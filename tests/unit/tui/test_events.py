@@ -152,6 +152,33 @@ class FakeSession:
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
+
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
 
@@ -691,3 +718,30 @@ def test_restoring_projection_is_never_muted() -> None:
     controller.restore_live_projection(_State(), set(), set())
 
     assert any(isinstance(m, AssistantDelta) for m in app.posted)
+
+
+def test_a_turn_aggregate_leaves_at_ms_to_its_components() -> None:
+    """The folded total has no moment of its own and must not invent one.
+
+    A turn can straddle an 04:00/06:00 boundary, so stamping the aggregate would
+    pick ONE window for calls that ran in two. The per-call stamps live on the
+    components, which is what the pricing path reads — and ``usd_cost`` is ``None``
+    on the aggregate for exactly the same reason (the components own provenance).
+    """
+    from local_operator.harness.types import Usage
+
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    first = Message.assistant("")
+    first.usage = Usage(input_tokens=10, output_tokens=0, at_ms=1_700_000_000_000)
+    second = Message.assistant("")
+    second.usage = Usage(input_tokens=20, output_tokens=0, at_ms=1_700_000_060_000)
+    session.emit(AgentEndEvent(messages=[first, second]))
+
+    ended = [m for m in app.posted if isinstance(m, TurnEnded)]
+    assert ended
+    assert ended[-1].usage.at_ms is None
+    assert [component.at_ms for component in ended[-1].usage.cost_components] == [
+        1_700_000_000_000,
+        1_700_000_060_000,
+    ]

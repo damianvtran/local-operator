@@ -1,4 +1,5 @@
 import { BridgeCommandError } from "./cdp";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getSurfaces, withSessionMutation } from "./state";
 
 /** A private proof is intentionally separate from ownerKey (tab-group copy).
@@ -17,11 +18,31 @@ export interface Scope {
   unknownReservations?: number;
 }
 type Params = Record<string, unknown>;
+// Per-OWNER command lanes, keyed by `owner_proof`.
+//
+// This lane spans a handler deliberately: it is what stops a same-owner
+// `owner_finish` overtaking its own in-flight `open` and letting a late
+// navigation resurrect the tab. It is per proof, so it starves nobody else.
+//
+// It is NOT the pool-admission lane any more. That lane used to live here as a
+// module-global `allocations` chain wrapped around the whole `open` handler —
+// including attach, log capture, grouping and `navigate()` with its redirect /
+// human origin-approval wait — so one owner's slow navigation delayed a
+// DIFFERENT owner's admission (audit A4). Admission is a read-modify-write of
+// the SURFACES map, and that map's own module (`state.ts`) now guards it, as
+// `withAdmission`, in the `open` handler around cap-check → create → putSurface.
+// See the addendum D3 for why the journal writes are NOT the window: nothing
+// counts `ownerScopes.allocations` against MAX_SURFACES; the surfaces map does.
 const queues = new Map<string, Promise<unknown>>();
-let allocations: Promise<unknown> = Promise.resolve();
 
 async function scopes(): Promise<Record<string, Scope>> {
-  return (await chrome.storage.session.get(["ownerScopes"])).ownerScopes ?? {};
+  return (
+    (await deadline(
+      chrome.storage.session.get(["ownerScopes"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.get(ownerScopes)",
+    )).ownerScopes ?? {}
+  );
 }
 function identity(params: Params): [string, string, string] {
   const proof = String(params.owner_proof ?? "");
@@ -36,13 +57,42 @@ async function mutate<T>(params: Params, fn: (scope: Scope) => T, create = false
   return withSessionMutation(async () => {
     const [proof, session, generation] = identity(params);
     const all = await scopes();
+    // Taken BEFORE the scope is materialized below: creating one IS a mutation,
+    // so a `before` captured after it would make the create look like a no-op
+    // and silently drop the new scope (the trap this ordering exists for).
+    const before = JSON.stringify(all);
     let scope = all[proof];
     if (!scope && create) scope = all[proof] = { session, generation, allocations: {} };
     if (!scope || scope.session !== session || scope.generation !== generation) {
       throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved");
     }
+    // The READ must stay inside the lane: the proof/session/generation check
+    // above IS the fencing decision, and reading outside it would let a
+    // concurrent mutation land between the check and the write.
+    //
+    // The WRITE must not happen when the op changed nothing. Every owned
+    // command funnels through `mutate(params, value => value, ...)` in
+    // `withOwnership` — that call is a pure read whose only job is to validate
+    // the scope and (for the create-able methods) materialize it — yet it
+    // re-wrote the whole `ownerScopes` map on every command of every session.
+    // That read-modify-write is serialized on the same module-global lane every
+    // other session's mutation queues behind, which is the measured
+    // `get/set(ownerScopes)` stall: the fleet's commands paid for a write that
+    // provably could not change the stored bytes. Comparing the serialized map
+    // before and after is cheap next to a storage round trip, and it is the
+    // WHOLE map rather than `scope` because an op may mutate nested
+    // `allocations` entries, add a scope (`create`) or delete a field.
+    //
+    // A skipped write is not a deferred one: nothing else consumes these bytes
+    // before their next writer, and the value left on disk is byte-identical to
+    // what the op would have written.
     const result = fn(scope);
-    await chrome.storage.session.set({ ownerScopes: all });
+    if (JSON.stringify(all) === before) return result;
+    await deadline(
+      chrome.storage.session.set({ ownerScopes: all }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(ownerScopes)",
+    );
     return result;
   });
 }
@@ -56,10 +106,17 @@ export async function recordAllocation(params: Params, tab: string, state: strin
   });
 }
 
-/** Serialize owner commands through the entire side effect, not just the map
- * write. A finish cannot overtake an in-flight allocation and then let its late
- * navigation resurrect the tab. The daemon's deadlines remain bounded; a lost
- * response is replayed by allocation id rather than creating a second tab.
+/** Serialize owner commands per owner through the entire side effect, not just
+ * the map write. A finish cannot overtake an in-flight allocation and then let
+ * its late navigation resurrect the tab. The daemon's deadlines remain bounded;
+ * a lost response is replayed by allocation id rather than creating a second
+ * tab. POOL ADMISSION IS NOT THIS LANE — see the map's declaration above.
+ *
+ * `queues` is keyed by `owner_proof` and is module-level, so a HUNG op here
+ * parked `owner_recover` — the recovery path itself — for every session on that
+ * proof. The chain swallows a predecessor's rejection but not its hang
+ * (`.catch()` never runs on a promise that never settles); every chrome await
+ * inside the ops is bounded by `deadline` so the link always settles.
  */
 export function withOwnership(
   method: string, params: Params, handler: () => Promise<Record<string, unknown>>,
@@ -97,7 +154,11 @@ export function withOwnership(
         // above, so a foreign caller cannot use it to clear someone else's.
         if (scope.generation !== generation || params.resumed_scope === true) delete scope.terminal;
         scope.generation = generation;
-        await chrome.storage.session.set({ ownerScopes: all });
+        await deadline(
+          chrome.storage.session.set({ ownerScopes: all }),
+          CHROME_API_DEADLINE_MS,
+          "chrome.storage.session.set(ownerScopes)",
+        );
         const allocation = scope.allocations[String(params.allocation_id ?? "")];
         const live = allocation?.tab && (await getSurfaces())[allocation.tab];
         const unresolved = allocation && ["allocating", "allocated", "cleanup_pending"].includes(allocation.state);
@@ -120,7 +181,11 @@ export function withOwnership(
         // the recorded capability without navigating/submitting a second time.
         const surface = (await getSurfaces())[existing.tab];
         if (!surface) throw new BridgeCommandError("tab_closed", "browser tab disappeared");
-        const tab = await chrome.tabs.get(surface.tabId);
+        const tab = await deadline(
+          chrome.tabs.get(surface.tabId),
+          CHROME_API_DEADLINE_MS,
+          `chrome.tabs.get(${surface.tabId})`,
+        );
         return { tab: existing.tab, url: tab.url ?? "", title: tab.title ?? "", state: existing.state };
       }
       if (existing && existing.state !== "closed") {
@@ -170,14 +235,7 @@ export function withOwnership(
     }
     return handler();
   };
-  const run = previous.catch(() => {}).then(() => {
-    if (method !== "open") return operate();
-    // Pool admission spans create+persist, including legacy callers. Sharing
-    // the allocation lane avoids two owners both observing the last free slot.
-    const allocation = allocations.catch(() => {}).then(operate);
-    allocations = allocation;
-    return allocation;
-  });
+  const run = previous.catch(() => {}).then(operate);
   queues.set(key, run);
   void run.finally(() => { if (queues.get(key) === run) queues.delete(key); }).catch(() => {});
   return run;

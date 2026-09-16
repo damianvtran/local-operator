@@ -479,6 +479,19 @@ class KeyPromptBlock(TranscriptBlock):
             self._finalized = was_finalized
 
     def on_resize(self, event: object) -> None:
+        self.refit_width(self.size.width)
+
+    def refit_width(self, width: int) -> None:
+        """Rebuild the prompt's row when the lane moved.
+
+        Reached by the container's lane walk
+        (:meth:`TranscriptView._refit_authored_blocks`), for the reason
+        ``ApprovalBlock.refit_width`` records: ``_build`` takes its width from
+        this block's own reconciled size, so the row is short — clipped at the
+        OLD lane — until something re-fits it, and the ``Resize`` that would
+        have is the notification the walk exists because the compositor can
+        drop.
+        """
         self._refresh_row()
 
     def _mask(self) -> str:

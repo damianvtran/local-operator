@@ -522,6 +522,33 @@ class FakeSession:
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
+
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
 
@@ -982,6 +1009,11 @@ async def test_repaired_config_boots_into_an_escapable_state(
     seed = ConfigManager(tmp_path)
     seed.set_config_value("hosting", "anthropicxyq")
     seed.set_config_value("model_name", "claude-sonnet-4-5")
+    # A stored effort this recovery does NOT touch but which rides into the boot
+    # it is about to start, clamped to whatever the chosen model takes (U5). The
+    # receipt names it, because a default is host + model + effort and this is
+    # the one receipt a first-run user sets one through.
+    seed.set_config_value("model_effort", "xhigh")
 
     # The repair the app performs on a successful `/login`, through the real
     # planner rather than a hand-written config: the point is that this exact
@@ -1049,7 +1081,8 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
         # THE SUBSTANCE: the state must be escapable. A setup state you cannot
         # leave is the same bug wearing a different colour.
-        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": None)
+        receipts: list[str] = []
+        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": receipts.append(body))
         for _ in range(200):
             await pilot.pause()
             if app._session is not None:
@@ -1058,6 +1091,10 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
         assert app._session is session, "the recovery command must BUILD the session"
         assert app._setup_state is False
+        # U5: the stored effort is named beside the pair it will govern. It is
+        # not rewritten here and it IS what the new boot runs on, so a receipt
+        # that stopped at host + model described two thirds of the default.
+        assert any("model_effort xhigh" in body for body in receipts), receipts
 
     # The escape persisted the pair, so the next launch does not return here.
     recovered = ConfigManager(tmp_path)
@@ -1833,13 +1870,19 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
 
 @pytest.mark.asyncio
 async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
-    """Queued canonical updates repaint once, from the newest complete state."""
+    """Coalesce the snapshot COPY too, not only the eventual repaint."""
     from local_operator.session.frontend_state import FrontendSessionState
 
     class StatefulSession(FakeSession):
         def __init__(self) -> None:
             super().__init__()
-            self.frontend_state = FrontendSessionState(session_id="sess", epoch="owner")
+            self._state = FrontendSessionState(session_id="sess", epoch="owner")
+            self.reads = 0
+
+        @property
+        def frontend_state(self) -> FrontendSessionState:
+            self.reads += 1
+            return self._state.model_copy()
 
     session = StatefulSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1858,19 +1901,18 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
         app.call_later = schedule
         app._apply_frontend_state = apply
 
-        session.frontend_state = session.frontend_state.model_copy(
-            update={"conversation_title": "first"}
-        )
+        session.reads = 0
+        session._state = session._state.model_copy(update={"conversation_title": "first"})
         app._on_frontend_update(object())
-        session.frontend_state = session.frontend_state.model_copy(
-            update={"conversation_title": "latest"}
-        )
+        session._state = session._state.model_copy(update={"conversation_title": "latest"})
         app._on_frontend_update(object())
 
+        assert session.reads == 0
         assert len(scheduled) == 1
         callback, args = scheduled[0]
         callback(*args)
         assert [state.conversation_title for state in applied] == ["latest"]
+        assert session.reads == 1
 
 
 @pytest.mark.asyncio
@@ -5711,6 +5753,59 @@ async def test_loop_no_goal_hint_surfaces_inline_form() -> None:
 
 
 @pytest.mark.asyncio
+async def test_loop_stop_says_this_terminal_while_a_turn_is_in_flight() -> None:
+    """`/loop stop` must not contradict the reader's own screen, or claim more.
+
+    The branch used to be guarded by ``_session_is_busy``, which probed
+    ``is_busy``/``busy`` — names that exist on NEITHER session class — so it
+    answered a hard-coded ``False`` and this case was unreachable: a second
+    viewer watching a loop's turns arrive from another terminal was told "no
+    loop is running", a flat contradiction of what it could see.
+
+    Replacing the dead probe with ``is_streaming`` made the case reachable but
+    wrong in the other direction: ``is_streaming`` is true for ANY in-flight
+    turn, so it also fired in the OWNER's terminal during an ordinary prompt
+    where no loop exists anywhere, and it asserted where a loop was
+    ("a loop is cancelled where it was started") while offering ``/stop`` — a
+    session-ending action — as the remedy for a no-op (UX round 1, U1/U2;
+    design round 1, D2). One scoped sentence is true in every one of those
+    states, so the branch is flat again.
+    """
+    session = GoalSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop stop")
+        # Collapse wrap so an 80-col break inside the notice does not matter.
+        text = " ".join(_transcript_text(app).split())
+    assert "no loop is running in THIS terminal" in text
+    # Nothing may be suggested that ends the session, and nothing that names a
+    # place the reader cannot act on.
+    assert "/stop" not in text
+    assert "where it was started" not in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_loop_stop_is_the_same_honest_no_op_when_nothing_is_running() -> None:
+    """Idle and in-flight answer identically, because the answer is scoped.
+
+    The message says only what THIS terminal knows, so there is no second copy
+    to keep in step and no state in which it asserts something false.
+    """
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop stop")
+        text = " ".join(_transcript_text(app).split())
+    assert "no loop is running in THIS terminal" in text
+    assert "/stop" not in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_loop_stops_on_turn_error() -> None:
     session = GoalSession()
     session.set_goal("g")
@@ -6089,6 +6184,11 @@ class FakeMcpManager:
         #: Servers still connecting past the startup gate — the state a slow
         #: HTTP MCP server is in on every launch.
         self._connecting: set[str] = set()
+        #: Installed by the app's MCP wiring (``_wire_mcp_status``), exactly as
+        #: the real manager receives it. Declared so a test can drive an
+        #: after-boot grant expiry through the sink the app installed, rather
+        #: than waiting for a real grant to lapse.
+        self.on_auth_required: Any = None
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -6714,6 +6814,179 @@ async def test_mcp_logout_list_offers_only_servers_holding_a_credential() -> Non
             for _ in range(6):
                 await pilot.pause()
             assert [name for name, _ in editor.picker.suggestions()] == ["logout linear"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_rows_build_on_a_followers_read_only_facade() -> None:
+    """The `/mcp logout ` list must survive the PRODUCTION follower facade.
+
+    An attached viewer's session carries ``SnapshotMcpManager``, which is
+    read-only by design: it holds the roster accessors the status surfaces need
+    and no config at all. The logout branch reached into it for
+    ``get_server_config`` anyway, so every keystroke that refilled the list
+    raised ``AttributeError`` out of ``on_refresh_argument_choices`` and killed
+    the TUI — the operator's "/mcp logout seems to cause a crash" report.
+
+    The existing grant tests could not see it: they drive
+    ``_run_slash_command``, which ROUTES the verb to the owner, and never the
+    PICKER, which the TUI builds locally either way. The rows are asserted too,
+    not merely "it did not raise": a filter that cannot read a facade's config
+    empties the list silently, which is the same bug wearing a quieter face.
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+    from local_operator.session.frontend_state import SnapshotMcpManager
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    # The follower's real shape: the roster, and no config lookup to offer.
+    session = McpSession(manager=SnapshotMcpManager(), startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch(
+                "local_operator.mcp.auth.mcp_logged_out_servers",
+                return_value={"https://mcp.notion.com/mcp"},
+            ),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert [name for name, _ in editor.picker.suggestions()] == ["logout notion"]
+            # The verb-context line is what a NON-empty list carries: it must
+            # survive the rows fix (design review D1's other half). It is set
+            # whether or not rows paint, so it is asserted directly.
+            assert editor.picker._notice == "choose a credential to forget"
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_picker_says_why_its_list_is_empty() -> None:
+    """An empty list must state the reason, not invite a choice from nothing.
+
+    `/mcp logout ` with an OAuth server configured and NO stored grant filters
+    every row away — a row survives only when its URL holds a credential — and
+    the verb-context notice ("choose a credential to forget") then reads as a
+    broken picker: the user is asked to choose from an empty list and is never
+    told that nothing is stored. The sibling `/logout` picker sets its empty
+    REASON instead ("no stored credentials — nothing to log out of."), and this
+    is the same state one command over. Design review D1, and the same fix
+    answers the row the filter drops in silence (review round 1, MINOR-1).
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["notion"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "no stored credential" in editor.picker._notice, editor.picker._notice
+            assert "choose a credential to forget" not in editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_empty_state_distinguishes_no_oauth_server_from_none_stored() -> None:
+    """Two ways to an empty logout list, and they need different sentences.
+
+    `oauth_server_names` returns OAuth-CAPABLE servers, so a host whose servers
+    are all stdio reaches the empty list too — and there, "no stored credential
+    — /mcp login <name> authorizes a server" misframes the state: there is no
+    OAuth server to log in to, so the suggested command cannot apply. That
+    state's sentence names `/mcp add` instead, while the designer-signed
+    sentence stays for OAuth servers that simply hold no grant (review round 2,
+    R2-MINOR-2).
+    """
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    configs = {"filesystem": MCPStdioServerConfig(command="npx")}
+    manager = FakeMcpManager(["filesystem"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            # The command that actually WRITES the auth block, per design round
+            # 3's D7: `/mcp add <name> <url>` cannot, so it is not the step this
+            # names.
+            assert "lop mcp add --oauth" in editor.picker._notice, editor.picker._notice
+            assert "no stored credential" not in editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_picker_says_when_the_config_layer_is_unreadable() -> None:
+    """The third empty reason, and it must not borrow either of the other two.
+
+    `_mcp_configured_urls` returning `None` means the layer could not be READ,
+    not that no server has a URL — the distinction the `dict | None` return
+    exists for. A bare empty list there would report a machine's setup as empty
+    when it was merely unreadable (review round 2, R2-NIT-2).
+
+    The loader is called twice on this path — once by `oauth_server_names` and
+    once by the URL mapping — so the failure is staged on the SECOND call, which
+    is the only shape that reaches the branch at all. A FIRST-call failure never
+    gets here: the names guard above turns it into an empty list with no notice
+    whatsoever, which the design round recorded as its own follow-up (review
+    round 3, NIT-2 — the earlier wording said "answered", which overstated it).
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["notion"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                side_effect=[(configs, {}), RuntimeError("config layer raised")],
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "unreadable" in editor.picker._notice, editor.picker._notice
 
 
 async def _type_into_editor(pilot, app, text: str) -> None:
@@ -8129,8 +8402,9 @@ async def test_the_picker_lists_a_store_far_larger_than_any_default_limit(
         assert (
             len(picker.visible_rows) == total
         ), f"picker holds {len(picker.visible_rows)} of {total} sessions"
-        # And the header says so, rather than reporting a truncated total.
-        assert f"{total:,} sessions" in "\n".join(picker.render_lines_for_test())
+        # And the filter row says so, rather than reporting a truncated total.
+        # The tally lives there now, not in the card header.
+        assert f"{total:,}" in picker.render_footer_for_test()
 
         # The oldest session — the one furthest past every cap — is reachable by
         # filtering, which is the user-visible failure being fixed ("a session I
@@ -8751,6 +9025,11 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
     # breaks by construction.
     for key, tail in (
         ("ctrl+v", "system clipboard"),
+        # The panel's keyboard mode is entered by `f9` and by nothing else since
+        # design round D1 (a pointer press no longer takes it), so this row is
+        # the durable half of that discovery — and it carries the same 74-cell
+        # ceiling as its neighbours.
+        ("f9", "esc returns"),
         ("cmd+v", "not Terminal.app"),
         ("!", "shell command"),
         ("option+left/right", "by word"),
@@ -8815,8 +9094,11 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     assert written["hosting"] == "anthropic", written
     assert written["model_name"] == "claude-opus-5", written
-    # What it wrote, under the names the config file uses…
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    # What it wrote, named the way the app names a model everywhere else (the
+    # joined label) with the third key under its registry name (design D3: at
+    # 120 columns a row holds 110 cells, so the pair is joined rather than
+    # spelled as the two config keys).
+    assert _unwrapped("anthropic/claude-opus-5, model_effort") in _unwrapped(text), text
     # …and where, so the user can go and read or undo it.
     assert str(tmp_path / "config.yml") in _unwrapped(text), text
 
@@ -8869,7 +9151,7 @@ async def test_model_default_alone_saves_the_model_the_session_is_on(
     # the persist path's own `set_model` is a no-op re-selection.
     assert label_after == "anthropic/claude-opus-5", label_after
     # Same receipt vocabulary as the explicit spelling — one outcome, one wording.
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    assert _unwrapped("anthropic/claude-opus-5, model_effort auto") in _unwrapped(text), text
     assert str(tmp_path / "config.yml") in _unwrapped(text), text
 
 
@@ -9085,7 +9367,7 @@ async def test_model_default_alone_is_write_only(
         await pilot.pause()
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     # The bare form WROTE (its receipt names the pair) without the access note…
-    assert _unwrapped("hosting openrouter, model_name deepseek/deepseek-chat") in bare_receipt
+    assert _unwrapped("openrouter/deepseek/deepseek-chat, model_effort auto") in bare_receipt
     assert _unwrapped("openrouter logged in") not in bare_receipt, bare_receipt
     # …and the explicit form with a different model took the switch tail once.
     assert session.set_model_calls == [("anthropic/claude-opus-5", True)], session.set_model_calls
@@ -9162,11 +9444,18 @@ async def test_model_default_alone_prints_one_row_not_a_relaunch_echo(
             await pilot.pause()
             await pilot.pause()
             notices = [block.text() or "" for block in app.query(NoticeBlock)]
-        receipts = [n for n in notices if "boot default saved" in n]
+        # `startswith`, not a substring (review round 3, MINOR-2): three
+        # FAILURE notices contain `default:` — `could not save default:`,
+        # `model switched, but could not save default:` and `could not read the
+        # saved default:` — so the substring form would also have passed had the
+        # success receipt been replaced by a save failure, which is the one
+        # substitution this assertion exists to catch. The sibling budget test in
+        # `test_effort.py` uses the same shape against the same receipt.
+        receipts = [n for n in notices if n.startswith("default: ")]
         assert len(receipts) == 1, notices
         assert not [n for n in notices if "config.yml changed" in n], notices
         # The receipt is the LAST row: nothing followed it.
-        assert "boot default saved" in notices[-1], notices
+        assert notices[-1].startswith("default: "), notices
     finally:
         _reset_for_tests()
 
@@ -9813,7 +10102,7 @@ async def test_switch_after_recovery_gave_up_retries_the_bind_and_says_so() -> N
     """A give-up facade is REPAIRED by `/model`, not merely described by it.
 
     The state ``AttachedSession._recover_runtime`` reaches at
-    ``RECOVERY_GIVE_UP_S`` is cold with a callable ``_ensure_bound``, which is
+    ``COLD_FALLBACK_S`` is cold with a callable ``_ensure_bound``, which is
     exactly what ``_needs_runtime_first`` diverts into ``_bind_then_dispatch``.
     So the cold ladder in ``_activate_resolved_model`` is never consulted from
     this state, and the sentence the user reads comes from the bind attempt's
@@ -10072,7 +10361,7 @@ async def test_model_default_on_a_cold_viewer_still_saves(
         app._run_slash_command("/model default anthropic/claude-fable-5-1")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("default:") in text, text
     assert _unwrapped("no runtime is running") not in text, text
     assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
 
@@ -10121,7 +10410,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # Still the persistence receipt, not the session one: this asserts the row
     # was ADDED to that branch rather than the branch being changed.
-    assert _unwrapped("used by new sessions") in text, text
+    assert _unwrapped("(new sessions)") in text, text
 
 
 @pytest.mark.asyncio
@@ -12440,6 +12729,207 @@ async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -
         # The projection's own placeholder still counts when no manager exists.
         assert band_for(("github", "failed")).failed is True
         assert band_for(("github", "connected")).failed is False
+
+
+# --- picker enter -> real resume boot ----------------------------------------
+
+
+def _stamp(tmp_path: Path, session_id: str, mtime: float) -> None:
+    """Pin a seeded session's mtime so rank order is deterministic.
+
+    ``recent_session_rows`` sorts by ``(-mtime, id)`` (``resume.py:1616``), so
+    without an explicit stamp two sessions written in the same millisecond rank
+    by id and the "second row" this test asserts on would depend on filesystem
+    timestamp granularity rather than on the picker.
+    """
+    target = tmp_path / "sessions" / session_id / "transcript.jsonl"
+    os.utime(target, (mtime, mtime))
+    os.utime(target.parent, (mtime, mtime))
+
+
+@pytest.mark.asyncio
+async def test_picker_enter_boots_the_row_under_the_cursor(tmp_path, monkeypatch) -> None:
+    """``enter`` on the picker resumes the CURSOR's session, not rank 0.
+
+    The gap this closes: every existing picker test asserts on rendered rows or
+    on ``selected_id()``, and the only tests that touch ``boots`` assert it is
+    EMPTY (a bare ``/resume`` must not boot). Nothing drove the full path
+    ``/resume`` -> picker -> move -> ``enter`` -> resume factory, so a picker
+    that dismissed with the right id while the app booted the wrong one — or
+    booted nothing — would pass the whole suite.
+
+    Moving the cursor first is the point. Asserting on rank 0 would pass even
+    if ``action_choose`` ignored ``self._selected`` entirely and returned the
+    first row.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aaaa11", prompt="First session about asteroids")
+    _seed_session(tmp_path, "bbbb22", prompt="Second session about submarines")
+    # Newest first: aaaa11 is rank 0, bbbb22 is rank 1 (the row under the
+    # cursor after one ``down``).
+    _stamp(tmp_path, "aaaa11", 2_000.0)
+    _stamp(tmp_path, "bbbb22", 1_000.0)
+
+    session = FakeSession()
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen), f"no picker: {picker!r}"
+        assert [row.id for row in picker.visible_rows][:2] == ["aaaa11", "bbbb22"]
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert picker.selected_id() == "bbbb22", "cursor did not move to rank 1"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+    assert boots == ["bbbb22"], f"enter booted {boots!r}, expected ['bbbb22']"
+
+
+@pytest.mark.asyncio
+async def test_picker_escape_boots_nothing(tmp_path, monkeypatch) -> None:
+    """``escape`` closes the picker without resuming anything.
+
+    The other half of the contract: ``action_cancel`` dismisses with ``None``,
+    and ``None`` is a REAL value to the resume factory (it is what ``/new``
+    sends, meaning "start fresh"). So a cancel that leaked its ``None`` into
+    the resume path would silently start a new session instead of returning
+    the user to the one they were already in. ``boots == []`` is the assertion
+    that distinguishes those two outcomes; ``boots == [None]`` would be the bug.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aaaa11", prompt="First session about asteroids")
+    _seed_session(tmp_path, "bbbb22", prompt="Second session about submarines")
+    _stamp(tmp_path, "aaaa11", 2_000.0)
+    _stamp(tmp_path, "bbbb22", 1_000.0)
+
+    session = FakeSession()
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionPickerScreen)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert not isinstance(app.screen, SessionPickerScreen), "escape left the picker up"
+
+    assert boots == [], f"escape booted {boots!r}, expected []"
+
+
+@pytest.mark.asyncio
+async def test_the_durable_notice_carries_one_dash_and_no_orphaned_pointer() -> None:
+    """D5: the notice must not append its pointer to a line that IS a command.
+
+    The auth requirement leads with ``/mcp reauth notion — …``, so the
+    template's unconditional ``— /mcp for details`` gave the composed sentence
+    TWO em-dashes (against the house one-dash rule) and pushed it to 107 cells,
+    where the wrap orphaned the pointer onto a row of its own. The pointer is
+    for diagnostic text ("command not found: …"); when the text is already the
+    command, the reader has the answer.
+
+    Asserted at BOTH widths because that is what D9 pinned: at 100 columns the
+    notice is one row, and at 44 it wraps carrying the whole command — the bare
+    form is four cells shorter, which is the difference between the name being
+    handed over whole and being cut mid-word.
+    """
+    failure = "/mcp reauth notion — refresh unconfirmed"
+    diagnostic = "command not found: slack-mcp"
+    for width in (100, 44):
+        manager = FakeMcpManager(["notion", "slack"], [])
+        startup = McpStartupOutcome(
+            configured=("notion", "slack"),
+            failures={"notion": failure, "slack": diagnostic},
+        )
+        session = McpSession(manager=manager, startup=startup)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            for _ in range(6):
+                await pilot.pause()
+            app.query_one(Toast).dismiss_toast()
+            await pilot.pause()
+            rows = _transcript_text(app).split("\n")
+            at = next((index for index, row in enumerate(rows) if "MCP notion failed" in row), None)
+            assert at is not None, "the failure must survive the toast"
+            # The notice carries the transcript's spine indent and outcome glyph,
+            # so the assertion is on the sentence itself; at 44 columns the row
+            # wraps, so the block is re-joined with normalised whitespace rather
+            # than asserted row by row (the wrap's missing hanging indent is
+            # D6's separate, deferred property).
+            block = [rows[at]]
+            for row in rows[at + 1 :]:
+                if not row.strip() or ("MCP " in row and "failed:" in row):
+                    break
+                block.append(row)
+            joined = " ".join(part.strip() for part in block if part.strip())
+            assert joined == f"✗ MCP notion failed: {failure}", joined
+            assert joined.count("—") == 1, joined
+            assert "/mcp for details" not in joined
+
+            # A DIAGNOSTIC failure still gets the pointer WHERE THE COLUMN CAN
+            # HOLD IT: the rule is about a line that already names /mcp, not about
+            # suppressing the signpost. Read across the wrap, since the diagnostic
+            # row wraps too at 44.
+            diagnostic_block = " ".join(
+                row.strip()
+                for row in rows[rows.index(next(r for r in rows if "MCP slack failed" in r)) :]
+                if row.strip()
+            )
+            assert diagnostic in diagnostic_block, diagnostic_block
+            if width >= 80:
+                assert "/mcp for details" in diagnostic_block, diagnostic_block
+            else:
+                # Rung 4, and this test was asserting the opposite: the 45-cell
+                # sentence leaves the 34-cell body column at 44 columns no room
+                # for EITHER form of the signpost, so the honest contract there is
+                # the sentence whole with no fragment of the pointer (the ladder
+                # is pinned per width in test_mcp_startup_announce.py; what this
+                # test owns is the D5 rule that a command line never gets one).
+                assert "\u2014 /mcp" not in diagnostic_block, diagnostic_block
+
+
+@pytest.mark.asyncio
+async def test_the_mid_session_auth_toast_leads_with_the_command() -> None:
+    """D8: the card must not put the server name in front of the command.
+
+    ``on_auth_required`` fires when a grant expires after boot. Its message
+    already names the server (the auth line does so inside its command), so the
+    old ``{ICON} MCP {name} {message}`` prefix rendered ``notion`` first — ahead
+    of the command the user has to run — and left ``notion /mcp reauth`` with no
+    separator between them. The message now leads the card unchanged, and D9's
+    bare command keeps it on one row at 100 columns.
+    """
+    from local_operator.tui.widgets.status_line import ICON_MCP
+
+    for width in (100, 44):
+        manager = FakeMcpManager(["notion"], ["notion"])
+        session = McpSession(manager=manager)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            for _ in range(6):
+                await pilot.pause()
+            manager.on_auth_required("notion", "/mcp reauth notion — refresh unconfirmed")
+            for _ in range(4):
+                await pilot.pause()
+            toast = app.query_one(Toast)
+            assert toast.display is True
+            assert toast.message == f"{ICON_MCP} MCP /mcp reauth notion — refresh unconfirmed"
+            assert "notion /mcp" not in toast.message, "the name must not precede the command"
 
 
 # -- f10 pins, the ⌥ layer and the sidebar's settings seam --------------------

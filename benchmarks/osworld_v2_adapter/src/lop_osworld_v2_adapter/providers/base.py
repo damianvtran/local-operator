@@ -158,6 +158,34 @@ GUEST_TYPE_MS_PER_CHAR = 8.0
 GUEST_TYPE_DEADLINE_FRACTION = 0.6
 
 
+#: The largest observation cause a provider may attach to a raw observation.
+#:
+#: A BACKSTOP, NOT THE DISCIPLINE. Bounding third-party text is only safe here
+#: because the cause is restricted, by construction, to a closed set of facts
+#: (a record kind, an integer status code, a millisecond latency): there is no
+#: upstream byte in it for a cut to sever, so the harness's canary scan cannot
+#: be defeated the way it can when free text is clipped before it is scanned
+#: (see ``worker._redacted``, whose scan-before-bound ordering this side cannot
+#: reproduce). Upstream's own words are surfaced by the HARNESS instead, as the
+#: worker's stderr tail, where the scan sees the whole retained buffer.
+MAX_OBSERVATION_CAUSE = 512
+
+
+def bounded_observation_cause(text: str) -> str:
+    """Shape one provider-authored cause for the raw-observation channel.
+
+    Control characters collapse to spaces: the cause crosses an LF-delimited
+    JSONL wire and is rendered into a text/plain artifact, so a raw CR would
+    make an otherwise-valid frame unparseable, and a tab or NUL would be a
+    binary blob in a text artifact. The result is then bounded.
+    """
+
+    if not isinstance(text, str):
+        raise TypeError("an observation cause must be a string")
+    collapsed = "".join(character if character.isprintable() else " " for character in text)
+    return collapsed.strip()[:MAX_OBSERVATION_CAUSE]
+
+
 @runtime_checkable
 class EnvironmentProvider(Protocol):
     """One environment backend. Implemented by FakeProvider and AwsProvider."""
@@ -175,7 +203,15 @@ class EnvironmentProvider(Protocol):
         ...
 
     async def observe(self) -> dict[str, Any]:
-        """Return OSWorld's raw observation dict (screenshot/a11y/terminal/instruction)."""
+        """Return OSWorld's raw observation dict (screenshot/a11y/terminal/instruction).
+
+        The ONE addition to that shape is optional and belongs to this adapter's
+        own namespace: ``observation.SCREENSHOT_CAUSE_KEY``, the provider's
+        bounded, value-free account of a failed capture. It is present only when
+        the screenshot is absent AND the provider knows something about why. An
+        absent key means "nothing to add", never "nothing failed": the builder
+        then raises exactly the text it always did.
+        """
         ...
 
     async def execute(self, statements: list[str], *, settle: bool = True) -> None:

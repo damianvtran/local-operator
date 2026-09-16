@@ -11,6 +11,13 @@ fireable with no session process running:
 - :mod:`.store` — the derived per-session index under
   ``<config_dir>/wakes/``, rewritten by the session on every schedule change
   and on every open.
+- :mod:`.deliveries` — the supervisor's OWN ledger under
+  ``<config_dir>/wakes/deliveries/``: one record per fire it attempted and has
+  not yet handed to a runtime. This is what makes a undeliverable fire durable
+  (retried with a backoff, never dropped on a schedule's due time moving on)
+  and visible (``lop wake status`` reports it). It describes delivery
+  attempts, never schedules — the transcript is still the only source of truth
+  for what a schedule is.
 - :mod:`.install` — the install-on-demand hook for the supervisor that reads
   that index and engages a runtime when a cold session's wake comes due. A
   no-op stub until the supervisor lands.

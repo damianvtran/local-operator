@@ -259,6 +259,12 @@ class EpisodeConfig:
     the episode is still scored on the state it reached. ``None`` means
     :func:`default_guards`; an empty tuple disables them.
     ``max_cycle_cost_micros`` feeds the default cost-rate guard's absolute cap.
+    ``max_steps`` is snapshotted for the guards (``GuardInput.max_steps``):
+    a guard that would truncate on PRICE is told the episode's length is an
+    authority the operator set, so it judges no cost ratio at all and only the
+    operator's own ``max_cycle_cost_micros`` can stop a bounded episode on
+    cost (see :class:`CostRateGuard` for the measured reason a prorated
+    per-step pace is not an acceptable substitute).
     ``max_decision_retries`` is how many corrective re-prompts one observation
     may take after a billed reply fails strict parsing (a ``frame_id`` the
     observation does not carry, malformed JSON) before the episode ends as a
@@ -326,6 +332,45 @@ class EpisodeOutcome:
     rescue_required: bool = False
     rescue_complete: bool | None = None
     diagnostic: str | None = None
+    # The scored run's truncation, mirrored out of the sealed step payload so a
+    # caller's own result record carries it without re-reading ``events.jsonl``
+    # by hand (the campaign harness writes this outcome as its outcome.json).
+    # ``truncation_reason`` is the same stable identifier the bundle records
+    # (``max-steps``, a guard code); ``truncation_detail`` is the guard
+    # verdict's human-readable why, which has no other home: ``GuardVerdict``
+    # keeps the two apart because consumers compare runs on the code and a
+    # diagnosis is not an identifier. Both are ``None`` unless the run reached
+    # its last step truncated and the bundle was sealed -- an abandoned run
+    # reports its abandonment in ``diagnostic`` instead, because it has no
+    # sealed step to mirror.
+    truncation_reason: str | None = None
+    truncation_detail: str | None = None
+
+
+#: How many times ONE decision retries a reply that spent its whole output
+#: budget thinking -- an EMPTY ``length`` truncation, no text and no tool calls
+#: -- one effort rung lower before the ordinary rejection path sees it.
+#:
+#: The same mechanism, and the same number, as ``harness/loop.py``'s
+#: ``MAX_EMPTY_TRUNCATION_RETRIES``, which the ordinary session path has had all
+#: along while this arm had none: two covers the observed failure shape (a high
+#: rung, then the rung below it also silent) without burning a budget on a model
+#: that cannot answer today. Its absence here is what scored three of five
+#: episodes ZERO on the 2026-09-15 canary: ``task_002``, ``task_010`` and
+#: ``task_012`` each ended on three consecutive replies of
+#: ``output_tokens=16384 reasoning_tokens=16384 stop_reason=length
+#: tool_call_count=0`` -- every token went to thinking, nothing was emitted, and
+#: the SAME effort was re-prompted until ``max_decision_retries`` sealed the
+#: episode ``model_failure`` after 94/82/55 steps.
+#:
+#: Deliberately SEPARATE from ``EpisodeConfig.max_decision_retries``, and not a
+#: widening of it. That bound counts corrective re-prompts -- billed calls whose
+#: reply was wrong and could be corrected by naming the defect. This one counts
+#: retreats, where there is no reply to correct and the fix is a different
+#: question, so spending it must not eat the allowance for a model that is
+#: genuinely not converging: an episode that hits both still gets its full
+#: corrective budget after the retreat allowance is gone.
+MAX_EMPTY_TRUNCATION_RETRIES = 2
 
 
 class _Cancelled(Exception):
@@ -408,6 +453,7 @@ class EpisodeRunner:
         )
         self._recent_costs: list[int] = []
         self._truncation_reason: str | None = None
+        self._truncation_detail: str | None = None
         self._last_request_id: str | None = None
         self._usage_totals: dict[str, int] = {}
         self._provider_cost_micros = 0
@@ -793,7 +839,7 @@ class EpisodeRunner:
                 return
 
     async def _decide(self, observation: Observation) -> Any:
-        """Ask the model until it returns a usable batch, within the retry bound.
+        """Ask the model until it returns a usable batch, within the retry bounds.
 
         A :class:`DecisionRejected` is a BILLED call whose reply failed strict
         parsing (the first paid episode's ``frame_id "1"`` against a published
@@ -806,25 +852,99 @@ class EpisodeRunner:
         retryable ``error`` event naming the defect, so a reader can see the
         correction happen rather than infer it from an extra triple.
 
-        The bound is ``config.max_decision_retries`` corrective re-prompts.
-        Spending it means the model is not converging, and the episode ends
-        as a MODEL failure (``_ModelFailure``) rather than burning the budget
-        on replies that can never execute.
+        TWO bounds, and they are deliberately different ones. ``rejection`` is
+        the ordinary corrective re-prompt and is counted against
+        ``config.max_decision_retries``. A reply that arrived as an EMPTY
+        ``length`` truncation -- ``length`` with no text and no tool calls, the
+        reasoning model that spent its ENTIRE output budget thinking -- is not
+        corrected but RETREATED: the same call is re-issued one effort rung
+        lower (``MAX_EMPTY_TRUNCATION_RETRIES``), because there is no reply to
+        correct and the rung that produced silence will produce silence again.
+        Spending the retreat allowance must not eat the corrective one, so the
+        two counters are separate; only when the retreats are gone does an
+        empty truncation count as an ordinary rejection, which is where the
+        ``model_failure`` verdict comes from.
+
+        Both bounds existing is the difference between this arm and the
+        ordinary harness (``harness/loop.py``), and its absence here is what
+        scored three of five canary episodes ZERO on 2026-09-15: the same
+        effort was re-prompted until the episode was sealed, while an ordinary
+        session on the same route recovered at the rung below.
+
+        The verdict's ``attempts`` is the TOTAL billed calls behind it, retreats
+        included, even though only the corrective ones are what exhaust it.
         """
 
         rejections = 0
+        empty_truncations = 0
+        # Every billed call that produced no usable batch, counted separately
+        # from ``rejections`` because they are no longer the same number: a
+        # retreat is a billed call too, and the ``agent_stop`` event's
+        # ``attempts`` field means exactly this total (see
+        # ``AgentStopPayload``). Reporting the corrective count instead would
+        # make a run that spent two extra calls on a retreat look identical to
+        # the run it replaced -- the one thing this fix must not do.
+        attempts = 0
         while True:
             try:
                 return await self._decide_once(observation)
             except _DecisionRejection as rejection:
+                attempts += 1
+                if empty_truncations < MAX_EMPTY_TRUNCATION_RETRIES and self._retreat(rejection):
+                    empty_truncations += 1
+                    continue
                 rejections += 1
                 if rejections > self._config.max_decision_retries:
                     raise _ModelFailure(
-                        f"model produced no usable decision after {rejections} attempt(s): "
+                        f"model produced no usable decision after {attempts} attempt(s): "
                         f"{rejection.diagnostic}",
                         observation_id=observation.observation_id,
-                        attempts=rejections,
+                        attempts=attempts,
                     ) from rejection
+
+    def _retreat(self, rejection: Any) -> bool:
+        """Retreat this episode's decision effort one rung, or say why not.
+
+        ``True`` means ``decide`` must be called again for the SAME observation
+        and the attempt is a retreat rather than a corrective re-prompt. Every
+        reason for ``False`` ends in the ordinary rejection path, which the
+        caller owns: the reply was not an empty output-limit truncation (a
+        truncation that DID emit text or a call is truncated, not silent -- the
+        line ``harness/loop.py`` draws on the same two fields); or the client
+        has no retreat to offer (``None`` -- no effort ladder, or already at the
+        bottom rung, which is the loop's own ``_lower_effort`` refusal), which
+        is also the honest answer for the scripted and historic clients that do
+        not model effort at all.
+
+        The effort is the CLIENT's to lower, not the runner's: it is the client
+        that holds the model spec and the ladder, and reading the rung off the
+        model's own ladder is what keeps this free of provider vocabulary the
+        runner may not import. The capability is optional in the same way
+        ``model_reply_metadata`` is, so a client that cannot retreat degrades to
+        today's behaviour rather than breaking.
+
+        The retreat is recorded where the campaign reads it -- the NEXT
+        attempt's ``model_request.reasoning_effort``, beside the reply that
+        forced it -- rather than as a new event kind: the attempt already has
+        its full triple and its retryable ``error``, and the evidence model's
+        kinds are a closed, versioned vocabulary that readers bucket by.
+
+        One step down is not always one smaller ASK, and a reader must not take
+        it for one: where a route maps its middle rungs to a single budget
+        (DeepSeek's ``low`` and ``high`` both ask 65,536), the second retreat is
+        budget-neutral and only the effort parameter changes. On this route
+        ``max -> high`` is the step that halves the ask; ``high -> low`` is a
+        different rung, not a different budget.
+        """
+
+        if not getattr(
+            getattr(rejection, "rejection", rejection), "empty_length_truncation", False
+        ):
+            return False
+        lower = getattr(self._model, "retreat_effort", None)
+        if lower is None:
+            return False
+        return lower() is not None
 
     async def _decide_once(self, observation: Observation) -> Any:
         """One model call, writing request/response/usage in that exact order.
@@ -962,6 +1082,15 @@ class EpisodeRunner:
                 tool_count=getattr(decision, "offered_tool_count", 0),
                 prompt_cache_key=decision.prompt_cache_key,
                 context_tokens=decision.context_tokens,
+                # Read with a default for the same reason as ``tool_count``
+                # above: ``decision`` is not always a ``ModelDecision``. It is
+                # the rung this request was BUILT with (the client reports what
+                # it sent, not what the run was configured with), which is what
+                # makes an emptied-budget retry legible -- a retreat shows as a
+                # later request whose effort is one rung lower, beside the
+                # ``length``/zero-tool-call response that forced it. ``None``
+                # for a client that has no effort at all.
+                reasoning_effort=getattr(decision, "reasoning_effort", None),
             ),
         )
         self._append(
@@ -977,6 +1106,12 @@ class EpisodeRunner:
                 cache_read_tokens=decision.usage.cache_read_tokens,
                 cache_write_tokens=decision.usage.cache_write_tokens,
                 tool_call_count=decision.tool_call_count,
+                # Read with a default because ``decision`` is a
+                # ``ModelDecision`` only on the accepted path: a rejected or
+                # aborted attempt carries its own count (or none), and a
+                # scripted client -- which has no reply assembly to speak of --
+                # must record 0 rather than claim a strip that never ran.
+                stripped_reply_markers=getattr(decision, "stripped_reply_markers", 0),
                 redacted_response=response_artifact,
             ),
         )
@@ -1038,8 +1173,16 @@ class EpisodeRunner:
             # whether the turn was a mistyped keyboard action or a stray
             # sentence after the JSON. Without the reply, diagnosing a
             # rejection class costs a whole re-run of a paid episode.
+            #
+            # The episode's redaction set is forwarded because this is the one
+            # artifact that publishes raw model output: the scan has to happen
+            # before the bound, and only this side of the boundary holds the
+            # resolved canaries. The class key and stream shape ride along for
+            # a reader counting rejection classes and telling an empty reply
+            # apart from a discarded one.
             detail = self._publish(
-                _rejection_detail(rejected).encode("utf-8"), media_type="text/plain"
+                _rejection_detail(rejected, self._redactions).encode("utf-8"),
+                media_type="text/plain",
             )
             self._append(
                 "error",
@@ -1051,7 +1194,7 @@ class EpisodeRunner:
                     retryable=True,
                 ),
             )
-            raise _DecisionRejection(rejected.diagnostic) from rejected
+            raise _DecisionRejection(rejected.diagnostic, rejection=rejected) from rejected
         return decision
 
     def _append_batch(
@@ -1095,6 +1238,7 @@ class EpisodeRunner:
         reason = self._truncation_reason
         if truncated and reason is None:
             reason = "max-steps"
+        detail = self._truncation_detail
         if not truncated:
             # Guards are evaluated HERE, on the post-step snapshot and before
             # the step event is written, for the same reason ``max_steps`` is
@@ -1107,6 +1251,13 @@ class EpisodeRunner:
             if verdict is not None:
                 truncated = True
                 reason = verdict.code
+                # Keep the why as well as the code. ``reason`` is a
+                # ``StrictIdentifier`` that consumers compare runs on, so it
+                # cannot carry the diagnosis; dropping the detail here is what
+                # forced every truncation analysis to be re-derived from
+                # ``events.jsonl`` by hand. A step-cap truncation has no guard
+                # verdict and so no detail -- ``max-steps`` is its own why.
+                detail = verdict.detail
         # The step event MUST precede its output observation: the verifier
         # expects the observation it just declared, and reversing the two makes
         # the observation unbound.
@@ -1131,6 +1282,7 @@ class EpisodeRunner:
         )
         self._truncated = truncated
         self._truncation_reason = reason if truncated else None
+        self._truncation_detail = detail if truncated else None
         self._last_step_terminated = truncated
         self._record_observation(result.observation)
 
@@ -1198,13 +1350,22 @@ class EpisodeRunner:
         true because it describes this event, not the episode's fate: an
         exhausted final attempt propagates and is recorded separately by the
         fatal-error path.
+
+        The worker's stderr tail rides here as well as on the fatal path, and
+        deliberately: this artifact is written BEFORE the backoff, so it is the
+        first thing a reader sees and the only one that survives if the session
+        dies while waiting. On the two canary episodes it would have carried
+        upstream's own "Failed to get screenshot. Status code: %d" lines at
+        the moment the outage started instead of after it had already cost the
+        run.
         """
 
-        detail = self._publish(
+        text = (
             f"observation-phase failure, attempt {attempt} of {attempts}: "
-            f"{_diagnostic(error, self._redactions)}".encode("utf-8"),
-            media_type="text/plain",
+            f"{_diagnostic(error, self._redactions)}"
+            + _adapter_stderr_section(self._adapter_stderr(), self._redactions)
         )
+        detail = self._publish(text.encode("utf-8"), media_type="text/plain")
         self._append(
             "error",
             ErrorPayload(
@@ -1247,6 +1408,7 @@ class EpisodeRunner:
         recent = (*self._turns[-RECENT_TURNS_WINDOW:], EpisodeTurn(observation=latest))
         snapshot = GuardInput(
             steps_taken=self._steps_taken,
+            max_steps=self._config.max_steps,
             model_cycles=self._model_cycles,
             provider_cost_micros=self._provider_cost_micros,
             elapsed_ms=max(0, _now_ms() - self._started_ms),
@@ -1439,6 +1601,35 @@ class EpisodeRunner:
         # guard requires the terminal kind to agree with the stop reason.
         return await self._close_out(score, failure_kind=failure_kind, cancelled=False)
 
+    def _adapter_stderr(self) -> bytes:
+        """The adapter worker's retained stderr tail, for a failure artifact.
+
+        The supervisor already drains the worker's stderr into a bounded tail on
+        every launch (``MAX_DIAGNOSTIC_TAIL``) and nothing read it, so upstream's
+        own explanation for a failed capture reached the parent and was thrown
+        away. Reading it needs no adapter change and no new protocol field: the
+        bytes are already here.
+
+        Empty for a session that never launched, and for a launcher whose handle
+        has no tail (the in-process test seams), so an artifact written without
+        one is byte-identical to what it was before this existed.
+
+        ``settled()`` rather than ``bytes()``: the drainer that fills the tail
+        runs in another thread, and a failure path can be reached milliseconds
+        after the worker wrote -- a scripted episode entirely so -- where a bare
+        snapshot misses the lines that explain the failure. The wait is bounded
+        (``STDERR_SETTLE_QUIET_S``/``STDERR_SETTLE_TIMEOUT_S``) because it runs
+        while sealing a failed episode. A launch seam whose own tail object
+        offers only ``bytes()`` still works: a failure path must never raise,
+        so the narrower surface degrades to the snapshot.
+        """
+
+        tail = getattr(self._supervisor, "stderr_tail", None)
+        if tail is None:
+            return b""
+        settled = getattr(tail, "settled", None)
+        return settled() if settled is not None else tail.bytes()
+
     async def _finalize_failure(self, error: BaseException) -> EpisodeOutcome:
         """Finalize unscored after a mid-episode failure.
 
@@ -1480,6 +1671,11 @@ class EpisodeRunner:
         # chars, and ``publish_artifact`` independently scans every byte
         # against the episode's RedactionSet.
         #
+        # The worker's stderr tail is appended too (``_adapter_stderr``): it is
+        # the adapter's own account, upstream's words included, and it is the
+        # one source that could explain the two canary crashes whose only
+        # recorded fact was a fixed string.
+        #
         # That parent scan is NOT a backstop for a secret the harness itself
         # truncated, and must not be read as one. ``assert_clear`` is a
         # SUBSTRING check, so a value already cut by ``_diagnostic``'s 500-char
@@ -1487,11 +1683,16 @@ class EpisodeRunner:
         # and the scan returns clean on the surviving prefix. The defence that
         # actually closes that case is ordering: the worker scans the UNBOUNDED
         # string before truncating (``worker._redacted``), so a straddled
-        # secret is withheld whole before it ever reaches this side.
+        # secret is withheld whole before it ever reaches this side -- and the
+        # tail section applies the same order for the same reason.
         detail: Any = None
         try:
             detail = self._publish(
-                _failure_detail(error, self._redactions).encode("utf-8"),
+                _failure_detail(
+                    error,
+                    self._redactions,
+                    adapter_stderr=self._adapter_stderr(),
+                ).encode("utf-8"),
                 media_type="text/plain",
             )
         except (_EvidenceFailure, OSError):
@@ -1629,6 +1830,8 @@ class EpisodeRunner:
             rescue_required=cleanup_result.rescue_required or self._rescue_required,
             rescue_complete=rescue_complete,
             diagnostic=diagnostic,
+            truncation_reason=self._truncation_reason,
+            truncation_detail=self._truncation_detail,
         )
 
     # ------------------------------------------------------------------
@@ -2033,11 +2236,21 @@ class _DecisionRejection(Exception):
     Raised by ``_decide_once`` AFTER the attempt's triple and its retryable
     ``error`` event are in the journal, so ``_decide`` can count it against
     the retry bound without touching evidence itself.
+
+    ``rejection`` is the client exception this wraps, carried WHOLE rather than
+    reduced to its prose. The bound ``_decide`` applies now depends on one fact
+    about the reply the client measured -- whether it was an EMPTY output-limit
+    truncation, the one shape answered with a lower effort instead of a
+    corrective re-prompt -- and re-deriving that from the diagnostic text here
+    is precisely the string-matching fragility the client-side classification
+    exists to remove. Everything the bundle records still comes from the
+    original attempt; this object is only what the retry loop holds.
     """
 
-    def __init__(self, diagnostic: str) -> None:
+    def __init__(self, diagnostic: str, *, rejection: Any | None = None) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
+        self.rejection = rejection
 
 
 class _ModelFailure(Exception):
@@ -2164,7 +2377,12 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
     )
 
 
-def _failure_detail(error: BaseException, redactions: RedactionSet | None = None) -> str:
+def _failure_detail(
+    error: BaseException,
+    redactions: RedactionSet | None = None,
+    *,
+    adapter_stderr: bytes = b"",
+) -> str:
     """The fatal-error artifact: the diagnostic, plus the adapter's own cause.
 
     ``_diagnostic`` is also the ``outcome.diagnostic`` field and is bounded at
@@ -2175,6 +2393,12 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
     So the artifact carries both: the same first line a reader sees in the
     outcome, then the full structured detail when the failure crossed the
     adapter boundary carrying one.
+
+    ``adapter_stderr`` is the worker's own stderr tail (see
+    ``EpisodeRunner._adapter_stderr``). It is appended as a THIRD section and
+    only when it has content, so a launcher that has no tail -- every
+    in-process test seam, and any adapter process whose stderr stayed empty --
+    produces byte-identical text to what this function produced before.
 
     The adapter-supplied fields below were bounded and canary-checked on the
     WORKER side before they crossed (``worker._error_detail``). The SUMMARY
@@ -2187,9 +2411,12 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
     """
 
     summary = _diagnostic(error, redactions)
+    section = _adapter_stderr_section(adapter_stderr, redactions)
     detail = getattr(error, "detail", None)
     if detail is None or not hasattr(detail, "render"):
-        return summary
+        # No structured boundary detail: the summary is the whole artifact, and
+        # it stays byte-identical to what it was before a tail existed.
+        return summary + section
     lines = [
         summary,
         "",
@@ -2204,24 +2431,143 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
         lines.append(f"cause[{index}]: {cause.exception_type}: {cause.message}")
     for frame in detail.frames:
         lines.append(f"  at {frame.file}:{frame.line} in {frame.function}")
-    return "\n".join(lines)
+    # ``section`` carries its own leading blank line, so the artifact ends on
+    # the tail when there is one and is unchanged when there is not.
+    return "\n".join(lines) + section
 
 
-def _rejection_detail(rejected: Any) -> str:
-    """The rejection artifact: why the reply was refused AND what it said.
+#: How much of the adapter worker's retained stderr a failure artifact carries.
+#:
+#: The supervisor already keeps a bounded 64 KiB tail (``MAX_DIAGNOSTIC_TAIL``),
+#: so this is a second, tighter bound on what a bundle should embed: the LAST
+#: lines are the ones that name the failure, and an artifact that is mostly
+#: library chatter costs a reader more than it tells them.
+MAX_STDERR_TAIL_CHARS = 4096
 
-    Two sections rather than one blob, so a reader (or a script mining a batch
-    of bundles for rejection classes) can tell the harness's diagnostic apart
-    from the model's own words. A client that did not capture the reply --
-    every implementation of the protocol is free not to -- degrades to the
-    diagnostic alone rather than emitting an empty section that reads as "the
-    model said nothing".
+
+def _adapter_stderr_section(adapter_stderr: bytes, redactions: RedactionSet | None) -> str:
+    """Render the worker's stderr tail for a failure artifact, or nothing.
+
+    WHY THE HARNESS AND NOT THE ADAPTER. The supervisor drains the worker's
+    stderr into a bounded tail on every launch and NOTHING read it. Upstream's
+    own explanation for a failed capture -- "Failed to get screenshot. Status
+    code: %d", the exception that was raised, a library traceback -- therefore
+    arrived in the parent and was discarded, and a bundle could name only a
+    fixed string for a failure that cost two canary episodes $1.08 and $2.24.
+    Recovering it needs no adapter contract change, and putting it here rather
+    than on the adapter wire keeps it out of a size-bounded protocol field.
+
+    ORDER IS THE SECURITY PROPERTY, exactly as in ``_diagnostic`` and
+    ``worker._redacted``: the FULL decoded tail is scanned BEFORE the bound is
+    applied. ``assert_clear`` is a substring check, so bounding first would
+    sever a canary straddling the cut and the surviving prefix would be
+    published clean -- and ``publish_artifact``, applying the same substring
+    semantics to the bytes it receives, would agree. A tail that trips the scan
+    is withheld WHOLE rather than masked, because a partial still narrows the
+    secret for whoever holds the bundle.
+
+    The tail is third-party text and cannot be structured, so unlike the
+    adapter's bounded cause it is exactly the case that scan exists for.
     """
 
-    reply = getattr(rejected, "reply", None)
+    if not adapter_stderr:
+        return ""
+    text = adapter_stderr.decode("utf-8", errors="replace")
+    if not text.strip():
+        return ""
+    if redactions is not None:
+        try:
+            redactions.assert_clear(text)
+        except ValueError:
+            return "\n\n--- adapter stderr tail ---\n" + WITHHELD
+    return "\n\n--- adapter stderr tail ---\n" + text[-MAX_STDERR_TAIL_CHARS:]
+
+
+def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
+    """The rejection artifact: why the reply was refused AND what it said.
+
+    ``redactions`` is REQUIRED rather than defaulted, exactly as in
+    ``_diagnostic``: this is the one artifact that publishes raw model output,
+    so the UNSAFE call -- publishing unscanned -- must not be the shorter one to
+    write. Every call site therefore has to state which of the two cases it is:
+    the episode's set, or an explicit ``None`` meaning "this rendering is
+    in-process only and never reaches evidence".
+
+    Three parts in a fixed order a script can rely on: the harness's model-facing
+    diagnostic, then the CLASS KEY and per-attempt STREAM SHAPE when the client
+    recorded them, and finally the model's own words. The first line is unchanged
+    from before this artifact learned to carry classes, so anything reading a
+    rejection artifact's first line keeps working.
+
+    The class key is what makes a batch of bundles countable: deriving a
+    rejection class from Pydantic prose after the fact is guesswork, and the
+    prose used to be the only thing recorded. The stream shape answers the one
+    question the reply cannot: a refusal whose reply is empty may have been
+    EMPTY or DISCARDED, and the delta counts tell those apart. The same line
+    carries ``stripped_reply_markers``, which answers the other question the
+    reply cannot: whether the reply it shows was the reply that arrived, or one
+    with a provider's boundary token already removed from its head.
+
+    The reply is redaction-scanned and bounded by
+    :func:`rejected_reply_evidence`, which fails closed and WHOLE -- so a reply
+    that cannot be cleared is replaced by a marker rather than being published
+    in part, and the diagnostic above it still makes the rejection readable.
+    A client that did not capture the reply -- every implementation of the
+    protocol is free not to -- degrades to the diagnostic (and class) alone
+    rather than emitting an empty section that reads as "the model said nothing".
+    """
+
+    from local_operator.evaluation.runner.public_reply import rejected_reply_evidence
+
+    sections = [rejected.diagnostic]
+    class_key = getattr(rejected, "class_key", None)
+    if isinstance(class_key, str) and class_key:
+        sections.append(f"class: {_header_value(class_key)}")
+    shape = getattr(rejected, "stream_shape", None)
+    if shape is not None:
+        # ``stripped_reply_markers`` is not a provider event count, and it rides
+        # on this line anyway: the line is the artifact's one per-ATTEMPT record,
+        # and the reader needs it beside the counts because it explains them.
+        # Without it, a refusal whose reply lost a provider boundary token reads
+        # exactly like one that arrived broken -- the reply section shows the
+        # version already judged (marker gone), so the artifact would have no
+        # evidence that anything was removed, which is the "quietly mangling a
+        # reply" failure the tally exists to prevent.
+        sections.append(
+            "stream: "
+            f"content_deltas={shape.content_deltas} "
+            f"reasoning_deltas={shape.reasoning_deltas} "
+            f"tool_call_deltas={shape.tool_call_deltas} "
+            f"stop={_header_value(shape.stop)} "
+            f"stripped_reply_markers={getattr(rejected, 'stripped_reply_markers', 0)}"
+        )
+    # ``evidence_reply`` is the boundary that may carry the reply into evidence;
+    # ``reply`` is the history rendering and is the fallback for a client that
+    # never recorded the two separately.
+    reply = getattr(rejected, "evidence_reply", None)
+    if reply is None:
+        reply = getattr(rejected, "reply", None)
     if not reply:
-        return rejected.diagnostic
-    return f"{rejected.diagnostic}\n\n--- rejected reply ---\n{reply}"
+        return "\n".join(sections)
+    rendered = rejected_reply_evidence(reply, redactions)
+    sections.extend(["", "--- rejected reply ---", rendered])
+    return "\n".join(sections)
+
+
+def _header_value(value: str) -> str:
+    """A value safe to place inside a one-line artifact header.
+
+    The stop marker and the class key are TEXT, and the artifact's reader relies
+    on a fixed section order: a marker carrying a newline would otherwise open a
+    line that reads like another header, and a control character could hide the
+    rest of the section behind a terminal's interpretation of it. Escaped rather
+    than truncated -- the builder's 64-character bound does not neutralise a
+    short injection -- and ``unicode_escape`` leaves an ordinary ASCII marker
+    byte-identical to what the provider sent, so ``stop=stop`` still reads as
+    the marker itself.
+    """
+
+    return value.encode("unicode_escape").decode("ascii")
 
 
 def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:

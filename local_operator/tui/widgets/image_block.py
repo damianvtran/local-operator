@@ -140,10 +140,16 @@ class ImageBlock(TranscriptBlock):
         *,
         label: str = "",
         navigation_visible: bool = True,
+        fold_width: int = 0,
     ) -> None:
         super().__init__()
         self.add_class("image-block")
         self._navigation_visible = navigation_visible
+        # Before the first `_build`/`_grid`: the grid is chosen from the width
+        # (see `UserBlock.__init__` for why a hint supplied later is a width
+        # nothing reads). Zero keeps construction's 80-column guess, which
+        # `on_mount` corrects.
+        self.set_fold_hint(fold_width)
         #: Short human name for the unavailable receipt (marker text or file
         #: name). Never rendered while the image itself is on screen — the
         #: caption already lives on the tool card or in the prompt text.
@@ -193,7 +199,7 @@ class ImageBlock(TranscriptBlock):
         (possibly downscaled) copy: the fit's job is the true aspect ratio
         and the no-upscale rule, both properties of the source image.
         """
-        width = self.size.width or 80
+        width = self.fold_width(80)
         avail = max(8, width - SPINE_INDENT)
         return images_mod.fit_cells(
             self._px_width,
@@ -428,7 +434,7 @@ class ImageBlock(TranscriptBlock):
 
         style = Style(color=theme_mod.semantic_color("muted"))
         lead = f"{glyph} "
-        room = max(8, (self.size.width or 80) - SPINE_INDENT - cell_len(lead))
+        room = max(8, self.fold_width(80) - SPINE_INDENT - cell_len(lead))
         if cell_len(message) > room:
             from rich.cells import set_cell_size
 
@@ -466,6 +472,21 @@ class ImageBlock(TranscriptBlock):
         Receipts repaint too: their truncation point is a function of the
         width (see :meth:`_receipt_row`), so a receipt built at 100 columns
         and left alone would clip rather than ellipsize at 44.
+        """
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-fit the image when the lane moved — its cell grid is a function of it.
+
+        Reached by the container's lane walk
+        (:meth:`TranscriptView._refit_authored_blocks`), and reruns exactly what
+        ``on_resize`` does, including the gap re-ask (a changed grid is a height
+        change). Unconditional, like ``on_resize``: :meth:`_grid` fits against
+        the ladder — which answers the new lane in the pass this runs in — and
+        there is no cheaper staleness test, because the grid depends on the
+        image's aspect ratio as well as the lane. One image per turn at most, so
+        the unconditional rebuild is not the O(rows) cost the lane funnel is
+        careful about elsewhere.
         """
         self._repaint()
         parent = self.parent

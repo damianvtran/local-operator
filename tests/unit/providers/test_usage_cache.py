@@ -70,6 +70,32 @@ def test_report_round_trips_through_the_wire_format() -> None:
     assert limit.shared is True
 
 
+def test_round_trip_keeps_a_limits_detail_line() -> None:
+    """The decoder rebuilds a limit field by field rather than by splatting the
+    dict, so a field it forgets is dropped on the CACHED path only: the credit
+    split would show on a cold `/usage` and vanish on every warm one."""
+    report = _report()
+    report.limits[0].detail = "100.00 USD paid · 20.00 USD granted"
+    restored = report_from_dict(report_to_dict(report))
+    assert restored is not None
+    assert restored.limits[0].detail == "100.00 USD paid · 20.00 USD granted"
+
+
+def test_a_null_decodes_as_absent_rather_than_as_the_word_none() -> None:
+    """A JSON ``null`` is PRESENT, so ``limit.get(key, "")`` hands it to ``str()``
+    and the four-character string ``None`` lands in the field — as a tier row, and
+    as a bogus annotation line under a meter. Our own writer cannot emit null
+    (``asdict`` over a ``str`` field), so this is the hand-edited or
+    foreign-written row: exactly the row a decoder must not trust."""
+    payload = report_to_dict(_report())
+    payload["limits"][0]["detail"] = None
+    payload["limits"][0]["tier"] = None
+    restored = report_from_dict(payload)
+    assert restored is not None
+    assert restored.limits[0].detail == ""
+    assert restored.limits[0].tier == ""
+
+
 def test_report_from_dict_rejects_garbage_as_a_miss() -> None:
     # A schema change or a corrupt row must read as a cache MISS, never an
     # exception on the /usage path.

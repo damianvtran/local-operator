@@ -17,6 +17,15 @@ stopped for floundering is a *scored partial* an operator can compare
 unscored and a fabricated failure lies about what the environment saw. A
 budget cap is the same shape -- the budget was reported as overrun after the
 fact and never enforced; :class:`BudgetCapGuard` is what makes it real.
+
+**How much of a campaign these guards actually stop, measured.** Across 233
+scored episodes of the OSWorld campaign, this module produced 54 truncations
+(``budget-cap`` 21, ``cost-spike`` 21, ``repeated-batch`` 12) against 53 clean
+finishes and 125 failures -- and those failures are dominated by 475
+``decision-rejected`` errors, a model failing the action contract, which no
+guard can see or fix. The guards are therefore roughly a quarter of the
+campaign's stops: a guard change moves that quarter's composition, never the
+whole ceiling. Do not read a guard fix as "the truncation problem solved".
 """
 
 from __future__ import annotations
@@ -57,11 +66,18 @@ class GuardInput(ProtocolModel):
     the model chose for it; ``recent_costs_micros`` are the per-cycle provider
     costs in the same order (one per model cycle, so they may outnumber the
     turns kept). ``usage_totals`` mirrors what the runner will reconcile.
+
+    ``max_steps`` is the episode's own step budget when the caller states one
+    (``EpisodeConfig.max_steps``), and ``None`` when it does not -- which is
+    what lets a guard tell a bounded episode, whose remaining steps are known,
+    from one that is bounded only by cost. A guard that reads it must treat
+    ``None`` as "no step budget", never as zero steps.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=False, validate_default=True)
 
     steps_taken: SafeCount
+    max_steps: SafeCount | None = None
     model_cycles: SafeCount
     provider_cost_micros: SafeCount
     elapsed_ms: SafeCount
@@ -85,6 +101,7 @@ class GuardVerdict(ProtocolModel):
 
 
 CONTINUE = GuardVerdict(kind="continue", code="ok", detail="no guard fired")
+
 
 #: How many of the newest turns the runner snapshots into
 #: ``GuardInput.recent_turns``. A guard that needs to see more turns than
@@ -164,13 +181,58 @@ class CostRateGuard:
     absolute cap is optional because a sane value depends on the model's
     price, which is the episode config's to know.
 
-    The ratio check needs REPORTED cost. A provider that reports no
-    ``usd_cost`` folds in as 0 (the evidence payload has no "unknown"
-    encoding), and a free tier is genuinely 0; either way a zero previous
-    window has no rate to exceed. Rather than silently returning the generic
-    continue, the guard says so in its verdict (``code="cost-unreported"``)
-    so a reader of the guard's decisions can see the ratio check was skipped,
-    and only ``max_cycle_cost_micros`` remains in force.
+    The ratio check needs a per-cycle cost that priced to something. A window
+    whose cycles all priced at 0 has no rate to exceed: either a genuinely free
+    route, or a model the harness could not price at all (a direct provider's
+    wire states only tokens, so the evidence prices it from the shared table
+    and folds in as 0 when the table has no row -- the evidence payload has no
+    "unknown" encoding). Rather than silently returning the generic continue,
+    the guard says so in its verdict (``code="cost-unreported"``) so a reader
+    of the guard's decisions can see the ratio check was skipped, and only
+    ``max_cycle_cost_micros`` remains in force.
+
+    **A step-budgeted episode's ratio is never judged.** When the snapshot
+    states an explicit step budget, that budget is an authority the operator
+    set, so this guard judges no ratio at all and continues whatever the cycle
+    prices do. The one price-based stop left in that case is
+    ``max_cycle_cost_micros`` -- the operator's own absolute number, firing on
+    a number they chose rather than on this guard's diagnosis. An episode that
+    states no step budget keeps the ratio unchanged, because there it is the
+    only cost signal that exists.
+
+    WHY, and this is a corrected defect rather than a preference. The ratio
+    was once replaced, for such an episode, by a per-cycle ceiling prorated
+    from the budget actually left (``remaining cost / remaining steps``). Two
+    measurements, kept apart here because only one of them is an observation:
+
+    * OBSERVED -- it cut ``batch-k3-canary6/task_010`` (harness 0.54.25, the
+      first release after the ceiling landed) at step 337 of a 500-step run.
+      That is the campaign's one recorded cost-spike cut made by the ceiling
+      rather than by the ratio, and replaying its sealed series reaches the
+      same step.
+    * COUNTERFACTUAL -- replayed over the recorded cost series of a lane that
+      FINISHED AND SCORED 50.00%, ``batch-k3v7-0/task_016`` (harness 0.52.4,
+      written days BEFORE the ceiling existed, so the ceiling never saw that
+      lane), it fires ``cost-spike`` on the lane's eleventh cycle (a 47,591
+      micro-USD allowance against a 63,487 cycle) and keeps firing. That is a
+      simulation of what the ceiling would do to a lane that scored; it is not
+      a cut the ceiling caused, and it must not be quoted as one.
+
+    The shape of the error is structural: the ceiling prorates a PER-STEP
+    allowance while a cycle's price is set by CONTEXT SIZE, which grows with
+    horizon by design (12-24k micro-USD per step against 16-90k micro-USD per
+    cycle at a 40-65k-token context). It measured context growth and called it
+    waste, and it TIGHTENED as the episode ran, because ``remaining_steps``
+    falls faster than the budget is spent -- penalising exactly the
+    long-horizon episodes this benchmark is made of. Its predecessor had the
+    same disease in a cheaper form (a prompt-cache miss multiplies one cycle's
+    input price while the context is unchanged).
+
+    THE RULE THIS ENCODES, and it is what any future truncating cost guard
+    must obey: such a guard may read an AUTHORITY (the operator's cap) or a
+    STATE signal (what the episode did); it may not read price and infer
+    intent from it. A prompt-cache miss and a genuine blow-up are
+    indistinguishable to a predicate that reads price alone.
     """
 
     def __init__(
@@ -190,11 +252,24 @@ class CostRateGuard:
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         costs = snapshot.recent_costs_micros
+        # The operator's own number, and the only price-based stop this guard
+        # still makes: it fires on an authority the operator set, not on this
+        # guard's diagnosis of pace.
         if self._max_cycle is not None and costs and costs[-1] > self._max_cycle:
             return GuardVerdict(
                 kind="truncate",
                 code="cost-spike",
                 detail=f"one model cycle cost {costs[-1]} micro-USD (cap {self._max_cycle})",
+            )
+        if snapshot.max_steps is not None:
+            return GuardVerdict(
+                kind="continue",
+                code="cost-bounded",
+                detail=(
+                    "the episode declares an explicit step budget, so its own step cap is "
+                    "the authority about how long it runs and the cost-rate ratio is not "
+                    "judged"
+                ),
             )
         if len(costs) < 2 * self._window:
             return CONTINUE
@@ -205,7 +280,7 @@ class CostRateGuard:
                 kind="continue",
                 code="cost-unreported",
                 detail=(
-                    f"the previous {self._window} cycles reported no cost, so the"
+                    f"the previous {self._window} cycles priced at zero cost, so the"
                     " cost-rate ratio cannot be judged; only the per-cycle cap applies"
                 ),
             )
@@ -420,7 +495,9 @@ def default_guards(config: Any) -> tuple[EpisodeGuard, ...]:
     read) so this module does not import ``episode`` and ``episode`` can
     import it. Every guard here is on by default because each one converts a
     reported-after-the-fact failure into a scored stop; the cost-rate cap is
-    the one that needs a configured number.
+    the one that needs a configured number, and its ratio check is judged only
+    for an episode that states no step budget of its own (see
+    :class:`CostRateGuard`).
     """
 
     max_cycle = getattr(config, "max_cycle_cost_micros", None)

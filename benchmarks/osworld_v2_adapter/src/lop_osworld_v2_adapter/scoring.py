@@ -16,6 +16,10 @@ reward must never promote a near miss. The original evaluate() result is retaine
 as canonical JSON, including any safety/checkpoint/error fields, not reconstructed
 from its rounded ppm.
 A scalar result cannot supply checkpoint data the upstream evaluator discarded.
+The evaluator's own scoring-path output -- its prints, its log records and the
+state it fetched -- does not appear in that return value at all, so it travels in
+the SAME detail artifact (see ``evaluator_diagnostics`` below) rather than in a
+second artifact or a new protocol field.
 Invalid or over-budget details fail closed rather than claiming full evidence.
 """
 
@@ -26,7 +30,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from local_operator.evaluation.evidence.models import EvidenceArtifactRef, ScoreArtifact
 
@@ -35,6 +39,23 @@ from local_operator.evaluation.evidence.models import EvidenceArtifactRef, Score
 MAX_SCORE_DETAIL_BYTES = 1024 * 1024
 MAX_SCORE_DETAIL_NODES = 100_000
 MAX_SCORE_DETAIL_DEPTH = 64
+
+# The two keys the retained-diagnostics detail is built from. Namespaced and
+# fixed so a reader never has to guess which half is upstream's and which is
+# ours, and so an evaluator returning a dict of its own can never collide with
+# them: they are the WRAPPER's keys, and the evaluator's return value sits
+# verbatim under ``evaluator_result``.
+EVALUATOR_RESULT_KEY = "evaluator_result"
+EVALUATOR_DIAGNOSTICS_KEY = "evaluator_diagnostics"
+
+# What that key holds when a diagnostics block was produced but could not be
+# attached within the limits above. One field, so it fits whatever the rejected
+# block was, and a fixed value, so a reader can tell a refusal from a capture
+# that genuinely retained nothing (an absent block).
+DIAGNOSTICS_REFUSED: dict[str, str] = {
+    "schema": "lop-evaluator-diagnostics-v1",
+    "refused": "over_budget",
+}
 
 
 class ScoringUnavailable(RuntimeError):
@@ -89,13 +110,54 @@ def _detail_bytes(raw: Any) -> bytes:
     return bytes(data)
 
 
-def score_to_artifact(raw: Any, *, artifact_root: Path) -> ScoreArtifact:
+def _detail_payload(raw: Any, diagnostics: Mapping[str, Any] | None) -> Any:
+    """What is persisted for a score: the raw return, plus retained diagnostics.
+
+    A capture that produced nothing (``None``) leaves ``raw`` untouched, which
+    is what keeps an episode whose evaluator emitted nothing byte-identical to
+    what this function staged before diagnostics existed.
+
+    Diagnostics can never cost the score. The block is attached only if the
+    wrapped payload still satisfies the same structural and byte limits every
+    other detail obeys; a block that could not be attached is replaced by a
+    one-field marker saying so, so that "no block" never has to mean both
+    "nothing was emitted" and "something was refused". If even the marker does
+    not fit -- unreachable, since the capture's own bounds cap the whole
+    payload at well under a third of the byte limit -- the exact pre-change
+    bytes are staged: an explanation must never cost the number it explains.
+    """
+
+    if not diagnostics:
+        return raw
+    wrapped = {EVALUATOR_RESULT_KEY: raw, EVALUATOR_DIAGNOSTICS_KEY: diagnostics}
+    try:
+        _detail_bytes(wrapped)
+        return wrapped
+    except ScoringProtocolError:
+        pass
+    refused = {EVALUATOR_RESULT_KEY: raw, EVALUATOR_DIAGNOSTICS_KEY: DIAGNOSTICS_REFUSED}
+    try:
+        _detail_bytes(refused)
+        return refused
+    except ScoringProtocolError:
+        return raw
+
+
+def score_to_artifact(
+    raw: Any, *, artifact_root: Path, diagnostics: Mapping[str, Any] | None = None
+) -> ScoreArtifact:
     """Map OSWorld's raw ``evaluate()`` return to a SCORED artifact, or raise.
 
     V2 may return a dict carrying ``{"score": float}`` (task_base.py:79-88)
     when a task overrides ``evaluate``; unwrap exactly that one key. Anything
     else that is not a real number in [0.0, 1.0] is a protocol violation, not
     a zero.
+
+    ``diagnostics`` is the evaluator's own scoring-path output retained by
+    ``lop_osworld_v2_adapter.diagnostics``. It changes nothing about which
+    value is the score and nothing about the numeric result; it only widens
+    what the detail artifact carries, so a reader can tell a genuinely unmet
+    checkpoint from an evaluator that bailed out before checking one.
     """
 
     value = raw
@@ -111,7 +173,7 @@ def score_to_artifact(raw: Any, *, artifact_root: Path) -> ScoreArtifact:
     if not (0 <= value <= 1):
         raise ScoringProtocolError("evaluator score is outside [0.0, 1.0]")
     value = float(value)
-    data = _detail_bytes(raw)
+    data = _detail_bytes(_detail_payload(raw, diagnostics))
     details = EvidenceArtifactRef(
         sha256=hashlib.sha256(data).hexdigest(),
         media_type="application/json",

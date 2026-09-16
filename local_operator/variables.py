@@ -434,6 +434,29 @@ class VariableStore:
         """
         return [*self._credentials.values(), *self._redactions]
 
+    def unregister_redaction(self, value: str) -> bool:
+        """Stop scrubbing a §6 registration; returns whether anything was dropped.
+
+        The counterpart :meth:`register_redaction` needs. Without it the redaction
+        set can only GROW, so a registration outlives its reason and any test (or
+        short-lived resolver) that made one leaves the process scrubbing that value
+        for everything that runs afterwards — measured as one store test's
+        three-character value rewriting an unrelated provider warning in a later
+        test of the same worker (agent review R-1 / QA Q1).
+
+        Only §6 registrations are droppable: a value held in ``_credentials`` is a
+        credential for as long as the session holds it, so dropping it from the
+        scrub list is not reachable here.
+        """
+        trimmed = value.strip()
+        if not trimmed:
+            return False
+        # ``discard`` returns None, so the membership has to be read before the
+        # removal for the return value to mean what the docstring says.
+        dropped = trimmed in self._redactions
+        self._redactions.discard(trimmed)
+        return dropped
+
     def redact(self, text: str) -> str:
         """Replace every stored credential or registered value with ``[redacted]``."""
         return redact_secret_values(text, self.redaction_values())

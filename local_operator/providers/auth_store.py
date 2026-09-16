@@ -39,7 +39,7 @@ import threading
 import time
 import uuid
 import zlib
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -1017,6 +1017,21 @@ class AuthStore:
             self._release_refresh_lease(row.id)
             return merged
 
+    def _refreshable_row(self, credential_id: int) -> StoredCredential | None:
+        """The row a refresh may act on, or ``None`` when there is no such row.
+
+        Shared by both refresh entry points so their precondition cannot drift: a
+        row that is gone, disabled, or not an OAuth credential is not a refresh
+        failure in either of them, and only the raising variant can then tell a
+        failed refresh from a missing row.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or row.disabled_cause is not None:
+            return None
+        if row.credential_type != "oauth":
+            return None
+        return row
+
     async def ensure_oauth_fresh(self, credential_id: int) -> dict[str, Any] | None:
         """Usable OAuth data for ONE specific credential, refreshed if stale.
 
@@ -1027,15 +1042,30 @@ class AuthStore:
         row is gone, disabled, not an OAuth credential, or its refresh fails:
         the caller keeps whatever verdict the row already carried. Raises
         nothing; a probe is a read, not a routing decision."""
-        row = self.get_credential(credential_id)
-        if row is None or row.disabled_cause is not None:
-            return None
-        if row.credential_type != "oauth":
+        row = self._refreshable_row(credential_id)
+        if row is None:
             return None
         try:
             return await self._ensure_oauth_fresh(row)
         except AuthStoreError:
             return None
+
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int) -> dict[str, Any] | None:
+        """`ensure_oauth_fresh`, but a refresh that fails keeps its cause.
+
+        The probe above collapses every unusable state into ``None``, which is
+        right for a caller that only needs a verdict and wrong for one that must
+        tell an operator WHERE to look: a token endpoint that could not be
+        reached and a grant the IdP rejected arrive as the same ``None``, and
+        they need different remedies. ``None`` still means the row is gone,
+        disabled, or not an OAuth credential; a refresh that failed raises
+        :class:`AuthStoreError` with the underlying transport or IdP error
+        chained on ``__cause__``, so a caller can classify on it.
+        """
+        row = self._refreshable_row(credential_id)
+        if row is None:
+            return None
+        return await self._ensure_oauth_fresh(row)
 
     # -- selection: stickiness + round-robin -------------------------------------
 
@@ -1488,6 +1518,8 @@ class AuthStore:
         ignore_demotions: bool = False,
         model_id: str = "",
         session_id: str | None = None,
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> list[StoredCredential]:
         # ``model_id`` scopes the block filter: an account blocked only for a
         # model family (a spent scoped weekly cap) still serves every other
@@ -1507,6 +1539,28 @@ class AuthStore:
         ]
         if source is not None:
             rows = [r for r in rows if r.data.get("source") == source]
+        if exclude_keys or exclude_credential_ids:
+            # Rows the CALLER already saw rejected are hidden from THIS resolve
+            # alone: nothing is blocked, demoted or repointed, so the pick comes
+            # back exactly as it went in for every other resolver. This is the
+            # read-only half of "an isolated errand may serve ITSELF from a
+            # sibling" — the write half (blocking the failing row) belongs to
+            # the turn's rotation, not to decoration.
+            #
+            # BOTH identifiers, because neither alone is sufficient. A bearer
+            # string does not survive a refresh: an OAuth row whose token the
+            # concurrent turn rotated between the errand's resolve and its retry
+            # would escape a key-only exclusion and be served again, which is
+            # the whole failure this exclusion exists to prevent. And an id
+            # alone cannot cover a store tier that produces a bearer without a
+            # row behind it (env/legacy keys resolve with no credential id).
+            excluded_ids = set(exclude_credential_ids or ())
+            rows = [
+                r
+                for r in rows
+                if r.id not in excluded_ids
+                and not any(self._row_matches_key(r, k) for k in (exclude_keys or ()))
+            ]
         # Drop demoted rows from the TIER, not merely sort them last, when some
         # other credential is still reachable.
         #
@@ -1590,6 +1644,8 @@ class AuthStore:
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> str | None:
         """Resolve the API key for ``provider`` via the 7-step cascade.
 
@@ -1597,7 +1653,8 @@ class AuthStore:
         :meth:`_resolve`. ``model_id`` names the model the request will run,
         so model-family-scoped quota blocks (see
         :meth:`is_blocked_for_model`) only exclude the accounts that cannot
-        serve THAT model.
+        serve THAT model. ``exclude_keys`` / ``exclude_credential_ids`` hide
+        the rows they name from THIS resolve alone — see :meth:`_resolve`.
         """
         key, _row = await self._resolve(
             provider,
@@ -1605,6 +1662,8 @@ class AuthStore:
             force_refresh=force_refresh,
             read_only=read_only,
             model_id=model_id,
+            exclude_keys=exclude_keys,
+            exclude_credential_ids=exclude_credential_ids,
         )
         return key
 
@@ -1616,6 +1675,8 @@ class AuthStore:
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -1629,6 +1690,8 @@ class AuthStore:
         stickiness, for a decorative call running beside a live turn — see
         :meth:`_resolve` and
         :attr:`~local_operator.harness.types.ChatRequest.isolated`.
+        ``exclude_keys`` / ``exclude_credential_ids`` hide the rows they name
+        from THIS resolve alone — see :meth:`_resolve`.
         """
         if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
             return None
@@ -1638,6 +1701,8 @@ class AuthStore:
             force_refresh=force_refresh,
             read_only=read_only,
             model_id=model_id,
+            exclude_keys=exclude_keys,
+            exclude_credential_ids=exclude_credential_ids,
         )
         if key is None:
             return None
@@ -1832,6 +1897,8 @@ class AuthStore:
         read_only: bool = False,
         ignore_demotions: bool = False,
         model_id: str = "",
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
@@ -1851,6 +1918,15 @@ class AuthStore:
         OAuth refresh still persists the rotated token: that is the same
         account's own bookkeeping, not a decision about where requests go, and
         dropping it would throw away a single-use refresh token.
+
+        ``exclude_keys`` and ``exclude_credential_ids`` hide the rows they name
+        from this ONE resolve — a read-only way to ask for a SIBLING after a
+        bearer was rejected, leaving every block, demotion and the sticky
+        pointer exactly as they were. Threaded only by the failover driver's
+        isolated auth re-resolve; the ordinary rotation path hides the failing
+        row by blocking it instead (``rotate_sibling``), which a decorative call
+        must not do. The id form is the load-bearing one for OAuth, whose bearer
+        string changes under a refresh — see :meth:`_usable_key_rows`.
         """
 
         def pin(credential_id: int | None) -> None:
@@ -1877,6 +1953,8 @@ class AuthStore:
             ignore_demotions=ignore_demotions,
             model_id=model_id,
             session_id=session_id,
+            exclude_keys=exclude_keys,
+            exclude_credential_ids=exclude_credential_ids,
         )
         for row in self._selection_order(
             oauth_rows, provider, session_id, read_only=read_only, model_id=model_id
@@ -1907,6 +1985,8 @@ class AuthStore:
             ignore_demotions=ignore_demotions,
             model_id=model_id,
             session_id=session_id,
+            exclude_keys=exclude_keys,
+            exclude_credential_ids=exclude_credential_ids,
         )
         for row in self._selection_order(
             login_rows, provider, session_id, read_only=read_only, model_id=model_id
@@ -1936,6 +2016,8 @@ class AuthStore:
                 ignore_demotions=ignore_demotions,
                 model_id=model_id,
                 session_id=session_id,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
             )
             if row.data.get("source") != "login"
         ]
@@ -1977,6 +2059,8 @@ class AuthStore:
                 read_only=read_only,
                 ignore_demotions=True,
                 model_id=model_id,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
             )
 
         return None, None

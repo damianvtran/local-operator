@@ -1,0 +1,22 @@
+collapsed at 45 columns, case=fail
+  body_rows=1
+    [ 0] cells= 38 ' \uf0ac web_sea… openai rate…  Web… ✗  0.4s'
+  probe 'Fetch a page directly': rows=ABSENT joined=NO
+  probe 'keyed Sonar': rows=ABSENT joined=NO
+  probe 'refused this search': rows=ABSENT joined=NO
+  probe 'only provider tried': rows=ABSENT joined=NO
+expanded at 45 columns, case=fail
+  size=Size(width=43, height=28) virtual=Size(width=43, height=28) vscroll=False card_size=Size(width=41, height=8) indent=2
+  body_rows=8
+    [ 0] cells= 38 ' \uf0ac web_sea… openai rate…  Web… ✗  0.4s'
+    [ 1] cells= 27 '  query: openai rate limits'
+    [ 2] cells= 33 '  Web search failed: Fetch a page'
+    [ 3] cells= 37 '  directly, or set PERPLEXITY_API_KEY'
+    [ 4] cells= 37 '  for keyed Sonar: the anonymous tier'
+    [ 5] cells= 27 '  refused this search (wall'
+    [ 6] cells= 30 '  fraud_authwall_upsell/LOGIN)'
+    [ 7] cells= 38 "  ('perplexity' was the only provider…"
+  probe 'Fetch a page directly': rows=ABSENT joined=yes
+  probe 'keyed Sonar': rows=[(4, 6)] joined=yes
+  probe 'refused this search': rows=[(5, 2)] joined=yes
+  probe 'only provider tried': rows=ABSENT joined=NO

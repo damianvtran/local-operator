@@ -120,6 +120,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
+    (
+        "local_operator/tui/app.py::OperatorApp._on_steer_undeliverable",
+        "<path>.remove",
+        "THREE list removals on the app's own bookkeeping — `_held_steer_blocks`, "
+        "`_queued_steer_notices` and `_deferred_steer_notices` hold widgets and "
+        "Message objects, and none of the three is a path (QA round 2, Q-1)",
+        3,
+    ),
     # The browser resource sidecar. Both paths are the FILE
     # `<session_dir>/.browser-resource.json` and a `mkstemp` sibling of it, so
     # neither call can name the directory itself: `os.replace` over a regular
@@ -163,6 +171,50 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tui/move_targets.py::remember_recent",
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    # The desktop delivery lease. Every path here derives from this process's
+    # OWN instance id under `<config_dir>/run/desktop/delivery/` -- one of the
+    # two run directories this project already owns, beside `run/viewers/`, and
+    # created 0700 rather than derived from anything a caller passes. It cannot
+    # name a session directory: the parent is the config root, the filename is a
+    # generated hex id, and an app that never paired leaves the record absent.
+    # Split per process in review round 1 (R6) so a publisher can only ever
+    # withdraw its own record; the legacy fixed `delivery.json` is read but no
+    # longer written.
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
+        "os.replace",
+        "Atomic replacement of THIS process's own <instance_id>.json record FILE "
+        "in run/desktop/delivery/, never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
+        "<path>.unlink",
+        "Withdraws this process's own record in run/desktop/delivery/ when its "
+        "last claim leaves, or the tmp FILE of a failed write",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
+        "os.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
+        "<path>.unlink",
+        "Shutdown withdraws only its OWN <instance_id>.json record, so a stopping "
+        "server does not leave a lease behind and does not delete a live "
+        "sibling's",
+    ),
+    (
+        "local_operator/server/utils/desktop_presence.py::"
+        "DesktopDeliveryPublisher._prune_dead_records",
+        "<path>.unlink",
+        "Sweeps a SIBLING publisher's <instance_id>.json record FILE in "
+        "run/desktop/delivery/ once it is provably dead (dead pid, or heartbeat "
+        "older than DEAD_RECORD_AGE_S), and only after re-identifying the entry "
+        "by inode/mtime so a live sibling's staged replace is never raced. The "
+        "glob is *.json inside that one directory: never a directory, never "
+        "this process's own record, never under sessions/ (review round 2, R15)",
     ),
     # The sidebar's pin store, the same shape and the same argument as
     # `remember_recent` above: both paths are the config ROOT joined with a
@@ -311,6 +363,56 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/config.py::ConfigManager._write_config",
         "os.unlink",
         "temp FILE -> config.yml",
+    ),
+    # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
+    # the marker FILE beside the transcript, whose name is the fixed
+    # `DESKTOP_MARKER_NAME` basename joined onto the session directory the bridge
+    # already holds — and only in the case where the refused move found no marker
+    # there at all, so the unlink restores that absence. No caller input becomes
+    # part of the path, and the target is that one FILE, never a directory.
+    #
+    # The qualified owner is the CURRENT nested name. The move transaction was
+    # refactored under the per-session lock, which renamed `move_session`'s body
+    # to `_move_session`; the entry kept naming the pre-refactor function and both
+    # deletion guards then failed as stale (review R5 / QA Q1). The permission it
+    # grants is unchanged and deliberately still exactly one FILE.
+    (
+        "local_operator/server/utils/desktop_sessions.py::_move_session.restore_marker",
+        "<path>.unlink",
+        "the <sessions>/<id>/desktop.json FILE this call's own move created",
+    ),
+    # The atomic marker writer's own staging cleanup and publication, in the
+    # ONE ``_stage_and_replace`` both halves of the marker contract share (the
+    # forward write and the rollback). The unlink removes the TEMP STAGE this
+    # call created one line earlier, in the same directory as the marker it is
+    # publishing; the receiver is a local `Path` for a unique
+    # `.desktop.json.<uuid>.tmp` name, so no caller input and no session
+    # directory can reach it, and the staged file is a FILE by construction and
+    # is removed only on the failure path — the success path consumes it
+    # through `os.replace`. The replace is same-directory temp onto the marker
+    # FILE: `os.replace` onto a FILE path cannot remove a directory, and the
+    # destination is the fixed `DESKTOP_MARKER_NAME` basename joined onto the
+    # session directory the caller already holds.
+    (
+        "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
+        "<path>.unlink",
+        "the .desktop.json.<uuid>.tmp staging FILE this write created",
+    ),
+    (
+        "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
+        "os.replace",
+        "the .desktop.json.<uuid>.tmp staging FILE -> desktop.json FILE",
+    ),
+    # The local publication's in-memory store swap. `<path>.replace` is this
+    # guard's heuristic reading of `store.replace(state)` — the receiver is a
+    # FrontendStateStore, not a path, and this function's only directory-ish
+    # input is a plain string it never opens. Adding the entry here keeps the
+    # allow-list's shape key honest while the `_NEAR_DISPLACERS` entry below
+    # records the same reading for the neighbourhood test.
+    (
+        "local_operator/session/attached.py::AttachedSession._publish_working_directory",
+        "<path>.replace",
+        "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
     (
         "local_operator/credentials.py::CredentialManager.write_to_file",
@@ -504,15 +606,79 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/wakes/store.py::write_entry", "os.replace", "temp FILE -> wakes/<id>.json"),
     ("local_operator/wakes/store.py::write_entry", "os.unlink", "temp FILE -> wakes/<id>.json"),
+    # The wake DELIVERY ledger is the supervisor's OWN state beside the index
+    # (`local_operator/wakes/deliveries.py`): every path in it is
+    # `<config>/wakes/deliveries/<session-id>.json`, built from the config dir
+    # plus a FIXED suffix. The id reaches it only as a filename — the ledger's
+    # callers take it from an index entry's filename (so it can contain no
+    # separator) or from the ledger directory's own listing — and nothing in the
+    # module walks, renames or removes a directory, under `sessions/` or
+    # anywhere else.
     (
-        "local_operator/session/runtime/registry.py::publish",
+        "local_operator/wakes/deliveries.py::write_delivery",
         "os.replace",
-        "temp FILE -> runtime/<pid>.json",
+        "temp FILE -> wakes/deliveries/<id>.json",
     ),
     (
-        "local_operator/session/runtime/registry.py::publish",
+        "local_operator/wakes/deliveries.py::write_delivery",
         "os.unlink",
-        "temp FILE -> runtime/<pid>.json",
+        "temp FILE -> wakes/deliveries/<id>.json",
+    ),
+    (
+        "local_operator/wakes/deliveries.py::remove_delivery",
+        "<path>.unlink",
+        "wakes/deliveries/<id>.json FILE",
+    ),
+    # The registry's staged write is now ONE helper shared by the discovery
+    # record and the durable stop marker, and the reaper MOVES a dead record
+    # into the run namespace's `reaped/` sidecar instead of unlinking it (a
+    # deleted record was the evidence the death classifier reads). These four
+    # rows replace the two the old inline `publish` carried: same shape — a
+    # `.tmp` FILE renamed onto a FILE, never a directory. `_staged_write`'s
+    # target is `<config>/run/<ns>/<pid>.json` or `<session>/runtime-stop.json`,
+    # i.e. a file INSIDE a directory that already exists (the same shape as
+    # `resume.py::write_session_title`'s row below), and it never creates or
+    # moves that directory; `_reap_dead_record`'s receiver is the run
+    # directory's own `reaped/` subdirectory, built from `run_dir()` and the
+    # record's pid — nothing here is derived from a session id or a transcript.
+    (
+        "local_operator/session/runtime/registry.py::_staged_write",
+        "os.replace",
+        "temp FILE -> runtime/<pid>.json, or <session>/runtime-stop.json FILE",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::_staged_write",
+        "os.unlink",
+        "clears the .tmp FILE this same call just created, when the write failed",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::_unlink_quietly",
+        "<path>.unlink",
+        "best-effort delete of a run-namespace FILE (a record, a reaped entry)",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::remove_stop_marker",
+        "<path>.unlink",
+        "the runtime-stop.json FILE the ladder's own refusal withdraws (never a directory)",
+    ),
+    (
+        "local_operator/session/runtime/registry.py::_reap_dead_record",
+        "os.replace",
+        "runtime/<pid>.json -> runtime/reaped/<pid>.json; both run_dir()-derived",
+    ),
+    # The boot-record namespace (``run/host``, see ``journal.HOST_RUN_DIRNAME``)
+    # is the one place the runtime's own instrumentation deletes anything, and it
+    # is bounded by ``prune_boot_records`` rather than by the session-cleanup
+    # guards for a reason the row has to justify: nothing here is derived from a
+    # session id. The directory is the FIXED constant joined to the config root,
+    # and the glob matches one level of ``*.json`` under it, so the only paths
+    # this loop can name are boot records — a session directory is not reachable
+    # from it, and a record of a LIVE pid is skipped whatever its age.
+    (
+        "local_operator/session/runtime/journal.py::prune_boot_records",
+        "<path>.unlink",
+        "boot records under <config>/run/host only; fixed dirname + one-level "
+        "'*.json' glob, never a session path",
     ),
     # The viewer registry is the same staged-write shape as the session
     # registry above, one directory over (run/viewers rather than run/mobile)
@@ -593,12 +759,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # -- unlink/remove of FILES the same function owns (locks, caches, sidecars,
     #    temp files, install artefacts). A session directory is never the arg.
+    # The pairing/pending files are daemon-owned state under the config root
+    # (`browser/pairing.json`, `run/browser/pairing-pending.json`), never a
+    # session directory. Since the allow-list landed these three calls replaced
+    # the two that used to sit in `BridgeService._try_pair` (which now calls
+    # `_drop_pending`) and `reset_pairing` (which now delegates to `revoke_all`),
+    # so the keys moved with the code: revoking the last authorised identity
+    # removes the pairing FILE, revoking everything removes both, and writing an
+    # empty waiting-code map removes the pending FILE. Keyed per call rather than
+    # per function, which is why a key that no longer has a call site fails the
+    # audit.
     (
-        "local_operator/browser_bridge/daemon.py::BridgeService._try_pair",
+        "local_operator/browser_bridge/daemon.py::revoke_identity",
         "<path>.unlink",
-        "pending-pair FILE",
+        "pairing FILE, when the last identity is removed",
     ),
-    ("local_operator/browser_bridge/daemon.py::reset_pairing", "<path>.unlink", "pairing FILE"),
+    (
+        "local_operator/browser_bridge/daemon.py::revoke_all",
+        "<path>.unlink",
+        "pairing + pending-pair FILEs (`pair --reset`)",
+    ),
+    (
+        "local_operator/browser_bridge/daemon.py::_write_pending",
+        "<path>.unlink",
+        "pending-pair FILE, when the last waiting code is retired",
+    ),
     (
         "local_operator/browser_bridge/install.py::uninstall",
         "<path>.unlink",
@@ -708,8 +893,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/runtime/registry.py::scan",
         "<path>.unlink",
-        "stale runtime/<pid>.json FILE",
-        2,
+        "torn runtime/<pid>.json FILE; a DEAD record is moved to reaped/, not unlinked",
     ),
     (
         "local_operator/session/runtime/registry.py::unpublish",
@@ -770,6 +954,76 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
     ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
+    # The generation layout's own trees and pointer. Every path in this block is
+    # built from ``stable_root()`` (``~/.local/share/lop``, from ``Path.home()``)
+    # plus a timestamped generation id this module chose, or from
+    # ``~/.local/bin``: NONE of them is derived from a session id, a config dir,
+    # or other caller input, so none can name a path under the session store.
+    #
+    # ``_remove_tree`` is the sharpest of them and is confined by construction:
+    # its every caller passes either (a) a generation this module RESERVED with
+    # ``os.mkdir`` earlier in the same call, or (b) an entry of
+    # ``generations_dir().iterdir()`` after ``wanted`` has been subtracted —
+    # i.e. a sibling of the reserved name. A record's ``install_root`` is only
+    # ever read to ADD to ``wanted`` (protecting a generation), never to choose
+    # a path to delete, which is why a hostile record cannot redirect it.
+    (
+        "local_operator/update.py::_remove_tree",
+        "shutil.rmtree",
+        "<stable>/generations/<id> — reserved by this call, or listed from generations_dir()",
+    ),
+    (
+        "local_operator/update.py::flip_pointer",
+        "<path>.unlink",
+        "<stable>/current.tmp-<pid> — this call's own staged SYMLINK",
+        2,
+    ),
+    (
+        "local_operator/update.py::flip_pointer",
+        "os.rename",
+        "staged symlink -> <stable>/current; both under the stable root, no directory moves",
+    ),
+    (
+        "local_operator/update.py::_rebind_scripts",
+        "<path>.unlink",
+        "<gen>/…/bin/<script>.rebind-<pid> temp FILE, unlinked when its rename fails",
+    ),
+    (
+        "local_operator/update.py::_undo_migration",
+        "<path>.unlink",
+        "<stable>/current pointer and <stable>/bin/python3 shim, undone on a failed migration",
+        2,
+    ),
+    (
+        "local_operator/update.py::_rebind_scripts",
+        "os.rename",
+        "<gen>/…/bin/<script>.rebind-<pid> FILE -> the script; only text FILES under bin/",
+    ),
+    (
+        "local_operator/update.py::_sweep_staging_links",
+        "<path>.unlink",
+        "<stable>/current.tmp-<pid> SYMLINK left by an interrupted flip; the stable root, aged",
+    ),
+    (
+        "local_operator/update.py::_atomic_symlink",
+        "os.rename",
+        "<local bin>/<entry>.tmp-<pid> -> <local bin>/<entry> symlink; no directory moves",
+    ),
+    (
+        "local_operator/update.py::_atomic_symlink",
+        "<path>.unlink",
+        "a previous run's own staging symlink beside the launcher, before re-linking",
+    ),
+    (
+        "local_operator/update.py::_write_executable",
+        "os.rename",
+        "temp FILE -> <stable>/bin/<name>; the shim is a FILE, the dir is never moved",
+    ),
+    (
+        "local_operator/update.py::_write_executable",
+        "<path>.unlink",
+        "cleanup of this function's own mkstemp temp FILE beside the shim",
+    ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
     # The install-provenance marker, written atomically after an upgrade. Both
@@ -927,6 +1181,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "widget.remove()",
         2,
+    ),
+    (
+        "local_operator/mcp/credentials.py::store_credentials.persist",
+        "<path>.remove",
+        "list.remove(key) — drops a written id from the failed-ids list",
     ),
 )
 
@@ -1121,11 +1380,18 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
         # self.replace(state) = in-memory snapshot swap
         "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
+        # Same receiver, same reason: the local publication installs an accepted
+        # directory onto the in-memory FrontendStateStore before the desktop
+        # bridge repaints from it. `store.replace(state)` is a state swap, never
+        # a path operation, and this function holds no session-directory path at
+        # all (it is handed a plain directory string).
+        "local_operator/session/attached.py::AttachedSession._publish_working_directory",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
         "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
-        "local_operator/session/runtime/registry.py::publish",  # tmp -> registry FILE
+        "local_operator/session/runtime/registry.py::_staged_write",  # tmp -> record FILE
+        "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE

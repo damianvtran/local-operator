@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
 import pytest
 from rich.console import Console
 
-from scripts.visual_capture import CaptureProfile, save_capture, terminal_svg
+from scripts.visual_capture import (
+    CaptureProfile,
+    save_capture,
+    settle_status_line,
+    terminal_svg,
+)
 
 NS = {"s": "http://www.w3.org/2000/svg"}
 
@@ -166,3 +173,101 @@ def test_probe_isolation_refuses_a_late_import(tmp_path: Path) -> None:
         text=True,
     )
     assert early.returncode == 0 and early.stdout.strip() == "ok", early.stderr
+
+
+# -- the capture must not race the status band (review round 2, M1/Q1) ---------
+#
+# `settle_status_line` exists so a before/after pair differs in the change under
+# test and nothing else, so what these pin is the WAIT: that the pending
+# sentinel is not mistaken for a settled band, that a settled band costs no
+# frames, and that neither a missing band nor a wedged one can fail a capture.
+# The first of the three fails on the implementation that shipped in round 1 —
+# it tested `_model_label` for truthiness, and `MODEL_PENDING` is a truthy
+# string, so it returned after one frame with the band still pending.
+
+
+class _FakePilot:
+    """Counts frames, so a wait is asserted instead of waited out for real.
+
+    ``settle_after`` is the number of frames the band needs before it carries a
+    real label; ``None`` means it never gets there.
+    """
+
+    def __init__(self, band: object, *, settle_after: int | None = None) -> None:
+        self.pauses = 0
+        self._band = band
+        self._settle_after = settle_after
+
+    async def pause(self) -> None:
+        self.pauses += 1
+        if self._settle_after is not None and self.pauses >= self._settle_after:
+            setattr(self._band, "_model_label", "test/model")
+
+
+def _pending_band() -> SimpleNamespace:
+    from local_operator.tui.widgets.welcome import MODEL_PENDING
+
+    return SimpleNamespace(_model_label=MODEL_PENDING)
+
+
+@pytest.mark.asyncio
+async def test_settle_status_line_does_not_treat_the_pending_sentinel_as_settled(capsys) -> None:
+    """THE regression pin for M1: `connecting…` is a NON-EMPTY label.
+
+    A band stuck on the sentinel must be waited out (the bounded tries) and
+    reported, never handed back as settled. On the round-1 implementation this
+    fails twice over: it returns after a single frame, and it says nothing.
+    """
+    band = _pending_band()
+    pilot = _FakePilot(band)
+
+    await settle_status_line(pilot, SimpleNamespace(_status=band), tries=4)
+
+    captured = capsys.readouterr()
+    assert pilot.pauses == 4, "the pending sentinel was mistaken for a settled band"
+    assert "still reads" in captured.err and "connecting" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_settle_status_line_waits_exactly_until_the_label_lands() -> None:
+    """A band that settles on the third frame is waited for, and no longer."""
+    band = _pending_band()
+    pilot = _FakePilot(band, settle_after=3)
+
+    await settle_status_line(pilot, SimpleNamespace(_status=band), tries=200)
+
+    assert pilot.pauses == 3
+    assert band._model_label == "test/model"
+
+
+@pytest.mark.asyncio
+async def test_settle_status_line_costs_no_frames_when_already_settled() -> None:
+    """The common case: the caller's own pauses already settled the band."""
+    band = SimpleNamespace(_model_label="test/model")
+    pilot = _FakePilot(band)
+
+    started = time.monotonic()
+    await settle_status_line(pilot, SimpleNamespace(_status=band), tries=200)
+    elapsed = time.monotonic() - started
+
+    assert pilot.pauses == 0
+    # Generous, because this asserts "no waiting happened", not a benchmark: the
+    # round-1 helper would have spent tries * pause() here for a band it could
+    # not read at all.
+    assert elapsed < 1.0, elapsed
+
+
+@pytest.mark.asyncio
+async def test_settle_status_line_no_ops_without_a_status_band() -> None:
+    """No band (or an unreadable one) is not a reason to fail a capture.
+
+    Neither branch may raise: `settle_status_line` is exported from the shared
+    capture module, and a status line is not worth losing a frame over.
+    """
+    for app in (SimpleNamespace(), SimpleNamespace(_status=SimpleNamespace())):
+        pilot = _FakePilot(app)
+        started = time.monotonic()
+        await settle_status_line(pilot, app, tries=200)
+        elapsed = time.monotonic() - started
+        assert pilot.pauses == 0, app
+        assert elapsed < 1.0, (app, elapsed)

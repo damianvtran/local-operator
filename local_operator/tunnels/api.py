@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.auth_store import AuthStore, AuthStoreError
 from local_operator.tunnels.config import DEFAULT_API_URL
 
 
@@ -48,7 +48,16 @@ class RadientTunnels:
             row = store.get_credential(self.selected)
             if row is None or row.provider != "radient" or row.credential_type != "oauth":
                 raise ValueError("The tunnel's Radient login is unavailable; log in again.")
-            credentials = await store.ensure_oauth_fresh(self.selected)
+            try:
+                credentials = await store.ensure_oauth_fresh_or_raise(self.selected)
+            except AuthStoreError as failure:
+                # Chained, never flattened. A refresh that could not REACH the
+                # token endpoint and a grant the IdP rejected both arrive here,
+                # and only a caller that reads the chain can tell an operator
+                # whether the fault is their network or their login: reporting
+                # the first as an expired login is what sent a lost network to
+                # /login. `authorization_failure_reason` reads `__cause__`.
+                raise ValueError("The tunnel's Radient login could not be refreshed.") from failure
         token = credentials.get("access") if credentials else None
         if not isinstance(token, str) or not token:
             raise ValueError("The tunnel's Radient login expired; log in again.")

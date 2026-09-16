@@ -651,7 +651,10 @@ async def test_a_cross_field_validator_is_still_a_model_fault(tmp_path):
 @pytest.mark.parametrize(
     "damage,why",
     [
-        ("values:\n  subagents:\n    models: {}\n", "operator removed the tier"),
+        (
+            "values:\n  subagents:\n    model_choice: model\n    models: {}\n",
+            "operator removed the tier",
+        ),
         ("values: [ this is not: valid yaml\n", "config.yml became unreadable"),
     ],
 )
@@ -675,7 +678,8 @@ async def test_an_effort_tier_that_vanished_after_build_is_not_the_models_fault(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     (config_dir / "config.yml").write_text(
-        "values:\n  subagents:\n    models:\n      med: anthropic/claude-sonnet-4-5\n"
+        "values:\n  subagents:\n    model_choice: model\n    models:\n"
+        "      med: anthropic/claude-sonnet-4-5\n"
     )
 
     # Build the tool while the tier exists, so the advertised enum contains it.
@@ -832,8 +836,13 @@ async def test_an_effort_tier_that_was_never_advertised_is_the_models_fault(
     config_dir.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    # ``model_choice: model`` in every config written by the effort tests in this
+    # module, because without it the shipped default refuses the call on the
+    # POLICY ("not yours to choose") rather than on the tier the test is about —
+    # the same verdict by a shorter route, which is how a test stops testing
+    # what its docstring says.
     (config_dir / "config.yml").write_text(
-        "values:\n  subagents:\n    models:\n"
+        "values:\n  subagents:\n    model_choice: model\n    models:\n"
         + (f"      {configured}: anthropic/claude-sonnet-4-5\n" if configured else "      {}\n")
     )
 
@@ -874,7 +883,8 @@ async def test_an_invented_tier_cannot_launder_a_genuine_violation(tmp_path, mon
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     (config_dir / "config.yml").write_text(
-        "values:\n  subagents:\n    models:\n      med: anthropic/claude-sonnet-4-5\n"
+        "values:\n  subagents:\n    model_choice: model\n    models:\n"
+        "      med: anthropic/claude-sonnet-4-5\n"
     )
     task = _shipped_task_tool(tmp_path)
 
@@ -924,14 +934,84 @@ async def test_concurrent_tools_do_not_see_each_others_advertised_effort():
     def schema(*members: str) -> dict[str, Any]:
         return {"properties": {"effort": {"anyOf": [{"type": "string", "enum": list(members)}]}}}
 
-    first = _with_advertised_effort(report, schema("med"))
-    second = _with_advertised_effort(report, schema("hi", "lo"))
+    first = _with_advertised_effort(report, schema("med"), model_choice=True)
+    second = _with_advertised_effort(report, schema("hi", "lo"), model_choice=True)
     left, right = await asyncio.gather(
         first("1", {}, None, None, None), second("2", {}, None, None, None)
     )
 
     assert (left.text, right.text) == ("med", "hi,lo")
     assert _ADVERTISED_EFFORT.get() is None, "the snapshot must not outlive the call"
+
+
+def _write_subagents(config_dir, *, model_choice: str, models: str = "") -> None:
+    """Write ``values.subagents`` for the refusal tests below."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yml").write_text(
+        f"values:\n  subagents:\n    model_choice: {model_choice}\n    models:\n{models}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_mid_session_model_to_operator_flip_is_environmental(tmp_path, monkeypatch):
+    """The operator took the menu away; that is their change, not the model's error.
+
+    The build ran with ``model_choice: model``, so ``hi`` was IN the enum the
+    model was reading — then the key was flipped and the same tool object
+    validated the same argument. Refusing is right (the operator owns the
+    choice now) but billing it to the model is not: the model picked a member
+    the schema it was handed actually published, exactly like the vanished-tier
+    case next door. The build-time policy record is what makes the two
+    distinguishable — the live config alone cannot tell an operator edit from an
+    invented value.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    _write_subagents(config_dir, model_choice="model", models="      hi: anthropic/opus-1\n")
+    task = _shipped_task_tool(tmp_path)
+    assert "hi" in json.dumps(task.parameters), "the build must have offered the tier"
+
+    _write_subagents(config_dir, model_choice="operator", models="      hi: anthropic/opus-1\n")
+
+    recorded = await _run(
+        _calls((0, "c1", "task", json.dumps({"label": "x", "prompt": "y", "effort": "hi"})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"task": "execution"}
+
+
+@pytest.mark.asyncio
+async def test_a_tier_invented_under_the_operator_default_is_the_models_fault(
+    tmp_path, monkeypatch
+):
+    """The counterpart, and the reason the record is consulted at all.
+
+    Built under the shipped default, the schema carries no ``effort`` field at
+    all, so a call sending one is sending a field that does not exist — the
+    model's mistake, and it stays one even though the policy is also what
+    refuses it. Without this half, every operator-mode refusal would book as
+    ``execution`` and the new key would be a laundering channel for a model that
+    ignores its schema.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    _write_subagents(config_dir, model_choice="operator", models="      hi: anthropic/opus-1\n")
+    task = _shipped_task_tool(tmp_path)
+    assert "effort" not in (
+        task.parameters.get("properties") or {}
+    ), "the default must drop the field"
+
+    recorded = await _run(
+        _calls((0, "c1", "task", json.dumps({"label": "x", "prompt": "y", "effort": "hi"})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"task": "invalid_arguments"}
 
 
 @pytest.mark.asyncio
@@ -958,12 +1038,15 @@ async def test_a_static_violation_paired_with_a_vanished_tier_is_not_billed_to_t
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     (config_dir / "config.yml").write_text(
-        "values:\n  subagents:\n    models:\n      med: anthropic/claude-sonnet-4-5\n"
+        "values:\n  subagents:\n    model_choice: model\n    models:\n"
+        "      med: anthropic/claude-sonnet-4-5\n"
     )
     task = _shipped_task_tool(tmp_path)
 
     # The tier really was on offer, then the operator removed it.
-    (config_dir / "config.yml").write_text("values:\n  subagents:\n    models: {}\n")
+    (config_dir / "config.yml").write_text(
+        "values:\n  subagents:\n    model_choice: model\n    models: {}\n"
+    )
 
     recorded = await _run(
         _calls(
