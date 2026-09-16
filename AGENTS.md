@@ -2195,6 +2195,13 @@ secret. A comment or a docstring that promises more than that is wrong.
 
 ## The QwenCloud console ticket (`lop qwencloud-ticket`)
 
+Full agent-facing guidance — advising a USER who wants the personal Token Plan
+window in `/usage`, including capturing the cookie — is `guide://qwencloud`
+(packaged at `local_operator/guides/qwencloud/GUIDE.md`). This section is what
+someone CHANGING this code needs to know, and it is the half that does not
+ship: `AGENTS.md` is absent from `pyproject.toml`'s `package-data`, which is
+why the guide carries the user-facing workflow rather than this file.
+
 **What it is.** `login_qwencloud_ticket`, the QwenCloud console's browser
 session cookie. Not a scoped API key — it is a FULL-ACCOUNT console session,
 the broadest credential in `auth.db`.
