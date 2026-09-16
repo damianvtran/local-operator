@@ -343,8 +343,10 @@ def test_a_ticket_that_could_never_reach_the_wire_is_refused(
     """Each of these makes httpx refuse the cookie header LOCALLY.
 
     The console fetcher then swallows it (`except httpx.HTTPError: return
-    None`) and the panel renders "no windows reported" with nothing linking
-    it to the paste, so storing it and reporting success is exactly the
+    None`) and, with no report object at all, the panel falls back to its
+    generic empty-result row -- "no usage — no quota endpoint, or no credential
+    for one", quoted verbatim -- naming a MISSING credential and nothing
+    linking it to the paste, so storing it and reporting success is exactly the
     plausible-degraded-state bug controller.py:268-278 names. Measured on a
     real TCP socket, not MockTransport, which does not validate header
     values.

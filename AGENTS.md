@@ -2269,10 +2269,11 @@ embedded newline, any other control character, or a non-latin-1 character, and
 bounds the length at 4096 (the live cookie is 172 chars). This is not
 fastidiousness: the value's only use is interpolation into a `cookie:` header,
 httpx rejects such values LOCALLY, and the console fetcher swallows that as
-`httpx.HTTPError` — so the panel showed "no windows reported" with nothing
-linking it back to the paste. Copying the cookie out of devtools is the
-documented workflow and the cookie expires roughly weekly, so a multi-line
-paste is a recurring certainty rather than a corner case.
+`httpx.HTTPError` — so the panel showed its generic empty-result row ("no
+usage — no quota endpoint, or no credential for one"), naming a missing
+credential, with nothing linking it back to the paste. Copying the cookie out of
+devtools is the documented workflow and the cookie expires roughly weekly, so a
+multi-line paste is a recurring certainty rather than a corner case.
 
 **The update hazard.** `lop /update` or `uv tool upgrade` reinstalls from PyPI
 and silently reverts a locally built console fetcher while leaving the row in

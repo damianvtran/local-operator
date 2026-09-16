@@ -704,7 +704,7 @@ produce a report for a typical user:
 | `OAUTH_USAGE_PROVIDERS` was hand-written, had drifted, and was read by nothing; `USAGE_PROVIDERS` (the set that gates the UI) duplicated the same eight keys | `USAGE_PROVIDERS = frozenset(_FETCHERS)`; `OAUTH_USAGE_PROVIDERS` deleted — `usage_kinds()` already answers its question for its one would-be caller |
 | The Moonshot balance URL hardcoded the INTERNATIONAL host `api.moonshot.ai` while every other Kimi setting targets mainland `api.moonshot.cn` — separate platforms, separate accounts, separate keys, so the `KIMI_API_KEY` a user must hold 401s and the table is empty again | the balance path is appended to the provider's configured `base_url`; the host also fixes the currency (the response carries none), so a CNY balance no longer renders as USD |
 | `UsageReport.identity` was never assigned, so the TUI's annotation was unreachable | populated from the OAuth email/account id |
-| `/usage` could not distinguish "no endpoint" from "endpoint you cannot reach" | `usage_kinds()` reports both routes; the TUI now names the missing credential. **Partially superseded:** for `alibaba-token-plan` an expired console ticket renders the same `no windows reported` as a provider with no endpoint, and there is no credential to name because the ticket is not an OAuth row. See "QwenCloud personal Token Plan usage" below. |
+| `/usage` could not distinguish "no endpoint" from "endpoint you cannot reach" | `usage_kinds()` reports both routes; the TUI now names the missing credential. **Partially superseded:** for `alibaba-token-plan` an expired console ticket renders the same empty-panel string as a provider with no endpoint (`no provider reports no usage — no quota endpoint, or no credential for one`), which names a missing credential when the credential is stored and merely expired; there is no "re-run `set`" hint because the ticket is not an OAuth row. See "QwenCloud personal Token Plan usage" below. |
 | OpenRouter called the undocumented `/api/v1/auth/key` alias | pinned to the documented `/api/v1/key` (both verified live, identical bodies) |
 | The renderer printed a number only for `used`, so both balance fetchers (deliberately `remaining`-only) drew a row labelled "Balance" with no amount, and `UNIT_LABELS` was read by nothing while the raw dict key was interpolated | `remaining`/`limit`/fraction fall-backs, and units come from `UNIT_LABELS` — `519.86 USD` and `30%`, not `519.86 usd` and `30 percent` |
 
@@ -2057,11 +2057,20 @@ succeeds at the transport and reports nothing:
   `sfm_tokenplanteamsaddon_dp_intl`)
 
 No test can reproduce that: it is a property of one live account, and it is the
-entire justification for the console route. `IsGray: true` with an empty seat
-summary is also a latent dead end inside `fetch_qwencloud_token_plan` — it
-returns a report with no window rather than `None`, so the fall-through would
-never fire on that shape. The console route answering first is what keeps it
-off the path; it is noted in the fetcher and deliberately not fixed here.
+entire justification for the console route. On that shape
+`fetch_qwencloud_token_plan` returns **`None`**, not a window-less report:
+`_qwencloud_credits_limit` bails at `if not total or total <= 0`, an empty seat
+summary gives `total = 0.0`, so `limits` stays empty and the fetcher's
+`return … if limits else None` answers `None` (re-verified in-process against a
+`MockTransport` BSS, 2026-09-16). That is the real reason the console route runs
+first: `fetch_usage` returns on the first route it can attempt and has no
+fall-through between the OAuth and API-key pair, so BSS first would end the
+fetch at `None` and the console route would never be consulted. A window-less
+BSS report IS reachable on a narrower shape — an account that also holds add-on
+Credit Packs (`packs > 0`) with no subscription window — and there console-first
+is what keeps the 7-day window on the panel, at the cost of the packs row
+`fetch_usage` documents as a KNOWN LIMITATION. The fetcher's `# NOTE` records
+both; the packs-only case is deliberately not fixed here.
 
 **Console envelope.** `POST https://cs-data.qwencloud.com/data/api.json`,
 `application/x-www-form-urlencoded`, product `sfm_bailian`, action
@@ -2093,11 +2102,14 @@ credential exists at all, and why it is stored under its own provider id
 would conclude it can run CHAT traffic on a read-only console cookie.
 
 **Expiry is indistinguishable from "no endpoint", so the audit row above is
-partially stale for this provider.** An expired ticket renders `no windows
-reported` (`tui/widgets/usage_panel.py`) — the same string used for a provider
-with no quota endpoint — with no "re-run `set`" hint, because the ticket is not
-an OAuth row and cannot set `credential_invalid`. The panel also keeps serving
-the last cached percentage past expiry: the report TTL is 5 min
+partially stale for this provider.** An expired ticket renders the empty-panel
+string `no provider reports no usage — no quota endpoint, or no credential for
+one` (`tui/widgets/usage_panel.py`; `alibaba-token-plan reports no usage — …`
+when the panel is scoped to the provider) — the same string a provider with no
+quota endpoint produces, and it names a MISSING credential when the credential
+is stored and merely expired, with no "re-run `set`" hint, because the ticket
+is not an OAuth row and cannot set `credential_invalid`. The panel also keeps
+serving the last cached percentage past expiry: the report TTL is 5 min
 (`USAGE_REPORT_TTL_MS`), stale serving holds the last-good row, and an
 unavailable account is re-probed on a 10 min ±25% cadence
 (`USAGE_UNAVAILABLE_RETRY_MS`). `lop qwencloud-ticket status` is the only

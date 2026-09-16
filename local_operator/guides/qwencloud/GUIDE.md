@@ -80,13 +80,16 @@ inspect it.
 
 ## The panel is not the diagnostic
 
-On expiry `/usage` shows `no windows reported` — **the same string** it uses for
-"this provider has no quota endpoint" — with no hint to re-run `set`. It can
-also keep serving the last good percentage for minutes after the ticket dies:
-a failed fetch writes the previous value back (`USAGE_REPORT_TTL_MS` is 5
-minutes, and an account whose probes keep failing re-probes on a jittered
-~10-minute cadence). So a dead ticket can look healthy for a while, and an
-empty panel can mean nothing more specific than "no endpoint". Do not tell the
+On expiry `/usage` shows `no provider reports no usage — no quota endpoint, or
+no credential for one` (`alibaba-token-plan reports no usage — …` when the panel
+is scoped to the provider). That is worse than a neutral "nothing to show": it
+names a **missing credential** when the credential is stored and merely expired,
+and it carries no hint to re-run `set`. It can also keep serving the last good
+percentage for minutes after the ticket dies: a failed fetch writes the previous
+value back (`USAGE_REPORT_TTL_MS` is 5 minutes, and an account whose probes keep
+failing re-probes on a jittered ~10-minute cadence). So a dead ticket can look
+healthy for a while, and an empty panel can mean nothing more specific than
+those two guesses — neither of which is "your ticket expired". Do not tell the
 user to trust the panel in either direction. `lop qwencloud-ticket status` is
 the **only** diagnostic: run it before believing anything the panel implies
 about QwenCloud.
