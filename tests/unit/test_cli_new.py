@@ -1216,6 +1216,7 @@ async def test_mcp_reauth_still_refuses_a_server_that_cannot_take_oauth(
         (["logout", "openai"], "logout_command"),
         (["login-status"], "login_status_command"),
         (["mcp", "list"], "mcp_command"),
+        (["qwencloud-ticket", "status"], "qwencloud_ticket_command"),
     ],
 )
 def test_main_management_command_dispatch(

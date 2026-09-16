@@ -50,7 +50,7 @@ PAGES = [
     "resume-populated",
     "analytics-empty",
     "analytics-populated",
-    *[f"usage-{state}" for state in ("empty", "loading", "error", "populated")],
+    *[f"usage-{state}" for state in ("empty", "loading", "error", "populated", "qwencloud")],
     *[f"aside-{state}" for state in ("empty", "loading", "error", "populated")],
     *[f"todo-{state}" for state in ("empty", "populated", "overflow")],
     *[f"wake-{state}" for state in ("empty", "populated", "overflow")],
@@ -124,6 +124,33 @@ async def capture(path: Path, page: str, size: tuple[int, int], palette: str) ->
                 panel.show_error("Synthetic provider unavailable; retry is safe")
             elif page.endswith("populated"):
                 panel.show_reports([_report(_percent("weekly", "Weekly", 36))])
+            elif page.endswith("qwencloud"):
+                # The console fetcher's UsageLimit shape (providers/usage.py:
+                # `fetch_qwencloud_console_usage`); 24% / 4d3h are the
+                # live-verified values. Both clocks are pinned literals:
+                # `now_ms=` alone only stamps the title's age, while the
+                # countdown reads `self._now()` (usage_panel.py:1477), so
+                # without `set_clock` "resets in 4d3h" drifts a day per day and
+                # the frame stops being reproducible evidence.
+                now_ms = 1_788_400_000_000  # 2026-09-03T01:46:40Z
+                report = _report(
+                    _percent(
+                        "credits-7d",
+                        "7 Day Credits",
+                        24,
+                        window="7d",
+                        shared=True,
+                        resets_at_ms=now_ms + 356_400_000,  # 4d3h
+                    ),
+                    provider="alibaba-token-plan",
+                )
+                # `fetched_at` defaults to the WALL clock, which against a
+                # pinned panel clock dates the report in the future. Every
+                # consumer clamps at zero, but a title reading `just now`
+                # because of a clamp is not honest evidence — pin it too.
+                report.fetched_at = int(now_ms)
+                panel.set_clock(now_ms)
+                panel.show_reports([report], now_ms=now_ms)
             panel.focus()
         elif page.startswith("aside"):
             panel = app._open_aside()
