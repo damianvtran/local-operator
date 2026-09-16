@@ -109,14 +109,24 @@ class _ExplodingScan:
 
 
 def _failing_iteration(
-    monkeypatch: pytest.MonkeyPatch, store: Path, error: OSError, *, after: int = 1
+    monkeypatch: pytest.MonkeyPatch, store: Path, error: OSError, *, after: int = 1, nth: int = 1
 ) -> None:
+    """Make the ``nth`` scan OF ``store`` die ``after`` entries in.
+
+    Scoped by path and by occurrence for the same reason ``_failing_open`` is:
+    the catalogue walks this store twice (the scan, then the desktop-marker
+    probe) and a double that broke the first read only would never reach the
+    second one's own iteration.
+    """
     real = os.scandir
+    seen = {"count": 0}
 
     def fake(path: Any = ".", *args: Any, **kwargs: Any) -> Any:
         scan = real(path, *args, **kwargs)
         if isinstance(path, (str, Path)) and Path(path) == store:
-            return _ExplodingScan(scan, after)
+            seen["count"] += 1
+            if seen["count"] == nth:
+                return _ExplodingScan(scan, after)
         return scan
 
     monkeypatch.setattr(os, "scandir", fake)
@@ -247,6 +257,31 @@ def test_a_probe_that_cannot_read_the_store_surfaces_instead_of_dropping_rows(
 
     with pytest.raises(SessionStoreUnavailable):
         load_catalog(tmp_path)
+
+
+def test_a_probe_that_dies_mid_iteration_surfaces_instead_of_dropping_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe's OWN iteration is a read too, and it is the second one.
+
+    The test above injects the failure at the probe's *open*, which leaves the
+    same question open one level in: this loop was swapped from a bare ``for``
+    to ``_scanned_entries`` for exactly this case — a directory that grows or
+    rotates between the open and the last ``readdir`` — and until this test
+    existed that half of the change was argued but unpinned. Both halves have
+    to surface, because the rows this loop contributes are the newest thing in
+    the store.
+
+    ``nth=2`` for the same reason the open is injected that way: ``nth=1``
+    would break the SCAN's iteration, which a different test already owns.
+    """
+    store = _store(tmp_path, "aaaaaaaaaaaa")
+    _failing_iteration(monkeypatch, store, OSError(errno.EIO, "Input/output error"), nth=2)
+
+    with pytest.raises(SessionStoreUnavailable) as caught:
+        load_catalog(tmp_path)
+
+    assert isinstance(caught.value.__cause__, OSError)
 
 
 def test_a_store_without_a_desktop_marker_is_probed_without_error(tmp_path: Path) -> None:
