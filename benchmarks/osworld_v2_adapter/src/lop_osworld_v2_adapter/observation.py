@@ -46,6 +46,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+from lop_osworld_v2_adapter import artifacts
+
 from local_operator.evaluation.adapters.api import (
     BoundFrame,
     bound_screen_frame,
@@ -242,10 +244,12 @@ class ObservationBuilder:
         sha = hashlib.sha256(bound.payload).hexdigest()
         # The parent reads the artifact back by opening <root>/<sha256> with
         # O_NOFOLLOW and re-hashing, so the file name IS the content address
-        # and there is no extension to disagree over.
-        artifact_path = self._artifact_root / sha
-        if not artifact_path.exists():
-            artifact_path.write_bytes(bound.payload)
+        # and there is no extension to disagree over. That makes the write
+        # indivisible or nothing: a create-then-write leaves the name on disk
+        # before the bytes are, so one interrupted publish poisons the address
+        # for every later attempt. ``publish`` writes to a sibling temp name
+        # and replaces atomically, and heals an address an older build poisoned.
+        artifacts.publish(self._artifact_root / sha, bound.payload)
 
         frame = FrameRef(
             frame_id="screen",
