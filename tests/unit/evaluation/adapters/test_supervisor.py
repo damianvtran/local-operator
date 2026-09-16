@@ -5,9 +5,11 @@ import hashlib
 import io
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -45,6 +47,7 @@ from local_operator.evaluation.adapters.supervisor import (
     HostVerifier,
     SupervisionError,
     VerifiedAdapterSession,
+    _file_kind,
     _Tail,
     _terminate_process_group,
     load_pending_rescue,
@@ -577,6 +580,74 @@ def test_each_artifact_refusal_says_which_clause_fired(tmp_path: Path) -> None:
     )
 
 
+def test_a_socket_at_the_digest_name_is_refused_by_the_path_clause(tmp_path: Path) -> None:
+    """The kinds ``_file_kind`` names that ``verify_artifact`` can never print.
+
+    The kind clause is what tells an operator a hostile worker (a FIFO, refused
+    precisely because it attacks the parent's liveness) from a broken
+    publication (a directory, a short file). A SYMLINK and a SOCKET are NOT in
+    that set: the open carries ``O_NOFOLLOW``, so a symlink fails there with
+    ``ELOOP``, and a socket node fails there too (``EOPNOTSUPP`` on macOS,
+    ``ENXIO`` on Linux) -- both before any ``fstat``, so both are refused by the
+    PATH clause with an errno rather than by the kind clause with a name.
+
+    Pinned because both docstrings now say exactly that, and because the two
+    branches are kept deliberately as defence in depth for a caller that stats
+    a name it did not open itself: this test fails if ``O_NOFOLLOW`` is ever
+    dropped from ``flags``, which is the moment the kind clause would start
+    naming a confinement escape it used to refuse.
+    """
+
+    data = b'{"ok":true}'
+    digest = hashlib.sha256(data).hexdigest()
+    reference = ArtifactRef(sha256=digest, media_type="application/json", byte_count=len(data))
+
+    outside = tmp_path / "outside"
+    outside.write_bytes(data)
+    (tmp_path / digest).symlink_to(outside)
+    with pytest.raises(SupervisionError) as caught:
+        verify_artifact(tmp_path, reference)
+    assert str(caught.value) == (
+        f"artifact path is unsafe or unavailable: {digest} could not be opened in the "
+        f"artifact root (ELOOP: {os.strerror(errno.ELOOP)})"
+    )
+    (tmp_path / digest).unlink()
+
+    # The socket's directory is built directly under /tmp rather than under
+    # ``tmp_path``: ``sun_path`` is 104 bytes on macOS (108 on Linux) INCLUDING
+    # the NUL, and both a pytest temp directory and macOS's ``/var/folders/...``
+    # temp root already overrun that once a 64-character digest is appended.
+    with tempfile.TemporaryDirectory(prefix="lo-artifact-", dir="/tmp") as short:
+        short_root = Path(short)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(str(short_root / digest))
+        except OSError:  # a host whose ``sun_path`` cannot hold this name
+            pytest.skip("cannot bind an AF_UNIX name of this length on this host")
+        try:
+            with pytest.raises(SupervisionError) as caught:
+                verify_artifact(short_root, reference)
+        finally:
+            server.close()
+        message = str(caught.value)
+        assert message.startswith(
+            f"artifact path is unsafe or unavailable: {digest} could not be opened in the "
+            "artifact root ("
+        )
+        # The KIND clause is what must not appear. Asserting on the substring
+        # "socket" would be wrong on macOS, where this refusal's own errno detail
+        # is "EOPNOTSUPP: Operation not supported on socket" -- the word arrives
+        # from ``strerror``, not from ``_file_kind``, which is exactly the
+        # distinction this test exists to hold.
+        assert "not a regular file" not in message
+        assert f"{digest} is a socket" not in message
+
+    # ...and the branch the refusal cannot reach still names its mode, which is
+    # the whole reason it is kept rather than deleted.
+    assert _file_kind(stat.S_IFSOCK | 0o777) == "socket"
+    assert _file_kind(stat.S_IFLNK | 0o777) == "symlink"
+
+
 def test_artifact_grown_past_its_declared_size_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -614,9 +685,56 @@ def test_artifact_grown_past_its_declared_size_is_refused(
     monkeypatch.setattr(os, "fstat", frozen)
     with pytest.raises(SupervisionError) as caught:
         verify_artifact(tmp_path, reference)
+    # The message carries a LOWER BOUND, not the file's true length, and the
+    # pinned value is the one the bounded read can actually prove: the loop asks
+    # for ``byte_count + 1`` bytes so it stops at the first byte past the
+    # declaration and never learns the rest. ``grown`` holds 15 bytes and is
+    # deliberately NOT what the assertion expects -- claiming the real size would
+    # mean a second, unbounded read of an artifact that has already broken its
+    # declaration, for a number the operator can get from ``stat`` anyway.
     assert str(caught.value) == (
         f"artifact exceeds its declared size: {digest} declares {len(data)} bytes but the "
-        "file read longer than that"
+        f"file supplied at least {len(data) + 1} bytes"
+    )
+
+
+def test_artifact_io_fault_after_a_successful_open_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fault on an artifact that OPENED must not borrow the path refusal.
+
+    ``fstat``/``read``/``close`` run on a descriptor the open already handed
+    back, so a failure here is not a missing or unpublishable name -- it is the
+    filesystem failing under a publication that was there and would have been
+    accepted. The old shared sentence called this ``artifact path is unsafe or
+    unavailable``, which sent an operator looking for a publication mistake
+    that did not exist; the whole point of the split is that the two have
+    different remedies. The fault is forced on an artifact that is otherwise
+    valid (right digest, right size, right media), so nothing but the clause
+    under test can refuse it, and the patch is bounded by the read size the
+    reference itself derives so no other reader in the process is affected.
+    """
+
+    data = b'{"ok":true}'
+    digest = hashlib.sha256(data).hexdigest()
+    reference = ArtifactRef(sha256=digest, media_type="application/json", byte_count=len(data))
+    (tmp_path / digest).write_bytes(data)
+
+    real_read = os.read
+
+    def failing_read(fd: int, size: int) -> bytes:
+        # verify_artifact's first read asks for byte_count + 1 bytes (the cap in
+        # the read loop), so this cannot be confused with another consumer's
+        # read -- and it fires only after the open and fstat have succeeded.
+        if size != reference.byte_count + 1:
+            return real_read(fd, size)
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(os, "read", failing_read)
+    with pytest.raises(SupervisionError) as caught:
+        verify_artifact(tmp_path, reference)
+    assert str(caught.value) == (
+        f"artifact verification failed on I/O: {digest} (EIO: {os.strerror(errno.EIO)})"
     )
 
 

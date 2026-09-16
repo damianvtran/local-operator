@@ -1036,6 +1036,23 @@ def _file_kind(mode: int) -> str:
     name: a FIFO is a worker attacking the parent's LIVENESS, while a directory
     or a short zero-filled file is usually a publication whose bytes never
     landed.
+
+    THIS IS A PURE MODE MAPPING, so it names every kind it is asked about and
+    the names a BUNDLE can actually show are a strict subset of them. Through
+    ``verify_artifact`` the kinds that clause can report are a fifo, a character
+    or block device, and a directory -- anything the open admits that is not
+    regular (a device node is reachable BY THE CLAUSE but not by a stock worker,
+    which needs privilege to create one). A symlink and a socket are not: the
+    open carries ``O_NOFOLLOW``, so a symlink is refused there with ``ELOOP``,
+    and a socket node is refused there too (``EOPNOTSUPP`` on macOS, ``ENXIO``
+    on Linux) -- both before any ``fstat``, so both land in the path clause with
+    an errno rather than here with a kind. The two therefore stay in the table
+    below as defence in depth, for a caller that stats a name it did not open
+    itself, and the mapping is deliberately NOT trimmed to the set a bundle can
+    show: a socket or symlink mode must not degrade into the raw-mode fallback,
+    which is the least legible answer this function can give. Whether a kind can
+    reach a bundle is documented on ``verify_artifact``, which is where that
+    promise belongs.
     """
 
     kind = stat.S_IFMT(mode)
@@ -1070,15 +1087,25 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
       not the artifact, could not be opened (a wrong or unmounted root).
     * ``artifact path is unsafe or unavailable`` -- the name could not be
       opened inside that directory: never published (``ENOENT``), a symlink
-      refused by ``O_NOFOLLOW`` (``ELOOP``), or not a directory in the path.
-    * ``artifact is not a regular file`` -- SOMETHING is there, and its kind is
-      named: a FIFO, a socket, a device, or a directory.
+      refused by ``O_NOFOLLOW`` (``ELOOP``), a socket node (``EOPNOTSUPP`` on
+      macOS, ``ENXIO`` on Linux), or not a directory in the path.
+    * ``artifact is not a regular file`` -- SOMETHING is there and its kind is
+      named. The kinds this can actually print are a fifo, a character or block
+      device, and a directory; ``_file_kind`` also names symlinks and sockets,
+      but neither reaches this clause because the open above refuses both first
+      (see that function on why they are kept anyway).
     * ``artifact byte count differs`` -- a regular file whose size is not the
       declared ``byte_count``. A 0-byte file at a digest name is the signature
       of a publication interrupted after the file was created but before its
       bytes landed, which is exactly what a full disk produces.
     * ``artifact exceeds its declared size`` -- the file grew past the declared
-      size while it was being read.
+      size while it was being read. Reported as a lower bound, because the read
+      stops at one byte past the declaration.
+    * ``artifact verification failed on I/O`` -- the name OPENED, and the
+      ``fstat``/``read``/``close`` that followed failed. A separate clause from
+      the path refusal because a fault on an artifact that opened is not a
+      missing or unpublishable name: the two send an operator to different
+      places, one to the worker's publication and one to the filesystem.
     * ``artifact digest differs`` / ``artifact media differs`` -- the bytes are
       the declared length but not the declared content.
     """
@@ -1104,6 +1131,21 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
     try:
         root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     except OSError as error:
+        # CONVERTED, and the conversion is deliberate on both counts. Every
+        # caller of verify_artifact handles SupervisionError and none of them
+        # catches OSError around the call, so a raw FileNotFoundError used to
+        # escape the whole supervision layer and reach the bundle with no
+        # statement of WHAT failed to open. The second consequence is the
+        # bundle's diagnostic_code, which _diagnostic_code derives from the
+        # exception's class name: this failure class used to record
+        # "filenotfounderror"/"permissionerror"/"notadirectoryerror" and now
+        # records "supervisionerror". That rebucketing is INTENDED rather than
+        # tolerated -- the root open is the parent's own directory, not a
+        # worker-supplied artifact, so it does not belong in the same bucket as
+        # an artifact refusal, and the message's own "artifact root is unsafe
+        # or unavailable" prefix is what separates the two inside the new
+        # bucket. category (adapter), reason (crash) and retryable (False) are
+        # unchanged, so no acceptance decision moves with it.
         raise SupervisionError(
             f"artifact root is unsafe or unavailable: {root} ({_errno_detail(error)})"
         ) from error
@@ -1133,9 +1175,15 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
             while chunk := os.read(fd, min(65536, reference.byte_count + 1 - len(data))):
                 data.extend(chunk)
                 if len(data) > reference.byte_count:
+                    # The count read is carried as a LOWER BOUND, not as a size:
+                    # the read above is capped at byte_count + 1 so the loop
+                    # stops at the first byte past the declaration, and the file
+                    # may be longer still. "Supplied at least" is the most a
+                    # single bounded read can honestly say.
                     raise SupervisionError(
                         f"artifact exceeds its declared size: {name} declares "
-                        f"{reference.byte_count} bytes but the file read longer than that"
+                        f"{reference.byte_count} bytes but the file supplied at least "
+                        f"{len(data)} bytes"
                     )
         finally:
             os.close(fd)
