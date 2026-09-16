@@ -86,8 +86,10 @@ import heapq
 import mimetypes
 import os
 import stat
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
 from local_operator.harness.approval import ApprovalGate, ask_approval
 
@@ -122,6 +124,13 @@ from local_operator.tools.builtin import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.tui.autocomplete import ArgumentChoice
+
+#: The return of whatever blocking call :func:`_off_loop` is handed.
+_T = TypeVar("_T")
+
+#: The name every abandoned-read thread carries, so a leaked one is
+#: identifiable in a dump and assertable in a test.
+_READ_THREAD_NAME = "lop-reference-read"
 
 
 class ExpansionResult(NamedTuple):
@@ -239,11 +248,23 @@ def _sensitive_name(name: str) -> bool:
     ``'.env'``), and constructing a ``Path`` per entry measured 0.74 ms per
     2000 entries on the keystroke path.
     """
-    if name in SENSITIVE_NAMES:
+    # CASEFOLDED before every test, because the filesystem this runs on is
+    # commonly case-insensitive and the deny-list was not. Verified on macOS
+    # (APFS, the default case-insensitive configuration): `.ENV` and `.env`
+    # report the SAME INODE, so `@.ENV` opened the real secret while matching
+    # nothing in the lowercase sets — the gate was never consulted.
+    # `WORKSPACE.ENV` took the same route past the suffix rule. NTFS is
+    # case-insensitive by the same default, though that was not tested here.
+    #
+    # The candidate is folded rather than the sets: the sets are already
+    # lowercase, and folding them at definition would read as if the DATA had
+    # changed when what changed is the COMPARISON.
+    folded = name.casefold()
+    if folded in SENSITIVE_NAMES:
         return True
-    if any(name.startswith(prefix) for prefix in SENSITIVE_NAME_PREFIXES):
+    if any(folded.startswith(prefix) for prefix in SENSITIVE_NAME_PREFIXES):
         return True
-    return os.path.splitext(name)[1] in SENSITIVE_SUFFIXES
+    return os.path.splitext(folded)[1] in SENSITIVE_SUFFIXES
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -418,12 +439,30 @@ _DEFUSED_CLOSE = REFERENCE_BLOCK_CLOSE.replace("<", "<" + _ZERO_WIDTH_SPACE, 1)
 #: and leave the transcript row nothing short to paint.
 _BLOCK_PREAMBLE = "The operator's message references these paths. Content is included below."
 
-#: The notice introducing the by-path-only tail. Sized into the budget UP FRONT
-#: by :class:`_Block` rather than appended afterwards — see that class for the
-#: measured overshoot the old "append and hope" shape produced.
-_OVERFLOW_NOTICE = (
-    f"[the reference block reached its {BLOCK_LIMIT_CHARS}-character cap; "
-    "these paths are named but not included — read them if you need them]"
+#: The notice introducing the by-path-only tail, as a template over the block's
+#: ACTUAL size. Sized into the budget UP FRONT by :class:`_Block` rather than
+#: appended afterwards — see that class for the measured overshoot the old
+#: "append and hope" shape produced.
+#:
+#: It reports the real number instead of asserting the cap was reached, because
+#: the fixed-text version was a LIE in the common case: a message naming one
+#: real file and several hundred nonexistent ones emitted a 343-character block
+#: — 1.0% of the cap — under a notice saying the 32,768-character cap had been
+#: reached. A path can be named rather than carried because the block truly
+#: filled up OR because room had to be kept for the other paths still to be
+#: named, and the operator cannot act on the difference unless told which.
+_OVERFLOW_NOTICE_TEMPLATE = (
+    "[not every referenced path could be included; the reference block holds "
+    "{used} of its {limit}-character budget. These paths are named but not "
+    "included — read them if you need them]"
+)
+
+#: The widest the notice can render, which is what :class:`_Block` CHARGES. The
+#: real notice is never longer, so the charge is an upper bound and the cap
+#: stays a bound; charging the exact string is impossible because the number it
+#: contains is not known until every element has been decided.
+_OVERFLOW_NOTICE_MAX_LEN = len(
+    _OVERFLOW_NOTICE_TEMPLATE.format(used=BLOCK_LIMIT_CHARS, limit=BLOCK_LIMIT_CHARS)
 )
 
 #: The separator between block elements, counted with each element because an
@@ -441,6 +480,50 @@ class _Token(NamedTuple):
 
     typed: str
     raw: str
+
+
+class _Resolved(NamedTuple):
+    """One token after its kind is known, and what naming it would COST.
+
+    Exists so the tail reservation can be computed from the tokens that can
+    actually spend block characters. Resolution and carrying are separate
+    passes because a reservation made during the first token must already know
+    how many of the LAST tokens are real — a fact a single interleaved pass
+    does not have, which is how a real file's body came to be dropped to pay
+    for paths that did not exist.
+
+    ``notice`` set means the token is prose: it never reaches the block, so it
+    costs nothing and is excluded from the reservation. The notice is carried
+    rather than emitted during resolution so the caller can append it at the
+    token's own position and keep notice order identical to the typed order.
+
+    ``listed`` is the rendered ``<listed>`` element, precomputed so the
+    reservation sums each remaining token's REAL length instead of multiplying
+    the current token's length by a count.
+    """
+
+    token: _Token
+    path: Path
+    inside: bool
+    resolvable: bool
+    is_dir: bool
+    notice: str | None
+    listed: str
+
+    @property
+    def chargeable(self) -> bool:
+        """Whether this token can still spend characters inside the block.
+
+        Prose cannot: it takes the governing rule's branch, emits a notice and
+        returns. Counting it in the reservation is the phantom charge that
+        dropped a real reference's body.
+
+        A token that is later declined at the approval gate DOES count here.
+        Its verdict is not known until pass 2 asks, and over-reserving by a
+        decided-late token is safe in the direction that matters — the cap
+        holds — whereas under-reserving would breach it.
+        """
+        return self.notice is None
 
 
 def _attribute(value: str) -> str:
@@ -706,6 +789,68 @@ def _file_payload(path: Path, size: int, limit: int, shown: str) -> tuple[str, d
     return text, {"bytes": str(size), "lines": str(len(text.splitlines()))}
 
 
+async def _off_loop(fn: Callable[..., _T], *args: object) -> _T:
+    """Run a blocking filesystem call in a DAEMON thread and await its result.
+
+    :func:`asyncio.to_thread` is the convention everywhere else in this
+    codebase — but its executor threads are NON-DAEMON, and that is load
+    bearing here in a way it is not at the other call sites. This module's
+    whole reason for going off the loop is that a read can WEDGE forever (a
+    FIFO with no writer, an NFS mount that never answers), and the only
+    recovery is to abandon the thread. ``to_thread``'s thread then keeps the
+    interpreter alive, and the join that hangs is ``asyncio.run``'s own:
+    it calls ``loop.shutdown_default_executor()``, which is
+    ``ThreadPoolExecutor.shutdown(wait=True)`` and blocks joining the worker
+    still stopped in the kernel. Confirmed by a fault handler traceback —
+    ``_do_shutdown`` -> ``concurrent.futures.thread.shutdown`` -> ``join``.
+    (Those workers are also non-daemon, so interpreter shutdown would join
+    them as well; ``asyncio.run`` simply gets there first.)
+
+    Measured before this change, on an abandoned FIFO read: ``wait_for``
+    regained control in 2.0 s and the process was STILL alive 30 s later with
+    all its work done — a hang at exit, not just a leak. With a daemon thread
+    the same run returned from ``asyncio.run`` at 2.0 s and the process exited.
+
+    The abandoned thread still leaks for the life of the process; nothing can
+    reclaim a thread stopped in the kernel. What changes is that the leak no
+    longer outranks shutdown.
+
+    ``call_soon_threadsafe`` rather than ``run_coroutine_threadsafe`` because
+    the worker only needs to settle a future, and the ``done()`` guard is for
+    the abandoned case \u2014 the awaiting task may be long gone when the read
+    finally returns, and setting a cancelled future raises.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[_T] = loop.create_future()
+
+    def deliver(error: BaseException | None, result: object) -> None:
+        # The awaiting task may have been cancelled while this thread was
+        # blocked, and setting an already-settled future raises.
+        if future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(cast("_T", result))
+
+    def run() -> None:
+        # The outcome is passed as ARGUMENTS, never captured in a closure: an
+        # `except ... as exc` name is deleted at the end of its block, so a
+        # lambda closing over it raises `NameError` when the loop runs it. That
+        # left the future permanently unsettled and the awaiting coroutine hung
+        # forever — caught here by `test_expansion_never_raises` hanging rather
+        # than failing.
+        try:
+            result = fn(*args)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the awaiting side
+            loop.call_soon_threadsafe(deliver, exc, None)
+        else:
+            loop.call_soon_threadsafe(deliver, None, result)
+
+    threading.Thread(target=run, name=_READ_THREAD_NAME, daemon=True).start()
+    return await future
+
+
 def _file_payload_of(path: Path, limit: int, shown: str) -> tuple[str, dict[str, str]]:
     """:func:`_file_payload` with its ``stat`` done on the SAME thread.
 
@@ -911,6 +1056,11 @@ class _Block:
         )
         self._overflow: list[str] = []
         self._notice_charged = False
+        # Where the notice sits in `_elements`. The slot is filled with a
+        # placeholder when charged and replaced at render, because the notice
+        # states the block's final size and that is not known until every
+        # element has been decided.
+        self._notice_at: int | None = None
 
     def _charge(self, element: str) -> None:
         self._elements.append(element)
@@ -929,7 +1079,7 @@ class _Block:
         """
         due = reserved
         if reserved and not self._notice_charged:
-            due += len(_BLOCK_JOIN) + len(_OVERFLOW_NOTICE)
+            due += len(_BLOCK_JOIN) + _OVERFLOW_NOTICE_MAX_LEN
         return self._used + len(_BLOCK_JOIN) + len(element) + due <= self._limit
 
     def carry(self, element: str) -> None:
@@ -960,11 +1110,15 @@ class _Block:
         keeps this object free of control flow that the ``never raises``
         contract would have to catch.
         """
-        due = 0 if self._notice_charged else len(_BLOCK_JOIN) + len(_OVERFLOW_NOTICE)
+        due = 0 if self._notice_charged else len(_BLOCK_JOIN) + _OVERFLOW_NOTICE_MAX_LEN
         if self._used + due + len(_BLOCK_JOIN) + len(element) > self._limit:
             return False
         if not self._notice_charged:
-            self._charge(_OVERFLOW_NOTICE)
+            # A placeholder of the CHARGED width: `render` replaces it with the
+            # real sentence, which is never longer, so `_used` stays an upper
+            # bound on what is emitted.
+            self._notice_at = len(self._elements)
+            self._charge(" " * _OVERFLOW_NOTICE_MAX_LEN)
             self._notice_charged = True
         self._charge(element)
         self._overflow.append(element)
@@ -985,8 +1139,55 @@ class _Block:
         return bool(self._overflow)
 
     def render(self) -> str:
-        body = _BLOCK_JOIN.join([_BLOCK_PREAMBLE, *self._elements])
+        elements = list(self._elements)
+        if self._notice_at is not None:
+            elements[self._notice_at] = self._notice_for(elements)
+        body = _BLOCK_JOIN.join([_BLOCK_PREAMBLE, *elements])
         return f"{REFERENCE_BLOCK_OPEN}{_BLOCK_JOIN}{body}{_BLOCK_JOIN}{REFERENCE_BLOCK_CLOSE}"
+
+    def _notice_for(self, elements: list[str]) -> str:
+        """The overflow notice, stating the block's ACTUAL size.
+
+        The old fixed string asserted the cap had been reached, which was false
+        whenever a path was listed to keep room for other paths rather than
+        because the block filled: one real file among several hundred
+        nonexistent tokens emitted 343 characters — 1.0% of the cap — under a
+        notice claiming 32,768 had been used.
+
+        The size is SELF-REFERENTIAL: the number is inside the string whose
+        length it counts. Solved by iterating to a fixed point, reached as soon
+        as the reported digit count stops changing — one round in practice,
+        since only a digit-count change can move the length. The loop is
+        bounded rather than `while True` because an unbounded fixed-point
+        search on a render path is a hang waiting to happen; on the bound being
+        exhausted it returns the last iterate, whose length is within a digit
+        of correct and never exceeds the charged width, so the cap still holds.
+
+        Whatever it returns is no longer than :data:`_OVERFLOW_NOTICE_MAX_LEN`,
+        which is what `fits` and `list_only` charged: ``used`` cannot exceed
+        ``limit``, so the number can never be wider than the one that sized the
+        charge.
+        """
+        fixed = sum(
+            len(_BLOCK_JOIN) + len(part)
+            for index, part in enumerate(elements)
+            if index != self._notice_at
+        )
+        fixed += (
+            len(REFERENCE_BLOCK_OPEN)
+            + len(_BLOCK_JOIN)
+            + len(_BLOCK_PREAMBLE)
+            + len(_BLOCK_JOIN)
+            + len(REFERENCE_BLOCK_CLOSE)
+            + len(_BLOCK_JOIN)
+        )
+        notice = _OVERFLOW_NOTICE_TEMPLATE.format(used=fixed, limit=self._limit)
+        for _ in range(4):
+            settled = _OVERFLOW_NOTICE_TEMPLATE.format(used=fixed + len(notice), limit=self._limit)
+            if len(settled) == len(notice):
+                return settled
+            notice = settled
+        return notice
 
 
 async def _approved(
@@ -1058,6 +1259,70 @@ async def expand_references(
         return ExpansionResult(text, False, [f"references could not be expanded: {exc}"])
 
 
+async def _resolve_tokens(tokens: list[_Token], cwd: str) -> list[_Resolved]:
+    """Decide what every token IS, before any of them is carried.
+
+    Separated from carrying so the tail reservation can be computed from the
+    tokens that can actually spend block characters — see :class:`_Resolved`
+    and the reservation in :func:`_expand`.
+
+    Reads NOTHING. Only the one ``stat`` per token that was already on this
+    path, so splitting the loop adds no syscalls; the file bodies are still
+    read in the second pass, and only for references that survive the cap and
+    the approval gate. A token that is prose here never costs a read at all,
+    exactly as before.
+
+    Failures become a ``notice`` rather than an exception, because the caller's
+    contract is per-token degradation: one unreadable path must not abandon the
+    whole message.
+    """
+    entries: list[_Resolved] = []
+    for token in tokens:
+        path, inside, resolvable = _resolve_workspace_path(token.raw, cwd)
+        # `Path.exists()` PROPAGATES `PermissionError` — it swallows only
+        # ENOENT/ENOTDIR/EBADF/ELOOP — so an unstatable path used to escape past
+        # the per-token handler here to the catch-all in `expand_references`
+        # and abandon the WHOLE message: `@README.md and @noperm/s.txt`
+        # expanded neither, though §3's governing rule is per-token
+        # degradation. `is_file()`/`is_dir()` raise the same way, so the one
+        # statement covers all three.
+        #
+        # `is_file()` rather than `exists()` is also the FIFO fix. A FIFO
+        # exists, is not a directory, and therefore took the file branch, where
+        # `read_bytes()` blocks forever with no writer — not a raise but a
+        # WEDGE, on the submit path of every surface, and `asyncio.wait_for`
+        # cannot cancel it because the thread is blocked in the kernel rather
+        # than at an await. `expand_references` is documented never to raise;
+        # it must also be able to return. A device, socket or FIFO is not a
+        # file to include, so the governing rule applies: it is prose.
+        notice: str | None = None
+        is_dir = False
+        try:
+            # One `stat` for both questions, off the loop with the reads below.
+            is_dir, is_file = await _off_loop(_kind_of, path)
+        except OSError as exc:
+            notice = f"{token.typed} — could not be read ({exc.strerror or exc})"
+        else:
+            if not resolvable or not (is_dir or is_file):
+                # THE GOVERNING RULE. Not a reference, so no block entry and no
+                # change to the prose — this is the branch `@me` takes.
+                notice = f"{token.typed} — no such path; sent as written"
+        entries.append(
+            _Resolved(
+                token=token,
+                path=path,
+                inside=inside,
+                resolvable=resolvable,
+                is_dir=is_dir,
+                notice=notice,
+                # Rendered even for prose (cheap, no I/O) so the reservation
+                # can sum real lengths; `chargeable` is what excludes it.
+                listed=_render_listed(path, token.typed, cwd),
+            )
+        )
+    return entries
+
+
 async def _expand(
     text: str,
     cwd: str,
@@ -1084,42 +1349,40 @@ async def _expand(
 
     notices: list[str] = list(suppressed_notices)
     block = _Block()
-    seen: set[Path] = set()
-    # Every token this pass CONSUMES must end up named in the block, or pass 2
-    # re-expands it. Counted down rather than recomputed so `_Block.fits` can
-    # reserve the tail's worst case against what is still outstanding.
-    outstanding = len(tokens)
 
-    for token in tokens:
-        outstanding -= 1
-        path, inside, resolvable = _resolve_workspace_path(token.raw, cwd)
-        # `Path.exists()` PROPAGATES `PermissionError` — it swallows only
-        # ENOENT/ENOTDIR/EBADF/ELOOP — so an unstatable path used to escape past
-        # the per-token handler below to the catch-all in `expand_references`
-        # and abandon the WHOLE message: `@README.md and @noperm/s.txt`
-        # expanded neither, though §3's governing rule is per-token
-        # degradation. `is_file()`/`is_dir()` raise the same way, so the one
-        # statement covers all three.
-        #
-        # `is_file()` rather than `exists()` is also the FIFO fix. A FIFO
-        # exists, is not a directory, and therefore took the file branch, where
-        # `read_bytes()` blocks forever with no writer — not a raise but a
-        # WEDGE, on the submit path of every surface, and `asyncio.wait_for`
-        # cannot cancel it because the thread is blocked in the kernel rather
-        # than at an await. `expand_references` is documented never to raise;
-        # it must also be able to return. A device, socket or FIFO is not a
-        # file to include, so the governing rule applies: it is prose.
-        try:
-            # One `stat` for both questions, off the loop with the reads below.
-            is_dir, is_file = await asyncio.to_thread(_kind_of, path)
-        except OSError as exc:
-            notices.append(f"{token.typed} — could not be read ({exc.strerror or exc})")
+    # PASS 1 — decide what each token IS, before anything is carried.
+    #
+    # The tail reservation has to know how many of the LATER tokens can still
+    # spend block characters, and interleaving resolution with carrying does
+    # not have that fact at the first token. It charged the tail for every
+    # token not yet looked at, including ones that turn out to be prose and
+    # cost nothing, and the phantom charge demoted a REAL reference from
+    # `<reference>` to `<listed>` — its body never reached the model. Measured
+    # with one real file: at 340 nonexistent tokens the body was dropped while
+    # the emitted block was 343 chars, 1.0% of the 32,768 cap.
+    entries = await _resolve_tokens(tokens, cwd)
+
+    # The tail's worst case, as chars still owed by tokens not yet DECIDED.
+    # Only a token that can reach `list_only` is counted: prose never enters
+    # the block. Each entry contributes its own rendered length rather than a
+    # count times the current token's length, so the reservation is the real
+    # remainder and not an estimate of it.
+    pending = sum(len(_BLOCK_JOIN) + len(entry.listed) for entry in entries if entry.chargeable)
+    seen: set[Path] = set()
+
+    # PASS 2 — carry what fits, name what does not.
+    for entry in entries:
+        token = entry.token
+        if entry.notice is not None:
+            # Prose: no block entry and no change to the text. Emitted here
+            # rather than in pass 1 so notices keep the operator's typed order.
+            notices.append(entry.notice)
             continue
-        if not resolvable or not (is_dir or is_file):
-            # THE GOVERNING RULE. Not a reference, so no block entry and no
-            # change to the prose — this is the branch `@me` takes.
-            notices.append(f"{token.typed} — no such path; sent as written")
-            continue
+        path = entry.path
+        # Decided now, so `reserved` below is what the OTHER pending tokens
+        # still owe. The reservation can only shrink as tokens are consumed,
+        # which is what lets `_Block.fits` treat it as a bound.
+        pending -= len(_BLOCK_JOIN) + len(entry.listed)
         # Dedupe by RESOLVED path, so `@./README.md` and `@README.md` are one
         # reference. Both tokens stay in the prose: the user wrote them, and
         # the model reads the sentence, not the block.
@@ -1129,11 +1392,11 @@ async def _expand(
         # 2 — `@n.md and @./n.md` produced a doubled block. Naming it costs one
         # short `<listed>` element and makes guarantee 3 true for this path.
         if path in seen:
-            if not block.list_only(_render_listed(path, token.typed, cwd)):
+            if not block.list_only(entry.listed):
                 return _too_many(text, notices)
             continue
         seen.add(path)
-        if not await _approved(path, inside, resolvable, request_approval, job_id):
+        if not await _approved(path, entry.inside, entry.resolvable, request_approval, job_id):
             notices.append(f"{token.typed} — not included; approval declined")
             continue
         # One display path per reference, resolved once and used by BOTH the
@@ -1142,7 +1405,7 @@ async def _expand(
         shown = _shown(path, cwd)
         try:
             # OFF THE EVENT LOOP, matching `execute_read`'s precedent
-            # (`builtin.py:3768`, `:3458`): every read here was inline, and
+            # (`builtin.py:3768`, `:3810`): every read here was inline, and
             # this sits on the submit path of every surface, so a slow disk
             # stalled the loop for the whole read. For ordinary files the
             # inline cost was minor (8 near-cap files measured 10.1 ms expand,
@@ -1155,28 +1418,30 @@ async def _expand(
             # is uncancellable — `asyncio.wait_for` never regains control
             # because the thread is stopped in the kernel, not at an await. In
             # a worker thread the same block leaves the loop responsive and
-            # `wait_for` recovers in 3.0 s (the thread leaks; a leaked thread
-            # is recoverable, a wedged event loop is not).
-            if is_dir:
-                body, attributes = await asyncio.to_thread(_directory_payload, path)
+            # `wait_for` recovers in 3.0 s. The thread still leaks — nothing
+            # can reclaim one stopped in the kernel — but it is a DAEMON
+            # thread (`_off_loop`, not `asyncio.to_thread`), so the leak does
+            # not also block interpreter shutdown the way the executor's
+            # non-daemon thread did. A leaked daemon thread is recoverable; a
+            # wedged event loop is not.
+            if entry.is_dir:
+                body, attributes = await _off_loop(_directory_payload, path)
             else:
-                body, attributes = await asyncio.to_thread(
+                body, attributes = await _off_loop(
                     _file_payload_of, path, INTERNAL_READ_LIMIT_CHARS, shown
                 )
         except OSError as exc:
             notices.append(f"{token.typed} — could not be read ({exc.strerror or exc})")
             continue
         element = _render(path, token.typed, body, attributes, cwd)
-        listed = _render_listed(path, token.typed, cwd)
         # The tail still owed if every remaining token overflows. Reserving it
         # BEFORE carrying this element is what makes `BLOCK_LIMIT_CHARS` a
         # bound rather than a suggestion.
-        reserved = outstanding * (len(_BLOCK_JOIN) + len(listed))
-        if not block.fits(element, reserved):
+        if not block.fits(element, pending):
             # Past the whole-block cap the reference is named, not carried.
             # Naming it beats dropping it silently: the model can `read` a path
             # it has been told about, and pass 2 can see it was consumed.
-            if not block.list_only(listed):
+            if not block.list_only(entry.listed):
                 return _too_many(text, notices)
             continue
         block.carry(element)

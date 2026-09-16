@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -565,7 +566,13 @@ async def test_the_block_cap_lists_overflow_by_path_only(tmp_path):
     # under a green test: `used` was tracked for carried elements only and the
     # tail was appended afterwards with no accounting.
     assert len(_block_of(result.sent)) <= BLOCK_LIMIT_CHARS
-    assert "reached its" in result.sent
+    # The notice states the block's ACTUAL size rather than asserting the cap
+    # was reached, and the number it reports is the truth: it must equal the
+    # emitted block's real length. The fixed-text version claimed "reached its
+    # 32768-character cap" on a 343-character block.
+    block = _block_of(result.sent)
+    assert "not every referenced path could be included" in block
+    assert f"holds {len(block)} of its {BLOCK_LIMIT_CHARS}-character budget" in block
     # Every file is accounted for: carried as an element, or named in the tail.
     for name in names:
         assert name in result.sent
@@ -579,6 +586,13 @@ async def test_the_block_cap_lists_overflow_by_path_only(tmp_path):
         (1000, 35, 2000),
         (300, 120, 2000),
         (400, 8, 50),
+        # THE SHAPE THAT ACTUALLY CATCHES A BREACH. The four above all resolve
+        # to "expand nothing", so they fit the cap trivially and cannot observe
+        # the per-element accounting at all: with the marker/preamble charge
+        # deleted the suite stayed GREEN while the emitted block reached 32,835
+        # characters. This shape fills the block with room still to carry, so
+        # the charge is inside its margin and its absence is a measured breach.
+        (200, 35, 500),
     ],
 )
 @pytest.mark.asyncio
@@ -608,6 +622,68 @@ async def test_the_block_cap_is_never_exceeded(tmp_path, count, namelen, filesiz
         # `_Block.list_only` for why the two requirements genuinely collide.
         assert result.sent is text
         assert any("too many references" in notice for notice in result.notices)
+
+
+@pytest.mark.parametrize(
+    ("count", "namelen", "filesize"),
+    [
+        (40, 35, 2000),
+        (100, 35, 1000),
+        # Deleting the NOTICE charge turns this one from a working expansion
+        # into total loss; the two above survive it. Without this row that
+        # accounting term has no guard at all.
+        (200, 35, 500),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_shape_that_FITS_still_carries_content_inside_the_cap(
+    tmp_path, count, namelen, filesize
+):
+    """The cap must BOUND the block without emptying it.
+
+    ``test_the_block_cap_is_never_exceeded`` cannot see this. It accepts
+    ``expanded=False`` as a valid outcome, so every accounting term it exists
+    to protect can be deleted and it stays green: dropping the tail reservation
+    turned both shapes here from working expansions into TOTAL LOSS (40x2000
+    and 100x1000 both went from carried content to nothing) and the cap
+    assertion still passed, because a block that expands nothing trivially fits
+    in 32,768 characters.
+
+    Worse, dropping the marker/preamble charge BREACHED the cap at 32,824 > 32,768
+    and stayed green too. A bound-only assertion is half the invariant; this is
+    the other half, and the two shapes are chosen because they sit where the
+    block genuinely fills but still has room to carry.
+    """
+    names = []
+    for index in range(count):
+        stem = ("f" * max(1, namelen - len(str(index)) - 4)) + str(index)
+        name = stem[: namelen - 4] + ".txt"
+        (tmp_path / name).write_text("z" * filesize, encoding="utf-8")
+        names.append(name)
+    text = " ".join(f"@{name}" for name in names)
+
+    result = await expand_references(text, str(tmp_path))
+
+    # A shape that CAN fit must actually expand. `expanded=False` here is the
+    # total-loss regression a bound-only assertion cannot distinguish from a
+    # correctly capped block.
+    assert result.expanded is True, "a shape that fits must not degrade to no expansion"
+    block = _block_of(result.sent)
+    assert len(block) <= BLOCK_LIMIT_CHARS
+    # Content actually reached the model: at least one FULL reference, not a
+    # block made entirely of `<listed>` names.
+    assert block.count("<reference ") >= 1, "the block carried no content at all"
+    # Every consumed token is still accounted for, carried or named.
+    assert block.count("<reference ") + block.count("<listed ") == count
+    # The block genuinely fills rather than trivially fitting, so this shape
+    # exercises the accounting instead of sitting far below it. The marker and
+    # preamble charge is inside this margin: dropping it produced 32,824.
+    assert (
+        len(block) > BLOCK_LIMIT_CHARS - 2000
+    ), "this shape no longer fills the block, so it cannot observe the accounting"
+    # The overflow notice is charged AND emitted, with a truthful size.
+    assert "not every referenced path could be included" in block
+    assert f"holds {len(block)} of its {BLOCK_LIMIT_CHARS}-character budget" in block
 
 
 @pytest.mark.asyncio
@@ -841,6 +917,100 @@ async def test_a_dotenv_file_always_asks_even_inside_the_workspace(tmp_path, nam
     assert len(gate.asks) == 1, f"{name} was read with no prompt"
     assert name in gate.asks[0][1]
     assert "TOKEN=placeholder-not-a-real-secret" not in result.sent
+
+
+@pytest.mark.parametrize(
+    ("actual", "typed"),
+    [
+        (".env", ".ENV"),
+        (".env", ".Env"),
+        ("workspace.env", "WORKSPACE.ENV"),
+        ("prod.env", "Prod.Env"),
+        (".env.local", ".ENV.LOCAL"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_deny_list_is_case_INSENSITIVE_like_the_filesystem(tmp_path, actual, typed):
+    """The gate must fold case, because the filesystem under it does.
+
+    On macOS and Windows the default filesystem is case-INSENSITIVE, so
+    ``@.ENV`` opens the very same inode as ``.env`` — verified on this host:
+    ``stat`` reports one inode for both spellings. The deny-list compared the
+    name verbatim against lowercase sets, so the uppercase spelling matched
+    nothing, never consulted the gate, and returned the secret's contents. The
+    same route past the suffix rule read ``WORKSPACE.ENV``, which is the exact
+    file this repo's ``AGENTS.md`` names as the live credential file.
+
+    The file is created under its REAL lowercase name and referenced by the
+    uppercase one, which is what makes this the actual attack rather than a
+    test of ``str.casefold``: on a case-sensitive filesystem the uppercase name
+    simply does not resolve and the token degrades to prose, so this asserts
+    per-outcome rather than assuming the open succeeds.
+    """
+    (tmp_path / actual).write_text("TOKEN=placeholder-not-a-real-secret\n", encoding="utf-8")
+    gate = SpyGate(reply=False)
+
+    result = await expand_references(f"read @{typed}", str(tmp_path), request_approval=gate)
+
+    # The secret never reaches the model on EITHER kind of filesystem: the gate
+    # was asked and declined, or the name did not resolve at all.
+    assert "TOKEN=placeholder-not-a-real-secret" not in result.sent
+    if (tmp_path / typed).exists():
+        # Case-insensitive: the uppercase spelling opens the real file, so the
+        # gate is the only thing standing between the token and the secret.
+        assert len(gate.asks) == 1, f"{typed} resolved to {actual} and was read with no prompt"
+    else:
+        assert result.expanded is False
+
+
+def test_an_abandoned_read_thread_cannot_block_interpreter_exit():
+    """A wedged read must not outrank shutdown, so its thread is a DAEMON.
+
+    Going off the loop made a wedged read recoverable — the loop stays
+    responsive and ``wait_for`` regains control. But ``asyncio.to_thread`` runs
+    on the default executor, whose threads are NON-daemon, and
+    ``threading._shutdown`` joins every one of them. So the abandoned thread
+    kept the process alive: measured before this change, ``wait_for`` returned
+    at 2.0 s and the process was STILL running 30 s later with all its work
+    done. "Recoverable" was true of the event loop and false of the process.
+
+    A FRESH SUBPROCESS, because the claim is about interpreter EXIT and pytest
+    is not going to exit. The child abandons a real FIFO read — no writer, so
+    the thread is genuinely stopped in the kernel and cannot be reclaimed — and
+    the test is simply whether the child terminates. Against ``to_thread`` this
+    times out; the ``timeout=`` below is the assertion, not a courtesy.
+    """
+    probe = textwrap.dedent("""
+        import asyncio, os, pathlib, tempfile
+        from local_operator.references import _off_loop
+
+        async def main():
+            fifo = os.path.join(tempfile.mkdtemp(), "wedge.fifo")
+            os.mkfifo(fifo)
+            # No writer ever opens it, so this read blocks in the kernel.
+            read = _off_loop(lambda: pathlib.Path(fifo).read_bytes())
+            try:
+                await asyncio.wait_for(read, timeout=1.0)
+            except asyncio.TimeoutError:
+                print("ABANDONED", flush=True)
+
+        asyncio.run(main())
+        print("EXITED", flush=True)
+        """)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+        # The whole assertion: against a non-daemon thread the child never
+        # reaches its own exit and this raises `TimeoutExpired`.
+        timeout=60,
+    )
+
+    assert "ABANDONED" in completed.stdout, completed.stderr
+    assert "EXITED" in completed.stdout, completed.stderr
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_the_deny_list_rules_are_all_set_membership():

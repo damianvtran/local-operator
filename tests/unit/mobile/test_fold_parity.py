@@ -986,10 +986,21 @@ def test_a_message_that_QUOTES_the_block_marker_keeps_all_its_words() -> None:
     mid = f"explain {REFERENCE_BLOCK_OPEN} and then tell me about the resolver"
     assert user_row_text(mid) == mid
 
-    # A CLOSER with no opener is half a quoted tag, not a block. Guessing a span
-    # for it would be the same defect in the other direction.
+    # A closer in the MIDDLE of a sentence: the text does not end with the
+    # marker, so `reference_block_stripped` returns at its `endswith` check and
+    # never reaches the no-opener branch. This is the quoted-tag case, not the
+    # half-a-block one.
     closer_only = f"what does {REFERENCE_BLOCK_CLOSE} mean?"
     assert user_row_text(closer_only) == closer_only
+
+    # A TRAILING closer with no opener is what actually reaches the
+    # `opened == -1` guard (`harness/rows.py`): the text ends with the marker,
+    # so the `endswith` check passes and the `rfind` for an opener returns -1.
+    # That is half a quoted tag, not a block — guessing a span for it would be
+    # the same defect in the other direction. The assertion above cannot
+    # observe this branch, which left the guard untested.
+    trailing_closer = f"paste went wrong, here is a stray closer {REFERENCE_BLOCK_CLOSE}"
+    assert user_row_text(trailing_closer) == trailing_closer
 
 
 def test_a_real_block_is_still_stripped_when_the_prose_also_quotes_the_marker() -> None:
