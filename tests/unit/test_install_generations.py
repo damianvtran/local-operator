@@ -708,6 +708,16 @@ class TestInstallIntoGeneration:
         assert not update_mod.pointer_path().is_symlink(), "the flip must be undone"
         assert not update_mod.daemon_image_path().exists(), "the shim must be undone"
         assert not list(update_mod.generations_dir().glob("*")), "the copy must be gone"
+        # Q1: THE SENTENCE SAYS WHAT HAPPENED. It listed all three steps as "gone";
+        # on a machine that had not adopted the layout yet that is true, and this is
+        # the arm that pins the words for it — the one this test builds.
+        text = str(refused.value)
+        assert "the pointer removed" in text, text
+        assert "the daemon shim removed" in text, text
+        assert "the copy" in text and "removed" in text, text
+        assert (
+            "so this machine is as it was" in text
+        ), "every step landed, so the claim is earned here"
 
     def test_a_failed_migration_puts_back_the_pointer_it_replaced(
         self, home: Path, tmp_path: Path
@@ -726,6 +736,14 @@ class TestInstallIntoGeneration:
         _skip_as_root()
         adopted = _install("0.52.0")
         assert update_mod.current_generation() == adopted.resolve()
+        # The shim is part of the ADOPTED state this test is about: the machine
+        # already carried one from the migration that adopted it, so the undo must
+        # KEEP it. Planted rather than assumed, because ``ensure_daemon_image``
+        # deliberately declines to name a machine-level artefact from a source
+        # checkout, which is what this test process is.
+        shim = update_mod.daemon_image_path()
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        shim.write_text("#!/bin/sh\n", encoding="utf-8")
         legacy = tmp_path / "legacy-venv"
         _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
         # One entry point the adopted launcher set does not have: that is how a
@@ -752,6 +770,67 @@ class TestInstallIntoGeneration:
         assert (
             update_mod.current_generation() == adopted.resolve()
         ), "a failed migration must leave the machine on the generation it was on"
+        # Q1: AND THE SENTENCE SAYS THAT, in the operator's words. It used to list
+        # all three steps as "gone", and on THIS machine — the already-adopted state
+        # R6-1 created — the pointer is PUT BACK and the existing shim is KEPT, so
+        # two of the three clauses described the opposite of what the undo did.
+        text = str(refused.value)
+        assert f"the pointer put back to {adopted.name}" in text, text
+        assert "the daemon shim that was already there kept" in text, text
+        assert "the copy" in text and "removed" in text, text
+        assert "are gone" not in text, text
+        assert "so this machine is as it was" in text, text
+
+    def test_a_prune_between_the_flip_and_the_undo_leaves_no_pointer_behind(
+        self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R7-1: the generation the undo wants to put BACK can be gone by then.
+
+        ``flip_pointer`` answers a target that no longer exists with
+        ``UpdateError``, not ``OSError``, and the undo caught only the latter — so
+        the refusal escaped a function documented never to raise, from its FIRST
+        step, and the two steps after it never ran. What was left is the half-layout
+        the migration exists to prevent: the pointer on the refused copy, and that
+        copy still on disk (measured by review round 7).
+
+        The race is this layout's own: nothing holds a generation a migration has
+        only captured as ``previous`` — the running process publishes no record —
+        while ``lop install prune`` is the operation the layout invites beside it.
+        ``write_stable_launchers`` is the seam because it sits between the flip and
+        the undo in the real sequence.
+        """
+        _skip_as_root()
+        adopted = _install("0.52.0")
+        legacy = tmp_path / "legacy-venv"
+        _build_tree(legacy, tmp_path / "legacy-bin", "0.51.9")
+
+        def _race(generation: Path) -> tuple[list[Path], list[Path]]:
+            # A concurrent prune takes the captured generation, and the launcher
+            # write then refuses for its own unrelated reason (an entry point this
+            # adopted machine does not have).
+            assert update_mod._remove_tree(adopted) is True
+            return [], [Path.home() / ".local" / "bin" / "lop-doctor"]
+
+        monkeypatch.setattr(update_mod, "write_stable_launchers", _race)
+        with pytest.raises(UpdateError) as refused:
+            update_mod.clone_into_generation(legacy)
+        # NO POINTER LEFT FLIPPED, asserted first because it is the end state review
+        # round 7 measured: the pointer named a tree the same undo then deletes, and a
+        # pointer left there is the DANGLING ``current`` R6-1 exists to prevent. An
+        # un-restorable pointer is REMOVED rather than left, which is the whole of
+        # the fix's end state.
+        assert not update_mod.pointer_path().is_symlink(), "the pointer was left flipped"
+        assert update_mod.current_generation() is None
+        assert not list(update_mod.generations_dir().glob("*")), "the copy must be gone"
+        # The refusal the CALLER is reporting, not the one the cleanup tripped over:
+        # an ``UpdateError`` escaping from inside the undo replaced the real error and
+        # stopped the cleanup at its first step.
+        assert "could not write" in str(refused.value), refused.value
+        assert "refusing to point current at a missing generation" not in str(refused.value)
+        # And the sentence must not claim the restore it could not perform: the
+        # closing clause is earned only when every step landed (Q1).
+        assert "the pointer removed" in str(refused.value), refused.value
+        assert "as it was" not in str(refused.value), refused.value
 
     def test_a_symlinked_install_path_still_re_points_the_copy(
         self, home: Path, tmp_path: Path
@@ -1032,6 +1111,52 @@ class TestPruning:
         assert not stale.exists(), "an interrupted flip left litter in the stable root"
         assert fresh.is_symlink(), "a concurrent flip's staging link must survive"
 
+    def test_a_failed_removal_is_not_summarised_as_nothing_to_remove(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Q2: the header claimed the benign arm while the rows said otherwise.
+
+        An empty machine and a machine where every removal attempt FAILED both
+        arrive at ``plan.removed == ()``, and the summary said ``nothing to
+        remove`` for both — directly above rows reading ``could not be removed; it
+        is still there``. On the one command whose entire job is to report a
+        retention decision, that is the contradiction an operator acts on wrongly:
+        "nothing to remove" reads as "this machine is already trimmed" while the
+        disk is untouched. With no removals every candidate WAS attempted, so the
+        two arms are exact rather than an estimate.
+        """
+        _skip_as_root()
+        first = _install("0.52.0")
+        second = _install("0.52.1")
+        _install("0.52.2")  # the pointer's target: never a removal candidate
+        stubborn = {_real(first), _real(second)}
+        real_remove = update_mod._remove_tree
+
+        def _refuse(path: Path) -> bool:
+            # The shape a real failure has: a path the process may not delete, which
+            # the write-bit retry inside ``_remove_tree`` cannot rescue either.
+            return False if _real(path) in stubborn else real_remove(path)
+
+        monkeypatch.setattr(update_mod, "_remove_tree", _refuse)
+        plan = update_mod.prune_generations(keep=0)
+        assert plan.removed == ()
+        text = "\n".join(update_mod.prune_lines(plan))
+        assert "could not be removed; it is still there" in text, text
+        assert "nothing to remove" not in text, text
+        assert "none could be removed" in text, text
+        assert first.is_dir() and second.is_dir()
+
+    def test_nothing_to_remove_still_says_so_when_no_removal_was_attempted(
+        self, home: Path
+    ) -> None:
+        """The benign arm keeps its words: only a FAILED attempt changes the header."""
+        _install("0.52.0")
+        plan = update_mod.prune_generations()
+        text = "\n".join(update_mod.prune_lines(plan))
+        assert plan.removed == ()
+        assert "nothing to remove" in text, text
+        assert "none could be removed" not in text, text
+
     def test_pruning_a_machine_with_no_layout_is_a_no_op(self, home: Path) -> None:
         assert update_mod.prune_generations().removed == ()
 
@@ -1197,6 +1322,139 @@ class TestMigration:
         assert update_mod._is_generation_install() is True
         assert update_mod.install_migrate_command() == 0
         assert len(list(update_mod.generations_dir().iterdir())) == 1
+
+
+# -- status ----------------------------------------------------------------------
+
+
+class TestInstallStatus:
+    """The pointer states, the load label and the held line (R7-5).
+
+    Three review rounds churned this text with no test behind it — D7 (the empty
+    state explaining itself), D16 (``a new lop would load:`` shortened to ``next lop
+    would load:`` so the value fits the column), D17 (a held generation named by its
+    id rather than by the absolute path its record carries) — and text defended only
+    by the rounds that produced it is text the next edit can silently rewrite.
+
+    Expected lines are built with ``_field`` rather than spelled out, because the
+    block's column is that helper's job: a test that re-counts the padding fails on
+    a change no reader would see, and passes on the change this class exists for.
+    """
+
+    def test_an_adopted_machine_names_the_generation_it_would_load(
+        self, home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        generation = _install("0.52.0")
+        assert update_mod.install_status_command() == 0
+        text = capsys.readouterr().out
+        current = update_mod.current_generation()
+        assert current is not None
+        assert current.name == generation.name
+        assert (
+            update_mod._field("pointer:", f"{update_mod.pointer_path()} -> {current}") in text
+        ), text
+        assert f"  {current.name}  <- current" in text, text
+
+    def test_a_pointer_that_resolves_to_nothing_is_unresolved_not_absent(
+        self, home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """R6-2: a dangling pointer and a machine with no layout are two states.
+
+        They printed identically, including while the very next line listed the
+        generations that DO exist.
+        """
+        generation = _install("0.52.0")
+        shutil.rmtree(generation)
+        assert update_mod.install_status_command() == 0
+        text = capsys.readouterr().out
+        assert (
+            update_mod._field("pointer:", f"{update_mod.pointer_path()} -> (unresolved)") in text
+        ), text
+        assert "no generation layout on this machine" not in text, text
+
+    def test_a_missing_pointer_with_generations_standing_says_absent(
+        self, home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The layout question is answered by the LAYOUT, not by the pointer (R6-2)."""
+        generation = _install("0.52.0")
+        update_mod.pointer_path().unlink()
+        assert update_mod.install_status_command() == 0
+        text = capsys.readouterr().out
+        assert (
+            update_mod._field("pointer:", f"{update_mod.pointer_path()} -> (absent)") in text
+        ), text
+        assert "<- current" not in text, "no generation can be current with no pointer"
+        assert f"  {generation.name}" in text, "the generations standing are still listed"
+
+    def test_the_load_label_is_the_short_one_and_names_the_stamp(
+        self, home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """D16: the shortened label, and the single space that shortening bought."""
+        generation = _install("0.52.0")
+        stamp = update_mod.disk_build(generation / "tools" / "local-operator")
+        assert stamp is not None, "a generation installed through the layout carries a stamp"
+        assert update_mod.install_status_command() == 0
+        text = capsys.readouterr().out
+        assert f"next lop would load: {stamp.label()}" in text, text
+        assert "a new lop would load:" not in text, text
+
+    def test_a_held_generation_is_named_by_its_id(
+        self, home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """D17: a record names the VENV, so the record's own path would be the one
+        line in this block not written in the vocabulary of the lines above it."""
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import SessionRecord
+
+        generation = _install("0.52.0")
+        install_root = generation / "tools" / "local-operator"
+        record = SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id="status",
+            conversation_name="n",
+            cwd="/",
+            model_label="m",
+            control_port=0,
+            control_key="k",
+            install_root=str(install_root),
+        )
+        root = Path.home() / ".local-operator"
+        registry.publish(record, root=root)
+        try:
+            assert update_mod.install_status_command() == 0
+        finally:
+            registry.unpublish(record.pid, root)
+        text = capsys.readouterr().out
+        assert f"  held by a live session: {generation.name}" in text, text
+        assert str(install_root) not in text, text
+
+    def test_an_unknown_load_line_does_not_contradict_the_current_row(
+        self, home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """D18: a post-flip-damaged generation is reachable, and this line used to
+        lie about it.
+
+        With the pointer resolving to a generation that holds no install in it, the
+        load line printed "(unknown — nothing resolves behind the pointer)" directly
+        above the row marking that same generation ``<- current``. The designer
+        recorded the reachability honestly and accepted the rejection because the
+        clean writers cannot produce it — but the state is one ``rm -r`` away from
+        anything that can, and the fix is the sentence, so the sentence is fixed.
+        """
+        damaged = update_mod.generations_dir() / "20260101T000000Z-damaged"
+        (damaged / "tools").mkdir(parents=True)
+        update_mod.flip_pointer(damaged)
+        assert update_mod.install_status_command() == 0
+        text = capsys.readouterr().out
+        assert f"  {damaged.name}  <- current" in text, text
+        assert (
+            update_mod._field(
+                "next lop would load:", f"(unknown — {damaged.name} holds no install)"
+            )
+            in text
+        ), text
+        assert "nothing resolves behind the pointer" not in text, text
 
 
 # -- snapshots -----------------------------------------------------------------
