@@ -96,6 +96,34 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "copy", "Copy an agent message or code block", desktop_destination="transcript.copy"
     ),
+    # The companion surface to `/copy` — same shape, a different verb — and
+    # placed beside it because both answer "something in the conversation that I
+    # want to take out of it". NOT an echo, `/approvals`' rule: the receipt is
+    # the browser opening or a warning naming why it did not, and nothing here
+    # reaches the model.
+    #
+    # It exists because the terminal cannot offer the gesture. lop holds mouse
+    # reporting, and a terminal reporting mouse events to an application does
+    # not run its own click-to-open — so the OSC-8 hyperlink the transcript
+    # paints is correct and unclickable under Ghostty, and a bare URL is in the
+    # same position. Shift+click is the terminal's own bypass and never reaches
+    # the app, so the app needs a route of its own, and the typed command is the
+    # one that works on every terminal.
+    #
+    # NO KEYBOARD CHORD, the rule `test_copy_command.py` records: one shipped
+    # for `/copy` (ctrl+o) and was withdrawn with the picker, because a global
+    # chord that opens a modal is a different gesture from one that acts in
+    # place and the keymap surface is worth spending once. A convenient chord
+    # here would also have to take a `ctrl+<letter>`, and every one of those is
+    # held: the app has ctrl+b/f/g/l/n/s/t, the composer holds
+    # ctrl+a/e/k/o/u/v/w/x/y/z, and Textual holds ctrl+p/ctrl+q.
+    #
+    # The description names WHERE the links come from rather than what happens
+    # to them, because "open" alone reads as "open a file" in a command list
+    # that already has `/move` and `/resume`. 48 cells, inside the ~55 the
+    # description column wraps past (see `/model` and `/theme`, where a wrapping
+    # row renders a phantom command name in `/help`).
+    SlashCommand("links", "Open a link from this conversation in a browser"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand(
         "new",
