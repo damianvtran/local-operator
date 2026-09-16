@@ -37894,7 +37894,8 @@ class OperatorApp(App[None]):
         if verb == "logout":
             # Only what can actually be removed — the /logout rule. Rows are
             # keyed by server NAME but the store is keyed by URL, so the
-            # config (via the manager) supplies the mapping.
+            # config — the same layer the names above came from — supplies the
+            # mapping.
             stored = mcp_logged_out_servers()
             if stored is None:
                 # An unreadable store is NOT the same answer as "no
@@ -37902,7 +37903,50 @@ class OperatorApp(App[None]):
                 # been rather than rendering a bare empty one.
                 editor.picker.set_notice("credential store unreadable — cannot list logouts")
                 return []
-            names = [name for name in names if self._mcp_server_url(name, manager) in stored]
+            # ONE load for every candidate row, not one per name (review
+            # NIT-1): this runs on every keystroke that refills the list, and
+            # the neighbour above loads once for all of its rows. ``None`` is a
+            # THIRD reason an empty list can have, and must not reuse either of
+            # the other two's sentences.
+            urls = self._mcp_configured_urls()
+            if urls is None:
+                editor.picker.set_notice("MCP config unreadable — cannot list logouts")
+                return []
+            # ``names`` here is the OAuth-capable set, so an empty list after the
+            # filter has TWO reasons and they need different sentences (review
+            # round 2, R2-MINOR-2): OAuth servers exist and none holds a stored
+            # grant, versus nothing on this machine can hold one at all, where
+            # the first sentence's suggested command could not apply.
+            candidates = names
+            names = [name for name in candidates if urls.get(name) in stored]
+            if not names:
+                if candidates:
+                    editor.picker.set_notice(
+                        "no stored credential — /mcp login <name> authorizes a server"
+                    )
+                else:
+                    # The step must WORK, or the user complies and lands back
+                    # here: the in-TUI `/mcp add <name> <url>` writes no `auth`
+                    # block by design and the slash grammar has no `--oauth`
+                    # token, so a server it creates is still not OAuth-capable
+                    # and this same empty list returns. The CLI's `--oauth` flag
+                    # is the only path that writes the block — the sibling hint
+                    # in `mcp/verbs.py:240-246` says so for the same reason — so
+                    # that is what this names, and it stays short because the
+                    # flag has to survive the notice's 60-column truncation
+                    # (design round 3, D7).
+                    editor.picker.set_notice(
+                        "no OAuth server configured — lop mcp add --oauth adds one"
+                    )
+                # An empty list must say WHY, in the list's own place — the rule
+                # `/logout`'s picker follows (its `reason`), and the store branch
+                # above already follows. Without it the verb-context line below
+                # ("choose a credential to forget") invites a choice from a list
+                # holding nothing and never says nothing is stored, which reads
+                # as a broken picker rather than an answer (design review D1).
+                # Both sentences name the next step, because "nothing here" is
+                # only half an answer.
+                return []
         # The verb→server swap is otherwise only inferable from the row
         # shapes; a one-line notice names what this list is FOR while the
         # server slot is open (it clears on the next slot change — the
@@ -37999,12 +38043,36 @@ class OperatorApp(App[None]):
             for name, source in sources.items()
         ]
 
-    def _mcp_server_url(self, name: str, manager: Any) -> str | None:
-        """The configured URL for one server, or ``None`` when unknown."""
-        if manager is None:
+    def _mcp_configured_urls(self) -> dict[str, str] | None:
+        """Every configured server's URL by name, or ``None`` when unreadable.
+
+        Read from the CONFIG layer, not from the session's manager. This maps
+        the picker's rows (keyed by server NAME) onto the credential store
+        (keyed by URL), and on a FOLLOWER the session carries the read-only
+        ``SnapshotMcpManager`` facade, which has no ``get_server_config``: the
+        unconditional call raised ``AttributeError`` on every refresh of the
+        ``/mcp logout `` argument list and took the app down.
+
+        The config layer is that source, and it is also the source the names in
+        the same list already come from (:func:`oauth_server_names`), so mapping
+        them through anything else was a latent disagreement between two halves
+        of one list. ``_mcp_remove_choices`` next door reads it for the same
+        reason: the config is the thing the command acts on, and it answers even
+        when there is no manager at all.
+
+        ONE load answers for a whole list. It is called once per fill rather
+        than once per candidate row, which is where it started (review NIT-1),
+        and ``None`` rather than an empty mapping because a layer that could not
+        be read is not the same news as a layer holding no URLs — the caller
+        says which, instead of rendering a bare empty list for both.
+        """
+        from local_operator.mcp.config import load_all_mcp_configs
+
+        try:
+            configs, _sources = load_all_mcp_configs(os.getcwd())
+        except Exception:  # noqa: BLE001 — an unreadable config offers no rows
             return None
-        cfg = manager.get_server_config(name)
-        return getattr(cfg, "url", None) if cfg is not None else None
+        return {name: url for name, cfg in configs.items() if (url := getattr(cfg, "url", None))}
 
     async def _mcp_login_worker(
         self, manager: Any, name: str, *, disconnect_first: bool = False

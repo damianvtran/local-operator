@@ -88,6 +88,53 @@ _ABORT_SETTLE_BUDGET_S = 1.0
 _ABORT_SETTLE_POLL_S = 0.02
 
 
+def _mcp_boot_discovery_failure(session: Any) -> str | None:
+    """The boot record's DISCOVERY failure as one honest line, or ``None``.
+
+    Only the synthetic :data:`~local_operator.session.mcp_status.MCP_DISCOVERY_KEY`
+    entry is read, because this is asked when the roster came back EMPTY, and a
+    PER-SERVER entry cannot describe that state honestly. A config change
+    produces the pair that way: ``/mcp remove`` reloads the manager into an empty
+    roster while nothing rewrites ``session.mcp_startup`` — only the boot wiring
+    and its settle sink write that, and the sink fires only when a round
+    deferred something — so reporting its stale entry would name a server the
+    session no longer configures (review round 2, R2-MINOR-1).
+
+    A fresh boot CAN produce the pair too, and the reference is a pathological
+    config rather than a stale one (QA round 2; reproduced here):
+    ``json.loads`` raises ``RecursionError`` on a deeply nested document, and
+    ``mcp/config.py::_read_json`` catches only ``OSError``/``ValueError``/
+    ``UnicodeDecodeError`` — so the raise escapes the reader, reaches the
+    discovery wrapper's own ``except Exception`` (``mcp/__init__.py:145-149``),
+    and comes back as the manager with an EMPTY roster plus the synthetic entry
+    ``session_factory`` keys as ``discovery``, on a boot where ``_connect_round``
+    never assigned ``_configs``. Both routes want the same answer, which is why
+    this keys on the roster rather than on how the emptiness arose.
+
+    The predicate this matches is the startup TOAST's, not the band's:
+    ``discovery_failed=not outcome.configured and outcome.failed``
+    (``tui/widgets/toast.py:417``). ``tui.app._mcp_status`` reads the boot record
+    only when there is no manager, so in this shape the band paints no segment
+    while this names the failure — a gap in the band itself, unchanged code and
+    out of scope here (review round 2, R2-NIT-1).
+    """
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    outcome = getattr(session, "mcp_startup", None)
+    failures = getattr(outcome, "failures", None) or {}
+    if MCP_DISCOVERY_KEY not in failures:
+        return None
+    # MEMBERSHIP decides, then the value is read: a present-but-EMPTY message is
+    # still a failure on the record — ``str(exc)`` is ``""`` for an exception
+    # raised with no args, and ``session_factory`` stores it with no falsy
+    # filter — so testing the VALUE fell through to the empty-state sentence and
+    # had ``/mcp list`` deny a failure it was holding (review round 3,
+    # MINOR-1). The fallback keeps that arm non-empty and says what is missing
+    # rather than inventing a cause.
+    detail = failures[MCP_DISCOVERY_KEY] or "no error detail was recorded"
+    return f"MCP discovery failed: {detail}"
+
+
 def _log_detached_admission(task: "asyncio.Task[str]") -> None:
     """Never let a dispatched admission become an unretrieved exception.
 
@@ -4312,11 +4359,53 @@ class ServingSessionHandle(SessionHandle):
         # reaches here — the viewer pulls it back to local because its own
         # facade holds the identical rows — so this answers the explicit
         # `list` and the empty case from the session's own manager.
+        #
+        # The emptiness test asks the MANAGER for its configured server NAMES
+        # (``get_all_server_names``), which is the question the status band's
+        # ``tui.app._mcp_status`` asks it. It used to read ``manager.servers``,
+        # an attribute no manager has ever had, so the test answered falsy
+        # forever and an explicit ``/mcp list`` said "no MCP servers configured."
+        # on EVERY session whose slash command routes here — every fresh viewer,
+        # and the phone projection, which shares this handler — while the very
+        # same session's transcript listed those servers failing to start by
+        # name.
+        names: list[str] = []
         manager = getattr(session, "mcp_manager", None)
-        servers = getattr(manager, "servers", None) if manager is not None else None
-        if not servers:
-            return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
-        return SlashResult(kind="block", data={"type": "mcp"})
+        if manager is not None:
+            try:
+                names = list(manager.get_all_server_names())
+            except Exception:  # noqa: BLE001 — a listing must never raise
+                logger.debug("MCP listing: the manager could not name its servers", exc_info=True)
+                # A roster we could not READ is not an empty roster either.
+                # Saying "none configured" for it is the same lie in a quieter
+                # place, so the guard reports itself rather than borrowing the
+                # empty state's sentence.
+                return SlashResult(
+                    kind="notice",
+                    text="could not read this session's MCP server list.",
+                    style="warning",
+                )
+        if names:
+            return SlashResult(kind="block", data={"type": "mcp"})
+        # AN EMPTY ROSTER IS THE QUESTION — not an absent manager (QA round 1,
+        # Q2). ``discover_and_load_mcp_tools`` does NOT raise for a discovery
+        # failure: it catches, logs, and returns the manager alongside a
+        # synthetic error entry, which ``session_factory`` keys as ``discovery``
+        # (``mcp/__init__.py:145-149``). So the state a user actually reaches
+        # has a MANAGER whose roster came back empty and a boot record that says
+        # why. Keying this on ``manager is None`` missed exactly that state and
+        # answered "no MCP servers configured." there too — the sentence this
+        # listing exists to stop saying. The boot record is the only thing that
+        # can tell an empty roster from an unread one, and it is what
+        # ``tui.app._mcp_status`` reads for the same reason.
+        failure = _mcp_boot_discovery_failure(session)
+        if failure is not None:
+            return SlashResult(kind="notice", text=failure, style="warning")
+        # Genuinely empty, and honestly said: either no boot record at all (the
+        # wiring has not run yet) or an outcome the wiring records as EMPTY on
+        # purpose because the MCP package would not import — a host that never
+        # used MCP must not be told MCP is broken.
+        return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
 
     def _grant_notice(self, text: str, kind: str) -> None:
         """Report a settled MCP grant to every front end watching this session.
