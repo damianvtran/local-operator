@@ -80,6 +80,62 @@ def test_scan_reaps_dead_pid_records(tmp_path: Path) -> None:
     assert registry.scan(root=tmp_path) == []
 
 
+def test_scan_reader_mode_moves_nothing(tmp_path: Path) -> None:
+    """``reap=False``: the same verdicts, with the run directory untouched.
+
+    The desktop feed's status probe calls this once a SECOND, and it is a reader:
+    a sweep on that poller would move another process's evidence aside behind its
+    back (the reason :data:`registry.REAPED_DIRNAME` exists at all), and would
+    delete a record it could not parse. The verdicts do not depend on the sweep —
+    reaping is a side effect of the classification, never an input to it — so a
+    reader that does not reap sees exactly what a reaper saw, and this asserts
+    both halves: the same answer, and nothing removed.
+    """
+    dead = make_record(pid=2**22 - 3)  # a pid that does not exist
+    path = registry.publish(dead, root=tmp_path)
+    directory = registry.run_dir(tmp_path)
+    torn = directory / "999998.json"
+    torn.write_text("{not json", encoding="utf-8")
+
+    results = registry.scan(root=tmp_path, reap=False)
+    assert [(r.pid, s) for r, s in results] == [(dead.pid, "stale")]
+    assert path.exists(), "reader mode moved a proven-dead record aside"
+    assert torn.exists(), "reader mode deleted a file it could not parse"
+    assert not (directory / registry.REAPED_DIRNAME).exists()
+
+
+def test_scan_passes_the_zombie_policy_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``check_zombie`` reaches :func:`classify`, and ``False`` spends no fork.
+
+    A structural spy rather than a timing bound, for the reason the timing section
+    gives: the property is WHERE the code ran (a ``ps`` fork on macOS, measured at
+    3.9 ms against ~1 µs for signal-0), not how long it took. The desktop feed
+    reads with ``False`` on the record doorbell, where a record that just moved
+    was demonstrably written by a live owner, and with the derived policy on its
+    1 s probe, where its verdicts must match ``decorate_rows``'.
+    """
+    import json
+
+    probes: list[int] = []
+    monkeypatch.setattr(registry, "is_zombie", lambda pid: probes.append(pid) or False)
+    record = make_record()  # this process: alive, so the zombie branch is reachable
+    record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
+    directory = registry.run_dir(tmp_path)
+    (directory / f"{record.pid}.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
+
+    assert [state for _record, state in registry.scan(root=tmp_path, check_zombie=False)] == [
+        "wedged"
+    ]
+    assert probes == [], "check_zombie=False still probed for a zombie"
+    # The derived policy (the default) is the one that spends the probe, because
+    # this record's heartbeat has gone quiet — which is what makes the assertion
+    # above a decision rather than a spy that never fires.
+    assert [state for _record, state in registry.scan(root=tmp_path)] == ["wedged"]
+    assert probes == [record.pid]
+
+
 def test_scan_tolerates_torn_records(tmp_path: Path) -> None:
     directory = registry.run_dir(tmp_path)
     (directory / "999999.json").write_text("{not json")
