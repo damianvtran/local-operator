@@ -2657,7 +2657,7 @@ async def test_a_filter_that_fits_one_page_reports_the_match_count() -> None:
     """
     rows = [_row(f"{index:012d}", f"session {index}") for index in range(63)]
     screen = SessionPickerScreen(rows, NOW)
-    screen._layout = lambda: plan_layout(120, 30)  # type: ignore[method-assign]
+    screen._layout = lambda: plan_layout(120, 45)  # type: ignore[method-assign]
 
     # Unfiltered, 63 rows scroll at this height, so the POSITION counter is
     # what shows — and its denominator is the store total, correctly.
@@ -2665,7 +2665,7 @@ async def test_a_filter_that_fits_one_page_reports_the_match_count() -> None:
 
     screen.set_query("session 1")
     matches = len(screen.visible_rows)
-    assert 0 < matches <= plan_layout(120, 30).list_rows, "fixture must fit one page"
+    assert 0 < matches <= plan_layout(120, 45).list_rows, "fixture must fit one page"
 
     footer = screen.render_footer_for_test()
     # ...and the noun is MATCHES while a filter is active (design round 5, D4):
