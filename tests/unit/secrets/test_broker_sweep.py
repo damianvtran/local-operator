@@ -684,7 +684,21 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
             "the module must stay in argv: it is how the issue's reopen condition "
             f"('argv is not -m local_operator.secrets.brokerd') is checked: {listing!r}"
         )
-        if procname.branded_link_path() is None:
+        # The rung is picked with the probe the SPAWN makes, and deliberately
+        # not with a neighbouring helper that answers a different question.
+        # ``branded_link_path()`` only names WHERE an image would live and never
+        # attempts the plant, so it disagrees with the spawn in reachable
+        # states — a static build or an interpreter whose dylib name cannot be
+        # derived (``spawn_identity`` refuses to plant a landmine there), an
+        # unwritable venv prefix, a cross-device prefix. Branching on it turned
+        # this test RED on a correct rung-2 tree, accusing the product of an
+        # unidentifiable child it had not spawned. ``spawn_identity(...)[1] is
+        # None`` is the call site's own decision, since ``_broker_identity``
+        # returns exactly this pair; the other axis is not read here, so the
+        # rendered field's value is irrelevant. Not ``_broker_identity`` itself:
+        # that is the code under test, and a probe that follows it would follow
+        # a regression through instead of catching it.
+        if procname.spawn_identity(procname.LABEL_BROKER, digest="probe")[1] is None:
             # Rung 2. The ABSENCE is the assertion, not an omission: a labelled
             # argv[0] on a child with no image is the shape that empties its
             # sys.executable, so it is exactly what must not be here.

@@ -37,8 +37,19 @@ nowhere and spawning nothing (#1162's M-c). That is true of today's broker and i
 not a contract to leave on a detached daemon whose failures are silent, so the
 broker now resolves both axes through ``spawn_identity`` with every other site.
 
-Each test drives the REAL spawn function with the image probe forced to fail, and
-reads what the spawn was actually called with.
+These tests drive the REAL spawn functions and read what the spawn was
+actually called with. They take three shapes, because the ladder has three
+distinct paths and only the first two are about the image probe:
+
+- the **rung-2** tests force ``ensure_branded_interpreter`` to return ``None``
+  (no image can be planted) and pin the unlabelled command line;
+- the **rung-1** tests force it to return a real interpreter file, so both axes
+  are labelled AND the child is genuinely executed through that pair;
+- ``secrets/client.py``'s remaining tests stop asking the probe anything at all:
+  they call the site's own ``_broker_identity``, or make ``spawn_identity``
+  RAISE. The raising one is the ``decoration never fails a spawn`` contract,
+  which is a different code path from ``no image to plant`` — an exception
+  anywhere in the ladder has to land on the same command line rung 2 produces.
 """
 
 from __future__ import annotations

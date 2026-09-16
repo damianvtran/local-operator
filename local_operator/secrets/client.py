@@ -289,11 +289,23 @@ def _spawn_broker(base: Path | None) -> None:
     branded children could be told apart there either.
 
     :func:`_broker_identity` now resolves both axes in one call, the same way
-    every other spawn site in this project does, so the row reads ``Local
-    Operator`` on the IMAGE axis (``ps -o ucomm``, Activity Monitor) with
-    ``Local Operator [secret broker] store=…`` in ``ps -o args`` — and the store
-    digest is what separates one broker from another, which ``comm``'s 15-byte
-    truncation cannot.
+    every other spawn site in this project does — and WHAT THE ROW READS
+    DEPENDS ON THE PLATFORM, because only one of the two rungs has an image to
+    ride with:
+
+    - **macOS, where the branded link can be planted**, both axes are the
+      product's: ``Local Operator`` on the IMAGE axis (``ps -o ucomm``, Activity
+      Monitor) and ``Local Operator [secret broker] store=…`` in ``ps -o
+      args``. The store digest is what separates one broker from another, which
+      ``comm``'s 15-byte truncation cannot.
+    - **off macOS there is no image, so there is no label either** (the ladder
+      in :mod:`local_operator.procname`): the broker gets today's unlabelled
+      command line, ``<interpreter> -m local_operator.secrets.brokerd`` with
+      ``executable=None``. It is still identifiable there, on the axis that
+      exists — ``comm`` carries the brand, set in the child by
+      :func:`procname.brand_this_process` — and ``ps -o args`` still names the
+      module. What it loses is the digest, and that cost is the measured one in
+      :func:`_broker_identity`.
     """
     environment = os.environ.copy()
     if base is not None:
