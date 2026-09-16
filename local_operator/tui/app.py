@@ -201,6 +201,7 @@ from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
 )
+from local_operator.tui.narration import DEFAULT_NARRATION, is_intermediate_narration
 from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -21318,6 +21319,15 @@ class OperatorApp(App[None]):
         view.mount(welcome, before=0)
         return welcome
 
+    def _narration_hidden(self) -> bool:
+        """True when ``display.narration`` is OFF — narration is removed at finalize.
+
+        Read at the moment a message finalizes rather than cached, so a
+        mid-session flip governs every message from that point on. It applies
+        FORWARD ONLY by construction: blocks already mounted are never revisited.
+        """
+        return not settings_get("display.narration", DEFAULT_NARRATION)
+
     def _sync_row_density_class(self) -> None:
         """Put ``Screen.comfortable-rows`` on iff the setting says so.
 
@@ -39648,6 +39658,30 @@ class OperatorApp(App[None]):
         block.navigation_anchor_id = message.message_id
         block.finalize_text()
         self._streaming_block = None
+        # `display.narration` OFF: this call finalized into TOOL CALLS, so the
+        # prose it streamed was mid-turn narration, not the answer. Remove it
+        # so the settled transcript reads `user -> tools -> answer`.
+        #
+        # Removal happens HERE and not before the mount because the streaming
+        # window cannot know the outcome: while deltas arrive nothing knows
+        # whether this call ends in tools or in the answer, so narration streams
+        # live and is dropped one event later.
+        #
+        # AFTER `finalize_text()` deliberately — a block left unfinalized could
+        # be repainted by a late delta after it has left the tree, and a
+        # finalized-then-removed block is the same shape `remove_block`'s
+        # existing caller (lifting the boot hint) already produces. Removing a
+        # block WHOLE does not violate the FINALIZED-BLOCK protocol, which
+        # governs mutation of a block's committed rows, not its existence.
+        #
+        # The WorkingBlock needs no guarding: it is SPACING_TRANSIENT, and
+        # `remove_block` already skips transient blocks when it re-decides the
+        # gap on whatever fell into the removed block's place.
+        if self._narration_hidden() and is_intermediate_narration(
+            stop_reason=message.stop_reason,
+            has_tool_calls=message.has_tool_calls,
+        ):
+            self._transcript_view().remove_block(block)
         # The prose is settled, so "responding…" is over: whatever the turn does
         # next — another model call, a tool batch — the line must stop claiming
         # text is still arriving.
