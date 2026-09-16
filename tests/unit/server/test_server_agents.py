@@ -1713,7 +1713,9 @@ async def test_download_agent_from_radient_success(test_app_client, dummy_regist
     with (
         patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
-        patch.object(dummy_registry, "download_agent_from_radient", return_value=mock_agent),
+        patch.object(
+            dummy_registry, "download_agent_from_radient", return_value=(mock_agent, None)
+        ),
     ):
         mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
         mock_radient_client.return_value = MagicMock()
@@ -1727,6 +1729,9 @@ async def test_download_agent_from_radient_success(test_app_client, dummy_regist
     result = data.get("result")
     assert result["id"] == "imported-agent-123"
     assert result["name"] == "Imported Agent"
+    # Always present, so a client can tell "nothing was renamed" (null) from
+    # "this backend does not report renames at all" (a missing key).
+    assert result["renamed_from"] is None
 
 
 @pytest.mark.asyncio

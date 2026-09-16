@@ -1665,10 +1665,13 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     with registry.exported_agent_archive(agent.id) as (zip_path, filename):
         assert zip_path.exists()
         # Import the agent (should create a new agent with a new id)
-        imported_agent = registry.import_agent(zip_path)
+        imported_agent, renamed_from = registry.import_agent(zip_path)
     assert imported_agent.id != agent.id
     assert registry.get_agent(agent.id) == agent
-    assert imported_agent.name == agent.name
+    # The registry already holds this agent's name, so the roundtrip lands under
+    # the contract's suffix rather than beside it (contract §3.6).
+    assert imported_agent.name == f"{agent.name} (2)"
+    assert renamed_from == agent.name
     assert imported_agent.security_prompt == agent.security_prompt
     assert imported_agent.model == ""
     assert imported_agent.hosting == ""
@@ -1947,7 +1950,7 @@ def test_import_strips_history_from_an_older_archive(temp_agents_dir: Path):
         zip_file.writestr("conversation.jsonl", '{"content": "private"}\n')
         zip_file.writestr("learnings.jsonl", '{"learning": "secret"}\n')
         zip_file.writestr("context.pkl", b"not-a-real-pickle")
-    imported = registry.import_agent(zip_path)
+    imported, _ = registry.import_agent(zip_path)
     imported_dir = registry.agents_dir / imported.id
     assert (imported_dir / "system_prompt.md").read_text() == "You are a specialist."
     assert (
@@ -2014,7 +2017,7 @@ def test_import_agent_skips_context_pickle(temp_agents_dir: Path):
         zip_file.writestr("learnings.jsonl", "")
         zip_file.writestr("context.pkl", context_bytes.getvalue())
 
-    imported_agent = registry.import_agent(zip_path)
+    imported_agent, _ = registry.import_agent(zip_path)
     imported_agent_dir = registry.agents_dir / imported_agent.id
 
     assert not (imported_agent_dir / "context.pkl").exists()
@@ -2107,8 +2110,14 @@ def test_download_agent_from_radient(tmp_path: Path):
         dest_path.write_bytes(zip_bytes)
 
     radient_client.download_agent_from_marketplace.side_effect = fake_download
-    imported_agent = registry.download_agent_from_radient(radient_client, "market-id")
-    assert imported_agent.name == "DownloadAgent"
+    imported_agent, renamed_from = registry.download_agent_from_radient(radient_client, "market-id")
+    # The pulled profile is the one exported from THIS registry, so its name is
+    # already held here: the pull lands under the contract's suffix and reports
+    # what it was renamed from (contract §3.6).
+    assert imported_agent.name == "DownloadAgent (2)"
+    assert renamed_from == "DownloadAgent"
+    original = registry.get_agent_by_name("DownloadAgent")
+    assert original is not None and original.id == agent.id
 
 
 def test_set_agent_system_prompt(temp_agents_dir: Path):
