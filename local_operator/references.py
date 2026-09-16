@@ -27,13 +27,13 @@ large transcript row, because the model would answer about code the user never
 showed it. So expansion runs once, the result is persisted, and replay is
 byte-identical to the live turn for free.
 
-Two callers expand, and the second pass must be a no-op: the TUI expands at its
-submit exits so the transcript row can stay short, and :meth:`Session.prompt`
-expands unconditionally so every non-TUI surface (CLI, headless, server,
-scheduler, mobile, subagent) gets the feature with zero per-surface work. That
-makes IDEMPOTENCE a hard requirement rather than a nicety —
+Two callers expand: the TUI's aside worker — the one model call that never
+reaches :meth:`Session.prompt` — and :meth:`Session.prompt` itself, the SINGLE
+expansion site for every other surface (CLI, headless, server, scheduler,
+mobile, subagent), which is what gives them the feature with zero per-surface
+work. That makes IDEMPOTENCE a hard requirement rather than a nicety —
 ``expand_references(expand_references(t).sent).expanded is False``. Were it
-true only by luck, every operator message would carry a doubled block.
+true only by luck, every FORWARDED message would carry a doubled block.
 
 It rests on TWO mechanisms, and both are load-bearing. :func:`_block_spans`
 skips any ``@`` sitting inside an already-emitted block, AND every token a pass
@@ -42,9 +42,13 @@ CONSUMED is named inside that block with a ``typed=`` attribute that
 supply: a token can be consumed without its content being carried — the block
 cap was reached, or it duplicated an earlier token — and such a token used to
 leave no trace in the block at all. It was therefore invisible to pass 2 and
-expanded AGAIN. Measured through the real TUI-then-``Session.prompt`` sequence:
-a 63-character message reached 27,584 chars after pass 1 and 55,084 chars with
-TWO blocks after pass 2, from three ordinary 16,383-byte files and no attacker.
+expanded AGAIN. Measured through the real TUI-then-``Session.prompt`` sequence
+(the PRE-RULING one, back when the composer still expanded at its submit exits;
+post-ruling ``prompt`` is the only site a composer draft reaches, so the double
+pass arises via FORWARDING — a subagent launch re-prompting text that already
+carries a block): a 63-character message reached 27,584 chars after pass 1 and
+55,084 chars with TWO blocks after pass 2, from three ordinary 16,383-byte
+files and no attacker.
 So overflowed and deduplicated tokens are named as ``<listed>`` elements, and
 the one case where naming them all cannot fit inside
 :data:`BLOCK_LIMIT_CHARS` expands nothing at all (:func:`_too_many`) — a
@@ -103,6 +107,7 @@ from local_operator.media import sniff_image_file
 # it, which is precisely what ``sigils.py`` exists for.
 from local_operator.sigils import _token_end, at_token, is_boundary, split_token
 from local_operator.tools.builtin import (
+    _BINARY_PEEK_BYTES,
     _GREP_PRUNE_DIRS,
     INTERNAL_READ_HEAD_CHARS,
     INTERNAL_READ_LIMIT_CHARS,
@@ -205,11 +210,6 @@ SENSITIVE_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".keystore", ".e
 SENSITIVE_NAME_PREFIXES = frozenset({".env"})
 SENSITIVE_DIR_PARTS = frozenset({".ssh", ".gnupg", ".credentials", ".aws", ".kube"})
 
-#: Bytes sampled for the NUL probe, and the probe itself — the SAME detection
-#: ``read`` uses at ``builtin.py:3804``. One answer about what "binary" means,
-#: not two that can drift.
-_BINARY_SNIFF_BYTES = 8000
-
 #: Entries listed inside one ``<reference>`` for a directory before the tail is
 #: named rather than shown. A directory reference is an orientation aid, not a
 #: recursive dump; the agent has ``glob`` for the rest.
@@ -287,7 +287,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
     """One directory's listable entries, as picker rows. Never raises.
 
     SYNCHRONOUS AND ONE LEVEL, and both halves are load-bearing. This runs from
-    ``_sync_picker`` on EVERY keystroke (``editor.py:3011``) and every buffer
+    ``_sync_picker`` on EVERY keystroke (``editor.py:3101``) and every buffer
     mutation, with no debounce, no cancellation and no generation counter. The
     measured costs decide the shape: one ``os.scandir`` of the repo root is
     0.04 ms and of ``local_operator/`` 0.07 ms, against 68 ms for an
@@ -688,10 +688,12 @@ def _file_payload(path: Path, size: int, limit: int, shown: str) -> tuple[str, d
             {"bytes": str(size), "kind": "image"},
         )
     data = path.read_bytes()
-    if b"\x00" in data[:_BINARY_SNIFF_BYTES]:
-        # The SAME detection ``read`` uses at ``builtin.py:3804``. Metadata
-        # only: bytes in a user message are tokens spent on noise, and under
-        # compaction a user turn is long-lived.
+    if b"\x00" in data[:_BINARY_PEEK_BYTES]:
+        # The SAME detection, and the same byte count, that ``read`` uses at
+        # ``builtin.py:3804``: ``_BINARY_PEEK_BYTES`` is imported rather than
+        # mirrored, so the one answer about what "binary" means cannot drift
+        # into two. Metadata only: bytes in a user message are tokens
+        # spent on noise, and under compaction a user turn is long-lived.
         guessed = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return (
             f"[binary ({guessed}), {size} bytes — not included.]",

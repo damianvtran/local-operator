@@ -5129,19 +5129,40 @@ class Session:
         # than a slow turn. Expanding before `acquire()` costs nothing and
         # removes the shape entirely.
         #
-        # This one call is what gives every non-TUI surface the feature for
-        # free — CLI, headless, server, scheduler, mobile and subagents all
-        # funnel through `prompt`. The TUI expands earlier (to paint a short
-        # transcript row), so this pass is a no-op on its text by construction:
-        # `expand_references` is idempotent.
+        # This one call is what gives EVERY composer surface the feature: CLI,
+        # headless, server, scheduler, mobile, subagents and the TUI's own
+        # submit exits all funnel through `prompt`. The TUI does NOT expand
+        # earlier — that pass was removed, because awaiting an approval card
+        # inside a Textual message handler deadlocks the composer (the pump
+        # awaits the handler to completion, and the card is mounted AND
+        # answered through that same pump; `on_editor_submitted` records the
+        # probe). So this is the first and only expansion of a composer draft,
+        # and the transcript row stays the typed line because the row is built
+        # from it, not because a second pass declined to touch it.
+        #
+        # THREE entry paths predate the feature and bypass `prompt`, so an
+        # `@path` in them stays inert prose: `steer` (queues the message
+        # directly — and `_submit_prompt` routes a draft typed while a turn
+        # runs there, so the TUI's own submit exit is on both lists), a wake
+        # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
+        # which adopts the TYPED question — `_aside_worker` expands only the
+        # text it hands the model, and the panel keeps the typed one).
+        #
+        # IDEMPOTENCE is still a hard requirement with a single expansion site,
+        # because this pass runs on text it did not type: a subagent launch
+        # forwards the manager's own prompt into `child.prompt`, and a manager
+        # that quoted an already-expanded block out of its context would have
+        # it doubled here.
         expansion = await expand_references(
             text,
             self._cwd,
             request_approval=None if self._yolo else self._request_approval,
         )
         # Notices are discarded deliberately: `prompt` has no channel back to a
-        # UI. The TUI paints its own from its own earlier call, and the
-        # CLI/headless surfaces have nowhere to put them.
+        # UI, and no surface pre-expands a composer draft, so an unresolved
+        # token on a submit exit is sent verbatim and silently — the accepted
+        # cost `on_editor_submitted` records. The aside is the one path that
+        # paints its notices, from its own call in `_aside_worker`.
         text = expansion.sent
         if self._turn_lock.locked():
             # An on-demand compaction holds the same lock a turn does, and for

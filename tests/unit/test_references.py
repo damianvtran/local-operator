@@ -322,8 +322,10 @@ def _the_same_path_twice(workspace: Path) -> str:
 )
 @pytest.mark.asyncio
 async def test_expansion_is_idempotent(tmp_path, make_text):
-    """MANDATORY. The TUI expands at submit and ``Session.prompt`` expands
-    again; if this is false, every operator message carries a doubled block.
+    """MANDATORY. ``Session.prompt`` is the single expansion site, but it runs
+    on text it did not type — a subagent launch forwards the manager's own
+    prompt into ``child.prompt`` — so already-expanded text re-enters here; if
+    this is false, every FORWARDED message carries a doubled block.
 
     PARAMETRISED OVER THE PATHS THAT BROKE IT. This test used one small file —
     the only shape where the property held — so it stayed green while the cap
