@@ -31,6 +31,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.session.naming import ConversationName
+from local_operator.session.spend import SessionSpend
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Deferred: ``frontend_state`` imports ``tui.costs``, whose package
@@ -300,7 +301,7 @@ class SessionProtocol(Protocol):
         ...
 
     async def complete_once(self, system: str, prompt: str) -> str:
-        """One cheap, isolated, single-attempt provider call for a host errand.
+        """One cheap, isolated, near-single-attempt provider call for a host errand.
 
         Not a turn: no tools, no history, no transcript entry. Hosts use it
         for small derived text (conversation auto-naming) without rebuilding
@@ -506,6 +507,26 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    # --- code memory (execution variables) --------------------------------
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one session code-memory verb (list/set/update/delete).
+
+        A SESSION capability for the same reason ``credential_op`` is: the thing
+        being read or written is the LIVE eval-kernel namespace, which only
+        exists in the process running the session's turn loop. A session that
+        runs its tools in this process answers from its own kernel registry; a
+        session that is a window onto a runtime routes it there, because a
+        namespace held anywhere else would be a copy no cell ever mutates.
+
+        The answer is the frozen envelope (``{ok, state, kernel, variables,
+        truncated}`` for a read, ``{ok, state, variable?}`` for a write,
+        ``{ok: False, code, message}`` for a refusal) — see
+        :mod:`local_operator.session.variable_ops`.
+        """
+        ...
+
     # --- events -----------------------------------------------------------
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable."""
@@ -560,9 +581,35 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 84 public members and a POSITIVE
+    than stylistic. This protocol carries 122 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
+
+    The figure is ``len(typing._get_protocol_attrs(ViewerSessionProtocol))`` —
+    exactly the set a positive ``isinstance`` walks, which is what makes it the
+    right number to quote beside the timing. It counts INHERITED members too,
+    so it is larger than the viewer-only population
+    ``test_viewer_protocol.py`` pins; the two answer different questions and
+    must not be reconciled. It read 84 for some time while the protocol grew
+    past it (106 before the warm members were added, 108 with them, 109 once
+    ``restored_search_spend`` joined ``restored_usage``, 111 once
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
+    112 once the lease-warm retry needed ``recovering``, 113 once
+    ``restored_spend`` joined the shared surface a viewer inherits, 114 once
+    session code memory joined the session contract with ``variables_op``, 115
+    once the retention predicate's clone-free ``has_running_job`` joined the
+    per-frame reads, 116 once ``mcp_credentials_op`` joined
+    ``ViewerSessionProtocol``, 117 once a move needed the viewer's own ``cwd``,
+    118 once the same move needed ``supports_exclusive_move`` so a desktop host
+    can fail CLOSED against an owner that would ignore the exclusivity flag, 119
+    once it needed the ``set_local_cwd_callback`` seam the move's local
+    replacement is published through, 120 once the drain notice's
+    ``set_drain_callback`` joined the viewer contract, 121 once the desktop's
+    interrupt rung needed ``interrupt`` to stop a turn without ending the
+    session, 122 once the same rung needed ``owner_reachable`` so a mid-resync
+    viewer could not be read as an absent owner), so recompute it rather
+    than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -648,6 +695,51 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     @property
+    def can_ever_bind(self) -> bool:
+        """Whether a bind attempt on this viewer could EVER succeed.
+
+        Its own question, and not a refinement of :attr:`is_cold`. A facade is
+        cold for many reasons that all clear on their own — a socket blip, an
+        owner loss the recovery loop is already chasing, a never-bound row that
+        has not been asked to dial yet, a live owner whose display history is
+        mid-refresh — and every one of those binds or syncs. This asks the one
+        thing a caller cannot wait out: whether the viewer is closed to dialling
+        BY CONSTRUCTION, with nothing reachable on the other end.
+
+        It is therefore NOT the negation of the guard at the top of
+        ``AttachedSession._ensure_bound``, which returns in states this answers
+        True for (a mid-refresh client, a facade with a recovery loop running).
+        False is that guard with no live owner behind it:
+
+        * the LEGACY attach contract (``_can_go_cold`` false, what ``connect``
+          builds unless a caller asks for the viewer contract) once its owner is
+          gone. That facade never dials, and what normally releases it is its
+          own recovery loop (``_give_up_recovery`` sets the flag before going
+          cold). A DELIBERATE stop is both the arm where no loop ever runs —
+          ``_on_disconnected`` returns before starting one, and
+          ``_recover_runtime`` returns instead of giving up when its own wake
+          marker says the session was stopped — and the arm where nothing sets
+          the flag, so the state is permanent;
+        * a DISPOSED facade, which refuses every path.
+
+        ``_recovering`` must answer True, and the distinction is load-bearing:
+        the flag means "a recovery loop is running", and every exit of that loop
+        either attaches this facade or releases it rebindable, so the state is
+        transient by construction. A caller that treated it as final would tell
+        the user that a session on its way back is gone.
+
+        **Why this is DECLARED rather than probed.** The caller that needs it
+        uses the answer to choose a sentence the user reads, which is exactly
+        where a ``getattr(session, "_can_go_cold", None)`` duck-probe belongs:
+        that is how the original sidebar defect shipped — a private read nothing
+        type-checks, and a rename on the facade could not break it loudly. The
+        name answers the question the caller has, not the flag it reads, so a
+        future second reason to be un-bindable does not put a second name in
+        every host.
+        """
+        ...
+
+    @property
     def runtime_pid(self) -> int | None:
         """Pid of the runtime this viewer is attached to.
 
@@ -697,6 +789,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
+    async def session_was_stopped(self) -> bool:
+        """Whether this session ended DELIBERATELY rather than dying.
+
+        A host that watched the disconnect can classify it from the wire, but a
+        host that did not — the sidebar re-dials a row clicked later — has only
+        this: the durable ``stopped_at`` marker the stop path stamps, plus this
+        viewer's own ``request_stop``. The question it answers is the one that
+        decides whether re-dialling is worth anything, so the answer must live
+        here rather than be re-probed by each front end.
+
+        FALSE IS "NOT PROVEN STOPPED", not "proven alive", and the difference
+        matters to a caller composing a verdict: the marker is written by
+        ``control._mark_wakes_dormant``, which writes NOTHING for a session with
+        no wake schedules (an absent index file is the store's own "no wakes"),
+        and it is cleared when the session is next opened. A wake-less stop
+        therefore leaves no trace here at all.
+        """
+        ...
+
     async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
         """Renew this viewer's desktop attach lease.
 
@@ -728,6 +839,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         paint path that cannot tolerate a raise probes defensively instead —
         several in ``app.py`` deliberately do, and ``_session_subject`` records
         what a raise there costs.
+        """
+        ...
+
+    @property
+    def supports_exclusive_move(self) -> bool:
+        """Whether the bound owner can retire under the move exclusivity fence.
+
+        Asked by the desktop move path BEFORE it mutates anything, because an
+        owner without ``exclusive-move-v1`` ignores the ``exclusive`` field and
+        retires unguarded — leaving a sibling facade to engage a successor from
+        its own stale cwd. False means refuse with update guidance; it never
+        means "fall back to a plain retire".
         """
         ...
 
@@ -811,6 +934,60 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Viewer-side for the same reason as its sibling above — it answers a
         display question off ``is_streaming`` plus the latest call group, and
         has no meaning on a runtime nobody is viewing.
+        """
+        ...
+
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
+        """Start instant per call executing RIGHT NOW, keyed by call id.
+
+        The timestamped sibling of :meth:`executing_display_tool_ids`, and the
+        one thing that makes a live row's elapsed clock survive a change of
+        viewer. Both surfaces answer it off the SAME folded fact — the
+        ``tool_execution_start`` events the producer emitted (see
+        ``ToolExecutionStartEvent.started_at_epoch``) — so a sidebar switch
+        seeds the replayed row and the band's phase from one anchor rather
+        than from whenever each of them was painted.
+
+        Declared here beside the id accessors it accompanies, and implemented
+        by BOTH session shapes: a local owner answers from its own fold (it is
+        the producer, so the instants are its own), and an attached viewer
+        answers from the same fold applied to the events it received.
+
+        Read membership and value as two different answers, because a replay
+        has to ask both:
+
+        * MEMBERSHIP — has this call started? A call that has no entry at all
+          is one the tail scan merely cannot pair with a result yet: queued
+          behind a sibling's execution group, or never run. Its row must not be
+          painted as executing. Membership is what distinguishes that from the
+          far more common case below, and the distinction is why the map is not
+          simply a list of epochs.
+        * VALUE — when it started, or ``None`` when the start carried no epoch
+          (a legacy producer, an older runtime). An epoch-less start is present
+          with ``None`` rather than absent: the event DOES say the call began,
+          and the value is withheld instead of guessed, so consumers keep the
+          clock blank rather than printing an age nobody measured.
+
+        An empty map is therefore a valid, supported answer and not an error.
+        """
+        ...
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The folded working-line phase, and the instant that phase began.
+
+        The companion :meth:`live_tool_start_epochs` cannot supply, and the
+        reason the operator's report names TWO clocks rather than one: the
+        thinking indicator has no tool call behind it, so there is no id to key
+        an epoch by and nothing for a per-call map to answer with. The phase is
+        what the band's number is anchored to, so the phase's own start is what
+        has to survive a switch.
+
+        Read together on purpose. The consumer's rule is "use this instant only
+        when this phase is the phase I just derived", and two independent reads
+        could pair one phase with the previous phase's zero — a wrong age that
+        would look perfectly plausible. A facade with no fold answers
+        ``("", None)``, which matches nothing and therefore withholds the
+        clock rather than inventing one.
         """
         ...
 
@@ -940,8 +1117,80 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Run a slash command on the runtime and return its result."""
         ...
 
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Write declared MCP credential values to the RUNTIME's encrypted store.
+
+        Declared for the same reason as :meth:`warm_runtime` below: the desktop
+        bridge reaches it through ``bridge.remote`` on
+        ``POST /v1/desktop/sessions/{id}/mcp/credentials``, so a rename here has
+        to be a type error rather than a silently missing capability — this is the
+        route that stores the key a UI-added MCP server authenticates with.
+
+        A VIEWER forwards it to the owner rather than writing locally: the store
+        it resolves against is the one the runtime's connects read, and a value
+        written anywhere else would be a copy no server ever sees. ``body`` is the
+        validated ``MCPCredentials`` payload (``name``/``values``/
+        ``confirmed_replace``), and the answer is the frozen envelope
+        (``{code, saved_ids, failed_ids, name}``) — never the value, which is why
+        the shape carries ids only. Raises when there is no owner to write
+        through, unlike the read-side probes that report a disconnected state.
+        """
+        ...
+
     def move_will_wait(self) -> bool:
         """Whether a move would block on an in-flight turn."""
+        ...
+
+    @property
+    def cwd(self) -> str:
+        """Where this session works, i.e. what :meth:`set_working_directory` moves.
+
+        Declared for the same reason as :attr:`engage_in_flight` below: the move
+        route resolves a relative target against this value and compares against
+        it to decide a no-op, so a rename on the facade must be a type error
+        rather than a silently stale base for every path a user types.
+        """
+        ...
+
+    async def warm_runtime(self) -> None:
+        """Engage a runtime speculatively, for a caller nobody is waiting on.
+
+        Declared for the same reason as :meth:`bind_runtime` beside it: the
+        desktop bridge reaches it through ``bridge.remote`` on the /warm route,
+        so a rename on the facade must be a type error rather than a silently
+        missing capability on the hottest new path in the desktop app.
+
+        Never raises, and is NOT interchangeable with :meth:`bind_runtime`: it
+        takes the background bind envelope and is silent on failure, because a
+        warm-up the user did not ask for must never become an error they have
+        to read.
+        """
+        ...
+
+    @property
+    def engage_in_flight(self) -> bool:
+        """Whether an engage is running that another caller would have to join.
+
+        A HINT, not a guarantee — it samples a lock at one instant. Declared
+        because the desktop bridge reads it to decide whether a speculative
+        warm needs starting at all; correctness under a missed sample belongs
+        to the bind lock, not to this predicate.
+        """
+        ...
+
+    @property
+    def recovering(self) -> bool:
+        """Whether owner recovery owns this viewer's dial right now.
+
+        Declared for the same reason as :attr:`engage_in_flight` beside it, and
+        it answers the question that predicate cannot: an engage attempted while
+        recovery owns the dial does NO WORK at all — ``_ensure_bound`` returns at
+        its own guard, with no task to report and no process to account for — so
+        the desktop bridge's lease-driven warm reads this to tell a REFUSED
+        attempt (retried on a short poll) from a FAILED one (which it paces,
+        because that attempt really did spawn). Unlike the lock sample above,
+        this is a state read: there is no window between asking and acting.
+        """
         ...
 
     # --- job trajectories --------------------------------------------------
@@ -990,6 +1239,36 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
+    async def interrupt(self) -> str:
+        """Stop the owner's CURRENT TURN and return its receipt, verbatim.
+
+        VIEWER-ONLY BY CONSTRUCTION, which is why it is not on
+        :class:`SessionProtocol` beside :meth:`abort`: an owner ``Session`` stops
+        its own turn with a local call and has nobody to ask, while a viewer
+        dials the owner's ``abort`` control frame and is handed a sentence back.
+        The desktop route reads this off a duck-typed bound facade to answer the
+        Stop button, so the name must be declared here — an undeclared read
+        degrades to a silent ``None`` and a rename would answer the press with
+        nothing rather than failing.
+
+        Not the kill switch (:meth:`request_stop` ends the session and its
+        process); this ends one turn and leaves both running.
+        """
+        ...
+
+    @property
+    def owner_reachable(self) -> bool:
+        """Whether a live owner exists to ask — reachability, not sync state.
+
+        Distinct from :attr:`is_cold`, whose third disjunct (``not
+        _ready_for_events``) is a RESYNC state that is true of a connected,
+        serving session mid-refresh; a caller deciding whether to dial must not
+        read a mid-resync viewer as an absent owner. Declared here because the
+        desktop interrupt route reads it off a duck-typed bound facade to choose
+        between an ``idle`` answer and dialling the owner.
+        """
+        ...
+
     # --- runtime-lifecycle callbacks ---------------------------------------
     # Installed once at adoption. They are how a viewer learns about outcomes
     # it cannot poll for: the runtime died and this process won the lease, the
@@ -1007,6 +1286,35 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Called when the runtime retired itself for a newer build."""
         ...
 
+    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Called the moment the runtime announces a departure that REFUSES work.
+
+        The sibling of :meth:`set_refresh_callback` one event earlier: that one
+        fires when the socket closes and re-engages, this one fires on the
+        ``retiring`` frame while the runtime is still working, and only when
+        the frame says the departure is draining. Viewer-only by construction —
+        an owner ``Session`` has no wire to hear the frame on.
+
+        ``callback`` takes the frame's ``leaving`` phrase: the trigger's own
+        words (a signal and a replaced build are two different sentences to a
+        reader). It is EMPTY only when the frame named no trigger at all — not
+        when the runtime predates the key, which is the older rule and the wrong
+        one: a runtime that predates ``leaving`` still hands the signal phrase
+        over for a signal drain, because its frame's ``reason``/``to`` decide
+        (``types.drain_phrase_for_frame``; agent review round 5, MINOR-2).
+        """
+        ...
+
+    def set_local_cwd_callback(self, callback: Callable[[str], Any] | None) -> None:
+        """Called when a move installs an accepted directory locally.
+
+        Viewer-only by construction: the callback exists so a DESKTOP bridge can
+        publish its own ``frontend.replace`` frame instead of the facade
+        emitting a same-sequence delta the renderer discards. An owner
+        ``Session`` has no host above it to repaint, so it must not grow one.
+        """
+        ...
+
     def set_cancel_resolution(self, resolver: Callable[[int], None] | None) -> None:
         """Arm the seam that rewrites an optimistic cancel count.
 
@@ -1017,6 +1325,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """The recall twin of :meth:`set_cancel_resolution`."""
+        ...
+
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Called with the id of a queued steer whose bind was refused.
+
+        The third asynchronous refusal, and the only one with no sender to
+        report it: ``steer_message`` spawns a task nobody awaits, so a message
+        the app has already echoed as sent can fail without the user ever
+        learning. See ``AttachedSession._send_steer_when_ready``.
+        """
         ...
 
     # --- engine state a viewer host renders --------------------------------
@@ -1125,6 +1443,19 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """The runtime epoch, read without the whole-state clone."""
         ...
 
+    @property
+    def has_running_job(self) -> bool:
+        """Whether any child is still running, read without the whole-state clone.
+
+        The retention predicate (``SessionInteraction.retained_for_auto_work``)
+        asks this as a boolean on every canonical delta of every leased source,
+        and it used to answer through ``frontend_state`` — a full deep copy of
+        canonical state for one boolean — which is why it belongs beside
+        ``pending_gate`` and ``epoch`` in this section rather than with the
+        roster-returning members.
+        """
+        ...
+
     def subscribe_frontend(self, handler: Callable[[Any], Any]) -> Any:
         """Refresh, snapshot and subscribe to canonical state in one step.
 
@@ -1144,6 +1475,33 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def restored_usage(self) -> Usage | None:
         """The provider's own last usage reading for this conversation."""
+        ...
+
+    def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
+        """Search-spend rows this conversation's transcript carries, oldest first.
+
+        The search twin of :meth:`restored_usage`, and DECLARED for the same
+        reason: the TUI reads it off the session to seed a resumed
+        conversation's ledger, and a duck-typed ``getattr`` would make a rename
+        degrade the band to a silently-short figure instead of an error.
+        """
+        ...
+
+    def restored_spend(self) -> SessionSpend | None:
+        """The durable per-session spend this conversation carries, or ``None``.
+
+        DECLARED on the SHARED protocol rather than on
+        :class:`ViewerSessionProtocol`, and the distinction is the one that rule
+        is for: ``tui/app.py::_restore_reported_usage`` reads it through a
+        duck-typed binding that may hold EITHER kind of session (the band is
+        restored on adopt, for an owner runtime and for an attached facade
+        alike), and BOTH classes implement it -- the owner by recalling the
+        ``session_spend.v1`` row it writes, a viewer by recalling the same row
+        out of the journal suffix it already read on a cold open. Declaring it
+        on the viewer-only protocol would say a runtime lacks the member, which
+        is the opposite of the truth, and would let the owner-side read degrade
+        to a silent ``None`` (an unmarked total on screen) on a rename.
+        """
         ...
 
     async def record_shell(self, command: str, result: ToolResult) -> None:

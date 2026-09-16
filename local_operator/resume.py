@@ -17,11 +17,24 @@ transcript-directory decision, so the rule has one definition.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
+
+from local_operator.procstate import is_zombie
+
+#: Module level, not lazy, and deliberately so: this module sits on the CLI
+#: startup path, and ``session.errors`` is the one importable that costs
+#: nothing there -- the package ``__init__`` is empty and the module itself
+#: imports no stdlib and no engine. Hiding the refusal behind a function-local
+#: import would make the type unreachable to a caller that wants to catch it.
+from local_operator.session.errors import SessionStoreUnavailable
+
+logger = logging.getLogger(__name__)
 
 #: ``--resume`` with no id. A sentinel rather than a second boolean flag so the
 #: whole "which session" decision stays ONE value threaded through one parameter.
@@ -376,6 +389,20 @@ PREVIEW_SCAN_BYTES = 64_000
 #: past this is cut by the surface anyway, and carrying more over the wire for
 #: every row in the list is pure weight.
 PREVIEW_MAX_CHARS = 200
+
+#: ``harness.message_types.SESSION_INCIDENT_MESSAGE_TYPE``, spelled out rather
+#: than imported. This module's contract (see the module docstring, and
+#: ``tests/unit/test_import_graph.py``) is that importing it drags in nothing —
+#: not the engine, not the providers, not ``asyncio`` — because it is on the
+#: path of ``local-operator --help`` and of every picker row. The vocabulary
+#: module is a cheap module today, but the guard is about the GRAPH, not about
+#: today's cost, and a literal keeps this module's import list empty.
+#:
+#: The duplication is pinned by a test that imports both and asserts they are
+#: equal, so a rename cannot silently turn this scan into one that matches
+#: nothing (which would degrade to the house sentence and look like "this
+#: session had no failure" rather than like a bug).
+_SESSION_INCIDENT_TYPE = "session_incident"
 
 #: The marker that says a fragment is a user message, and the first COMPLETE
 #: JSON string value of a ``text`` key. Both tolerate whitespace around the
@@ -1105,7 +1132,7 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
     return resume_dir(config_dir, requested).name
 
 
-def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
+def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = True) -> int | None:
     """Pid of the process currently hosting ``session_id``, or ``None``.
 
     Two writers on one transcript is how a TUI ``/resume`` of a phone-started
@@ -1118,8 +1145,41 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
     Consults the session directory's ``.session.pid`` liveness marker — the
     same file the retention sweep uses. Stdlib-only and import-light: this
     module must stay off the engine and the mobile package (see the module
-    docstring). A live TUI or phone-started child always writes that marker
-    when it claims the directory.
+    docstring); the shared probe it uses is the stdlib-only leaf module
+    :mod:`local_operator.procstate`, which is not part of either. A live TUI or
+    phone-started child always writes that marker when it claims the directory.
+
+    **A zombie is not an owner.** Signal 0 succeeds against an exited-but-
+    unreaped process, and this marker is written by the runtime that owns the
+    session — whose parent is often a long-lived TUI that may never reap it.
+    Reporting such a pid as the owner is what turned a killed runtime's session
+    into one that no interface would open: every attach path here refused with
+    "session X is already open in another process (pid N)", naming a corpse,
+    while the lease that decision agrees with kept the claim out of reach of
+    the one mechanism that recovers it. Discovery, the attach guard and the
+    lease all learn the same answer from one probe now; see
+    :func:`local_operator.procstate.is_zombie`.
+
+    ``check_zombie=False`` is for the engage loop's DISCOVERY path, which calls
+    this on every pass of its dense 10 ms grid: the proof costs a `ps` fork
+    (2.4-4.6 ms measured across runs on this host), which is more than the dead
+    time that grid exists to remove. At the three user-facing call sites (the
+    TUI's ``/resume``, ``lop exec --resume`` and the phone's attach) the answer
+    IS the decision, so they keep the default.
+
+    Cheap mode is not merely a wait, and saying so would be wrong. It cannot
+    change ARBITRATION — the loop's decision to attach or spawn still ends in a
+    runtime that has to acquire the lease, and that path always demands the proof
+    — but its answer is also read by ``find_runtime_record`` to SELECT a record,
+    and the two errands that deliver nothing (``WarmErrand``, ``WakeErrand``)
+    treat reaching a live record as the completed errand. So on the one pass
+    where an owner published AND died between two dense polls, the cheap answer
+    can hand back a corpse's record and report that errand ready. The window is a
+    single dense pass (~10-25 ms) because any pass that sees a record ends the
+    grid, the next pass proves the owner dead, and a wake is retried rather than
+    lost (the schedule stays overdue until a runtime loads). It is also strictly
+    narrower than the behaviour before this branch, when such a record read as
+    live for the ~45 s until its heartbeat quieted.
     """
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
@@ -1134,7 +1194,8 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
     # Windows has no signal 0 — ``os.kill`` there TERMINATES the target
     # (see ``session.retention._process_alive``). A parseable marker is
     # treated as live rather than probed, so a ``/resume`` cannot kill
-    # the phone-started child it is trying to share (F2).
+    # the phone-started child it is trying to share (F2). Windows also has no
+    # zombie state, so there is nothing the probe below could add there.
     if sys.platform == "win32":
         return pid
     try:
@@ -1145,6 +1206,13 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
         return pid
     except OSError:
         return pid
+    if check_zombie and is_zombie(pid):
+        # The probe is spent only here, where signal 0 has already said
+        # "exists". At the user-facing call sites the difference between a
+        # working runtime and its corpse decides whether someone is told to go
+        # and steer a session that nobody is running; on the engage loop's dense
+        # discovery path it is deferred, because there it can only cost a wait.
+        return None
     return pid
 
 
@@ -1328,7 +1396,11 @@ def _is_hidden_origin(origin: str) -> bool:
 
 
 def _recent_sessions_with_origin(
-    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    revalidate: bool = False,
+    strict: bool = False,
 ) -> list[tuple[str, float, str]]:
     """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
 
@@ -1344,12 +1416,76 @@ def _recent_sessions_with_origin(
     stat — use :func:`_scan_sessions` directly.
 
     ``revalidate`` is forwarded verbatim; see :func:`_scan_sessions`.
+    ``strict`` is forwarded the same way, and exists so a caller building a
+    MEMBERSHIP listing through :func:`recent_session_rows` (the phone's
+    history) can declare that for itself rather than only through the
+    catalogue; see that function.
     """
-    return _scan_sessions(config_dir, limit, revalidate=revalidate)[0]
+    return _scan_sessions(config_dir, limit, revalidate=revalidate, strict=strict)[0]
+
+
+def _store_error_detail(error: OSError) -> str:
+    """A path-free description of a store read failure, for the log and the error.
+
+    ``str(error)`` from ``os.scandir`` carries the store's absolute path, which
+    names the operator's home directory. The log may carry it -- the chained
+    cause had it anyway -- but the exception crosses to the HTTP layer, and this
+    codebase's rule for anything that does is that no path rides along (see the
+    ``session.errors`` module docstring). So the detail is rebuilt from the
+    errno alone; a caller losing the path can still get it from ``__cause__``.
+    """
+    if error.errno is None:
+        return type(error).__name__
+    return f"[Errno {error.errno}] {error.strerror or type(error).__name__}"
+
+
+def _scanned_entries(scan: Iterable[os.DirEntry[str]]) -> Iterator[os.DirEntry[str]]:
+    """Yield ``scan``'s entries, turning a MID-SCAN failure into a typed refusal.
+
+    The constructor was guarded and the iteration was not. A ``scandir`` can
+    die after the open instead: the directory grows or rotates under the
+    2-second poll, or the same descriptor exhaustion that would have failed the
+    open arrives one ``readdir`` batch later. Unguarded, that escaped as a bare
+    ``OSError``, which no handler in ``routes/desktop_sessions.errors`` maps --
+    the ladder maps enumerated categories -- so the sidebar's primary read
+    answered a bare 500 with no sentence on it.
+
+    Always raises, in BOTH modes, unlike the failed open: a half-built listing
+    is never a valid answer to give anyone. Every caller today already sees the
+    ``OSError`` propagate, so no caller loses a result it used to get, and the
+    tolerant sites that catch ``OSError`` keep catching this (the refusal
+    subclasses ``OSError`` on purpose -- see ``SessionStoreUnavailable``).
+
+    ``iter(scan)`` rather than ``next(scan)``: the thing being wrapped is only
+    required to be ITERABLE, which is what the ``for`` loop this replaces
+    demanded. A real ``ScandirIterator`` is its own iterator and this is a
+    no-op for it, but a caller that hands in something whose ``__iter__``
+    builds a fresh generator (the suite does exactly that, to inject an inode
+    failure) would otherwise start raising ``TypeError`` on the very scan it is
+    watching.
+
+    A generator rather than a ``try`` around the loop body because that body is
+    the scan's whole per-entry algorithm: wrapping it would re-indent ~180 lines
+    and bury this one-line guard inside them.
+    """
+    entries = iter(scan)
+    while True:
+        try:
+            entry = next(entries)
+        except StopIteration:
+            return
+        except OSError as error:
+            logger.warning("session store could not be read mid-scan", exc_info=True)
+            raise SessionStoreUnavailable(_store_error_detail(error)) from error
+        yield entry
 
 
 def _scan_sessions(
-    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    revalidate: bool = False,
+    strict: bool = False,
 ) -> tuple[list[tuple[str, float, str]], set[str]]:
     """The one store scan: ``(rows, hidden_names)``.
 
@@ -1359,6 +1495,22 @@ def _scan_sessions(
     the listing rather than displaying it should ask for this; see
     ``session.cleanup._picker_rows``, which is a deletion authority and must
     never decide from a speculatively-stale answer.
+
+    ``strict=True`` makes a store that exists but cannot be WALKED an error
+    (:class:`~local_operator.session.errors.SessionStoreUnavailable`) instead
+    of an empty listing, and the caller declaring it is one whose answer a UI
+    adopts as MEMBERSHIP -- ``session.catalog.load_catalog``, which feeds the
+    desktop sidebar and the TUI's, and ``recent_session_rows(strict=True)``,
+    which feeds the phone's conversation list. A missing store is an empty
+    answer in both modes; see the ``FileNotFoundError`` boundary below. Left
+    off by default because the OTHER callers document the opposite contract for
+    good reason (search, the ``/resume`` picker and the retention policy all
+    answer display-only questions, where an error is worse than an empty
+    answer) and because flipping it for them is a behaviour change to eight
+    surfaces this change has no evidence about. The phone's listing is
+    deliberately NOT in that list any more: it publishes rows the client
+    replaces wholesale, so an empty answer there is the same membership lie
+    this parameter exists to stop, and its own caller declares that.
 
     ``hidden_names`` is every directory this scan established is NOT the user's
     own session — whether it was skipped from cache or re-read. It exists for
@@ -1405,7 +1557,30 @@ def _scan_sessions(
     hidden_names: set[str] = set()
     try:
         scan = os.scandir(config_dir / "sessions")
-    except OSError:
+    except FileNotFoundError:
+        # NO STORE YET, which is a normal, empty answer and not a failure: a
+        # fresh install, a `lop` that has never run a session, and a probe of a
+        # config dir that does not exist all land here, and every one of them
+        # must keep answering "no conversations" rather than an error. It stays
+        # an empty answer under `strict` too, for that reason.
+        return [], set()
+    except OSError as error:
+        # ANY OTHER `OSError` IS A BROKEN READ, NOT AN EMPTY STORE -- `EMFILE`
+        # under descriptor exhaustion, `EACCES`, `EIO`, and `ENOTDIR` (a
+        # `sessions` entry that is a file, not a directory: something IS there
+        # and cannot be walked, which is the opposite of absent). Reporting
+        # these as "no conversations" is the defect this boundary closes; see
+        # `SessionStoreUnavailable` for why one category is so much worse than
+        # the other at the surface that adopts the listing as membership.
+        #
+        # Logged in BOTH modes. The tolerant caller still gets the empty answer
+        # its own docstring promises, but the failure is now an incident a
+        # normal run shows: nothing at the default log level was the other half
+        # of the report, because an operator could not reconstruct afterwards
+        # why the sidebar had gone empty for a while.
+        logger.warning("session store could not be read", exc_info=True)
+        if strict:
+            raise SessionStoreUnavailable(_store_error_detail(error)) from error
         return [], set()
     cache_path = origin_cache_path(config_dir)
     cached = _load_origin_cache(cache_path)
@@ -1416,7 +1591,7 @@ def _scan_sessions(
     # that has ever existed.
     seen: set[str] = set()
     with scan:
-        for entry in scan:
+        for entry in _scanned_entries(scan):
             previous = cached.get(entry.name)
             # ---- THE ZERO-SYSCALL SKIP -------------------------------------
             # A directory already known to be hidden is dropped here, before
@@ -1669,11 +1844,37 @@ class SessionRow(NamedTuple):
 
     #: ``"busy"`` (a turn is running), ``"idle"`` (resident, warm),
     #: ``"attached"`` (another terminal is watching), ``"wedged"`` (a live pid
-    #: whose heartbeat went stale), or ``""`` for a cold session.
+    #: that has stopped reporting — see below), or ``""`` for a cold session.
     live_state: str = ""
+    #: How long ago the owning process last wrote its discovery heartbeat, or
+    #: ``None`` for a cold row with no record.
+    #:
+    #: A QUALIFIER, not a state: it is what turns ``live_state == "wedged"`` into
+    #: the honest sentence a reader needs. The beat is authored by the runtime's
+    #: own event loop, so the same reading covers a frozen process and a
+    #: perfectly healthy one starved by a long turn, and the only defensible
+    #: thing to say about it is that the owner has not reported for this long
+    #: (``registry.classify`` owns the rule; this is its number). Defaulted
+    #: exactly like the live-state fields above, so every construction site but
+    #: the live-decorating one renders as before.
+    heartbeat_age_s: float | None = None
     #: ``"approval"`` / ``"ask"`` when the session is waiting for a PERSON.
     #: The needs-you marker, and the reason a row sorts first.
     pending: str | None = None
+    #: The record's own phrase when the runtime has been SIGNALLED and is
+    #: finishing the work in flight before it leaves (``LEAVING_ON_SIGNAL``);
+    #: ``""`` otherwise.
+    #:
+    #: SEPARATE FROM ``live_state`` ON PURPOSE. A draining runtime is busy, so
+    #: ``busy`` is true of it — but it is the wrong fact to lead with, and
+    #: ``live_state`` is a TOKEN that several surfaces branch on (the transport
+    #: spelling ``status_code``, the ranking in ``session_category``). Adding a
+    #: third value there would be a contract change made to carry a phrase,
+    #: which is the same call the CLI's LEAVING column made instead of teaching
+    #: STATE a new word (design round 2, D3). Carried as its own field, the row
+    #: can say it in the runtime's words — the ones `lop sessions` and `/info`
+    #: print — without teaching every consumer a new token (UX round 2, U8).
+    leaving: str = ""
     #: How many wakes are scheduled, and whether they are dormant because the
     #: session was deliberately stopped.
     wakes: int = 0
@@ -1695,6 +1896,21 @@ class SessionRow(NamedTuple):
     #: Empty for every construction site but the live-decorating one, exactly
     #: like the live-state fields above.
     kind: str = ""
+    #: Which live-decoration sources could NOT be read for this row, out of
+    #: ``session.catalog.DECORATION_SOURCES`` — empty for a poll that read them
+    #: all. This is the answer to a question the fields above cannot answer:
+    #: they are defaults, and a defaulted ``live_state=""``/``wakes=0`` reads
+    #: to every consumer as a confident "this session is cold", which is what
+    #: made a swallowed registry failure render as "Nothing running right now"
+    #: over a store full of running work.
+    #:
+    #: A tuple rather than one flag per source, and the fact belongs to the
+    #: READ rather than to the row: one ``registry.scan()`` answers for the whole
+    #: listing, so the value is the same on every row of a degraded poll and a
+    #: client reads it as "I could not tell", never as "this row is special".
+    #: Additive on the wire (the desktop row model passes extras through), so an
+    #: older client keeps rendering exactly as it does today.
+    degraded: tuple[str, ...] = ()
     #: Immutable conversation birth, not transcript activity or runtime start.
     #: Unknown legacy dates tie at zero and are ordered by session id.
     created_at: float = 0.0
@@ -1949,6 +2165,69 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
     missing, unreadable, or contains no assistant text, and the caller renders
     its own empty state.
     """
+    for entry in _tail_entries(session_dir):
+        if entry.get("type") != "message":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            continue
+        text = _first_text(payload.get("content"))
+        if text.strip():
+            return _condense(text, max_chars)
+    return ""
+
+
+def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) -> str:
+    """The raw text of this session's most recent failure, or ``""``.
+
+    The conversation-list preview answers "where did it get to"; this answers
+    "what went wrong", for the one banner where the first question has no
+    honest answer. A notification that says only "Stopped with an error" tells
+    the user a thing they must act on while withholding the only fact that
+    would let them act — whether to top up a quota, fix a credential, or simply
+    retry (design round 1, D4).
+
+    Read from the ``session_incident`` record's ``details.raw``, which is the
+    UNRENDERED provider text. Deliberately not ``details.text``: that is the
+    formatted model-facing block, several lines long and tailed with "This is
+    why the previous turn ended. Take it into account before repeating the same
+    request." — an instruction addressed to the model, which on a lock screen
+    reads as nonsense. ``raw`` is the sentence a human wants.
+
+    No new durable path is introduced. ``incidents.py`` already journals this
+    record on every classified failure, precisely so a resumed session can
+    explain itself, and it is persisted for the same reason this needs it.
+
+    Bounded and tolerant exactly like :func:`session_preview`, and for the same
+    reasons — it shares that function's tail window, so the cost is the same
+    single bounded read and is independent of transcript size. Returns ``""``
+    for a missing, unreadable or incident-free transcript, and the caller falls
+    back to the house sentence.
+    """
+    for entry in _tail_entries(session_dir):
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("custom_type") != _SESSION_INCIDENT_TYPE:
+            continue
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            continue
+        raw = details.get("raw")
+        if isinstance(raw, str) and raw.strip():
+            return _condense(raw, max_chars)
+    return ""
+
+
+def _tail_entries(session_dir: Path) -> list[dict[str, Any]]:
+    """Parsed entries from the transcript's tail window, NEWEST FIRST.
+
+    Factored out of :func:`session_preview` when
+    :func:`session_failure_summary` needed the identical scan: one bounded
+    seek, the first (fragment) line dropped, newest-first iteration, and every
+    unparseable line skipped because a live writer may be mid-append. Two
+    copies of that would be two places for the window arithmetic to drift.
+    """
     transcript = session_dir / TRANSCRIPT_NAME
     try:
         size = transcript.stat().st_size
@@ -1963,7 +2242,8 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
             else:
                 window = handle.read()
     except OSError:
-        return ""
+        return []
+    entries: list[dict[str, Any]] = []
     for line in reversed(window.decode("utf-8", "replace").splitlines()):
         line = line.strip()
         if not line:
@@ -1974,15 +2254,9 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
             # Normal for a live session: the writer appends and we may read
             # mid-write, so the final line can be half-written.
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "message":
-            continue
-        payload = entry.get("payload")
-        if not isinstance(payload, dict) or payload.get("role") != "assistant":
-            continue
-        text = _first_text(payload.get("content"))
-        if text.strip():
-            return _condense(text, max_chars)
-    return ""
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
 
 
 def _first_text(content: object) -> str:
@@ -2015,7 +2289,9 @@ def _condense(text: str, max_chars: int) -> str:
     return cut.rstrip(" ,.;:") + "…"
 
 
-def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[SessionRow]:
+def recent_session_rows(
+    config_dir: Path, limit: int | None = None, *, strict: bool = False
+) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
     Layered over :func:`recent_sessions` rather than replacing it: the CLI's
@@ -2051,9 +2327,25 @@ def recent_session_rows(config_dir: Path, limit: int | None = None) -> list[Sess
     3,000-session store, on this synchronous UI-thread path. That is the exact
     "unmarked is the cheap path" property :func:`recent_sessions` documents at
     length, and it must not be given back here.
+
+    ``strict=True`` forwards to the scan, so a store that exists but cannot be
+    WALKED raises :class:`~local_operator.session.errors.SessionStoreUnavailable`
+    instead of answering an empty list. It is off by default because these
+    callers answer display-only questions in the sense that matters -- a
+    picker, a search, a recovery listing -- and an error is worse for them than
+    an empty answer; flipping the default would be a behaviour change to eight
+    surfaces this parameter has no evidence about.
+
+    THE PHONE'S HISTORY IS NOT ONE OF THOSE, and it is the reason the parameter
+    exists at all. ``mobile.daemon`` builds its durable listing from these rows
+    and publishes them as the phone's conversation list, which the client
+    REPLACES wholesale -- so an unreadable store read as "no conversations" is
+    the same confidently-wrong membership this whole change removes from the
+    desktop and TUI sidebars, one surface out. That caller passes
+    ``strict=True`` and keeps the last listing it did read.
     """
     rows: list[SessionRow] = []
-    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit):
+    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit, strict=strict):
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(

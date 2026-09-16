@@ -506,6 +506,97 @@ class TranscriptBlock(Static):
                 return region.width
         return self._fold_hint or fallback
 
+    def fit_width(self, width: int | None) -> int:
+        """The width to build at: a container's published lane, else the ladder.
+
+        The container knows the lane the moment its own layout is reconciled
+        (:meth:`TranscriptView._refit_ledger_lane`), and when it says so that
+        number is the authority. Re-deriving one here instead asks a SECOND
+        question — the ladder again — and the two only agree by accident, not by
+        construction: the ladder's map-derived rungs (``region``/``size``) are
+        answered by the compositor the frame is painted from, so in the window
+        this funnel exists for they already name the NEW lane while the row's
+        *held* content is the old one (measured on the base tree at 130x36, the
+        torn frame: ``built=79, region.width=126, size.width=126,
+        outer_size.width=126`` for every row — nothing lags but the authored
+        width, which is why re-deriving is not the fix; the NOTIFICATION is, and
+        the funnel is it). Threading the container's number through is therefore
+        a guarantee rather than a correction: a rebuild always lands on the lane
+        the container published it for, whatever any second derivation would
+        have said in that frame.
+
+        ``None`` or ``0`` falls through to :meth:`fold_width` unchanged, so a
+        caller with no lane to publish (a hover, an expand, the name-column
+        resync) keeps the existing ladder exactly.
+        """
+        if width is not None and width > 0:
+            return width
+        return self.fold_width(0)
+
+    def authored_width(self, lane: int) -> int:
+        """The width to re-author this block at, given the container's lane.
+
+        The container publishes ONE lane per lane change — the transcript's own
+        reconciled ``scrollable_content_region`` — and for a block whose box IS
+        the row it fills, that lane is its box, so the base answers the lane
+        unchanged. Publishing the container's number rather than letting every
+        block re-derive one is what makes the walk a guarantee instead of a
+        second opinion — :meth:`fit_width` is the ledger rows' half of the same
+        question ("the width to build at, given the lane the container
+        published"), and this is the authored blocks' half.
+
+        The exception is deliberately one case wide, and it is a block that
+        PINS ITS OWN BOX: its box is not the lane and the lane cannot name it,
+        so the lane is the wrong rebuild width for it. Publishing the lane to
+        such a block authors its rows wider than the box they are painted in,
+        which is a wrap — and, for a notice, the loss of the single text column
+        ``NoticeBlock._build`` maintains — rather than the harmless no-op the
+        lane is for a block that fills its row. Such a block overrides this and
+        answers with the width it is pinned to; nothing else changes, because
+        ``refit_width`` keeps the one guard and the one rebuild, and the same
+        number then arrives from the block's own ``on_resize`` too.
+        """
+        return lane
+
+    def refit_width(self, width: int) -> None:
+        """Re-author this block's rows if the LANE it was built at has moved.
+
+        The counterpart of :meth:`fit_width` for a block that AUTHORS its rows —
+        it wraps or truncates text itself, so a stale width is baked into its
+        content rather than re-folded at paint time. Called by
+        :meth:`TranscriptView._refit_authored_blocks` with the width that block
+        answers for the lane the container just reconciled
+        (:meth:`authored_width` — the lane itself, unless the block pins its own
+        box), and by the block's own ``on_resize`` with the width its layout
+        pass reports, so the two triggers share one guard and one rebuild and
+        cannot disagree about what "stale" means.
+
+        It has to exist because the notification such a block would rely on —
+        ``Resize`` — is not delivered in one specific frame; :meth:`
+        TranscriptView._refit_ledger_lane` documents the mechanics. Measured on
+        the base tree at 130x36, in the lane-change frame itself: a long
+        ``UserBlock`` stayed wrapped for the 79-cell sidebar lane inside a
+        126-cell box — four prose rows stopping ~50 cells short of the tool rows
+        directly above them — and it did not heal on hover, unlike a ledger row.
+        Pre-existing on main rather than introduced by the lane funnel (the base
+        tree repairs neither), but it is the same defect on the same screen, so
+        it is closed here rather than left as a second tear to rediscover.
+
+        The default is a NO-OP: most blocks hand a renderable to Rich and fold it
+        at PAINT time, so they have no width baked in and nothing to re-fit. The
+        rule for the overriders is "a block that wraps or truncates its own text
+        rather than handing Rich a renderable" — today ``UserBlock``,
+        ``NoticeBlock``, ``WorkingBlock``, ``AssistantBlock``, ``ImageBlock``,
+        ``ApprovalBlock`` and ``KeyPromptBlock``, with ``InstructionBlock``
+        inheriting ``UserBlock``'s (R2, review round 2: this sentence named
+        three of the seven, which is the map a maintainer reads to decide
+        whether a new block needs an override). Ledger rows
+        are deliberately not part of this walk — they thread the lane into their
+        rebuild through :meth:`_repaint_ledger_rows`, which has to know which row
+        type it is holding.
+        """
+        return
+
     def invalidate_row_measurements(self) -> None:
         """Drop the memoized row counts (content or WIDTH changed).
 
@@ -599,10 +690,14 @@ class TranscriptBlock(Static):
         state (a tool card knows; a streaming message knows from its source
         text) never pays for a full render just to be spaced correctly.
         The default measures whatever renderable is applied, memoized per
-        content revision.
+        content revision. The width comes from the fold LADDER like every other
+        authoring site: a block a builder has already told where it is going
+        (`set_fold_hint`, e.g. a page settled before its mount) must not be
+        judged at the 80-column fallback, or `_settle_gaps` decides spacing for
+        a fold the block is never painted at.
         """
         if self._multirow_cache is None:
-            self._multirow_cache = _count_rows(self._content, self.size.width or 80) > 1
+            self._multirow_cache = _count_rows(self._content, self.fold_width(80)) > 1
         return self._multirow_cache
 
     # -- text selection (TUI-021) -------------------------------------------
@@ -770,6 +865,21 @@ class ExpandableActionBlock(TranscriptBlock):
     #: which is the honest answer for a row that has not been drawn yet.
     _built_width: int = -1
 
+    #: The shared name column the APPLIED content was built with, written beside
+    #: :attr:`_built_width` and for the same reason — it is the second input to
+    #: the geometry that was painted, and the only one a width guard cannot stand
+    #: in for.
+    #:
+    #: The two are written together because they are read together by
+    #: :meth:`_layout_moved`; ``None`` is "nothing applied yet", and it never
+    #: equals a real column, so a row that has never painted always re-fits on its
+    #: first layout pass. That is the ground this attribute exists to restore: a
+    #: row authored while it was parentless cannot read the shared column at all
+    #: (there is no ledger to ask), so it bakes the floor and records the width it
+    #: authored at — and when a fold hint has promised exactly that width, the
+    #: width term alone reported "unchanged" and the row kept the floor for good.
+    _built_name_col: int | None = None
+
     @classmethod
     def _bound_keys(cls) -> frozenset[str]:
         """Every key this row class answers itself, MERGED across the hierarchy.
@@ -808,9 +918,69 @@ class ExpandableActionBlock(TranscriptBlock):
         """Whether opening the row reveals more than its one-line summary."""
         raise NotImplementedError
 
-    def _refresh_row(self) -> None:
-        """Rebuild and apply this subclass's current summary/expansion."""
+    def _refresh_row(self, width: int | None = None) -> None:
+        """Rebuild and apply this subclass's current summary/expansion.
+
+        ``width`` is the LANE a container published for the rebuild
+        (:meth:`TranscriptView._refit_ledger_lane`) or ``None`` when the caller
+        has none and the row derives its own; every implementation must accept
+        both, which is what lets the ledger's one repaint funnel carry a lane
+        without knowing which row type it is holding.
+        """
         raise NotImplementedError
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells, as THIS row reads it.
+
+        Declared on the base because :meth:`_layout_moved` asks the question of
+        every ledger row, and each row type already answers it: the column is the
+        transcript's shared value above the width gate and the floor below it, or
+        the floor for a row with no ledger to ask. Implementing the ladder once
+        here instead would give the base an import of `tool_card` at class-body
+        time (the modules import each other) and, worse, a second copy of the
+        gate — which is the kind of duplicate that drifts and tears the column.
+        """
+        raise NotImplementedError
+
+    def _layout_moved(self, width: int) -> bool:
+        """Whether the APPLIED content is stale for a row laid out at ``width``.
+
+        Every ledger row's ``on_resize`` used to guard on the width alone, and the
+        width is only ONE of the two inputs its geometry is built from. The other
+        is the shared name column, which a row cannot read until it is mounted.
+
+        That is not a rare window. The replay and paging paths author a row before
+        they append it — deliberately, so the row folds once at its destination
+        width instead of flashing at the terminal's — and they say where it is
+        going through :meth:`set_fold_hint`. So the row builds parentless, bakes
+        the floor (`NAME_COL`, because there is no ledger to ask), records the
+        hinted width, and is then laid out at EXACTLY that width. The width term
+        says "unchanged", the rebuild is skipped, and the row keeps the floor
+        while its mounted neighbours paint the shared column: two `bash` rows on
+        one screen at different summary offsets, which is the tear the operator
+        reported. A pointer crossing such a row re-fitted THAT row and no other,
+        which is why it read as tearing under a moving cursor and why it healed
+        one row at a time.
+
+        Asked of the subclass's own :meth:`_name_col`, so the builder's ladder and
+        this question cannot disagree, and against :attr:`_built_name_col` — the
+        column the applied content was really built with — never against the
+        current column alone, which would rebuild every row on every resize that
+        happened to leave the width alone.
+        """
+        from local_operator.tui.widgets.tool_card import row_body_width
+
+        if width != self._built_width:
+            return True
+        if self._built_name_col is None:
+            # Nothing is applied to be stale: `_built_name_col` is written only
+            # where content is really applied, so `None` covers both a row that
+            # has never built (the `-1` placeholder) and one whose content was
+            # measured but could not be applied — the detached rung. Reading that
+            # as "the column moved" would rebuild rows no reader can see, on
+            # every height-only resize.
+            return False
+        return self._name_col(row_body_width(width)) != self._built_name_col
 
     def _row_indent(self) -> int:
         """Cells of left inset on this row's summary line AS BUILT.
@@ -1120,7 +1290,18 @@ class UserBlock(TranscriptBlock):
     #: is most crowded and the reader needs it most.
     MIN_BODY = 8
 
-    def __init__(self, text: str, attachments: int = 0) -> None:
+    def __init__(self, text: str, attachments: int = 0, *, fold_width: int = 0) -> None:
+        """``fold_width`` is the width this prompt is about to be given.
+
+        This block wraps in ``__init__``, so unlike a streaming row there is no
+        later authoring pass a caller could hint after: either the width is
+        known HERE or the rows are authored at the 80-column fallback and pin
+        that fold as their height until the first layout's resize lands — the
+        narrow-then-wide flash on a page mounted above the viewport, which is
+        the one place the reader is looking when a page arrives. Supplied by a
+        builder that knows the destination (`session_presentation`'s replay
+        fold, `entry_block` on the subagent page); zero keeps the fallback.
+        """
         super().__init__()
         self.add_class("user-block")
         self._text = text
@@ -1132,6 +1313,12 @@ class UserBlock(TranscriptBlock):
         #: by `_build` at the width it actually wrapped at, so `copy_row_is_chrome`
         #: never has to re-derive it and cannot disagree with the frame.
         self._receipt_row: int | None = None
+        #: The width `_build` last authored the rows at; `on_resize` compares
+        #: against it so a height-only resize does not re-wrap a prompt.
+        self._built_width: int = -1
+        # BEFORE `_build`: a hint supplied after the rows exist is a width
+        # nothing will read (the ladder is only consulted while authoring).
+        self.set_fold_hint(fold_width)
         self.set_content(self._build())
         self.finalize()
 
@@ -1180,11 +1367,45 @@ class UserBlock(TranscriptBlock):
         then settles — the second pass produces the same rows, so it converges
         rather than oscillating). A HEIGHT-only terminal resize costs none: the
         block's width is unchanged, so it is never sent a resize at all.
+
+        Guarded on the WIDTH, the same short-circuit `AssistantBlock.on_resize`
+        and `ToolCard.on_resize` document at length, and this block needs it for
+        one more case than they do: a page mounted above the viewport is
+        authored at its destination width (see `UserBlock.__init__`), so the
+        mount's own 0→W resize — which every pinned height raises — now
+        reproduces rows it has already been given. Measured for one page:
+        `UserBlock` authored 18 times before the ladder fix, 12 after it, and 6
+        with this guard, i.e. the guard removes the last build per block per
+        mount. Safe because the rows are a pure function of the text, the
+        attachment count and the width, all three fixed at construction — a
+        prompt whose body changed is a new block — and `retheme` rebuilds
+        directly without consulting this. The gap re-ask stays OUTSIDE the
+        guard (it answers a spacing question the width did not settle), which is
+        why this delegates to :meth:`refit_width` rather than inlining: the
+        container's lane walk has to reach the SAME rebuild and the SAME
+        unconditional re-ask, or a prompt re-wrapped by one trigger and not the
+        other lands a row off its neighbours.
         """
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-wrap the prompt if ``width`` is not the width it holds.
+
+        ``width`` is either the lane the container published
+        (:meth:`TranscriptView._refit_authored_blocks`) or the width this
+        block's own layout pass reported. It is used as the REBUILD width, not
+        merely as the trigger, so a rebuild cannot land on a third number: the
+        rows are a pure function of the prompt, the attachment count and this
+        width, which is what makes the guard sound ("the same rows" is exactly
+        what a matching width means) and what keeps a prompt re-fitted by the
+        lane walk identical to one re-fitted by its own ``Resize``.
+        """
+        lane = width if width > 0 else self.fold_width(80)
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(self._build())
+            if lane != self._built_width:
+                self.set_content(self._build(lane))
         finally:
             self._finalized = was_finalized
         parent = self.parent
@@ -1251,7 +1472,7 @@ class UserBlock(TranscriptBlock):
         finally:
             self._finalized = was_finalized
 
-    def _build(self) -> RenderableType:
+    def _build(self, width: int | None = None) -> RenderableType:
         """The prompt, every row prefixed by the gutter rule.
 
         The height is PINNED to the row count rather than left to ``auto``, the
@@ -1269,10 +1490,23 @@ class UserBlock(TranscriptBlock):
         A block that authors its own rows KNOWS its height; measuring it is the
         bug. Writing the style is itself a layout refresh, so the correction
         lands on the next pass.
+
+        ``width`` is the lane a caller has already published
+        (:meth:`refit_width`), and it is used verbatim when it is a real width —
+        the same precedence :meth:`fit_width` gives a container's number, kept
+        here as well so the rows a rebuild authors and the ``_built_width`` its
+        guard records can never be two different measurements. ``None`` keeps
+        the ladder, which is what construction and :meth:`retheme` want.
         """
         rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
         text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        # The LADDER, not `size.width or 80`: before this block has a size the
+        # ladder can still answer with the width it is about to be given (its
+        # parent's content region, or the hint a builder supplied). Reading the
+        # size alone is what made a detached prompt unable to receive one.
+        lane = width if width is not None and width > 0 else self.fold_width(80)
+        body = max(lane - self.RULE_COLS, self.MIN_BODY)
+        self._built_width = lane
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
         rows = self._rows(body)
         self._set_authored_height(len(rows))
@@ -1318,6 +1552,19 @@ class NoticeBlock(TranscriptBlock):
 
     SPACING_KIND = "notice"
 
+    #: Set by the app on an MCP failure notice: ``(server name, failure text,
+    #: column)``. The text is FITTED to a column when it is composed, so the
+    #: signpost ladder has to be re-run if the terminal later gives the block a
+    #: different one (``OperatorApp._refit_mcp_failure_notices``).
+    #:
+    #: It lives ON the block rather than in a side table keyed by the widget,
+    #: because a table loses rows: the app's boot sync runs BETWEEN two notices
+    #: being appended, and at that moment the first is created but not yet
+    #: MOUNTED, so an ``is_mounted`` sweep of that table pruned a live row and the
+    #: notice silently stopped tracking its column (measured at boot with two
+    #: failures; design round 2, D2-1). Every other notice leaves it ``None``.
+    mcp_failure_fit: tuple[str, str, int] | None = None
+
     #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
     #: settled tool summary — which is right for a receipt nobody needs to read
     #: and wrong for one that answers a question the user is actively asking
@@ -1345,12 +1592,25 @@ class NoticeBlock(TranscriptBlock):
         "error": "danger",
     }
 
-    def __init__(self, text: str, kind: NoticeKind = "info") -> None:
+    def __init__(self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0) -> None:
+        """``fold_width``: the width this notice is about to be given.
+
+        Same reason ``UserBlock.__init__`` documents at length — a notice wraps
+        itself in ``_build``, so the hint has to be set before the rows exist or
+        the wrap is authored at the fallback and the height pin measures it.
+        The boot-column notice is the one place a wrong fold is not merely a
+        flash: the app hands it the card's width, and a build folded for the
+        terminal wraps again inside it.
+        """
         super().__init__()
         self.add_class("notice-block")
         self._text = text
         self._token = self._KIND_TOKENS.get(kind, "dim")
         self._glyph = NOTICE_GLYPHS.get(kind, "·")
+        #: The width `_build` last authored the rows at; `on_resize` compares
+        #: against it so a height-only resize does not re-wrap the notice.
+        self._built_width: int = -1
+        self.set_fold_hint(fold_width)
         self.set_content(self._build())
         self.finalize()
 
@@ -1454,11 +1714,77 @@ class NoticeBlock(TranscriptBlock):
         A re-wrap is a HEIGHT change, so the spacing rule has to be asked again:
         the same notice is one row at 90 columns and three at 40, and adaptive
         spacing gaps a multi-row block where it packs single-row ones.
+
+        Guarded on the WIDTH like ``UserBlock.on_resize``: a notice built at
+        the width it is about to be given is re-authored identically by the
+        mount's own 0→W resize, and a notice whose text is replaced goes
+        through :meth:`restate`, which rebuilds directly. The gap re-ask stays
+        outside the guard, for the reason recorded there — which is why this
+        delegates to :meth:`refit_width`, the same rebuild the container's lane
+        walk reaches, so a notice re-wrapped by one trigger and not the other
+        cannot land off its neighbours.
         """
+        self.refit_width(self.fold_width(80))
+
+    def authored_width(self, lane: int) -> int:
+        """The width this notice authors at, given the lane the container publishes.
+
+        Most notices fill their row, so the lane IS their box and the inherited
+        answer is right. A BOOT-COLUMN notice does not: while the boot card is
+        up, ``OperatorApp._sync_boot_column_width`` pins its width to the card
+        and centres it on the card's column, so its box is the card — 75 cells
+        at 100 columns — while the transcript's lane is 96. Handed that lane,
+        the walk re-authored the notice 21 cells wider than the box it is
+        painted in (measured on the pre-fix head at 100x30: ``built=96
+        outer=75``), which is a wrap of content the block thought it had
+        already folded: the block's own ``Resize`` then handed it 75, so one
+        lane change rebuilt it TWICE and the width finally held was decided by
+        whichever trigger landed last (R1, review round 2 / Q-R2-1, QA round
+        2 — the row that left the single text column ``_build`` maintains,
+        painting at the box's left edge instead of the hanging column).
+
+        The width is read back from the style the app pinned it to rather than
+        from a reconciled ``size``/``outer_size``, because the pin is what the
+        box is arranged FROM: it is written in the same statement that sets the
+        class, so it is already the card the row will be given, where a
+        reconciled size can still hold the previous card in the frame the walk
+        runs in (measured at 190x36: the walk's frame had ``size=98`` with the
+        pin already re-resolved to 100). This is the same read the app itself
+        makes of a resolved layout input when it debits the sidebar
+        (``_sync_boot_column_width``).
+
+        Answers the lane when the block is not pinned — as a ``1fr`` notice is
+        not — so the ordinary notice keeps the container's number verbatim.
+        """
+        if self.has_class(BOOT_COLUMN_CLASS):
+            pinned = self.styles.width
+            if pinned is not None and not pinned.is_fraction:
+                width = int(pinned.value or 0)
+                if width > 0:
+                    return width
+        return lane
+
+    def refit_width(self, width: int) -> None:
+        """Re-wrap the notice if ``width`` is not the width it holds.
+
+        ``width`` is either the width the container published for this block
+        (:meth:`TranscriptView._refit_authored_blocks`, through
+        :meth:`authored_width`, so a pinned notice is handed its own box rather
+        than the lane) or the width this block's own layout pass reported, and
+        it is used as the REBUILD width rather than only as the trigger — the
+        rows are a pure function of the text and this width, so a rebuild has to
+        author at exactly the width the guard compared against. Most notices are
+        single-row and unaffected by a lane change; the ones that wrap are the
+        ``/stop all`` listings and refusals, and those were reaching
+        :meth:`on_resize` — the notification this funnel exists because the
+        compositor can drop.
+        """
+        lane = width if width > 0 else self.fold_width(80)
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(self._build())
+            if lane != self._built_width:
+                self.set_content(self._build(lane))
         finally:
             self._finalized = was_finalized
         parent = self.parent
@@ -1530,7 +1856,7 @@ class NoticeBlock(TranscriptBlock):
             rows.pop()
         return rows
 
-    def _build(self) -> RenderableType:
+    def _build(self, width: int | None = None) -> RenderableType:
         """Glyph + text on the spine, WRAPPED with a hanging indent.
 
         A notice is the one block whose text can exceed its row and whose author
@@ -1560,11 +1886,23 @@ class NoticeBlock(TranscriptBlock):
         shared left edge instead. A notice is prose, not a centred mass like the
         wordmark or the card's caret, so it gets the same treatment: one column,
         found by the block's offset rather than by each row's own width.
+
+        ``width`` is the lane a caller has already published
+        (:meth:`refit_width`) and is used verbatim, so the rows and the
+        ``_built_width`` its guard records always describe the same build;
+        ``None`` keeps the ladder for construction and :meth:`retheme`.
         """
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
-        body = self.body_budget(self.size.width or 80)
+        # The ladder, for the reason `UserBlock._build` records: a detached
+        # notice must be able to fold for the destination its builder named.
+        # A lane a caller published (`refit_width`) is used verbatim instead, so
+        # the rows and the `_built_width` the guard compares cannot be two
+        # different measurements.
+        lane = width if width is not None and width > 0 else self.fold_width(80)
+        body = self.body_budget(lane)
+        self._built_width = lane
         rows = self._rows(body)
         # PINNED to the authored row count, for the reason ``UserBlock._build``
         # gives: under ``auto`` the engine measures this block, and the first
@@ -1631,7 +1969,7 @@ class WakeBlock(ExpandableActionBlock):
     #: of row. Catch-up vs live is the SUMMARY, not the name.
     tool_name = "wake"
 
-    def __init__(self, text: str, *, catchup: bool = False) -> None:
+    def __init__(self, text: str, *, catchup: bool = False, fold_width: int = 0) -> None:
         super().__init__()
         self._text = text
         self._catchup = catchup
@@ -1644,6 +1982,9 @@ class WakeBlock(ExpandableActionBlock):
         self._row_count = 1
         self._applied_rows = -1
         self._built_width = -1
+        # Before the first row build: a hint set afterwards is never read
+        # (see `UserBlock.__init__`).
+        self.set_fold_hint(fold_width)
         self._refresh_row()
         self.finalize()
 
@@ -1652,9 +1993,16 @@ class WakeBlock(ExpandableActionBlock):
         return True
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the row at the new width (same guard as the tool card)."""
+        """Re-fit the row at the new width — or at a new shared column.
+
+        Same guard as the tool card, and the same two terms: the width this row is
+        laid out at and the ledger's shared column. A resize that moved neither
+        reproduces the row byte for byte; see
+        :meth:`ExpandableActionBlock._layout_moved` for why the column has to be
+        one of them.
+        """
         size = getattr(event, "size", None)
-        if size is not None and size.width == self._built_width:
+        if size is not None and not self._layout_moved(size.width):
             return
         self._refresh_row()
 
@@ -1674,23 +2022,37 @@ class WakeBlock(ExpandableActionBlock):
             return OUTPUT_INDENT
         return self._row_indent() + ToolCard.ICON_COLS
 
-    def refresh_row(self) -> None:
-        """Repaint at the current width — the ledger's shared column moved."""
-        self._refresh_row()
+    def refresh_row(self, width: int | None = None) -> None:
+        """Repaint at the current width — the ledger's shared column moved.
 
-    def _refresh_row(self) -> None:
+        ``width`` is the lane the container published when it changed
+        (:meth:`TranscriptView._refit_ledger_lane`); ``None`` means the caller
+        has none and the row derives its own, which is what a hover, an expand
+        or a name-column resync does.
+        """
+        self._refresh_row(width)
+
+    def _refresh_row(self, width: int | None = None) -> None:
         """Rebuild the card at its OWN width (D3), matching :class:`ToolCard`.
 
         Finalization is bypassed deliberately: a resize, a hover, or an expand
         must be able to re-fit a settled card, and the content it produces is
         a pure function of the card's state, never new history.
         """
-        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
 
+        # A published lane IS the answer, and a row already built at it has
+        # nothing to redo: the container broadcasts to every mounted ledger row
+        # on a lane change, and most of them re-fitted themselves off their own
+        # `Resize` in the same pass. Without this guard that broadcast is O(rows)
+        # rebuilds on a sidebar toggle or a terminal resize.
+        if width is not None and width > 0 and width == self._built_width:
+            return
         # Same ladder as `ToolCard._refresh_row`, for the same reason: a row
         # built before its first layout pass must fold at the width it is
-        # about to be given, not at the terminal's or at 80.
-        width = self.fold_width(0)
+        # about to be given, not at the terminal's or at 80. A lane published
+        # by the container outranks that ladder -- see :meth:`fit_width`.
+        width = self.fit_width(width)
         detached = False
         if width <= 0:
             try:
@@ -1703,6 +2065,11 @@ class WakeBlock(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
+        # The shared column is the OTHER input this content was built from — and
+        # the one a parentless build cannot read, so it bakes the floor. Recorded
+        # beside the width because :meth:`_layout_moved` reads the pair to decide
+        # whether this row still fits the ledger it just landed in.
+        self._built_name_col = self._name_col(row_body_width(width))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -1733,6 +2100,7 @@ class WakeBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            row_body_width,
             row_indent,
             truncate_cells,
         )
@@ -1746,7 +2114,10 @@ class WakeBlock(ExpandableActionBlock):
         # `_built_width`, which this runs before updating, and through the
         # ledger's one derivation so the copy gutter reads the same rule.
         indent = row_indent(width)
-        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
+        # The content box this row is built in — the SAME derivation
+        # `_refresh_row` records the name column against, so the guard's question
+        # and the builder's answer cannot be asked of two different widths (R2).
+        width = row_body_width(width)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -2014,11 +2385,15 @@ class PeerMessageBlock(ExpandableActionBlock):
     #: alone is a floor on half the arithmetic.
     MIN_BODY = 8
 
-    def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
+    def __init__(
+        self, body: str, sender: dict[str, object] | None = None, *, fold_width: int = 0
+    ) -> None:
         super().__init__()
         self.add_class("peer-message-block")
         self._text = body
         self._sender = sender or {}
+        # Before the first row build (see `UserBlock.__init__`).
+        self.set_fold_hint(fold_width)
         self._expanded = False
         self._hovered = False
         self._focused = False
@@ -2033,7 +2408,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         #: ONCE here rather than on every repaint.
         #:
         #: `_refresh_row` runs on hover, focus, expand/collapse, `retheme`,
-        #: `on_resize` AND `_invalidate_name_col` — and that last one repaints
+        #: `on_resize` AND the name-column resync — and that last one repaints
         #: every ledger block when the shared name column moves, so one peer
         #: card's cost is paid by the whole ledger. The strip is a regex plus a
         #: per-character `unicodedata.category` scan, and it runs over the
@@ -2254,9 +2629,16 @@ class PeerMessageBlock(ExpandableActionBlock):
         return identity, self._snippet
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the card at the new width (same guard as the tool card)."""
+        """Re-fit the card at the new width — or at a new shared column.
+
+        Same guard as the tool card, and the same two terms: the width this row is
+        laid out at and the ledger's shared column. Every ledger row class shares
+        it, which is the whole point of the guard living on the base — a peer row
+        sits between tool rows, so a peer left on the width-only form keeps the
+        floor column until a pointer crosses it (review round 1, R1).
+        """
         size = getattr(event, "size", None)
-        if size is not None and size.width == self._built_width:
+        if size is not None and not self._layout_moved(size.width):
             return
         self._refresh_row()
 
@@ -2286,23 +2668,32 @@ class PeerMessageBlock(ExpandableActionBlock):
         """
         return index < self._chrome_rows
 
-    def refresh_row(self) -> None:
-        """Repaint at the current width — the ledger's shared column moved."""
-        self._refresh_row()
+    def refresh_row(self, width: int | None = None) -> None:
+        """Repaint at the current width — the ledger's shared column moved.
 
-    def _refresh_row(self) -> None:
+        ``width`` is the lane the container published when it changed; ``None``
+        means the caller has none and the row derives its own.
+        """
+        self._refresh_row(width)
+
+    def _refresh_row(self, width: int | None = None) -> None:
         """Rebuild the card at its OWN width, matching :class:`WakeBlock`.
 
         Finalization is bypassed deliberately: a resize, a hover, or an expand
         must be able to re-fit a settled card, and the content it produces is a
         pure function of the card's state, never new history.
         """
-        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
 
+        # Same as `WakeBlock._refresh_row`: a published lane is the answer, a
+        # row already at it has nothing to redo, and `None` falls to the same
+        # ladder it always did.
+        if width is not None and width > 0 and width == self._built_width:
+            return
         # Same ladder as `WakeBlock._refresh_row`, for the same reason: a row
         # built before its first layout pass must fold at the width it is about
         # to be given, not at the terminal's or at 80.
-        width = self.fold_width(0)
+        width = self.fit_width(width)
         detached = False
         if width <= 0:
             try:
@@ -2315,6 +2706,11 @@ class PeerMessageBlock(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
+        # The shared column is the OTHER input this content was built from — and
+        # the one a parentless build cannot read, so it bakes the floor. Recorded
+        # beside the width because :meth:`_layout_moved` reads the pair to decide
+        # whether this row still fits the ledger it just landed in.
+        self._built_name_col = self._name_col(row_body_width(width))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -2345,6 +2741,7 @@ class PeerMessageBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            row_body_width,
             row_indent,
             truncate_cells,
         )
@@ -2358,7 +2755,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         # `_built_width`, which this runs before updating, and through the
         # ledger's one derivation so the copy gutter reads the same rule.
         indent = row_indent(width)
-        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
+        # The content box this row is built in — the SAME derivation
+        # `_refresh_row` records the name column against, so the guard's question
+        # and the builder's answer cannot be asked of two different widths (R2).
+        width = row_body_width(width)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -2685,6 +3085,8 @@ class WorkingBlock(TranscriptBlock):
         *,
         clock: bool = True,
         clock_from: float | None = None,
+        clock_from_epoch: float | None = None,
+        fold_width: int = 0,
     ) -> None:
         super().__init__()
         self.add_class("working-block")
@@ -2710,7 +3112,23 @@ class WorkingBlock(TranscriptBlock):
         # A zero supplied by the CALLER, overriding the phase's own. See
         # :meth:`set_activity`; ``None`` means the phase's zero is correct.
         self._clock_from = clock_from
+        # The same override expressed as the WALL-CLOCK instant the session
+        # recorded for this phase, for the phases whose zero lives outside this
+        # widget (a viewer that attached mid-turn). Kept beside the monotonic
+        # value rather than replacing it because only the epoch can be compared
+        # for "has the phase's own zero changed" — the monotonic conversion
+        # moves on every call — and because it is what a later re-seed has to
+        # match against. Converted ONCE, on a phase change; see
+        # :meth:`set_activity`.
+        self._clock_from_epoch = clock_from_epoch
+        self._seed_clock_from_epoch()
         self._clock = ""
+        #: The width the row was last authored at; `on_resize` compares against
+        #: it so a height-only resize does not re-truncate a one-row line.
+        self._built_width: int = -1
+        # Before the first `_paint`: the row's truncation point is a function of
+        # the width, so a hint supplied after construction is never read.
+        self.set_fold_hint(fold_width)
         self._paint()
 
     @property
@@ -2725,6 +3143,7 @@ class WorkingBlock(TranscriptBlock):
         *,
         clock: bool = True,
         clock_from: float | None = None,
+        clock_from_epoch: float | None = None,
     ) -> None:
         """Name what the turn is doing now.
 
@@ -2739,6 +3158,23 @@ class WorkingBlock(TranscriptBlock):
         phase containing it. ``None`` keeps the phase's own zero, which is right
         for every state whose label and phase begin together.
 
+        ``clock_from_epoch`` is the same override for the phases whose zero the
+        WIDGET cannot have observed — ``thinking``, ``responding`` and
+        ``composing`` — where the session folded the instant the phase began
+        from the producer's own events. It is what makes a viewer that attaches
+        mid-turn resume the true age: this row is constructed at the switch, so
+        its phase zero is the switch, and without the seed the operator's own
+        report applies — the thinking indicator counting from the moment they
+        came back rather than from when the model call started.
+
+        It is converted to a monotonic instant ONCE, here, on the phase change
+        (:func:`tool_card.monotonic_from_epoch`), and every tick afterwards
+        counts on ``time.monotonic``: an elapsed-time reading must not move
+        because something adjusted the system clock, and a DST jump on a
+        seeded row would be a number nobody could explain. ``clock_from_epoch``
+        wins over ``clock_from`` when both arrive; the two describe different
+        phases and the caller only ever passes the one that matches.
+
         ``clock=False`` says the caller knows the LABEL but not when the work it
         names began, and the number is then withheld rather than counted from
         this moment. The case that forced it: a sidebar switch adopts a tool the
@@ -2750,9 +3186,40 @@ class WorkingBlock(TranscriptBlock):
         the adjacent number read as a claim ABOUT that tool, so the label is
         kept and the clock is dropped: this row's whole contract is that every
         number on it was derived from an event the app received, and a clock
-        started from the wrong zero is worse than no clock. There is no honest
-        alternative reading available — the start event carries no timestamp, so
-        the true age is not recoverable on this surface at any price.
+        started from the wrong zero is worse than no clock.
+
+        Withholding is still the answer whenever the true age is genuinely
+        unavailable, and that is a real population rather than a hypothetical:
+        a call whose producer sent no ``started_at_epoch`` (an older runtime),
+        and every child row inside ``subagent_view``. For those the timestamp
+        does not exist on this surface at any price, so the number is withheld
+        rather than invented — ``clock=False``, which paints NO clock glyph at
+        all (``_clock_text`` still computes a nominal ``0s``; what drops it is
+        :meth:`_paint`'s ``if self._clock`` gate) while the glyph's cells stay
+        reserved, so the label beside it clips at the same column it would
+        otherwise. No glyph and a number counting up from zero are different
+        pictures, and which one a phase gets is a decision the next paragraph
+        makes separately rather than a side effect of it.
+
+        A fold that does not match the phase the app derived withholds the
+        SEED, not the number, and the row counts from its own phase zero
+        instead. A facade with no fold and a legacy owner land there; so do
+        the compaction and retry fallbacks, and for those that zero is the
+        honest reading rather than a substitute for one. The seed exists to
+        repair a zero this widget cannot have observed
+        (:meth:`_seed_clock_from_epoch`), so its absence says nothing about
+        the phase's own zero — the instant this row entered its phase, true
+        for every state whose label and phase begin together and never another
+        phase's age — and the fallbacks are exactly such a state.
+        ``OperatorApp._current_activity`` returns the label AS the phase for
+        ``compacting context`` and ``retrying (attempt n)`` precisely because
+        the fold models no compaction or retry edge, so the phase starts when
+        the app derived it from the event that began the pass, and the ``0s``
+        growing under that label IS the age of the pass the label names.
+        Withholding answers the other case — the label arriving at an instant
+        that is not the work's start, as the adopted tool above does — so a
+        mismatch is never a reason to blank a row that is telling the truth;
+        the matching rules live in ``OperatorApp._current_activity``.
 
         The clock restarts only when the PHASE changes, not whenever the label
         does. Keying it to the rendered string made the row refute itself: one
@@ -2771,13 +3238,48 @@ class WorkingBlock(TranscriptBlock):
         elif (
             activity == self._activity
             and clock == self._clock_known
-            and clock_from == self._clock_from
+            and clock_from_epoch == self._clock_from_epoch
+            # WHICH value is the anchor decides which one has to be compared,
+            # and getting that wrong is silent in both directions. With an
+            # epoch the epoch IS the anchor and the monotonic instant is only
+            # its image, so equality of the epoch is the whole test — comparing
+            # the image instead can never match the `None` this arm passes as
+            # `clock_from` for a non-epoch phase, and re-deriving the image on
+            # every repaint would put the counter back on the WALL clock (a
+            # system-clock adjustment or a DST change after the seed would move
+            # a reading that is supposed to be immune to both). With no epoch
+            # the monotonic value is the anchor and must itself be compared, or
+            # a running batch that sheds its oldest call keeps the stale zero
+            # and the band reports the shed sibling's age (D9).
+            and (clock_from_epoch is not None or clock_from == self._clock_from)
         ):
             return
         self._activity = activity
         self._clock_known = clock
+        self._clock_from_epoch = clock_from_epoch
         self._clock_from = clock_from
+        self._seed_clock_from_epoch()
         self._paint()
+
+    def _seed_clock_from_epoch(self) -> None:
+        """Convert a session-supplied epoch into this widget's monotonic zero.
+
+        Called wherever ``_clock_from_epoch`` is set — the constructor and
+        :meth:`set_activity` — so the conversion exists once. Kept OFF the paint
+        path deliberately: the epoch is converted when the phase's anchor
+        CHANGES, not on every repaint, because recomputing ``clock() - (now -
+        epoch)`` per frame would make the counter follow the wall clock again
+        and undoing that is the entire point of seeding a monotonic instant.
+
+        Lazy import for the same reason the sibling duration formatter is
+        imported this way: ``tool_card`` imports this module, so a module-level
+        import of the converter here would be a cycle.
+        """
+        if self._clock_from_epoch is None:
+            return
+        from local_operator.tui.widgets.tool_card import monotonic_from_epoch
+
+        self._clock_from = monotonic_from_epoch(self._clock_from_epoch)
 
     def on_mount(self) -> None:
         self._sync_rate()
@@ -2843,8 +3345,32 @@ class WorkingBlock(TranscriptBlock):
         self._paint()
 
     def on_resize(self, event: object) -> None:
-        """Re-truncate at the new width (the label is clipped, never wrapped)."""
-        self._paint()
+        """Re-truncate at the new width (the label is clipped, never wrapped).
+
+        Guarded on the WIDTH like ``UserBlock.on_resize``: the row is the
+        label's truncation point, one spinner cell and a clock the cadence
+        repaints anyway, so a resize that did not move the width reproduces the
+        row already held. Nothing else reaches this row without a paint either
+        (`set_activity`, `sync_animation_rate` and `_tick` all call
+        :meth:`_paint` directly), so the guard can only ever remove a duplicate.
+        Delegated to :meth:`refit_width` so the container's lane walk reaches
+        the same paint with the same guard.
+        """
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-truncate the row if ``width`` is not the width it was built at.
+
+        ``width`` is the lane the container published
+        (:meth:`TranscriptView._refit_authored_blocks`) or the width this row's
+        own layout pass reported. :meth:`_paint` reads the width off the ladder
+        (the lane's own number, measured equal to it in the frame under test),
+        so this is a repaint trigger and not a second width to thread — the row
+        is already repainted on its own cadence, and the guard is what keeps a
+        lane change from costing a second paint of an identical line.
+        """
+        if width > 0 and width != self._built_width:
+            self._paint()
 
     def _tick(self) -> None:
         from local_operator.tui.shimmer import shimmer_enabled
@@ -2931,10 +3457,11 @@ class WorkingBlock(TranscriptBlock):
         # model-supplied and of no bounded length. The clock's cells are
         # reserved rather than measured, so the clip point holds still.
         width = max(
-            (self.size.width or 80) - SPINE_INDENT - cell_len(head) - self._CLOCK_COL,
+            self.fold_width(80) - SPINE_INDENT - cell_len(head) - self._CLOCK_COL,
             8,
         )
         label = truncate_cells(self._activity, width)
+        self._built_width = self.fold_width(80)
         line = Text(" " * SPINE_INDENT)
         line.append(head, style=dim)
         if animated:
@@ -3238,6 +3765,35 @@ class TranscriptView(ScrollableContainer):
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
         self._name_col_cache: int | None = None
+        # The width the ledger's ROWS were last published with — what their
+        # summaries were actually laid out against. Deliberately separate from
+        # the cache: a path that invalidates the column drops the cache, so the
+        # cache cannot answer "did this actually change", and a resync comparing
+        # against it would read `None` as "nothing to do" while rows sat at the
+        # old offset. `None` here means no row has been painted under a published
+        # column yet, so there is nobody to be stale.
+        #
+        # PRECISELY what this is, because it is compared as an EQUALITY and an
+        # over-stated invariant here would be a tear later: it is the shared
+        # column's value in force, NOT the cell count every row literally painted
+        # with. A row fits itself inside it — `ToolCard._name_col` answers the
+        # floor below `NAME_GROWTH_MIN_ROW`, and `name_budget` shrinks it further
+        # on a narrow frame — and those clamps are functions of the ROW's own
+        # width, so every row at one frame width agrees on them without the
+        # column moving. That is why the comparison stays sound: a row can hold
+        # less than this number, but no row holds a DIFFERENT one because of a
+        # missed repaint, which is the only thing this field exists to detect.
+        self._name_col_applied: int | None = None
+        #: The LANE WIDTH (cells a block is given) the mounted ledger rows were
+        #: last fitted at — :attr:`_name_col_applied`'s counterpart for the
+        #: other axis. Published by :meth:`_refit_ledger_lane` from the
+        #: container's own reconciled geometry, and compared as an equality for
+        #: the same reason the column is: it is the value in force, not a claim
+        #: about any one row's line. `None` means no lane has been published
+        #: yet, so there is nobody to be stale — a fresh ledger's rows fit
+        #: themselves on their own first layout and its first derivation has
+        #: nobody to repaint.
+        self._row_width_applied: int | None = None
         #: The block held at the BOTTOM as later blocks arrive (the working
         #: line). Pinned rather than re-appended so it is never unmounted and
         #: remounted mid-turn, which would restart its timer and its clock.
@@ -3447,6 +4003,12 @@ class TranscriptView(ScrollableContainer):
         was_at_tail = self._tail_anchor.following or self.is_near_bottom()
         release_revision = self._tail_anchor.release_revision
         self.mount_all(blocks)
+        # A batch arrives as ONE ledger change, so it gets one resync rather than
+        # the per-append fast path's reading of it: the newcomers were held out
+        # of the container while they were appended, and the column their names
+        # imply has to be published to the rows already on screen in the same
+        # breath.
+        self._resync_name_col()
         self.call_after_refresh(self._settle_gaps, blocks)
         self._remeasure_empty_state()
         # Then land on the tail, AFTER the settle pass above.
@@ -3621,7 +4183,12 @@ class TranscriptView(ScrollableContainer):
         else:
             self.mount(*additions, before=before)
         self._blocks[index:index] = additions
-        self._name_col_cache = None
+        # Revealed rows are part of the ledger now, and a page can carry tool
+        # names longer than anything already on screen. Re-derive and repaint in
+        # the same pass as the mount: dropping the cache alone left the rows
+        # already painted at the old offset while the first newcomer to paint
+        # derived the wider column, which is the tear a reader saw on scroll-up.
+        self._resync_name_col()
         # The mount itself may not have triggered a resize yet; correct now so
         # no frame can be painted at the displaced offset even once.
         self._reanchor_insert()
@@ -3773,10 +4340,14 @@ class TranscriptView(ScrollableContainer):
         is the ledger's size that decides whether it matters). The two ways the
         column can SHRINK keep the full re-derivation, because only a re-scan
         can say how far: a rename, through :meth:`invalidate_name_col`, and a
-        removal, which drops the cache outright.
+        removal, which goes through :meth:`_resync_name_col`.
+
+        Whether it widened is asked of :attr:`_name_col_applied` — the width the
+        rows HOLD — not of the cache. This runs while the cache may be unset, and
+        the early return that read `None` as "nothing to do" is exactly the
+        defect: rows already painted kept the narrow offset while whichever row
+        painted next derived the wider one.
         """
-        if self._name_col_cache is None:
-            return  # nothing cached to widen; `tool_name_col` will derive it
         # The same two exclusions `tool_name_col` applies, and for the reasons
         # argued there: a pending approval and a call the model is still
         # dictating are not rows the spine is measured against.
@@ -3790,13 +4361,263 @@ class TranscriptView(ScrollableContainer):
         from local_operator.tui.glyphs import display_name
 
         width = max(TOOL_NAME_COL, min(cell_len(display_name(name)), TOOL_NAME_COL_MAX))
-        if width <= self._name_col_cache:
+        # `None` published means no row is holding a column yet, so the floor is
+        # the widest any of them can be showing.
+        applied = self._name_col_applied
+        if width <= (TOOL_NAME_COL if applied is None else applied):
             return
         self._name_col_cache = width
-        for existing in self._blocks:
-            repaint = getattr(existing, "refresh_row", None)
-            if callable(repaint):
+        self._name_col_applied = width
+        self._repaint_ledger_rows()
+
+    def _resync_name_col(self) -> None:
+        """Re-derive the shared name column and repaint the ledger if it moved.
+
+        The one funnel for every path that can move the column EXCEPT an
+        append's growth: pagination, a rename, a composing row's promotion to
+        running, a removal, a clear, and a batch mount. Growth keeps
+        :meth:`_widen_name_col`, which is a deliberate second path because an
+        append can only ever widen and can answer that in O(1) (see its
+        docstring); everything else goes through here, because only a re-scan
+        can say which way the width moved.
+
+        Each of those paths used to carry its own idea of what to do — most
+        dropped the derived width and repainted nobody, and the append's growth
+        path returned early whenever the width was unset, which is exactly the
+        state those drops leave — so rows kept the old offset until a pointer
+        happened to hover them. That is the tear a reader saw moving the cursor
+        down the ledger, and again on revealing an older page.
+
+        The comparison is against the width the rows were actually published
+        with, :attr:`_name_col_applied` — never against the cache, which the
+        caller has just dropped and which would therefore read as "unchanged".
+        """
+        previous = self._name_col_applied
+        self._name_col_cache = None
+        width = self.tool_name_col
+        if previous == width:
+            return
+        self._name_col_applied = width
+        self._repaint_ledger_rows()
+
+    def _repaint_ledger_rows(self, width: int | None = None) -> None:
+        """Re-render every ledger row against the current column.
+
+        Every ``LEDGER_ROW``, not only the ones on screen: a row is rebuilt from
+        the data it holds rather than from the frame it is on, so one scrolled
+        out of view is already correct when the reader reveals it. Repainting
+        just what is visible would move the same tear one page further out.
+
+        ``width`` is the LANE the container published for the rows it is
+        rebuilding (:meth:`_refit_ledger_lane`). ``None`` means the caller only
+        moved the shared column, and the row is asked for an ordinary repaint —
+        the same call shape this made before the lane funnel existed, so a
+        caller (or a test) that stands in for ``refresh_row`` needs no argument
+        it has never had.
+        """
+        for block in self._blocks:
+            if not getattr(block, "LEDGER_ROW", False):
+                continue
+            if block.parent is not self:
+                # A row that has not been mounted has not been painted, so it
+                # holds no stale offset — and rebuilding it here, with no parent
+                # to ask for the shared column, would fit it to the console rung
+                # and paint one frame at the old width before its own layout
+                # pass corrected it. It derives the column on that pass, like
+                # any other newcomer — which is a promise `_layout_moved` is
+                # what keeps: a row authored parentless bakes the floor, and
+                # without that second term in the resize guard the layout pass
+                # could see a width it had already built at and skip the rebuild
+                # that re-reads the column. Then this skip would be a tear, not
+                # a saving.
+                continue
+            repaint = getattr(block, "refresh_row", None)
+            if not callable(repaint):
+                continue
+            if width is None:
                 repaint()
+            else:
+                repaint(width)
+
+    def _refit_ledger_lane(self) -> None:
+        """Re-fit every ledger row when the LANE's width moved.
+
+        The lane is the width a block is given, and a block bakes that width
+        into the rows it authors — so a row that keeps an older one is a full-
+        width widget whose content stops short of its own right edge, with the
+        status tail stranded mid-row. That is the tear this exists to prevent,
+        and it is reachable because the notification a row would rely on,
+        ``Resize``, is not delivered in one specific frame:
+
+        * A widget's layout request reaches the Screen ASYNCHRONOUSLY
+          (``Widget._check_refresh`` posts ``messages.Layout``; ``Screen._on_layout``
+          is what fills ``_layout_widgets``). In the window before that message
+          is processed, ``Screen._refresh_layout(scroll=True)`` — the pass a
+          pending wheel scroll triggers — takes ``Compositor.reflow_visible``,
+          the visible-only arrangement. A sidebar toggle (or any lane change)
+          that lands in that window is therefore serviced by the VISIBLE-ONLY
+          branch: only the widgets newly EXPOSED by it get ``_size_updated`` and
+          a ``Resize``, so every already-visible row keeps the width it was
+          authored at while the compositor paints it at the new one.
+        * ``reflow_visible`` leaves ``_full_map_invalidated`` set, and the lazy
+          ``full_map`` read that follows (any ``Widget.size``/``region`` lookup
+          on a widget the visible map does not hold, plus the app's own
+          measuring) re-arranges at the NEW size and stores that as
+          ``_full_map``. The corrective full reflow then compares against it,
+          finds nothing changed, and sends ``Resize`` to NOBODY — the map's
+          membership decides what is resized (``shown | resized``,
+          ``screen.py:1365-1377``), not ``_size_updated``'s return value, so not
+          even a widget whose size hook just answered "changed" is told. The
+          narrow content is then permanent until something else happens to call
+          ``refresh_row`` (a hover, which is exactly the operator's one-row-at-
+          a-time cure).
+
+        Being keyed on this container's OWN reconciled geometry is what makes
+        the rule hold for lane changes nobody enumerated: a docked sidebar, its
+        overlay threshold, a settings position change, a boot-column sync, a
+        terminal resize. The container is told about its own size in
+        :meth:`_size_updated` even when the rows are not, and ``changed`` there
+        is exactly "my geometry moved". Two limits of that gate are recorded
+        here rather than papered over:
+
+        * A SCROLLBAR-GUTTER-ONLY move can change ``scrollable_content_region``
+          (the lane) without this container's own ``_size`` moving, and so does
+          not reach here (R3, review round 1). It does not need to: a thumb
+          appearing is a reflow of its own, the rows are re-fitted through their
+          ordinary ``Resize`` on it, and review could not produce a tear from
+          one — the content growing enough to raise a thumb moves
+          ``virtual_size``/``container_size`` with it, which is a geometry
+          change like any other. Widening the gate to cover it would mean
+          reading ``scrollable_content_region`` on every ``_size_updated``,
+          including the passes that moved nothing.
+        * The correction lands in the pass AFTER the lane change (D2, design
+          round 1): a frame captured in the same tick as
+          ``action_toggle_sidebar`` still shows the old width, and one
+          event-loop turn later it does not. That is inherent rather than a
+          defect — the container has to be RECONCILED at the new lane before it
+          can publish it, and the pass that moved the lane may be one this
+          container is not in (the visible-only pass visits the widgets it
+          exposed, not the ones already on screen). The gap is therefore bounded
+          by one message-loop turn, and this code cannot close it: ``Screen``'s
+          update timer is a callback timer (``Timer._tick`` awaits
+          ``_on_timer_update`` directly, not through the queue), so a live
+          terminal is not *provably* unable to paint inside that window. What it
+          cannot do is keep the tear, which is what was actually reported: a
+          stale row that survived settles and needed a hover to heal. Round 2
+          measured it directly with a display probe (every ``App._display`` of
+          the sequence): the clean toggle path paints ZERO torn frames where
+          the previous head painted one (D1's prose tear), and the raced path —
+          a manual ``_refresh_layout(scroll=True)`` in the toggle's own tick —
+          hands the display exactly ONE, self-correcting on the next pass
+          (D2, design round 2, rated MINOR for being measured rather than
+          assumed). Deliberately NOT suppressed by
+          ``_suppress_intermediate_paint``: that idiom stands in for
+          ``_compositor_refresh`` around an app-initiated, synchronous
+          ``_refresh_layout()`` (the ``/resume`` switch), and this frame comes
+          out of Textual's OWN scroll-triggered timer pass, which no call site
+          here owns — using it here would mean suppressing paints for an
+          unbounded window until an event this code cannot see, which is a
+          worse failure than one intermediate frame. Recorded as a bounded
+          residual on the thread rather than fixed.
+
+        The ``scrollable_content_region`` read below is a compositor-map lookup,
+        and with ``_full_map_invalidated`` still set in this frame it re-arranges
+        the whole tree from inside ``Screen._refresh_layout``'s iteration over
+        its captured layer list (R2, review round 1). Deliberate and bounded:
+        one arrangement per LANE change, attributed by review as
+        ``full:inside_refit_lane: 1``, and arrangement counts are at parity with
+        the base tree (51 vs 50 across an 8-step resize drag) because this
+        replaces the per-row ``Resize`` the base tree spent on the same pass. The
+        screen iterates the list it captured, and the map the lane is then taken
+        from is the new geometry — which is what makes the lane authoritative
+        here rather than a second opinion.
+
+        Cost is one O(rows) walk per LANE change (a toggle or a resize, not a
+        frame): each row compares the published lane against ``_built_width``
+        and returns untouched when it already matches, so a lane change only
+        rebuilds the rows that the missing ``Resize`` left behind.
+
+        Coverage is not ledger-only: the same missing notification strands a
+        block that authors its rows at a width — a wrapping ``UserBlock`` prompt
+        stays wrapped for the old lane inside the new box, which is the same
+        two-right-edges frame one block type over — so
+        :meth:`_refit_authored_blocks` is walked here too.
+        """
+        try:
+            lane = self.scrollable_content_region.width
+        except Exception:  # pragma: no cover - detached mid-pass
+            return
+        if lane <= 0:
+            return
+        if self._row_width_applied is None:
+            # Deriving IS publishing, and the first derivation has nobody to
+            # repaint: those rows fit themselves on their own first layout, off
+            # this same number, which is the behaviour that already works.
+            self._row_width_applied = lane
+            return
+        if lane == self._row_width_applied:
+            return
+        self._row_width_applied = lane
+        self._repaint_ledger_rows(width=lane)
+        self._refit_authored_blocks(lane)
+
+    def _refit_authored_blocks(self, width: int) -> None:
+        """Re-fit the non-ledger blocks that author their rows at a width.
+
+        The companion of :meth:`_repaint_ledger_rows`: that walk carries the
+        lane into a ledger row's rebuild, and this one reaches the blocks that
+        are not ledger rows but are built the same way — a block that wraps or
+        truncates its own text bakes the lane into its content, so a lane change
+        it is not told about leaves it authoring for a width it no longer has.
+        Measured on the base tree in this exact frame, with a wrapping prompt at
+        the bottom of a 40-row ledger: the ledger rows were left narrow and so
+        was the prompt, and on the head before this walk existed the rows were
+        repaired while the prompt stayed wrapped for the 79-cell lane inside a
+        126-cell box — prose stopping ~50 cells short of the tool rows directly
+        above it, in one viewport, which is the operator's "some lines will be
+        full width and some won't" one block type over. ``NoticeBlock`` and the
+        working line share the shape (both re-author through ``on_resize``, the
+        notification this window drops); ``RichBlock`` does not, and most blocks
+        never will — the base :meth:`TranscriptBlock.refit_width` is a no-op, so
+        a block with nothing to re-fit costs one attribute lookup.
+
+        Skipped when unmounted, for the reason the ledger walk records: a block
+        that is not a child of this container is not on screen to be torn and
+        derives on its own first layout, and one being re-parented mid-pass must
+        not be re-authored from a stale position.
+
+        Each block is asked for the width it should be fitted to
+        (:meth:`TranscriptBlock.authored_width`) rather than handed the lane
+        directly, because the lane is only the box of a block that fills its
+        row. A block that pins its own box answers with that box: publishing
+        the lane to a boot-column notice authored it wider than the box it is
+        painted in, and made the walk and the block's own ``Resize`` name two
+        different widths for one lane change (R1, review round 2 / Q-R2-1, QA
+        round 2). The base answers the lane unchanged, so every other block
+        still receives the container's number verbatim.
+
+        Two limits are recorded rather than papered over. The walk is cheap by
+        INHERITANCE, not by construction (R3, review round 2): ``ImageBlock``,
+        ``ApprovalBlock`` and ``KeyPromptBlock`` re-author on every lane change
+        whether or not their own width moved, each for a reason its own
+        docstring gives (no cheaper staleness test for a grid or a receipt row),
+        so a lane change costs those two builds of one-row blocks and the cost
+        is linear in lane changes rather than multiplicative. And the walk sees
+        ``self._blocks`` only, so a width-authoring child mounted around
+        ``append_block`` — the boot ``welcome`` splash
+        (``app.py`` mounts it ``before=0``) — is outside it by construction (R4,
+        review round 2, recorded and not measured: the splash re-fits in its own
+        ``on_resize``); a second walk over ``children`` would have to answer for
+        every non-block widget the container ever holds.
+        """
+        for block in self._blocks:
+            if getattr(block, "LEDGER_ROW", False):
+                # Already re-fitted by `_repaint_ledger_rows(width=lane)`, which
+                # threads the lane into the row's own rebuild.
+                continue
+            if block.parent is not self:
+                continue
+            block.refit_width(block.authored_width(width))
 
     def _settle_gaps(self, blocks: list[TranscriptBlock]) -> None:
         """Re-decide the gaps a batch changed, touching each boundary once.
@@ -3896,6 +4717,13 @@ class TranscriptView(ScrollableContainer):
                 if isinstance(name, str) and name:
                     longest = max(longest, cell_len(display_name(name)))
             self._name_col_cache = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
+            # Deriving IS publishing: this is the width every row paints with
+            # from here on, so it is also what a later resync has to compare
+            # against. Recorded at the derivation rather than only at a repaint
+            # broadcast so a resync can skip the repaint when the column did not
+            # move — a fresh ledger's first derivation has nobody to repaint, and
+            # a reveal that changes nothing must not walk every row.
+            self._name_col_applied = self._name_col_cache
         return self._name_col_cache
 
     def invalidate_name_col(self) -> None:
@@ -3905,21 +4733,7 @@ class TranscriptView(ScrollableContainer):
         column is derived from those names — without this the first fragment's
         width outlived it for the rest of the session.
         """
-        self._invalidate_name_col()
-
-    def _invalidate_name_col(self) -> None:
-        """Forget the cached column and repaint the ledger if it moved.
-
-        Only the cards repaint, and only when the number actually changed: a
-        ledger that reflowed on every append would undo the point of a spine.
-        """
-        previous = self._name_col_cache
-        self._name_col_cache = None
-        if previous is not None and previous != self.tool_name_col:
-            for block in self._blocks:
-                repaint = getattr(block, "refresh_row", None)
-                if callable(repaint):
-                    repaint()
+        self._resync_name_col()
 
     def reveal_block(self, block: TranscriptBlock) -> bool:
         """Scroll ``block``'s top back into view after it grew in place.
@@ -4056,10 +4870,12 @@ class TranscriptView(ScrollableContainer):
         if self._tail is block:
             self._tail = None
         block.remove()
-        # Same reason `clear_blocks` does it: the name column is derived FROM the
-        # blocks, so a removal can only ever make it too wide.
+        # The name column is derived FROM the blocks, so removing one can only
+        # make it too wide — but it is the rows LEFT BEHIND that have to hear
+        # about it. Dropping the cache alone let them keep the wide offset until
+        # something else repainted them.
         if getattr(block, "LEDGER_ROW", False):
-            self._name_col_cache = None
+            self._resync_name_col()
         # Whatever fell into the removed block's place now has a different
         # neighbour above it — most visibly the very first block, which must
         # never carry a gap once the boot hint is lifted off the top.
@@ -4104,10 +4920,12 @@ class TranscriptView(ScrollableContainer):
         self._blocks.clear()
         # Every derived measurement goes with them. The name column is computed
         # FROM the blocks, so a stale one made the next ledger inherit the width
-        # of a transcript the user just cleared. The pin goes too — the block it
-        # named was just removed, and the hook below is where a live turn's
-        # working line is mounted again.
-        self._name_col_cache = None
+        # of a transcript the user just cleared — re-deriving here publishes the
+        # floor of the empty ledger instead of leaving the answer to whichever
+        # row paints next. The pin goes too — the block it named was just
+        # removed, and the hook below is where a live turn's working line is
+        # mounted again.
+        self._resync_name_col()
         self._tail = None
         # An insert settling into the transcript that just went away has no
         # reader to hold. `_reanchor_insert` would notice the anchor is
@@ -4358,6 +5176,11 @@ class TranscriptView(ScrollableContainer):
         line as the user types, the terminal being resized.
         """
         changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if changed:
+            # Before the anchor work below: a row re-fitted for a lane change can
+            # change this container's extent, and the anchor has to be computed
+            # against the frame the reader will actually see.
+            self._refit_ledger_lane()
         if changed and self._on_extent_changed is not None:
             # Announced BEFORE the anchor work below, and unconditionally on
             # every extent change: a listener describing the geometry has to

@@ -342,6 +342,31 @@ export function Transcript({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [growthSignal]);
 
+	/* Follow the tail when the SCROLLER ITSELF is resized, not just when content
+	   arrives. The effect above triggers on new content, and a container that
+	   shrinks under stationary content is not new content — so expanding a panel
+	   beside the transcript silently cost the live tail: the scroller went from
+	   612px to 274px and the newest messages slid 156px below the fold with no
+	   scroll of the user's own, visible rows going [0..5] → [0..3] (U6).
+	   Collapsing the panel restored it, which made "close the thing you opened"
+	   the only way back to the conversation.
+
+	   A ResizeObserver here rather than a callback from each panel: the panels
+	   are one cause among several (the pending card claiming its space, the
+	   working line appearing, the keyboard re-pinning the column), and a
+	   per-caller notification fixes whichever cause someone remembered to wire.
+	   Gated on `pinnedRef` exactly like the content path, so a user reading
+	   history is never yanked to the bottom by a resize either. */
+	useEffect(() => {
+		const el = scrollRef.current;
+		if (!el || typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(() => {
+			if (pinnedRef.current) el.scrollTop = el.scrollHeight;
+		});
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, []);
+
 	/* Prepending older rows must NOT move the viewport: capture the scroll
 	   offset relative to the top of the OLD content, then restore it after the
 	   prepend so the row the user was reading stays put. */

@@ -228,7 +228,7 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: MEMBERS (and 363 of 414 ``file:line`` SITES, deduped per member and line), so
 #: any single global floor loose enough to survive ordinary churn there cannot
 #: notice a smaller host going dark at all. Measured, not guessed: dropping the
-#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 47 and dropping
+#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 48 and dropping
 #: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
 #: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
 #: stated beside each path fires on the host that actually decayed and names it.
@@ -303,6 +303,11 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "has_pending_fork",
         "journal_credential_change",
         "measure_preloaded_context",
+        # A viewer never owns a session to dispose, so it has no deliberate
+        # stop to record: a viewer's `/stop` goes over the socket, where the
+        # OWNER records the verdict. `_stop_local_session` returns before
+        # this is reached for a viewer at all, and the read is getattr-probed.
+        "note_deliberate_stop",
         "preflight_usage",
         "refresh_frontend_usage",
         "routing_settings",
@@ -973,7 +978,7 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     # 113 distinct public MEMBERS, so a number that survives ordinary churn
     # there is necessarily far above every other host's entire contribution.
     # Measured on this head — dropping the desktop utils host costs 3
-    # viewer-only members of 47, dropping ``info/collect.py`` costs 0 — so both
+    # viewer-only members of 48, dropping ``info/collect.py`` costs 0 — so both
     # single-point decays slid under a global ``>= 40`` exactly as they slid
     # under the ``>= 20`` that review round 2 (MINOR-1) rejected. Raising one
     # number would only move the blind spot. Each host is now asserted against
@@ -1110,9 +1115,85 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # ``pending_display_tool_ids`` and ``executing_display_tool_ids`` moved
     # onto ``SessionProtocol`` and both left the viewer-only population by
     # becoming declared for both shapes.
-    assert len(viewer_only) == 47, (
+    #
+    # 47 → 48 is an ADDITION, and the first move in this list in that direction.
+    # ``set_steer_failure`` is a viewer-only member by construction: only a
+    # viewer sends a steer across a socket, so only a viewer can have one fail
+    # without a sender to report it (QA round 2, Q-1). An `owner` `Session` has
+    # no such seam and must not grow one; a later figure that counts it as
+    # declared-for-both would mean the in-process session had grown a transport
+    # failure it cannot have.
+    #
+    # 48 → 50 is the same direction again: the desktop warm op adds
+    # ``warm_runtime`` and ``engage_in_flight``, both viewer-only for the same
+    # kind of reason — a runtime has no viewer to warm speculatively and no
+    # bind lock to sample — and both are read by the desktop bridge through
+    # ``bridge.remote``. Growth is not the decay this pin guards against (the
+    # aggregate below is a FLOOR), but the figure is exact on purpose, so it
+    # is edited deliberately rather than relaxed.
+    #
+    # 50 → 51 is the same direction once more. ``can_ever_bind`` asks whether a
+    # facade could EVER dial, which is a question only a facade needs to answer:
+    # the sidebar's connect spends a wall-clock budget re-dialling one, and the
+    # arm that can never dial must be told apart from the one that is on its way
+    # back. An owner ``Session`` binds by running the loop in this process, so
+    # it has no un-bindable state to report and must not grow a predicate for
+    # one.
+    #
+    # 51 → 52 is the same direction again, and for the sibling question:
+    # ``session_was_stopped`` tells a host that never saw the disconnect whether
+    # the owner was STOPPED (a durable marker, plus this viewer's own stop) —
+    # which is what decides whether re-dialling a clicked row is worth anything.
+    # An owner ``Session`` is the thing that ends, so there is no record to read
+    # back about itself and no un-bindable state to classify.
+    #
+    # 52 → 53 is the same reasoning once more: the lease-driven warm's retry
+    # loop needs ``recovering`` to tell a REFUSED engage (recovery owns the
+    # dial, no work done, no spawn to pace) from a FAILED one, and only a viewer
+    # can be in owner recovery at all — an owner `Session` has no lost owner to
+    # recover from, so the member is viewer-only by construction rather than by
+    # placement.
+    #
+    # 53 → 54 is the same direction again: the desktop move route needs the
+    # directory the session WORKS in — to resolve a relative target against it
+    # (``/move ../sibling``) and to recognise a no-op — and that is a viewer's
+    # field. An owner ``Session`` cannot usefully answer it: its directory is the
+    # one its process was constructed in and no seam moves it, so there is
+    # nothing for an owner to report back about where it works.
+    #
+    # 54 → 56 is the same direction twice more, from the move remediation.
+    # ``supports_exclusive_move`` is asked of the OWNER ABOVE this facade —
+    # whether it can retire under the exclusivity fence rather than ignoring the
+    # flag while a sibling client is attached — and an owner ``Session`` has no
+    # owner above it, so the question does not exist for it at all.
+    # ``set_local_cwd_callback`` installs the host that repaints after a locally
+    # accepted move (the desktop bridge's ``frontend.replace``); an owner session
+    # has no host above it to repaint, so it must not grow that callback either.
+    # Both are ADDITIONS in the direction the aggregate floor does not guard, and
+    # the figure is exact on purpose — edited deliberately, never relaxed.
+    #
+    # 56 → 57 is the drain notice's own seam: the app paints the row that says a
+    # handover is REFUSING work from the runtime's ``retiring`` frame, so it
+    # reads ``set_drain_callback`` off a duck-typed binding. Viewer-only for the
+    # same reason as the rest of this block — an owner session has no wire to
+    # hear that frame on, and the frame is the only honest source for the fact.
+    #
+    # 57 → 58 is the desktop Stop button's rung. ``interrupt`` stops the current
+    # turn and returns the owner's receipt, which only exists on the viewer side:
+    # an owner ``Session`` stops its own turn with a local call and has nobody to
+    # dial, so the member is viewer-only by construction rather than by choice.
+    # Its declared home is ``ViewerSessionProtocol`` (the same commit), which is
+    # why the undeclared-member check above does not fire for it — the two
+    # figures answer different questions and this one counts the facade's extra
+    # surface either way.
+    #
+    # 58 → 59 is the same rung's second read. ``owner_reachable`` is the "is there
+    # a LIVE owner to dial" half of ``is_cold``, split out because that property's
+    # third disjunct is a mid-resync state: an owner ``Session`` has no client at
+    # all, so the question does not exist for it.
+    assert len(viewer_only) == 59, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 47, and the aggregate floor is set at 40 against that number. A "
+        "says 59, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -1361,6 +1442,30 @@ def test_the_static_conformance_anchor_still_exists() -> None:
     )
 
 
+def test_both_session_shapes_answer_the_live_clock_accessors() -> None:
+    """The two clock anchors are declared on the protocol and answered by BOTH.
+
+    A per-call start epoch plus the working line's phase zero are what let a
+    front end that attaches mid-turn date the work in flight, and both session
+    shapes have to answer them: the local owner is the producer of those
+    instants, and an attached viewer folds them off the same events. Declared
+    on the protocol so pyright checks the SIGNATURES at
+    ``_static_conformance_is_checked_by_pyright``; what is asserted here is the
+    runtime half that isinstance cannot see — that neither shape raises on a
+    store it has not built yet.
+
+    The unsynchronized answers are the point rather than a technicality:
+    ``{}`` and ``("", None)`` both reduce to "withhold the clock", which is
+    what every consumer does with a missing entry. A facade that raised here
+    instead would take down a repaint, and one that defaulted to its own
+    arrival instant would print an age nobody measured.
+    """
+    for klass in (Session, AttachedSession):
+        shape = klass.__new__(klass)
+        assert shape.live_tool_start_epochs() == {}, klass.__name__
+        assert shape.activity_phase_clock() == ("", None), klass.__name__
+
+
 def test_every_registered_session_binding_still_matches_the_source() -> None:
     """Each (host, binding) pair in ``_SCANNED`` must derive at least one member.
 
@@ -1381,7 +1486,7 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
 
     The count is pinned as well as the contribution, because the two decays are
     different and only one of them is a rename. DELETING ``source.session``
-    outright costs 2 of 47 viewer-only members — under any floor, per-host or
+    outright costs 2 of 48 viewer-only members — under any floor, per-host or
     aggregate, and invisible to the zero-sites check because a removed entry is
     not an entry that derives nothing. It was the last planted violation this
     guard did not catch. A registered binding is a coverage claim, so removing
@@ -1696,3 +1801,51 @@ def test_two_probe_loops_sharing_one_variable_keep_both_sets() -> None:
         "planted_loop_a",
         "planted_unpack_b",
     }
+
+
+def test_the_quoted_isinstance_member_count_is_still_true() -> None:
+    """The figure two docstrings cite beside their timing must not rot.
+
+    ``ViewerSessionProtocol`` and ``tui/app.py::_is_viewer`` both justify NOT
+    dispatching on ``isinstance`` by naming how many members a positive check
+    walks. That number had drifted to 84 while the protocol grew to 106, which
+    nothing noticed because a stale comment fails no test (review round 1,
+    NIT-4). It is now derived here so a member added or removed without
+    updating the prose is a failure rather than a slow lie.
+
+    ``_get_protocol_attrs`` is exactly the set ``isinstance`` walks, which is
+    why it -- and not the viewer-only population pinned above -- is the right
+    quantity beside the measurement. The two differ because this one counts
+    inherited members; they answer different questions and must not be
+    reconciled.
+    """
+    import re
+    from typing import _get_protocol_attrs  # type: ignore[attr-defined]
+
+    from local_operator.session.protocol import ViewerSessionProtocol
+    from local_operator.tui.app import _is_viewer
+
+    walked = len(_get_protocol_attrs(ViewerSessionProtocol))
+    # THE LINEAGE IS PROSE, and it is the line a rebase moves: the parenthetical
+    # history in `protocol.py` stops at a figure that has to equal the walk too,
+    # or the docstring recites a chain ending one member short of the count it is
+    # defending (review round 5, NIT 4 — 116→117 was exactly this line).
+    lineage = re.search(r"past it \((.*?)\), so", ViewerSessionProtocol.__doc__ or "", re.S)
+    assert lineage, "the count lineage is missing or was reworded"
+    tail = max(int(n) for n in re.findall(r"\d+", lineage.group(1)))
+    assert tail == walked, (
+        f"the count lineage ends at {tail} but a positive check walks {walked}: "
+        "the docstring's own rule is that a member added or removed without "
+        "updating the prose is a failure rather than a slow lie"
+    )
+    for doc, where in (
+        (ViewerSessionProtocol.__doc__ or "", "session/protocol.py"),
+        (_is_viewer.__doc__ or "", "tui/app.py::_is_viewer"),
+    ):
+        quoted = {int(n) for n in re.findall(r"(\d+)\s+public\s*\n?\s*members", doc)}
+        assert quoted == {walked}, (
+            f"{where} quotes {sorted(quoted) or 'no'} public members beside its "
+            f"isinstance timing; a positive check now walks {walked}. Recompute "
+            "with len(typing._get_protocol_attrs(ViewerSessionProtocol)) rather "
+            "than adjusting the old figure by the size of your change."
+        )

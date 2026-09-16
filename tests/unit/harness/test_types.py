@@ -11,11 +11,16 @@ import pytest
 from pydantic import ValidationError
 
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     AskOption,
     AskQuestion,
+    ChatRequest,
+    Message,
+    ModelSpec,
     TextContent,
     ToolExecutionEndEvent,
     ToolResult,
+    turn_output_budget,
 )
 
 
@@ -172,3 +177,136 @@ def test_a_secret_question_still_refuses_a_recommendation_after_the_hoist_landed
     with pytest.raises(ValidationError) as excinfo:
         AskQuestion(id="GITHUB_TOKEN", question="Paste it.", options=[], secret=True, recommended=0)
     assert "no options to recommend" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# The generation bound a request carries (Step 1 of the runtime convergence)
+# ---------------------------------------------------------------------------
+#
+# The defect these pin is a bound that was never OURS: a request that named no ask
+# carried the provider's advertised capability verbatim, so on a 1M aggregate
+# model every call asked for 943,718 output tokens and a single decision ran to
+# 97,189 (95,098 of them reasoning). The bound therefore lives on the request
+# CONTRACT rather than at one call site, so a new interface cannot reintroduce it
+# by forgetting.
+
+
+def _spec(max_output_tokens: int) -> ModelSpec:
+    return ModelSpec(
+        provider="openrouter",
+        model_id="meta/muse-spark-1.3",
+        context_window=1_048_576,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def test_a_request_with_no_ask_carries_the_policy_ceiling() -> None:
+    """The measured case: a 1M-window model advertising 943,718 output tokens.
+
+    Built from the advertised figure -- which is 90% of that window -- the
+    request asked for it on EVERY call, which is what let one response reason
+    for 95,098 tokens before answering.
+    """
+    request = ChatRequest(model=_spec(943_718), messages=[Message.user("hi")])
+
+    assert request.max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+    assert request.max_tokens < 943_718
+
+
+def test_the_policy_ceiling_leaves_every_measured_ordinary_turn_intact() -> None:
+    """The number is chosen against the operator's own ledger, not taste.
+
+    876,719 recorded calls: 430 ever emitted more than 16,384 output tokens, 300
+    of them ordinary sessions; 2 ordinary calls exceeded 65,536, both
+    ``claude-opus-5`` at exactly its own 128,000 published ceiling; none exceeded
+    131,072. So the ceiling has to sit above 128,000 and below the
+    capability-shaped asks, and this pins both halves of that: the largest
+    published ceiling in ordinary use passes through untouched, and a
+    capability-shaped one is cut 7-8x.
+    """
+    assert DEFAULT_TURN_OUTPUT_TOKENS > 128_000
+    assert ChatRequest(model=_spec(128_000), messages=[]).max_tokens == 128_000
+    assert ChatRequest(model=_spec(1_047_576), messages=[]).max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+
+
+def test_a_smaller_published_ceiling_wins_over_the_policy() -> None:
+    """Model-aware in the narrowing direction only: a provider limit below the
+    policy is a real limit and is kept, while a larger advertisement is not."""
+    assert ChatRequest(model=_spec(4_096), messages=[]).max_tokens == 4_096
+    assert ChatRequest(model=_spec(64_000), messages=[]).max_tokens == 64_000
+    assert ChatRequest(model=_spec(131_072), messages=[]).max_tokens == 131_072
+
+
+def test_a_spec_with_no_published_ceiling_is_still_bounded() -> None:
+    """``0`` is "no data", not "unlimited", so the policy fills it.
+
+    This is NOT the case that produced the 97k-token response -- that call ran on
+    a model advertising 943,718, and it carried that figure on the wire. Keep the
+    two apart: a genuinely cap-less spec is a shape production does not reach
+    (unknown models resolve to 8,192, local ones to 1,024), which is why this arm
+    is pinned as a contract property rather than as a reproduced incident.
+    """
+    assert ChatRequest(model=_spec(0), messages=[]).max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+
+
+def test_an_explicit_ask_is_never_overridden() -> None:
+    """``Session.ERRAND_MAX_TOKENS`` (1024, titling) and the compaction
+    summariser name their own budget, and an explicit ask above the policy is
+    honoured too: the bound exists to fill a silence, not to cap a decision."""
+    assert ChatRequest(model=_spec(943_718), messages=[], max_tokens=1_024).max_tokens == 1_024
+    assert ChatRequest(model=_spec(943_718), messages=[], max_tokens=500_000).max_tokens == 500_000
+
+
+def test_asking_for_no_cap_is_unrepresentable() -> None:
+    """``0`` is rejected, and that is a correction rather than a tightening.
+
+    It used to mean "ask the provider for no cap", but the four wire builders
+    never agreed on what an absent cap is (the OpenAI-shaped and Google bodies
+    omit the key; Anthropic's API REQUIRES one), and on a model that advertises a
+    cap it did not mean "no cap" at all -- the clamp fell back to the advertised
+    capability and put 943,718 back on the wire (QA round 1, Q4). A caller that
+    wants the provider's own default gets it by naming nothing.
+    """
+    with pytest.raises(ValidationError):
+        ChatRequest(model=_spec(943_718), messages=[], max_tokens=0)
+
+
+def test_a_policy_bound_follows_a_model_swap_and_a_named_ask_does_not() -> None:
+    """``with_model`` is the failover hop, and the bound has to survive it.
+
+    ``model_copy`` cannot re-run the validator, so the old failover clone carried
+    the primary's ask onto a fallback publishing a smaller ceiling (34 shipped
+    rows publish under 20K) and kept a small model's ask on a large fallback
+    (review M1 / QA Q5, both directions measured).
+    """
+    small = _spec(8_192)
+    big = _spec(943_718)
+    policy_bound = ChatRequest(model=big, messages=[])
+    assert policy_bound.with_model(small).max_tokens == 8_192
+    assert policy_bound.with_model(small).max_tokens_from_policy is True
+    # The original request is untouched -- the clone is what moves.
+    assert policy_bound.max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+    # A NAMED ask is the caller's own decision and is carried through unchanged,
+    # which is the behaviour QA item 3 measured and must keep measuring.
+    named = ChatRequest(model=small, messages=[], max_tokens=50_000)
+    assert named.max_tokens_from_policy is False
+    assert named.with_model(big).max_tokens == 50_000
+    # A spec that publishes no cap re-derives to the policy, not to zero -- and
+    # the small-to-big direction the QA finding measured re-derives UP to the
+    # policy rather than leaving the small model's ask on the large fallback.
+    assert policy_bound.with_model(_spec(0)).max_tokens == DEFAULT_TURN_OUTPUT_TOKENS
+    assert ChatRequest(model=small, messages=[]).with_model(big).max_tokens == (
+        DEFAULT_TURN_OUTPUT_TOKENS
+    )
+
+
+def test_the_policy_ceiling_is_configurable() -> None:
+    """The bound is a default a host can raise, not a constant baked into every
+    caller: the policy takes the ceiling explicitly, and a host that needs a
+    longer answer names one on the request (pinned above)."""
+    assert turn_output_budget(_spec(943_718), ceiling=32_000) == 32_000
+    assert turn_output_budget(_spec(943_718)) == DEFAULT_TURN_OUTPUT_TOKENS
+    # ``None``/``0`` mean "the default", not "no bound" -- a non-positive
+    # override must not silently uncap a turn.
+    assert turn_output_budget(_spec(943_718), ceiling=None) == DEFAULT_TURN_OUTPUT_TOKENS
+    assert turn_output_budget(_spec(943_718), ceiling=0) == DEFAULT_TURN_OUTPUT_TOKENS

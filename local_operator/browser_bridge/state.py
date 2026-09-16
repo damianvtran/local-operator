@@ -13,7 +13,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,7 +25,39 @@ HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 
 
-class BridgeState(BaseModel):
+class HeartbeatState(BaseModel):
+    """Base for a host discovery record: every host stamps its own heartbeat.
+
+    Exists so the primitives below (``state_path``/``publish``/``read``) are
+    generic over WHICH host's file they are addressing while still owning the
+    one thing they must own — the atomic write and the heartbeat stamp. The
+    UI browser host's record (``local_operator/ui_browser/state.py``) is the
+    second implementation, and it deliberately reuses these primitives rather
+    than copying them, because a second atomic-write implementation is a second
+    chance to publish a half-written key or a non-0600 file.
+    """
+
+    heartbeat_at: float = Field(default_factory=time.time)
+    started_at: float = Field(default_factory=time.time)
+
+
+#: The record type ``read`` returns unless a caller names its own model. Bound
+#: to a plain ``BaseModel`` rather than to ``HeartbeatState`` so a future host
+#: whose file carries no heartbeat is not forced to invent one.
+StateT = TypeVar("StateT", bound=BaseModel)
+
+
+class HeartbeatStamp(Protocol):
+    """Anything carrying a heartbeat stamp: what :func:`heartbeat_age` needs.
+
+    Structural rather than a base class so a host can be stamped without being
+    forced into this module's hierarchy.
+    """
+
+    heartbeat_at: float
+
+
+class BridgeState(HeartbeatState):
     model_config = ConfigDict(extra="ignore")
 
     pid: int
@@ -36,19 +68,61 @@ class BridgeState(BaseModel):
     paired: bool = False
     extension_id: str = ""
     browser_name: str = ""
-    heartbeat_at: float = Field(default_factory=time.time)
-    started_at: float = Field(default_factory=time.time)
+    #: Whether the daemon has latched "the attached extension stopped answering"
+    #: and dropped its link for it. Related to `/health`'s `extension_unresponsive`
+    #: but NOT equal to it by design (review round 5, NIT 4): `/health` reports the
+    #: latch only while no proven link is serving, so for the TTL window after a
+    #: promotion this file says "latched" where `/health` says "the driver is
+    #: answering". Published because the reader that needs it most
+    #: cannot ask: `_execute_browser`'s demotion guard runs on the ABSENT side of
+    #: `liveness`, where the contract forbids a socket probe, and since a drop
+    #: writes `extension_connected=false` the file alone would otherwise look
+    #: exactly like a host with no bridge at all — which is how a paired, running
+    #: bridge got told to run `lop browser install` (design D3-2).
+    #:
+    #: Defaults false, so a file written by an older daemon (and every fixture)
+    #: reads as "no latch" — the conservative answer, since a false positive here
+    #: would claim a wedge the daemon never reported.
+    extension_unresponsive: bool = False
+    #: The attached extension's OWN reported version, as the daemon last saw it
+    #: in `hello`, and its protocol version. Published because the session-side
+    #: decision they drive — whether this link can use the `owner_*` lifecycle
+    #: at all (see `browser_bridge/resources.py`) — must not cost a socket
+    #: round-trip, and because the file is the only surface a session between
+    #: dials can read. Blank/0 when no link is proven, so a stamp outliving its
+    #: socket can never drive that decision.
+    extension_version: str = ""
+    extension_proto: int = 0
+    #: Whether a KNOWN extension version is strictly below the one this runtime
+    #: ships with (`protocol.EXPECTED_EXTENSION_VERSION`). The predicate lives
+    #: in the daemon (see `BridgeService.publish`) and is published rather than
+    #: recomputed here, so there is exactly one spelling of "an update is
+    #: available". Defaults false, so a file written by an older daemon never
+    #: nags.
+    extension_update_available: bool = False
 
 
-def run_dir(root: Path | None = None) -> Path:
-    """The run directory, CREATED and locked down. Only writers may call this."""
-    directory = (root or config_dir()) / RUN_DIRNAME
+def run_dir(root: Path | None = None, *, dirname: str = RUN_DIRNAME) -> Path:
+    """The run directory, CREATED and locked down. Only writers may call this.
+
+    ``dirname`` is a keyword-only default so a SECOND host's namespace can reuse
+    this without a second implementation of the mkdir/chmod pair. Every
+    parameter defaults to today's value, so no existing call site changes
+    behaviour (the ``AGENTS.md`` tool-surface ladder's "extend, do not invent a
+    parallel mechanism" rule, applied to a directory rather than a tool).
+    """
+    directory = (root or config_dir()) / dirname
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     return directory
 
 
-def state_path(root: Path | None = None) -> Path:
+def state_path(
+    root: Path | None = None,
+    *,
+    dirname: str = RUN_DIRNAME,
+    filename: str = STATE_FILENAME,
+) -> Path:
     """Where the discovery file lives. Pure path arithmetic: creates NOTHING.
 
     It used to route through :func:`run_dir`, which mkdirs and chmods, so every
@@ -61,18 +135,31 @@ def state_path(root: Path | None = None) -> Path:
     (see :func:`read`), so the path is now derived without touching disk and
     only the writer (:func:`publish`) asks for the directory to exist.
     """
-    return (root or config_dir()) / RUN_DIRNAME / STATE_FILENAME
+    return (root or config_dir()) / dirname / filename
 
 
-def publish(state: BridgeState, root: Path | None = None) -> Path:
-    directory = run_dir(root)
+def publish(
+    state: HeartbeatState,
+    root: Path | None = None,
+    *,
+    dirname: str = RUN_DIRNAME,
+    filename: str = STATE_FILENAME,
+) -> Path:
+    """Staged write + ``os.replace``, 0600 under a 0700 directory.
+
+    The temporary file's prefix names the host whose file is being replaced, so
+    an interrupted write is attributable to one namespace.
+    """
+    directory = run_dir(root, dirname=dirname)
     state.heartbeat_at = time.time()
-    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".bridge.", suffix=".tmp")
+    fd, temporary = tempfile.mkstemp(
+        dir=directory, prefix=f".{Path(filename).stem}.", suffix=".tmp"
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(state.model_dump(mode="json"), handle)
         os.chmod(temporary, 0o600)
-        target = directory / STATE_FILENAME
+        target = directory / filename
         os.replace(temporary, target)
         return target
     except BaseException:
@@ -83,11 +170,26 @@ def publish(state: BridgeState, root: Path | None = None) -> Path:
         raise
 
 
-def read(root: Path | None = None) -> BridgeState | None:
-    """Read without mutating or reaping; detection must have no side effects."""
+def read(
+    root: Path | None = None,
+    *,
+    dirname: str = RUN_DIRNAME,
+    filename: str = STATE_FILENAME,
+    model: type[StateT] = BridgeState,
+) -> StateT | None:
+    """Read without mutating or reaping; detection must have no side effects.
+
+    ``model`` is selectable because this module's own ``BridgeState`` declares
+    ``extra="ignore"``: reading another host's file through it would silently
+    DROP that host's own fields (the UI host's ``host``, ``app_version``,
+    ``profile_dir``, ``agent_tabs``), which is harmless but blind — the file
+    would parse and every host-specific fact would be missing with no error.
+    """
     try:
-        raw: Any = json.loads(state_path(root).read_text(encoding="utf-8"))
-        return BridgeState.model_validate(raw)
+        raw: Any = json.loads(
+            state_path(root, dirname=dirname, filename=filename).read_text(encoding="utf-8")
+        )
+        return model.model_validate(raw)
     except (OSError, ValueError, TypeError):
         return None
 
@@ -106,7 +208,7 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def heartbeat_age(current: BridgeState, *, now: float | None = None) -> float:
+def heartbeat_age(current: HeartbeatStamp, *, now: float | None = None) -> float:
     """Seconds since the daemon last republished. Negative ages clamp to 0.
 
     Clock skew (or a state file written by a daemon whose clock ran ahead) must
@@ -202,8 +304,13 @@ def advertisable(root: Path | None = None, *, now: float | None = None) -> bool:
     return liveness(root, now=now)[0] in (Liveness.FRESH, Liveness.STALE)
 
 
-def remove(root: Path | None = None) -> None:
+def remove(
+    root: Path | None = None,
+    *,
+    dirname: str = RUN_DIRNAME,
+    filename: str = STATE_FILENAME,
+) -> None:
     try:
-        state_path(root).unlink()
+        state_path(root, dirname=dirname, filename=filename).unlink()
     except OSError:
         pass

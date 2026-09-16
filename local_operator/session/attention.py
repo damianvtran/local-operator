@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
 from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from local_operator.paths import config_dir
 
@@ -33,6 +34,48 @@ logger = logging.getLogger(__name__)
 
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
+
+#: The machine token a surface reads to tell "your token is stale, re-arm from
+#: your own state" apart from a failure worth backing off on. Part of the wire
+#: contract because the clients must act DIFFERENTLY on the two, and message
+#: text is not a contract (the desktop error object carries it as `code`, the
+#: mobile body as `code`, and `docs/DESKTOP_API.md` documents the row).
+#:
+#: THIS constant is the string's source of truth. A renderer cannot import
+#: Python, so `SUPERSEDED_COMPLETION_TOKEN_CODE` in local-operator-ui's
+#: `src/shared/desktop-session-contract.ts` is a copy of it, and neither repo's
+#: tests can see the other's: each side therefore pins the literal it ships
+#: (here `tests/unit/server/test_desktop_attention.py`; there
+#: `scripts/completion-view-ack.test.mjs`). Changing the string is a cross-repo
+#: change, not a local one.
+SUPERSEDED_TOKEN_CODE = "superseded_completion_token"
+
+
+class SupersededCompletionToken(ValueError):
+    """A real token for this conversation that is no longer the current one.
+
+    SUBCLASSES ``ValueError`` so every surface that already maps "unknown
+    completion token" to 409 -- the desktop route's error ladder, the mobile
+    `/seen` route, the runtime op -- keeps that mapping without a per-surface
+    change, and a caller that catches ``ValueError`` cannot miss this one. The
+    separate TYPE is what lets a surface that cares name the remedy instead of
+    the generic sentence.
+
+    RAISED INSTEAD OF ANSWERED, and that is the whole point (see
+    :meth:`AttentionStore.acknowledge`). A superseded acknowledgement used to
+    return a 200 whose body said `unseen: true` and whose receipt had not moved:
+    a client that treats any resolved call as "read" (both shipped clients did)
+    latched forever, and the operator's completion checkmark never cleared.
+    """
+
+    code = SUPERSEDED_TOKEN_CODE
+
+    def __init__(self) -> None:
+        super().__init__(
+            "completion token superseded by a newer completion; "
+            "acknowledge the conversation's current token"
+        )
+
 
 #: Named once because BOTH the minting side (`provisional_anchor`) and the
 #: recognising side (`_supersedes_provisional`, on the stored AND the incoming
@@ -94,6 +137,37 @@ _BUMP_SUPERSEDES = (
     "ON CONFLICT(id) DO UPDATE SET supersedes=mutations.supersedes+1"
 )
 
+#: WHICH conversation a heal touched — the missing half of the counter above
+#: (review round 1, R4).
+#:
+#: `mutations.supersedes` is all `revision()` needs to be a correct change
+#: detector: it proves a heal HAPPENED. It cannot say WHICH record moved, and the
+#: machine-wide feed has to publish a corrected state for exactly that record. A
+#: heal UPDATEs the row in place, so the healed conversation appears in neither
+#: the feed's new-sequence delta nor its changed-acknowledgement delta — the feed
+#: correctly accepted the new revision and then emitted nothing at all, leaving
+#: every subscriber holding the provisional "Interrupted" outcome for a turn that
+#: had actually completed.
+#:
+#: An append-only log rather than a column on `mutations`: two heals landing
+#: between two ticks must BOTH be reported, and a single-row table silently merges
+#: them into whichever was last. Pruned to the newest
+#: `_SUPERSEDE_LOG_RETENTION` rows in the SAME transaction as the write, so it
+#: stays bounded on a store that runs for years. The retention is orders of
+#: magnitude deeper than any reader can fall — a consumer's cursor is never more
+#: than one poll interval behind the write — and the consequence of over-running
+#: it is a missed in-place correction rather than a missed completion, which is
+#: why the bound is safe to hold this loosely.
+_CREATE_SUPERSEDE_LOG = (
+    "CREATE TABLE supersede_log ("
+    "seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation TEXT NOT NULL)"
+)
+_SUPERSEDE_LOG_RETENTION = 256
+_APPEND_SUPERSEDE = "INSERT INTO supersede_log(conversation) VALUES(?)"
+_PRUNE_SUPERSEDE_LOG = (
+    "DELETE FROM supersede_log WHERE seq <= " "(SELECT COALESCE(MAX(seq),0) FROM supersede_log) - ?"
+)
+
 
 def conversation_identity(directory: Path) -> str:
     """Use the durable namespace, never the currently selected agent profile."""
@@ -110,6 +184,37 @@ def provisional_anchor(token: str) -> str:
     therefore safe to replace once the real outcome lands.
     """
     return f"{_PROVISIONAL_PREFIX}{token}"
+
+
+def _optional_column(row: sqlite3.Row, name: str) -> str:
+    """One ADDITIVE column's value, ``""`` when a pre-taxonomy row lacks it.
+
+    The read-only readers must not migrate: ``state_many`` opens the database
+    ``mode=ro`` precisely so a frontend list can never write, while the schema
+    migration lives on the WRITE path (``_connect``). An established database
+    that no build of this version has written yet therefore genuinely has no
+    ``reason``/``cause`` column, and a bare ``row[name]`` raises ``IndexError``
+    on it — a sidebar crash on exactly the machine that has not restarted yet.
+    Naming the absence here keeps the two readers in step without teaching
+    either one to alter a schema it is only reading.
+    """
+    try:
+        value = row[name]
+    except IndexError:
+        return ""
+    return str(value or "")
+
+
+#: How much of a reason the STORE keeps. This string rides every attach frame
+#: (once per conversation in the canonical `attention` state, and once per child
+#: for a job row), so an unbounded provider message would spend the frame ceiling
+#: that `tests/unit/session/test_attach_frame_size.py` guards. The full text is
+#: not lost: the live transcript notice and the journal row
+#: (`completion_attention`, replayed by `_default_convert_to_llm`) both carry it
+#: verbatim. 500 characters is past any harness-authored sentence and past the
+#: opening of a provider error, which is all a one-line tooltip or a phone
+#: banner can use.
+REASON_WIRE_CHARS = 500
 
 
 def _supersedes_provisional(
@@ -136,18 +241,30 @@ def _supersedes_provisional(
     identity), which is why the guard is cheap rather than elaborate: an
     incoming provisional anchor is legitimate only when it belongs to the token
     being published.
+
+    THE STORED KIND IS NO LONGER PART OF THE SHAPE. It used to have to read
+    `interrupted`, which was the only kind a provisional record could carry when
+    "no outcome" was published as an interruption. The taxonomy change makes
+    "no outcome" an `error`, and a provisional record published as `error` still
+    has to be superseded by the same token's real `complete` — otherwise the
+    change bricks exactly the session the docstring at :meth:`publish`
+    describes. The ANCHOR, not the kind, is the "replaceable" signal: a record
+    still wearing `completion-<token>` has no viewable result behind it and its
+    only legitimate successor is the same token's real outcome.
     """
-    stored_conversation, stored_anchor, stored_kind = tuple(existing)
+    stored_conversation, stored_anchor = tuple(existing)[:2]
     if anchor.startswith(_PROVISIONAL_PREFIX) and anchor != provisional_anchor(token):
         return False
-    return (
-        stored_conversation == conversation
-        and stored_kind == "interrupted"
-        and stored_anchor == provisional_anchor(token)
-    )
+    return stored_conversation == conversation and stored_anchor == provisional_anchor(token)
 
 
-def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -> None:
+def bootstrap_transcript(
+    transcript: Any,
+    store: AttentionStore | None = None,
+    *,
+    witnessed_cut_off: tuple[str, str] | None = None,
+    reaped_owner: Any | None = None,
+) -> tuple[str, str, str, str] | None:
     """Import a conversation's durable outcome; NEVER fatal to the caller.
 
     Both call sites are boot paths that must survive a bad conversation:
@@ -162,9 +279,27 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
 
     The failure is logged with the identity and the exception so a swallowed
     problem is still diagnosable from the log rather than silently invisible.
+
+    Returns whatever :func:`_import_transcript_outcome` published for an
+    orphaned run (or ``None``), so the caller that owns a ``Session`` can
+    journal the cut-off once. A failure also returns ``None``: a swallowed
+    problem journals nothing rather than half-narrating one.
+
+    ``witnessed_cut_off`` is passed straight through; see
+    :func:`_import_transcript_outcome` for the one caller that uses it and why
+    the record it writes is provisional.
+
+    ``reaped_owner`` is the record a caller's OWN reap has already deleted from
+    the run directory; see :func:`_classify_orphaned_run` for why the evidence
+    has to be handed in rather than re-read.
     """
     try:
-        _import_transcript_outcome(transcript, store)
+        return _import_transcript_outcome(
+            transcript,
+            store,
+            witnessed_cut_off=witnessed_cut_off,
+            reaped_owner=reaped_owner,
+        )
     except Exception as exc:  # noqa: BLE001 — attention must never block a boot
         # `getattr` so the handler cannot itself raise on a transcript that
         # never grew a `.directory` (a stub, a partially constructed instance)
@@ -182,15 +317,413 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
             exc,
             # An arbitrary unknown exception is being swallowed here, and `%r`
             # names its type but not the frame that raised it. The destination
-            # is a real file (a spawned runtime's `log_dir()/mobile.log`), so
+            # is a real file (a spawned runtime's `log_dir()/runtime.log`), so
             # the traceback is what makes the next novel failure recoverable
             # from disk instead of only reproducible.
             exc_info=True,
         )
 
 
-def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = None) -> None:
+def _config_root_for(directory: Path) -> Path:
+    """The config root that owns ``directory``.
+
+    Derived from the transcript path rather than read from the ambient
+    environment, because this classification must agree with the STORE it
+    writes into: an isolated run redirects ``HOME`` (or
+    ``LOCAL_OPERATOR_CONFIG_DIR``) and a store under one root must not be
+    classified against another root's run records. ``sessions/<id>`` and
+    ``agents/<id>`` are the only two layouts (``conversation_identity`` knows
+    the same two), so anything else falls back to the ambient root, which is
+    what a unit test's ``tmp_path`` transcript wants.
+    """
+    parent = directory.parent
+    if parent.name in ("sessions", "agents"):
+        return parent.parent
+    return config_dir()
+
+
+def _run_record_evidence(directory: Path) -> tuple[Any, Any]:
+    """``(live_foreign_owner, dead_owner)`` for this conversation's records.
+
+    Read RAW rather than through ``registry.scan``, and in ONE pass that returns
+    both facts, because ``scan`` used to UNLINK every stale record it met: a scan
+    performed first would destroy exactly the dead-owner evidence this
+    classification depends on (the daemon's own sweep is a scan, so the ordering
+    is not hypothetical). ``scan`` now MOVES a dead record to the run
+    directory's ``reaped/`` sidecar instead, and this reader reads BOTH
+    directories for that reason: the live directory is where an unreaped record
+    still sits, and the sidecar is where a sweep has already put it, so the
+    classification no longer depends on whether some other process happened to
+    sweep first (INCIDENT 2026-09-13, session ``5e109d459222``, which read as
+    "the cause could not be determined" for a death that had a recorded cause).
+
+    ``live_foreign_owner`` is a live pid that is NOT this process. Excluding
+    ourselves is load-bearing rather than tidiness: a successor runtime publishes
+    its own record BEFORE it constructs its ``Session``, so counting our own pid
+    as a live owner would make every orphaned run unclassifiable — precisely the
+    bug this change fixes.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+
+    run = _config_root_for(directory) / RUN_DIRNAME
+    live: Any = None
+    dead: Any = None
+    try:
+        if not run.is_dir():
+            return None, None
+        # Both the live directory and the sidecar a ``scan`` moves dead records
+        # into. A record is in exactly one of them (the move is a rename), so
+        # a path appearing twice is impossible and no dedupe is needed.
+        reaped = run / registry.REAPED_DIRNAME
+        paths = sorted(run.glob("*.json")) + sorted(reaped.glob("*.json"))
+    except OSError:
+        return None, None
+    for path in paths:
+        try:
+            record = SessionRecord.from_json(json.loads(path.read_text()))
+        except (OSError, ValueError, TypeError):
+            continue
+        if record.session_id != directory.name:
+            continue
+        # The zombie probe costs a `ps` fork, and boot is not a hot path — and a
+        # zombie is NOT a live owner, which is the whole point of asking.
+        if not registry.pid_alive(record.pid, check_zombie=True):
+            if dead is None or record.started_at >= dead.started_at:
+                dead = record
+            continue
+        if record.pid != os.getpid() and (live is None or record.started_at >= live.started_at):
+            live = record
+    return live, dead
+
+
+def _stopped_marker(directory: Path) -> bool:
+    """Whether this conversation's wake index carries a recorded STOP.
+
+    ``stopped_at`` is stamped by the stop path (``control._mark_wakes_dormant``)
+    and cleared on the session's next open, so it is a durable, transcript-derived
+    positive marker of a user's own cancel — the one cause a cut-off must not
+    report as an error. A schedule-less session has no entry at all, which is why
+    the deliberate stop is ALSO carried in the outcome marker itself; this is
+    corroboration for the case where the runtime wrote no marker, not the only
+    evidence.
+    """
+    from local_operator.wakes import store as wake_store
+
+    try:
+        entry = wake_store.read_entry(_config_root_for(directory), directory.name)
+    except Exception:  # noqa: BLE001 — an unreadable index is not a stop
+        return False
+    return bool(isinstance(entry, dict) and entry.get("stopped_at"))
+
+
+def _durable_stop_marker(directory: Path) -> dict[str, Any] | None:
+    """The durable stop marker a KILLER staged before an irreversible step.
+
+    Read from the CONVERSATION directory, not from a run directory derived from
+    a config root: the writer (``registry.write_stop_marker``) is handed the
+    same transcript directory this classifier starts from, so one spelling
+    keeps the two sides in step — and the marker must sit somewhere that
+    outlives the record it describes, because a clean stop unpublishes the
+    record and a sweep moves a dead one aside while the transcript directory
+    survives both. That durability is the whole reason this rung exists: at the
+    SIGKILL rung the target records nothing, so the file below is the only
+    artifact that can say the runtime was killed, by whom, and whether it was
+    asked for.
+    """
+    from local_operator.session.runtime import registry
+
+    return registry.read_stop_marker(directory)
+
+
+def _stop_marker_covers_run(
+    marker: dict[str, Any],
+    directory: Path,
+    dead: Any | None,
+    *,
+    run_started_at: float | None = None,
+) -> bool:
+    """Whether ``marker`` attests to the RUN this classification is about.
+
+    A marker is keyed to a RUN — ``(session_id, pid, started_at)`` — not to a
+    session, and this is where that is enforced. A session can be stopped
+    deliberately (marker naming sigkill), reopened, run again, and then die
+    involuntarily; without this check the SURVIVING marker would narrate the
+    later, unexplained death as the user's own act, which is the one misreading
+    a durable marker can introduce. So: the session id must be this
+    conversation's, and the marker has to be shown to describe THIS run by
+    whichever run key is available.
+
+    THE RUN KEY HAS TWO SOURCES, and neither may be skipped.
+
+    * A dead RECORD, when one survived: pid and start time must be the
+      marker's, which is the strongest form of the check.
+    * The run's own START, when there is no record at all — and there is no
+      record in the NORMAL rung-3 shape, because the ladder that wrote the
+      marker is the same ladder that unpublished the record
+      (``control._recover_record``), and because a sweep can move it to the
+      ``reaped/`` sidecar's retention bound. Skipping the check there (this
+      function used to ``return True``) let a marker from an EARLIER deliberate
+      stop of the same session narrate a LATER involuntary death as
+      ``interrupted``/``user-stop`` — naming the earlier run's killer — once the
+      sidecar's own bound evicted the record. That is a wrong-verdict hole in
+      the direction that HIDES a crash, reported as QA round 1's Q-1.
+
+    WHY ``at`` IS THE BOUND AND ``started_at`` IS NOT: ``started_at`` is the
+    TARGET PROCESS's start, which for any runtime that was already resident
+    when its turn began — the ordinary case — is EARLIER than the run, so
+    bounding on it would refuse legitimate markers. ``at`` is the moment the
+    killer staged the file, and a stop of THIS run necessarily happens after
+    this run started. A marker with no usable ``at`` keeps the old permissive
+    answer rather than inventing a refusal: no bound is no evidence, and
+    refusing on no evidence would delete the attribution rung 3 exists for.
+    """
+    if str(marker.get("session_id") or "") != directory.name:
+        return False
+    if dead is None:
+        return _marker_postdates_run(marker, run_started_at)
+    if int(marker.get("pid") or -1) != int(getattr(dead, "pid", -2) or -2):
+        return False
+    started = marker.get("started_at")
+    if _is_stamp(started):
+        return abs(float(started) - float(getattr(dead, "started_at", 0.0) or 0.0)) < (
+            _RUN_KEY_TOLERANCE_S
+        )
+    return True
+
+
+#: How far two readings of the SAME run key may differ, in seconds. The key is
+#: written by two processes (the killer stamps the marker, the target stamped
+#: its record) from the same clock, so this only absorbs rounding.
+_RUN_KEY_TOLERANCE_S = 1.0
+
+
+def _is_stamp(value: object) -> TypeGuard[float | int]:
+    """Whether ``value`` is a usable epoch stamp (``bool`` is an ``int``).
+
+    A ``TypeGuard`` rather than a plain ``bool`` so a caller that has already
+    asked can read the stamp without re-narrowing it: a ``dict.get`` returns
+    ``Any | None``, and ``float()`` of that is a type error the guard makes go
+    away instead of an inline ``isinstance`` chain repeated at each use.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value != 0
+
+
+def _marker_postdates_run(marker: dict[str, Any], run_started_at: float | None) -> bool:
+    """Whether a marker with NO record to compare against still fits this run.
+
+    See :func:`_stop_marker_covers_run` for why the bound is the marker's own
+    stamp and not the target's start time, and why an absent or unusable stamp
+    is permissive.
+    """
+    if run_started_at is None or not _is_stamp(marker.get("at")):
+        return True
+    # These fractional writer stamps order DIFFERENT events, unlike the two
+    # rounded copies of one process key compared above. Any look-behind here
+    # attributes a rapid re-engagement's death to the preceding turn's stop.
+    return float(marker["at"]) >= float(run_started_at)
+
+
+def _record_detail(record: Any) -> str:
+    """A parenthetical naming the record that outlived its process, or ``""``.
+
+    Kept to the record's own facts (build, pid, started-at) rather than prose,
+    because these are the fields a reader would otherwise have to reconstruct
+    from the log to answer "which runtime was this". The started-at is ONE
+    token rather than two — see the note on its format below (design round 3,
+    D7).
+    """
+    build = str(getattr(record, "version", "") or "")
+    ref = str(getattr(record, "source_ref", "") or "")
+    stamp = f"{build}@{ref}" if build and ref else build or ref
+    started = getattr(record, "started_at", None)
+    when = ""
+    if isinstance(started, (int, float)) and not isinstance(started, bool) and started:
+        # THE DATE AND THE TIME ARE ONE TOKEN, joined by a NON-BREAKING space,
+        # because the wrap is what made them read as two facts. Measured on the
+        # real `NoticeBlock` at 60 columns (56 content cells): with a plain
+        # space the boundary landed between them — `… started 2026-09-12` /
+        # `05:15:53)`, a 9-cell orphan line under a timestamp the reader has to
+        # reassemble. The non-breaking space carries the value whole on the last
+        # line at 60, and moves nothing anywhere else: 4/3/2/2 lines at
+        # 60/80/100/120 before and after, with the split removed (design round
+        # 3, D7 — the one-character fix it named).
+        when = time.strftime("%Y-%m-%d\u00a0%H:%M:%S", time.localtime(started))
+    parts = [
+        part for part in (stamp, f"pid {record.pid}", f"started {when}" if when else "") if part
+    ]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _classify_orphaned_run(
+    directory: Path, *, reaped_owner: Any | None = None, run_started_at: float | None = None
+) -> tuple[str, str, str]:
+    """``(kind, cause, reason)`` for a started run whose owner is gone.
+
+    The taxonomy's default flips here: "no evidence" used to mean
+    ``interrupted`` and now means ``error``, because a cut-off we cannot explain
+    is not a stop. Only POSITIVE evidence of a deliberate act records an
+    interruption. Evidence, in order:
+
+    * a DURABLE STOP MARKER staged by the process that took the irreversible
+      step (``runtime-stop.json``) → ``interrupted`` / ``user-stop``, with the
+      rung and the killer as the detail. It outranks everything below because
+      it is the only evidence a forced stop can leave: the target at the
+      SIGKILL rung is not executing;
+    * a stop recorded in the wake index (the in-process stop path) →
+      ``interrupted`` / ``user-stop``, no detail;
+    * THE RUNTIME'S OWN OPEN TURN JOURNAL ROW (``runtime/journal.py``) → a
+      NAMED involuntary cause: ``runtime-shutdown`` when the row itself recorded
+      the signal the runtime was leaving on (a stop sweep that reached its
+      target), ``install-mid-update`` when the install on disk moved away from
+      the build the row booted from (the install-window tear), and
+      ``runtime-killed`` otherwise. This rung is what turns the third case below
+      from an inference into a fact: an open row IS the runtime's own statement
+      that a turn was in flight and never ended, which is the evidence the two
+      rungs below cannot have. It sits BELOW the marker rungs deliberately — a
+      marker is a killer's attestation that someone asked for this, and nothing
+      about an unfinished turn may outrank a record that the stop was ordered;
+    * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
+      the record's build, pid and start time as the detail — the legacy path,
+      reached unchanged when no journal row survives;
+    * nothing at all → ``error`` / no cause, saying plainly that the cause could
+      not be determined.
+
+    Why the marker is FIRST, and why the order is the fix. Before it existed,
+    the same event (a stop that escalated to SIGKILL against a runtime that
+    could not answer) reached the operator as three incompatible verdicts —
+    ``runtime-killed`` here, no cause at all once a sweep had reaped the record,
+    and ``owner-lost`` viewer-side — because every rung below reports what the
+    process left behind and a SIGKILLed process leaves NOTHING. A marker is
+    written by the killer before the signal, so the deliberate act survives the
+    process it was done to, and one event yields exactly one verdict.
+
+    ``reaped_owner`` IS THE DEAD RUNG'S EVIDENCE WHEN SOMEBODY ALREADY TOOK IT.
+    ``registry.scan`` moves a stale record into a sidecar as it reports it (it
+    used to DELETE it), and this reader reads that sidecar too — so the daemon's
+    discovery loop can sweep before the classifier runs and the classification
+    is unchanged. The caller's own record is still preferred when it has one,
+    because it is strictly more evidence (the sweep may have run before the
+    caller proved the pid dead). Only the DEAD rung uses it: the marker rungs
+    answer for themselves, and the caller's live-owner gate
+    (:func:`_run_record_evidence` inside :func:`_import_transcript_outcome`) has
+    already run, so a successor that published while the record was being reaped
+    still wins.
+
+    ``run_started_at`` IS THE MARKER RUNG'S SECOND RUN KEY. The marker is keyed
+    to a run, and when no record survives to compare pid and start time against,
+    the run's own start — the in-flight ``attention_started`` entry's timestamp,
+    passed by the caller that already read it — is what keeps a marker from an
+    EARLIER stop of the same session from narrating a later involuntary death as
+    the user's own act (QA round 1, Q-1; see :func:`_stop_marker_covers_run` for
+    why the bound is the marker's own stamp and not the target's ``started_at``).
+    ``None`` — no entry, or a caller that has no transcript — keeps the
+    marker-only answer, because refusing on no evidence would delete the
+    attribution the rung-3 shape exists for.
+
+    THE NO-EVIDENCE ARM CARRIES NO CAUSE AND ITS OWN SENTENCE. It used to read
+    the ``runtime-killed`` sentence with a ``(the cause could not be determined)``
+    parenthetical bolted on, and every surface that prints the reason made that
+    a contradiction: the sidebar's ``_error_label`` drops a parenthetical by
+    design (it is built for the build pair), so the one surface that trims the
+    detail stated a definite cause in the one case where nothing is known
+    (design/UX review round 1, D3/U3). ``CUT_OFF_UNKNOWN`` already exists for
+    this branch and needs no hedging, and leaving ``cause`` empty is what keeps
+    ``cause_from_reason(reason)`` — the inverse every reader relies on —
+    agreeing with the reason instead of naming a mechanism nobody observed.
+    """
+    from local_operator.incidents import (
+        CUT_OFF_UNKNOWN,
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    # The dead record is read unconditionally rather than on the third rung
+    # only: the marker above is keyed to a RUN, so the rung that uses it has to
+    # know whether a dead record contradicts it (see
+    # :func:`_stop_marker_covers_run`). One directory read either way — the
+    # helper reads both the live directory and the reaped sidecar in one pass.
+    _, dead = _run_record_evidence(directory)
+    if dead is None:
+        dead = reaped_owner
+    marker = _durable_stop_marker(directory)
+    if (
+        marker is not None
+        and marker.get("deliberate")
+        and _stop_marker_covers_run(marker, directory, dead, run_started_at=run_started_at)
+    ):
+        raw_killer = marker.get("killer")
+        killer: dict[str, Any] = raw_killer if isinstance(raw_killer, dict) else {}
+        return (
+            "interrupted",
+            DELIBERATE_CUT_OFF_CAUSE,
+            render_cut_off_reason(
+                DELIBERATE_CUT_OFF_CAUSE,
+                detail=render_stop_attribution(
+                    rung=str(marker.get("rung") or ""),
+                    command=str(killer.get("command") or killer.get("argv0") or ""),
+                    killer_pid=killer.get("pid"),
+                ),
+            ),
+        )
+    if _stopped_marker(directory):
+        return (
+            "interrupted",
+            DELIBERATE_CUT_OFF_CAUSE,
+            render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
+        )
+    # THE RUNTIME'S OWN STATEMENT, preferred over every inference below it.
+    # Imported function-locally for the same reason the ``incidents`` import
+    # above is: this runs at session boot, and an instrument that cannot be
+    # read must degrade to the legacy rungs rather than stop a session opening.
+    try:
+        from local_operator.session.runtime import journal
+
+        row = journal.open_row_after_death(directory)
+        if row is not None:
+            return journal.death_verdict(row)
+    except Exception:  # noqa: BLE001 — unreadable evidence is not a dead session
+        logger.debug("turn journal evidence unreadable for %s", directory.name, exc_info=True)
+    if dead is not None:
+        return (
+            "error",
+            "runtime-killed",
+            render_cut_off_reason("runtime-killed", detail=_record_detail(dead)),
+        )
+    return "error", "", CUT_OFF_UNKNOWN
+
+
+def _import_transcript_outcome(
+    transcript: Any,
+    store: AttentionStore | None = None,
+    *,
+    witnessed_cut_off: tuple[str, str] | None = None,
+    reaped_owner: Any | None = None,
+) -> tuple[str, str, str, str] | None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
+
+    Returns the ``(kind, cause, reason, token)`` this call PUBLISHED — for an
+    orphaned in-flight run, or for the dying runtime's own saved marker when that
+    marker reports a CUT-OFF — and ``None`` when it published nothing new. The
+    caller that owns a ``Session`` (and can therefore journal) uses it to
+    narrate the cut-off once per token; the daemon sweep, which has no session,
+    ignores it.
+
+    An in-flight ``attention_started`` with no matching outcome means a process
+    died mid-turn — or is STILL RUNNING it. The two are told apart by the run
+    registry, and only the second may publish nothing: a provisional marker
+    written for a healthy run would be a wrong ``error`` row that every
+    surface's ``busy`` suppression HIDES rather than corrects, so the guard
+    removes the class instead of relying on every front end's suppression.
+    ``witnessed_cut_off`` is the ONE caller that may override that guard, and
+    only a caller holding POSITIVE evidence the owner is gone: a ``(cause,
+    reason)`` pair from a viewer that has just DELIVERED a cut-off verdict after
+    the whole cold window of failed dials and syncs. It publishes a PROVISIONAL
+    record for the run's token, so the live owner's real outcome supersedes it
+    when it lands (``_supersedes_provisional``) — which is what lets a
+    live-but-silent stop reach the sidebar without inventing a second, permanent
+    verdict (review round 1, MINOR-2).
 
     Old baselines were memory-only. Unknown historical work keeps that no-flood
     baseline, while a persisted seen stamp older than the actual final assistant
@@ -198,38 +731,140 @@ def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = N
     """
     store = store or AttentionStore()
     identity = conversation_identity(transcript.directory)
+    # Imported here rather than at module scope for the same reason
+    # ``_classify_orphaned_run`` does it: a broken ``incidents`` import must not
+    # stop a session from booting (see the guard around the bootstrap call).
+    from local_operator.incidents import is_cut_off_cause, is_deliberate_cause
+
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
-    started = transcript.latest_custom("attention_started")
+    # The ENTRY rather than only its details, because the run's own START is the
+    # bound the stop marker is checked against when the record is gone
+    # (``_stop_marker_covers_run``): the entry's timestamp is this turn's start,
+    # and it is the only run key left once the ladder unpublishes the record or
+    # the reaped sidecar's retention bound evicts it.
+    started_entry = transcript.latest_custom_entry("attention_started")
+    started = dict(started_entry.payload.get("details", {})) if started_entry is not None else None
+    run_started_at = float(started_entry.ts) if started_entry is not None else None
     if (
         isinstance(started, dict)
         and started.get("conversation_id") == identity
         and (not isinstance(saved, dict) or saved.get("token") != started.get("token"))
     ):
         token = started["token"]
-        # Provisional by construction: the turn may still be in flight, so this
-        # marker is explicitly the kind `publish` will let the real outcome
-        # supersede once the journal proves how the run actually ended.
-        store.publish(identity, token, provisional_anchor(token), "interrupted")
-        return
+        live_owner, _ = _run_record_evidence(transcript.directory)
+        if live_owner is not None:
+            if witnessed_cut_off is None:
+                # In flight. Publish NOTHING: the live runtime will publish the real
+                # outcome when the turn ends, and a marker written here would be a
+                # provisional row it then has to supersede — or, worse, a row no
+                # later writer ever corrects if the turn completes with an anchor
+                # this classifier did not predict.
+                return None
+            # A WITNESSED death the classifier cannot classify. The record on disk
+            # points at a pid that is still alive (or unverifiable), so the branch
+            # above has to assume a live run — and a viewer that already told the
+            # user the turn was cut off is the one party that KNOWS otherwise. The
+            # record is written PROVISIONALLY for exactly that reason: the live
+            # owner's own outcome for the same token replaces it with the real
+            # anchor and kind, so the worst case is a row that corrects itself
+            # (review round 1, MINOR-2).
+            cause, reason = witnessed_cut_off
+            # KIND FROM THE CAUSE, not hardcoded, which is what makes the
+            # witnessed writer agree with the two other writers that read this
+            # vocabulary (`daemon._projection_frame`'s fill and the narration
+            # guard below both route through `is_deliberate_cause`). The cause is
+            # always our own — the viewer that watched the turn end supplies it —
+            # so a deliberate one here must land `interrupted` and an involuntary
+            # one `error`; writing `error` for whatever arrived would have been
+            # the single place the taxonomy's deliberate half was not consulted
+            # (review round 2, NIT-2).
+            kind = "interrupted" if is_deliberate_cause(cause) else "error"
+            store.publish(
+                identity,
+                token,
+                provisional_anchor(token),
+                kind,
+                reason=reason,
+                cause=cause,
+            )
+            return kind, cause, reason, str(token)
+        kind, cause, reason = _classify_orphaned_run(
+            transcript.directory, reaped_owner=reaped_owner, run_started_at=run_started_at
+        )
+        store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
+        return kind, cause, reason, str(token)
     if isinstance(saved, dict) and saved.get("conversation_id") == identity:
         if saved.get("eligible", True):
-            store.publish(identity, saved["token"], saved["anchor"], saved["kind"])
-        return
+            # The dying runtime's own marker, replayed VERBATIM — including its
+            # kind, cause and reason. This is the one path that can report a
+            # deliberate stop as `interrupted` after the process is gone, so
+            # nothing here may re-derive the kind from the absence of evidence.
+            kind = str(saved.get("kind") or "")
+            cause = str(saved.get("cause") or "")
+            reason = str(saved.get("reason") or "")
+            store.publish(
+                identity,
+                saved["token"],
+                saved["anchor"],
+                kind,
+                reason=reason,
+                cause=cause,
+            )
+            if kind == "error" and is_cut_off_cause(cause):
+                # A CUT-OFF the dying runtime could not narrate itself. Its own
+                # `_journal_cut_off_once` is refused by `journal_incident`'s
+                # `_disposed` guard — the dispose rung sets that flag before
+                # the turn's `finally` publishes — so the update/shutdown/retire
+                # family reached every SURFACE and no MODEL (review round 1,
+                # MINOR-2 + QA Q-2). Returning the tuple is what makes THIS
+                # boot journal it: `Session._journal_restored_cut_off` narrates
+                # it once per token, so the next turn's context opens with
+                # `[session incident]` rather than a model re-guessing what its
+                # last half-delivered request did.
+                #
+                # MEMBERSHIP, not the presence of a cause (review round 2, Q3),
+                # AND not one token's identity (review round 1, NIT-1). The guard
+                # used to be `cause` truthiness, which narrates a marker carrying
+                # ANY string into the model's history — measured on a hand-written
+                # marker with `cause='not-a-real-cause'`: one `session_incident`
+                # card, and the malformed token imported as the durable outcome.
+                # So `is_cut_off_cause` decides: the VOCABULARY says this build
+                # can render the token, and `DELIBERATE_CUT_OFF_CAUSES` says
+                # understanding a token is not enough to call the turn a cut-off.
+                # Both halves are sets, so a future DELIBERATE cause joins a set
+                # instead of becoming a second comparison nobody remembers to
+                # write — which is how a user's own `/stop` would have been
+                # narrated as a cut-off the moment its token was coined.
+                # `kind` is still READ rather than re-derived: the dying
+                # runtime's marker is replayed verbatim.
+                #
+                # The cost is stated rather than hidden: a NEWER runtime's cause
+                # token is not narrated to the model by this build, because this
+                # build cannot say what it means. The durable outcome is still
+                # imported above — kind, cause and reason as recorded — so every
+                # surface reads the truth; only the `[session incident]` card,
+                # which is the model-facing form of a cause this build can
+                # render, is withheld. Reachability today is a corrupted marker
+                # (every in-tree `note_cut_off` caller passes a vocabulary token),
+                # which is why this is a claim-vs-code correction and not a live
+                # operator bug.
+                return kind, cause, reason, str(saved["token"])
+        return None
     if store.state(identity)["completion_token"]:
-        return
+        return None
     history = transcript.build_llm_history()
     if not history:
-        return
+        return None
     final = history[-1]
     if (
         getattr(final, "role", None) != "assistant"
         or not getattr(final, "text", "")
         or getattr(final, "tool_calls", None)
     ):
-        return
+        return None
     entry = next((row for row in reversed(transcript.entries()) if row.id == final.id), None)
     if entry is None:
-        return
+        return None
     seen = None
     try:
         raw = json.loads((store.path.parent / "mobile-seen.json").read_text())
@@ -242,6 +877,7 @@ def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = N
     store.publish(
         identity, token, final.id, "complete", baseline_seen=seen is None or seen >= entry.ts
     )
+    return None
 
 
 class AttentionStore:
@@ -267,7 +903,8 @@ class AttentionStore:
                         "CREATE TABLE completions ("
                         "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
                         "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
-                        "anchor TEXT NOT NULL, kind TEXT NOT NULL)"
+                        "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
+                        "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '')"
                     )
                     conn.execute(
                         "CREATE INDEX completion_conversation "
@@ -332,6 +969,38 @@ class AttentionStore:
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mutations'"
                     ).fetchone():
                         conn.execute(_CREATE_MUTATIONS)
+                    # `supersede_log` is additive for the same reason and stays
+                    # out of the probe above for the same reason: a database
+                    # written before this fix legitimately lacks it. NO BASELINE,
+                    # again because it is an EDGE not a LEVEL — readers start
+                    # from "nothing was healed before I connected", and seeding a
+                    # historical set would replay corrections nobody is stale for
+                    # (a reconnect takes a fresh snapshot that already carries the
+                    # healed state).
+                    if not conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
+                    ).fetchone():
+                        conn.execute(_CREATE_SUPERSEDE_LOG)
+                    # ``reason``/``cause`` are ADDITIVE and stay out of the probe
+                    # above for the reason the two tables do: every database
+                    # written before the cut-off taxonomy legitimately lacks
+                    # them, and naming them in the probe would read all of them
+                    # as corrupt. ``DEFAULT ''`` rather than a nullable column
+                    # keeps the readers one shape: an old row's reason is the
+                    # empty string, i.e. "no reason was recorded", which is
+                    # exactly what it is — never a claim that there was none to
+                    # record.
+                    columns = {
+                        str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")
+                    }
+                    if "reason" not in columns:
+                        conn.execute(
+                            "ALTER TABLE completions ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+                        )
+                    if "cause" not in columns:
+                        conn.execute(
+                            "ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''"
+                        )
             return conn
         except BaseException:
             conn.close()
@@ -362,6 +1031,12 @@ class AttentionStore:
             "completion_token": row["token"] if row else None,
             "anchor_id": row["anchor"] if row else None,
             "kind": row["kind"] if row else None,
+            # Why, in the operator's words, plus the machine token. Both empty
+            # for a completion and for any record written before the cut-off
+            # taxonomy; a surface that wants to append the cause must treat ""
+            # as "nothing to say" rather than as an empty sentence.
+            "reason": (row["reason"] or "") if row else "",
+            "cause": (row["cause"] or "") if row else "",
             "unseen": bool(row and row["sequence"] > acknowledged),
             "revision": [row["sequence"] if row else 0, acknowledged],
         }
@@ -380,6 +1055,8 @@ class AttentionStore:
                 "completion_token": None,
                 "anchor_id": None,
                 "kind": None,
+                "reason": "",
+                "cause": "",
                 "unseen": False,
                 "revision": [0, 0],
             }
@@ -411,6 +1088,8 @@ class AttentionStore:
                         "completion_token": row["token"],
                         "anchor_id": row["anchor"],
                         "kind": row["kind"],
+                        "reason": _optional_column(row, "reason"),
+                        "cause": _optional_column(row, "cause"),
                         "unseen": row["sequence"] > row["acknowledged"],
                         "revision": [row["sequence"], row["acknowledged"]],
                     }
@@ -418,6 +1097,121 @@ class AttentionStore:
 
     def state(self, conversation: str) -> dict[str, Any]:
         return self.state_many([conversation])[conversation]
+
+    def published_since(self, sequence: int) -> list[dict[str, Any]]:
+        """Publications NEWER than ``sequence``, oldest first, as deltas.
+
+        THE MACHINE-WIDE FEED'S READ, and it exists for the same reason
+        ``revision()`` does: a poller that must notice a completion cannot pay
+        ``state_many`` over the whole store on every tick. ``sequence`` is the
+        AUTOINCREMENT primary key, so this is an index scan over exactly what
+        happened since the caller's cursor, not a per-conversation lookup.
+
+        Returns ``(conversation, sequence, token, kind)`` per row because that
+        is the whole of what "a completion was published" needs: the caller
+        keys its own per-session baseline on ``token`` (the durable identity)
+        and decides eligibility from ``kind`` (``BRIDGE_NOTIFIABLE_KINDS``).
+        The caller has to read ``state_many`` for the affected sessions
+        afterwards for the wire shape — this read answers "which sessions
+        moved", never "what does the card say".
+
+        Read-only and missing-store tolerant, exactly like its neighbours: a
+        store that does not exist yet has published nothing, and a poller that
+        raised here would lose cross-process completion sync for the life of
+        its loop. A pre-taxonomy database reads without ``reason``/``cause``
+        because neither is selected.
+        """
+        if not self.path.exists():
+            return []
+        with closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return []
+            return [
+                {
+                    "conversation": row["conversation"],
+                    "sequence": int(row["sequence"]),
+                    "token": row["token"],
+                    "kind": row["kind"],
+                }
+                for row in conn.execute(
+                    "SELECT conversation, sequence, token, kind FROM completions "
+                    "WHERE sequence > ? ORDER BY sequence",
+                    (int(sequence),),
+                )
+            ]
+
+    def superseded_since(self, sequence: int) -> list[dict[str, Any]]:
+        """``{conversation}`` entries healed AFTER ``sequence``, oldest first.
+
+        THE FEED'S SECOND DELTA (review round 1, R4). ``revision()`` reports that
+        a heal happened but not which record it moved, and a heal deliberately
+        changes neither ``MAX(sequence)`` nor ``SUM(acknowledged)`` — so both
+        :meth:`published_since` and :meth:`acknowledgement_map` come back empty
+        for it. A consumer following the revision alone therefore advanced its
+        change detector and then published nothing, leaving its subscribers on
+        the stale outcome the heal had just corrected. This read is what turns
+        "a heal happened" into "publish a corrected state for THIS session".
+
+        Read-only and missing-store/missing-table tolerant, exactly like its
+        neighbours: ``supersede_log`` is additive, so a database whose runtime
+        has not reconnected yet legitimately lacks it and must read as "nothing
+        was healed" rather than raising. A reader that raised here would lose
+        in-place corrections for the life of its loop.
+        """
+        if not self.path.exists():
+            return []
+        with closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        ) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return []
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
+            ).fetchone():
+                return []
+            return [
+                {"sequence": int(row["seq"]), "conversation": row["conversation"]}
+                for row in conn.execute(
+                    "SELECT seq, conversation FROM supersede_log WHERE seq > ? ORDER BY seq",
+                    (int(sequence),),
+                )
+            ]
+
+    def acknowledgement_map(self) -> dict[str, int]:
+        """``{conversation: acknowledged}`` for every conversation with a receipt.
+
+        The second half of the feed's delta: a read is a durable change to the
+        same watermark the unseen mark is computed from (``sequence >
+        acknowledged``), so a session that is READ must be able to publish an
+        ``attention`` frame that clears its own mark without a full re-read of
+        the store. The caller diffs this against the map it held last tick and
+        re-reads state only for the sessions whose value moved.
+
+        Deliberately its own small read rather than a term of ``revision()``:
+        ``SUM(acknowledged)`` is enough to know *something* moved but not
+        *which*, and guessing the conversation is what would make a late frame
+        un-read a row.
+        """
+        if not self.path.exists():
+            return {}
+        with closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        ) as conn:
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return {}
+            return {
+                str(row[0]): int(row[1])
+                for row in conn.execute(
+                    "SELECT conversation, MAX(acknowledged) FROM receipts GROUP BY conversation"
+                )
+            }
 
     def publish(
         self,
@@ -427,6 +1221,8 @@ class AttentionStore:
         kind: str,
         *,
         baseline_seen: bool | None = None,
+        reason: str = "",
+        cause: str = "",
     ) -> dict[str, Any]:
         """Import a durable outcome idempotently, including after runtime restart.
 
@@ -444,13 +1240,14 @@ class AttentionStore:
 
         Supersession is deliberately narrow: same conversation, and the stored
         record must still wear the provisional shape — anchor
-        ``completion-<token>`` with kind ``interrupted``. Two refusals it does
-        NOT relax. A token appearing under a DIFFERENT conversation stays an
-        error, which is the integrity property this check exists for: a forked
-        transcript carrying its parent's journal must not capture the parent's
-        receipt. And a record already anchored to a real entry is never
-        replaced, so a late bootstrap racing a finished turn cannot drag a real
-        outcome back to a synthetic one.
+        ``completion-<token>``. (The stored KIND is no longer part of that shape:
+        see ``_supersedes_provisional`` for why requiring ``interrupted`` would
+        now be the bug.) Two refusals it does NOT relax. A token appearing under
+        a DIFFERENT conversation stays an error, which is the integrity property
+        this check exists for: a forked transcript carrying its parent's journal
+        must not capture the parent's receipt. And a record already anchored to
+        a real entry is never replaced, so a late bootstrap racing a finished
+        turn cannot drag a real outcome back to a synthetic one.
 
         A genuinely interrupted turn is stored in that same provisional shape,
         and that is intended rather than an ambiguity to resolve: the only
@@ -484,6 +1281,7 @@ class AttentionStore:
         """
         if kind not in {"complete", "error", "interrupted"} or not anchor:
             raise ValueError("invalid completion")
+        reason = str(reason or "")[:REASON_WIRE_CHARS]
         if str(uuid.UUID(token)) != token:
             raise ValueError("invalid completion token")
         with closing(self._connect()) as conn, conn:
@@ -502,17 +1300,24 @@ class AttentionStore:
                 if not _supersedes_provisional(existing, conversation, token, anchor):
                     raise ValueError("completion token belongs to another outcome")
                 conn.execute(
-                    "UPDATE completions SET anchor=?, kind=? WHERE token=?",
-                    (anchor, kind, token),
+                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=? WHERE token=?",
+                    (anchor, kind, reason, cause, token),
                 )
                 # Inside the SAME transaction as the UPDATE: a reader must
                 # never observe a healed row whose change the detector has not
                 # yet counted, or it would cache the new state under the old
                 # revision and then ignore the next real change.
                 conn.execute(_BUMP_SUPERSEDES)
+                # ...and WHICH record moved, inside the same transaction and for
+                # the same reason: a reader must never observe a healed row whose
+                # identity has not been counted yet, or it would cache the healed
+                # state under the old revision and then ignore the next change.
+                conn.execute(_APPEND_SUPERSEDE, (conversation,))
+                conn.execute(_PRUNE_SUPERSEDE_LOG, (_SUPERSEDE_LOG_RETENTION,))
             conn.execute(
-                "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
-                (conversation, token, anchor, kind),
+                "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind,reason,cause) "
+                "VALUES(?,?,?,?,?,?)",
+                (conversation, token, anchor, kind, reason, cause),
             )
             if baseline_seen:
                 sequence = conn.execute(
@@ -563,7 +1368,40 @@ class AttentionStore:
             return (row[0], row[1], supersedes)
 
     def acknowledge(self, conversation: str, token: str) -> dict[str, Any]:
-        """Advance only through the observed token, never through server 'now'."""
+        """Advance only through the observed token, never through server 'now'.
+
+        THE TOKEN MUST BE THE CONVERSATION'S CURRENT COMPLETION, or the
+        conversation must already be read. Anything else raises
+        :class:`SupersededCompletionToken`, so a 200 from this method means one
+        thing and only one: *this conversation is read now* (`unseen` false).
+
+        WHY THE OLDER TOKEN IS REFUSED RATHER THAN RECORDED. The watermark is
+        monotonic, so acknowledging an older token could only ever move the
+        receipt to that token's sequence -- which, while a newer completion is
+        still unseen, is a movement no surface can observe: `unseen` is computed
+        against the NEWEST sequence, so the conversation stays unread either way.
+        Returning 200 for it is what made the no-op indistinguishable from a read
+        (the operator's defect: the desktop app sent a superseded token, got a
+        200, latched, and its checkmark never cleared). The honest answer is that
+        the caller is looking at a result the conversation has moved past: refuse
+        it, and let the caller re-read the token that is current. THE REFUSAL
+        CARRIES NO STATE, deliberately: the wire body is a machine ``code`` plus
+        one operator-facing sentence (see :data:`SUPERSEDED_TOKEN_CODE`), because
+        the state that settles this is the CALLER's own projection -- the thing it
+        is already subscribed to and must refresh to learn which token is current
+        now. A state computed here would be a second, already-stale opinion about
+        a conversation the caller is watching, and a caller that trusted it
+        instead of refreshing would be exactly as stuck as before. A DELAYED OR
+        DUPLICATE RECEIPT STILL CONVERGES -- that is the
+        case where the conversation is already read, and there this method answers
+        with the read state exactly as before, which is what out-of-order
+        delivery of a buffered receipt needs.
+
+        The whole decision is made inside the write transaction: ``BEGIN
+        IMMEDIATE`` serialises it against a concurrent :meth:`publish`, so the
+        current sequence this compares against cannot be advanced under it, and
+        the state returned was computed from the same snapshot.
+        """
         if not isinstance(token, str) or len(token) != 36 or not self.path.exists():
             raise ValueError("unknown completion token")
         with closing(self._connect()) as conn, conn:
@@ -574,6 +1412,18 @@ class AttentionStore:
             ).fetchone()
             if row is None:
                 raise ValueError("unknown completion token")
+            current = conn.execute(
+                "SELECT COALESCE(MAX(sequence),0), "
+                "COALESCE((SELECT acknowledged FROM receipts WHERE conversation=?),0)"
+                " FROM completions WHERE conversation=?",
+                (conversation, conversation),
+            ).fetchone()
+            # `current[0] == 0` is a conversation with no completions at all,
+            # which cannot happen for a token that was just found. Acknowledged
+            # past the newest sequence is the already-read case: a reordered or
+            # duplicate receipt lands here and must keep converging.
+            if row[0] != current[0] and current[1] < current[0]:
+                raise SupersededCompletionToken
             conn.execute(
                 "INSERT INTO receipts(conversation,acknowledged) VALUES(?,?) "
                 "ON CONFLICT(conversation) DO UPDATE SET acknowledged="

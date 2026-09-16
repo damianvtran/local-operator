@@ -15,12 +15,14 @@ from local_operator.compaction.thresholds import (
     resolve_threshold_tokens,
 )
 from local_operator.harness.types import (
+    DEFAULT_TURN_OUTPUT_TOKENS,
     AgentTool,
     ChatRequest,
     ImageContent,
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -176,6 +178,52 @@ async def test_openai_compat_text_tool_usage() -> None:
     assert isinstance(end, StreamEndEvent)
     assert end.stop_reason == "toolUse"
     assert end.usage is not None and end.usage.output_tokens == 7
+
+
+async def test_openai_compat_surfaces_the_reasoning_channel() -> None:
+    """Reasoning is REPLAYED and was never REPORTED, which is a diagnosis hole.
+
+    The client accumulates ``reasoning_content``/``reasoning`` so it can replay
+    the model's own thinking in later requests, but it emitted no event for it,
+    so a caller watching the stream could not tell "the model thought for the
+    whole budget and said nothing" from "we threw away what it said". Both
+    spell an empty reply, and they call for opposite responses. Asserted beside
+    the text channel because the point is that the two are distinguishable: the
+    reasoning fragments surface as reasoning, and the visible text is still only
+    the visible text.
+    """
+
+    body = _sse(
+        [
+            {
+                "id": "chatcmpl-r1",
+                "choices": [{"delta": {"reasoning_content": "weighing "}, "index": 0}],
+            },
+            {"id": "chatcmpl-r1", "choices": [{"delta": {"reasoning": "options"}, "index": 0}]},
+            {
+                "id": "chatcmpl-r1",
+                "choices": [{"delta": {"content": "done"}, "index": 0, "finish_reason": "stop"}],
+            },
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    request = ChatRequest(model=_spec(), system_blocks=["be brief"], messages=[Message.user("hi")])
+
+    events = await _collect(client.stream(request, "sk-test"))
+
+    assert [event.delta for event in events if isinstance(event, StreamReasoningDelta)] == [
+        "weighing ",
+        "options",
+    ]
+    # The reasoning did NOT leak onto the visible channel: nothing renders it.
+    assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == ["done"]
 
 
 @pytest.mark.parametrize(
@@ -1027,13 +1075,22 @@ def three_effort_tiers(tmp_path, monkeypatch) -> None:
     enum on the wire. The ``agent``/``task`` schemas advertise only CONFIGURED
     tiers (an unconfigured one is a guaranteed launch failure), so with the
     suite's isolated HOME the enum would otherwise be ``["inherit"]`` alone and
-    these tests would no longer prove that every tier survives the client."""
+    these tests would no longer prove that every tier survives the client.
+
+    ``model_choice: "model"`` for the same reason, one level up: an enum on the
+    wire exists only in the arm where a delegating model may pick a tier, and
+    the shipped default (``operator``) removes the field entirely. This fixture
+    is about what a CLIENT does with the members, so it opts into the arm that
+    has any."""
     from local_operator.config import ConfigManager
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     ConfigManager(tmp_path / "config").set_config_value(
         "subagents",
-        {"models": {"lo": "openai/gpt-5-mini", "med": "openai/gpt-5", "hi": "anthropic/opus"}},
+        {
+            "model_choice": "model",
+            "models": {"lo": "openai/gpt-5-mini", "med": "openai/gpt-5", "hi": "anthropic/opus"},
+        },
     )
 
 
@@ -4551,6 +4608,472 @@ async def test_openrouter_provider_and_prompt_cache_key_coexist_on_one_body() ->
     assert captured["body"]["messages"]
 
 
+# ---------------------------------------------------------------------------
+# OpenRouter cache affinity (`ChatRequest.provider_affinity`)
+# ---------------------------------------------------------------------------
+
+
+def _affinity_client(
+    captured: dict[str, Any],
+    *,
+    preferences: dict[str, Any] | None = None,
+    chunks: Sequence[dict[str, Any]] | None = None,
+) -> OpenAICompatClient:
+    """A MockTransport client that records each request body it is handed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.setdefault("bodies", []).append(json.loads(request.content))
+        captured["body"] = captured["bodies"][-1]
+        return httpx.Response(
+            200,
+            content=_sse(
+                list(chunks)
+                if chunks is not None
+                else [{"choices": [{"delta": {"content": "ok"}, "index": 0}]}]
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return OpenAICompatClient(
+        "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openrouter_provider_preferences=preferences,
+    )
+
+
+def _cacheable_spec() -> ModelSpec:
+    spec = _spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    spec.supports_prompt_cache = True
+    return spec
+
+
+async def test_provider_affinity_pins_the_served_display_name_verbatim() -> None:
+    """The pin reaches the wire as `provider.order`, spelled exactly as served.
+
+    VERBATIM is the contract, not an accident: OpenRouter accepts its own
+    display name as an `order` entry, and slug-normalising it is wrong for 13
+    of 106 providers (`Z.AI` is `z-ai`, `AtlasCloud` is `atlas-cloud`). Sending
+    what was served means there is no slug table to keep in sync.
+    """
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"order": ["AtlasCloud"]}
+
+
+@pytest.mark.parametrize("name", ["Z.AI", "Google AI Studio", "AtlasCloud"])
+async def test_provider_affinity_does_not_reshape_awkward_display_names(name: str) -> None:
+    """Names with dots, spaces and internal capitals survive byte-for-byte."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity=name,
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"]["order"] == [name]
+
+
+async def test_no_affinity_leaves_the_body_without_a_provider_key() -> None:
+    """The "no opinion" invariant: an unpinned request must not grow an empty
+    `provider` object, which would itself be a routing statement."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert "provider" not in captured["body"]
+
+
+async def test_provider_affinity_is_ignored_without_prompt_cache_support() -> None:
+    """No server-side cache means nothing to keep warm, so narrowing the host
+    pool would cost availability and buy nothing."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    spec = _spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert spec.supports_prompt_cache is False
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=spec,
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert "provider" not in captured["body"]
+
+
+async def test_provider_affinity_merges_with_non_routing_preferences() -> None:
+    """A privacy/compliance preference is not a host opinion, so the two
+    coexist in one `provider` object rather than one suppressing the other."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured, preferences={"zdr": True})
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"zdr": True, "order": ["AtlasCloud"]}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("order", ["Novita"]),
+        ("only", ["Novita"]),
+        ("ignore", ["Novita"]),
+        ("sort", "price"),
+    ],
+)
+async def test_user_host_preferences_suppress_the_pin_and_survive_intact(
+    key: str, value: Any
+) -> None:
+    """The user's typed routing opinion wins outright.
+
+    Prepending a host to their `order`, or pinning against their `sort`, would
+    make the settings page describe something other than what happens. The
+    session-level gate refuses to pin at all in this state; this is the wire's
+    own defence in depth, so a pin arriving by any other path is still dropped.
+    """
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured, preferences={key: value})
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {key: value}
+
+
+async def test_pin_and_prompt_cache_key_are_siblings() -> None:
+    """The two cache stamps are one top-level key each; neither clobbers the
+    other or the rest of the body."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                prompt_cache_key="lineage-123",
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"order": ["AtlasCloud"]}
+    assert captured["body"]["prompt_cache_key"] == "lineage-123"
+    assert captured["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert captured["body"]["messages"]
+
+
+async def test_body_construction_is_isolated_from_caller_and_callee_mutation() -> None:
+    """DEEPCOPY, not `dict(...)`: `max_price` nests, and the `order` list this
+    feature appends must not alias the caller's configuration.
+
+    Two directions, both previously live bugs of the same class (review round
+    1, m1): a caller mutating its nested preferences after construction, and a
+    consumer mutating the returned body. Neither may reach a later request.
+
+    Asserted against `_build_body` DIRECTLY rather than through the transport,
+    because a MockTransport handler reads the body back with `json.loads` — a
+    fresh object graph, so mutating what the handler captured cannot reach the
+    client's state and the second direction would pass vacuously.
+    """
+    preferences: dict[str, Any] = {"max_price": {"prompt": 1}}
+    client = _affinity_client({}, preferences=preferences)
+    request = ChatRequest(
+        model=_cacheable_spec(),
+        messages=[Message.user("hi")],
+        provider_affinity="AtlasCloud",
+    )
+    expected = {"max_price": {"prompt": 1}, "order": ["AtlasCloud"]}
+
+    first = client._build_body(request, scope=None)
+    assert first["provider"] == expected
+
+    # A caller mutating its own nested mapping after construction, and a
+    # consumer mutating the body it was handed — the appended `order` list and
+    # the nested price cap alike.
+    preferences["max_price"]["prompt"] = 99
+    first["provider"]["order"].append("Novita")
+    first["provider"]["max_price"]["prompt"] = 77
+
+    assert client._build_body(request, scope=None)["provider"] == expected
+
+
+async def test_retired_hosts_ride_out_as_ignore_beside_the_pin() -> None:
+    """Both halves of the affinity decision reach one `provider` object.
+
+    Verified live that the two COMPOSE rather than conflict: with `order`
+    naming one host and `ignore` another, the ordered host served 8/8 calls and
+    the ignored one was never attempted. Sorted so the body stays byte-stable
+    across turns — this object sits in front of a cached prefix.
+    """
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="Wafer",
+                provider_avoid=["SiliconFlow", "GMICloud"],
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {
+        "order": ["Wafer"],
+        "ignore": ["GMICloud", "SiliconFlow"],
+    }
+
+
+async def test_retired_hosts_are_sent_even_with_no_pin_held() -> None:
+    """After a retirement the conversation has NO pin until another host
+    serves it, and it must not be routed straight back onto the host it just
+    left — so `ignore` has to outlive the `order` it replaced."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_avoid=["SiliconFlow"],
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"ignore": ["SiliconFlow"]}
+
+
+async def test_a_user_host_preference_suppresses_retirements_too() -> None:
+    """The user's own `ignore` (or any host opinion) wins whole: merging ours
+    into theirs would make their setting mean something they did not type."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured, preferences={"ignore": ["Novita"]})
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="Wafer",
+                provider_avoid=["SiliconFlow"],
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"ignore": ["Novita"]}
+
+
+async def test_served_provider_is_reported_on_the_end_event() -> None:
+    """The capture half: OpenRouter names the routed host on every chunk, and
+    the terminal event carries it so a session can pin the next turn."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": "AtlasCloud", "choices": [{"delta": {}, "index": 0}]},
+                {
+                    "provider": "AtlasCloud",
+                    "choices": [{"delta": {"content": "ok"}, "index": 0}],
+                },
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_provider == "AtlasCloud"
+    # Routing identity must NOT leak into the persisted message payload: that
+    # dict is native-replay and compaction substrate, not a routing hint.
+    assert "provider" not in (end.provider_payload or {})
+
+
+async def test_served_provider_is_none_when_the_wire_does_not_name_a_host() -> None:
+    """A direct (non-aggregator) endpoint sends no `provider` field, and must
+    leave the pin unset rather than inventing one."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "choices": [{"delta": {"content": "ok"}, "index": 0}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("deepseek", "deepseek-chat"),
+        ("zai", "glm-4.6"),
+        ("kimi", "kimi-k2"),
+        ("radient", "deepseek/deepseek-v4.1-flash"),
+    ],
+)
+def test_a_pinned_request_rendered_for_a_non_openrouter_spec_grows_no_provider_key(
+    provider: str, model_id: str
+) -> None:
+    """Review round 1, blocker-1 \u2014 the leak this closes was reproducible.
+
+    The pin rides on the ChatRequest so a retry keeps it, but the failover
+    driver CLONES that request for a fallback to ANOTHER model
+    (`model_copy(update={"model": spec})`) and the clone keeps `provider_
+    affinity`/`provider_avoid` while swapping in a direct provider's spec. The
+    wire gate previously tested only cacheability, so an OpenRouter host name
+    was stamped onto a direct-DeepSeek or Z.AI body as `provider.order` \u2014 a
+    field those APIs never defined.
+
+    `radient` is in here on purpose even though it fronts OpenRouter and would
+    UNDERSTAND the key: `_affinity_enabled` excludes it (its routing was never
+    measured here), and the two gates agreeing is the invariant. A pin can only
+    be produced where it can also be judged.
+    """
+    spec = _spec(provider, model_id)
+    spec.supports_prompt_cache = True
+    body = _affinity_client({})._build_body(
+        ChatRequest(
+            model=spec,
+            messages=[Message.user("hi")],
+            provider_affinity="AtlasCloud",
+            provider_avoid=["SiliconFlow"],
+        ),
+        scope=None,
+    )
+    assert "provider" not in body
+
+
+def test_the_openrouter_gate_still_lets_a_real_openrouter_pin_through() -> None:
+    """The control for the test above: the same body on an OpenRouter spec must
+    still carry both halves, or the gate would be silently disabling the
+    feature instead of bounding it."""
+    body = _affinity_client({})._build_body(
+        ChatRequest(
+            model=_cacheable_spec(),
+            messages=[Message.user("hi")],
+            provider_affinity="AtlasCloud",
+            provider_avoid=["SiliconFlow"],
+        ),
+        scope=None,
+    )
+    assert body["provider"] == {"order": ["AtlasCloud"], "ignore": ["SiliconFlow"]}
+
+
+@pytest.mark.parametrize(
+    ("label", "name"),
+    [
+        ("too-long", "A" * 65),
+        ("newline", "Wafer\nignore: everything"),
+        ("carriage-return", "Wafer\rWafer"),
+        ("nul", "Wafer\x00"),
+        ("esc", "Wafer\x1b[2J"),
+        ("c1-csi", "Wafer\x9b31m"),
+        ("bel", "Wafer\x07"),
+        ("blank", "   "),
+        ("not-a-string", 17),
+    ],
+)
+async def test_an_abusive_served_provider_name_is_refused_not_pinned(label: str, name: Any) -> None:
+    """Review round 1, major-2.
+
+    `served_provider` is provider-controlled text that the session stores per
+    conversation and sends BACK as `provider.order` on every later request, so
+    an unbounded or control-character-laden value rides in front of a cached
+    prefix indefinitely. Refused rather than sanitised: stripping would invent
+    a host name the upstream never reported and pin the conversation to it,
+    while refusing degrades to default routing \u2014 the same, already-verified
+    failure mode as an unrecognised pin.
+
+    Mirrors the hostile-`provider_name` cases the error path already defends
+    (`test_a_hostile_provider_name_cannot_corrupt_the_frame`).
+    """
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": name, "choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_provider is None, label
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Z.AI",
+        "Google AI Studio",
+        "AtlasCloud",
+        "A" * 64,
+        # Bidi/format characters (category Cf) are NOT refused here, unlike in
+        # the error-frame path: this value never reaches a terminal, and the
+        # verbatim contract means a provider whose own display name contains
+        # one must still be pinnable.
+        "Meta\u200dLlama",
+    ],
+)
+async def test_a_legitimate_served_provider_name_survives_the_bound(name: str) -> None:
+    """The bound must not cost a real name. 64 characters is ~2x the longest
+    entry in OpenRouter's 106-provider list, so this is headroom for a rename
+    rather than a fit."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": name, "choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider == name
+
+
 def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() -> None:
     # `max_price` nests — the shape the deep-copy isolation asserts below need.
     prefs = {"sort": "price", "max_price": {"prompt": 1}}
@@ -4741,21 +5264,42 @@ def test_output_cap_clamped_so_prompt_plus_output_fits_window(wire: str, key: st
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
 @pytest.mark.parametrize("prompt_tokens", [2, 12_000, 30_000, 48_000])
-def test_output_cap_unchanged_for_a_sanely_advertised_model(
+def test_the_policy_ceiling_survives_the_clamp_at_every_occupancy(
     wire: str, key: str, prompt_tokens: int
 ) -> None:
-    """The safeguard must not cost the models that work today anything — asserted
-    across the range real sessions actually occupy, not just a 2-token prompt.
+    """A healthy session asks for the bound the contract NAMED, unshaved, at
+    every occupancy real sessions actually occupy -- not just against a 2-token
+    prompt.
 
     This is the test that let the round-1 defect ship: it made this exact claim
     against ``Message.user("hi")``, the one input where a 4-18x over-estimate
     cannot bite. At 48,000 tokens (24% of Sonnet's window) the previous revision
-    sent 512 instead of 64,000 and truncated a real answer mid-sentence.
+    sent 512 instead of a usable ask and truncated a real answer mid-sentence.
+
+    What it protects is unchanged -- that the clamp does not shave a healthy ask
+    below the bound the request contract named -- and the bound it names is now
+    the contract's, not the spec's raw capability. For this spec the two coincide
+    at 64,000, because a published ceiling BELOW the policy is a real provider
+    limit and the narrowing direction keeps it.
     """
     spec = _sonnet_spec()
     request = ChatRequest(model=spec, messages=[Message.user(_prose(prompt_tokens))])
 
-    assert _bodies(request)[wire][key] == 64_000
+    assert request.max_tokens == spec.max_output_tokens
+    assert _bodies(request)[wire][key] == request.max_tokens
+
+
+@pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
+def test_an_explicitly_named_ask_above_the_policy_is_honoured(wire: str, key: str) -> None:
+    """The policy is a DEFAULT, not a hard cap: a caller that names its own
+    larger budget gets it, which is the escape hatch a host raising the bound
+    for one model or workflow uses."""
+    spec = _sonnet_spec()
+    request = ChatRequest(
+        model=spec, messages=[Message.user("hi")], max_tokens=spec.max_output_tokens
+    )
+
+    assert _bodies(request)[wire][key] == spec.max_output_tokens
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
@@ -4766,15 +5310,22 @@ def test_output_budget_does_not_depend_on_non_ascii_characters(wire: str, key: s
     A byte-length bound charges ``4 * len(text)`` for any block that is not
     ``str.isascii()``, so one ``\u2019`` — or an em dash, an emoji, an accented
     name, any non-English text — used to cut the same conversation's budget from
-    64,000 to 512. The two asks must now agree.
+    64,000 to 512. The two asks must now agree, and the figure they agree on is
+    the contract's fill for this spec (its published 64,000, below the policy
+    ceiling, which the narrowing direction keeps).
     """
     spec = _sonnet_spec()
-    ascii_body = _bodies(ChatRequest(model=spec, messages=[Message.user(_prose(30_000))]))
-    unicode_body = _bodies(
-        ChatRequest(model=spec, messages=[Message.user(_prose(30_000, non_ascii=True))])
+    ascii_request = ChatRequest(model=spec, messages=[Message.user(_prose(30_000))])
+    unicode_request = ChatRequest(
+        model=spec, messages=[Message.user(_prose(30_000, non_ascii=True))]
     )
 
-    assert ascii_body[wire][key] == unicode_body[wire][key] == 64_000
+    assert ascii_request.max_tokens == unicode_request.max_tokens == spec.max_output_tokens
+    assert (
+        _bodies(ascii_request)[wire][key]
+        == _bodies(unicode_request)[wire][key]
+        == ascii_request.max_tokens
+    )
 
 
 @pytest.mark.parametrize("wire,key", MAX_TOKEN_KEYS)
@@ -4836,8 +5387,19 @@ def test_the_clamp_still_lowers_an_overflowing_ask_before_refusing() -> None:
 def test_system_blocks_and_tools_are_charged_against_the_window() -> None:
     """The reported 400 itemised **10,400 tokens of tool input** separately, so
     tools are a real term. A clamp that counted only ``messages`` would leave
-    exactly that much of the overflow in place."""
-    spec = _muse_spark_spec()
+    exactly that much of the overflow in place.
+
+    The window and the ask are both narrowed deliberately. The ask is a model's
+    own published 16,384 -- the policy's narrowing arm, and a real shape -- since
+    the charge has to be visible against a modest ask: at 160k against a
+    ~125k-token prompt the bare request still gets its full 16,384 while the one
+    carrying the tool schema and system block does not, which is exactly the
+    charge this pins. (Against the policy's own 131,072 the bare request would be
+    shaved at that window too, and the test would pin nothing.)
+    """
+    spec = _muse_spark_spec().model_copy(
+        update={"context_window": 160_000, "max_output_tokens": 16_384}
+    )
     tool = AgentTool(
         name="write",
         description="x" * 40_000,
@@ -4856,22 +5418,43 @@ def test_system_blocks_and_tools_are_charged_against_the_window() -> None:
         )
     )["openai-completions"]
 
+    assert bare["max_tokens"] == spec.max_output_tokens
     assert with_extras["max_tokens"] < bare["max_tokens"]
 
 
-def test_no_cap_anywhere_leaves_the_key_absent() -> None:
-    """A spec with no cap must stay uncapped. Clamping a value nobody set would
-    turn an absent key into a present one and put a ceiling on a model that
-    currently has none."""
+def test_a_spec_with_no_published_cap_is_still_bounded() -> None:
+    """``max_output_tokens=0`` is "no data", not "unlimited".
+
+    This test used to assert the opposite -- that such a spec left the key off
+    the wire entirely -- on the argument that capping a model nobody had
+    published a limit for is worse than sending nothing. That was the wrong
+    reading of the one state where it matters: the absence of a published limit
+    is now filled by the policy ceiling instead.
+
+    What is asserted is the bound, not a particular number: this spec's window is
+    100,000, so the clamp legitimately lowers the 131,072 fill to what the window
+    can fund. The omit-the-key arm is still pinned below, through the one input
+    that can still reach it.
+    """
     spec = ModelSpec(
         provider="openrouter", model_id="x", context_window=100_000, max_output_tokens=0
     )
-    request = ChatRequest(model=spec, messages=[Message.user("hi")])
 
-    body = _bodies(request)
-    assert "max_tokens" not in body["openai-completions"]
-    assert "max_output_tokens" not in body["openai-responses"]
-    assert "maxOutputTokens" not in body["google"]
+    bounded = _bodies(ChatRequest(model=spec, messages=[Message.user("hi")]))
+    assert 0 < bounded["openai-completions"]["max_tokens"] <= DEFAULT_TURN_OUTPUT_TOKENS
+    assert 0 < bounded["openai-responses"]["max_output_tokens"] <= DEFAULT_TURN_OUTPUT_TOKENS
+    assert 0 < bounded["google"]["maxOutputTokens"] <= DEFAULT_TURN_OUTPUT_TOKENS
+
+    # The wire's "no cap of ours" arm survives for a request assembled WITHOUT
+    # the validator -- ``model_construct`` is the only way to reach it now, since
+    # the contract fills every constructed request and ``max_tokens`` is ``ge=1``.
+    # Pinned here because the four body builders still have to agree about an
+    # absent ask, and that agreement is what the old test was really protecting.
+    hand_assembled = ChatRequest.model_construct(model=spec, messages=[Message.user("hi")])
+    omitted = _bodies(hand_assembled)
+    assert "max_tokens" not in omitted["openai-completions"]
+    assert "max_output_tokens" not in omitted["openai-responses"]
+    assert "maxOutputTokens" not in omitted["google"]
 
 
 # --- the clamp's safety properties, not just its arithmetic --------------------
@@ -5009,7 +5592,11 @@ def test_a_hint_larger_than_the_window_is_not_believed() -> None:
     )
     request = ChatRequest(model=spec, messages=[Message.user("hi")], context_tokens_hint=600_000)
 
-    assert _effective_max_tokens(request) == 32_000
+    # The contract's fill, which for THIS spec is its published 32,000: the
+    # policy ceiling (131,072) is larger, so the provider limit wins in the
+    # narrowing direction. The point of this test is that the stale hint neither
+    # refuses the request nor inflates the ask above what the contract named.
+    assert _effective_max_tokens(request) == request.max_tokens == spec.max_output_tokens
 
 
 @pytest.mark.parametrize(
@@ -5140,15 +5727,19 @@ def test_a_healthy_session_keeps_its_full_ask_without_a_hint(occupancy: float) -
     the compaction summarizer — which is why a hinted measurement did not show it.
 
     Capped at 50% deliberately: past roughly 55% a reduced ask is CORRECT, since
-    the prompt plus a full 64k reply genuinely approaches the window. What this
-    pins is the band where main answers in full and the branch must too.
+    the prompt plus a full reply genuinely approaches the window. What this pins
+    is the band where main answers in full and the branch must too.
+
+    The ask it pins is the contract's fill rather than the spec's 64,000 as such:
+    they coincide here, and the property under test is that the hint-less path
+    does not quietly shave whichever bound the request carries.
     """
     spec = _sonnet_spec()
     request = ChatRequest(
         model=spec, messages=[Message.user(_prose(int(spec.context_window * occupancy)))]
     )
 
-    assert _bodies(request)["anthropic"]["max_tokens"] == spec.max_output_tokens
+    assert _bodies(request)["anthropic"]["max_tokens"] == request.max_tokens
 
 
 @pytest.mark.parametrize("window", [8_192, 32_768, 200_000])

@@ -4,12 +4,14 @@ import {
   cancelAccess,
   decideAccess,
   enqueueAccess,
+  readQueueSnapshot,
   setQueueObserver,
   sweepQueue,
   type QueueSnapshot,
 } from "./approval-store";
 import { BridgeCommandError, cdp } from "./cdp";
 import { safeHttpUrl, storedOriginAllowed } from "./origin-policy";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getLocal, getSession, withSessionMutation } from "./state";
 
 export { safeHttpUrl } from "./origin-policy";
@@ -78,7 +80,11 @@ export async function consumeOnceGrant(url: URL, requester: string): Promise<boo
     const grant = grants[key];
     if (!grant || Date.now() >= grant.expiresAt || grant.requester !== requester) return false;
     delete grants[key];
-    await chrome.storage.session.set({ onceGrants: grants });
+    await deadline(
+      chrome.storage.session.set({ onceGrants: grants }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(onceGrants)",
+    );
     return true;
   });
   if (consumed) await sweepQueue();
@@ -100,7 +106,11 @@ async function consumeGrantFor(url: URL, sessionRequester: string, commandId: st
     }
     if (!grant || Date.now() >= grant.expiresAt) return false;
     delete grants[key];
-    await chrome.storage.session.set({ onceGrants: grants });
+    await deadline(
+      chrome.storage.session.set({ onceGrants: grants }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(onceGrants)",
+    );
     return true;
   });
   if (consumed) await sweepQueue();
@@ -121,7 +131,59 @@ export async function ensureTopLevelAccess(
 }
 
 export async function updatePromptSurfaces(snapshot: QueueSnapshot): Promise<void> {
-  await reconcileActionSurface(snapshot, onPendingChange ?? undefined);
+  const failures = await reconcileActionSurface(snapshot, onPendingChange ?? undefined);
+  if (failures.length) scheduleSurfaceReconcile();
+}
+
+// A bounded cosmetic call that times out is ABANDONED, not retried (a retry of
+// the write Chrome could not cancel is what could overtake a later snapshot), so
+// the surface it was writing keeps the OLDER snapshot and nothing is guaranteed
+// to come back for it: `armNextExpiry` clears ACCESS_EXPIRY_ALARM as the queue
+// empties, and the other reconcile sites are only reached on the next enqueue,
+// decision, or sweep. A decided request that left the queue on this path would
+// therefore leave the toolbar advertising it — the badge being the extension's
+// PRIMARY pending signal (worker.ts says why the OS banner is not).
+//
+// The flag is held for the WHOLE follow-up, not just its scheduling turn. A cold
+// start reconciles twice (sweepQueue's observer, then restoreAccessQueue's own
+// call), so two failures land one microtask apart; clearing the flag before the
+// await gave the second one its own follow-up — measured as 1 + 2 writes where
+// this coalescing promises 1 + 1. Holding it is what makes the paragraph above
+// true, and it cannot reintroduce a retry loop, because the follow-up calls
+// reconcileActionSurface directly and never routes through the caller that
+// schedules: this flag only suppresses duplicate SCHEDULING.
+let surfaceReconcilePending = false;
+
+/** One follow-up reconcile, built from the queue as it is NOW rather than from
+ * the snapshot the abandoned call carried: a snapshot taken after the timeout
+ * cannot be older than the one it replaces, and any state that changed in
+ * between reaches its own reconciliation from ITS mutation, which runs after
+ * that mutation committed. It reuses the same observer, which is idempotent by
+ * construction (announced ids dedupe, and the notification key suppresses an
+ * identical aggregate).
+ *
+ * NEITHER AWAITED NOR RESCHEDULING: awaiting it would put a second bound on the
+ * cold-start dial and the consent ACK that this change exists to bound ONCE, so
+ * the caller's ordering is exactly what it was; and a failed follow-up does not
+ * schedule another, so one failure costs one extra burst, never a loop. Bursts
+ * coalesce — several failures from one reconcile, or several reconciles that
+ * failed before this ran, cost the same single follow-up, because it re-reads
+ * the queue when it runs and so already covers every older attempt. */
+function scheduleSurfaceReconcile(): void {
+  if (surfaceReconcilePending) return;
+  surfaceReconcilePending = true;
+  void (async () => {
+    try {
+      await reconcileActionSurface(await readQueueSnapshot(), onPendingChange ?? undefined);
+    } catch (error) {
+      // Console-only, deliberately: the alternative is a field on the daemon's
+      // /health, which is a protocol change this PR does not carry. The failure
+      // itself is already recorded per operation by reconcileActionSurface.
+      console.warn("approval action surface follow-up reconciliation failed", error);
+    } finally {
+      surfaceReconcilePending = false;
+    }
+  })();
 }
 
 export async function restoreAccessQueue(): Promise<void> {

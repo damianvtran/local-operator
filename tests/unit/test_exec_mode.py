@@ -138,6 +138,33 @@ class FakeSession:
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
 
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """The REAL verb table against this fake's (empty) kernel registry.
+
+        ``SessionProtocol`` declares code memory for every session shape and the
+        desktop route reaches it BY NAME through the bridge's facade, so a double
+        without it does not type as a session at all — the drift the declaration
+        exists to catch rather than a test-only nuisance.
+
+        The fake owns no interpreter, so the table answers exactly what a real
+        session whose runtime has never run a cell answers: observed/absent for a
+        read, ``no_kernel`` for a write. Delegating rather than hand-writing that
+        envelope keeps ONE copy of the frozen shape in the tree, so the double
+        cannot certify a branch the real session does not have.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        return await run_variable_verb(
+            f"fake-{id(self):x}",
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(getattr(self, "variables", None), "redact", None),
+        )
+
     async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
         """The REAL verb table against this fake's store, not a stub of it.
 
@@ -1079,6 +1106,132 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
     assert proc.returncode == 130, f"stdout={stdout!r} stderr={stderr!r}"
     assert "EXIT 130" in stdout
     assert "Traceback" not in stderr
+
+
+def test_exec_worker_sighup_ignore_is_registered_with_a_posix_fallback(monkeypatch) -> None:
+    """The HUP disposition is installed on the loop, with a SIG_IGN fallback.
+
+    A background worker is spawned detached, so a HUP is not a reason to drop a
+    run — and on the default disposition it would truncate the job log mid-write
+    and skip the ledger's terminal record, the same hard-exit shape the SIGTERM
+    handler exists to prevent.
+
+    Both branches are pinned here because only one of them runs on this
+    platform: a loop that refuses signal callbacks (Windows) must still end up
+    ignoring the HUP, and ``signal.signal`` is stubbed so the assertion does not
+    change THIS process's disposition.
+    """
+    calls: list[tuple[int, Any]] = []
+    monkeypatch.setattr(
+        exec_worker.signal, "signal", lambda sig, handler: calls.append((sig, handler))
+    )
+
+    class _Loop:
+        def __init__(self, fail: bool) -> None:
+            self.fail = fail
+            self.registered: list[tuple[int, Any]] = []
+
+        def add_signal_handler(self, sig: int, callback: Any) -> None:
+            if self.fail:
+                raise NotImplementedError
+            self.registered.append((sig, callback))
+
+    loop = _Loop(fail=False)
+    exec_worker._install_sighup_ignore(loop)  # type: ignore[arg-type]
+    assert [sig for sig, _ in loop.registered] == [exec_worker.signal.SIGHUP]
+    assert calls == [], "the loop took the handler; the fallback must not also fire"
+
+    # The handler itself must be inert: it is not a shutdown path.
+    callback = loop.registered[0][1]
+    callback()
+    callback()
+
+    fallback = _Loop(fail=True)
+    exec_worker._install_sighup_ignore(fallback)  # type: ignore[arg-type]
+    assert calls == [(exec_worker.signal.SIGHUP, exec_worker.signal.SIG_IGN)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGHUP semantics are POSIX")
+def test_exec_worker_survives_sighup_then_still_exits_130_on_sigterm(tmp_path: Path) -> None:
+    """A real HUP leaves the worker running; a real SIGTERM still ends it cleanly.
+
+    The sibling ``test_exec_worker_sigterm_yields_130`` covers the kill switch.
+    This covers the other half: an interface's teardown (the classic HUP) must
+    not be able to truncate a detached run. The child prints ``READY`` from
+    inside the parked turn, which is the only point where the handlers are
+    provably installed — a fixed sleep here raced, per that test's comment.
+    """
+    import signal as signal_module
+    import subprocess as sp
+    import time
+
+    repo_root = Path(exec_worker.__file__).resolve().parent.parent
+    script = (
+        "import asyncio\n"
+        "import local_operator.exec_worker as ew\n"
+        "from tests.unit.test_exec_mode import FakeSession\n"
+        "class Slow(FakeSession):\n"
+        "    def __init__(self):\n"
+        "        super().__init__([])\n"
+        "        self._abort = asyncio.Event()\n"
+        "    def subscribe(self, handler):\n"
+        "        return lambda: None\n"
+        "    def abort(self, reason):\n"
+        "        self._abort.set()\n"
+        "    async def prompt(self, text, images=None):\n"
+        "        print('READY', flush=True)\n"
+        "        await self._abort.wait()\n"
+        "    async def dispose(self):\n"
+        "        self.disposed = True\n"
+        "parsed = ew.build_parser().parse_args(['--prompt', 'sleepy'])\n"
+        "code = ew.run(parsed, session_factory=Slow)\n"
+        "print('EXIT', code)\n"
+        "import sys\n"
+        "sys.exit(code)\n"
+    )
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+    env["HOME"] = str(tmp_path / "home")
+    env["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path / "config")
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = sp.Popen(
+        [sys.executable, "-c", script],
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+    )
+    assert proc.stdout is not None
+    deadline = time.monotonic() + 30.0
+    ready = False
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        if line.strip() == "READY":
+            ready = True
+            break
+    if not ready:
+        proc.kill()
+        remainder, stderr = proc.communicate(timeout=15)
+        raise AssertionError(f"worker never signalled READY: {remainder!r} {stderr!r}")
+
+    os.kill(proc.pid, signal_module.SIGHUP)
+    # Liveness over a bounded window, not a sleep standing in for an assertion:
+    # the HUP is delivered and the child must still be there afterwards.
+    window_end = time.monotonic() + 2.0
+    while time.monotonic() < window_end:
+        assert proc.poll() is None, (
+            f"the worker died from a SIGHUP (rc={proc.returncode}); a detached run must "
+            "not be truncatable by an interface going away"
+        )
+        time.sleep(0.1)
+
+    proc.terminate()
+    stdout, stderr = proc.communicate(timeout=15)
+    assert proc.returncode == 130, f"stdout={stdout!r} stderr={stderr!r}"
+    assert "EXIT 130" in stdout, stdout
+    assert "Traceback" not in stderr, stderr
 
 
 # --- exec config-root resolution (#737 regression guards) -------------------------

@@ -41,6 +41,20 @@ class WebSocketManager:
         # Maps WebSockets to connection types to a set of message IDs they are subscribed to
         self.connection_subscriptions: Dict[WebSocket, Dict[WebsocketConnectionType, Set[str]]] = {}
 
+    def live_connection_count(self) -> int:
+        """How many live WebSocket subscriptions are open, across message ids.
+
+        The count a retiring daemon needs before it may exit: the legacy
+        transport carries the same live frames SSE does, so a non-zero count
+        means frames are being delivered out of THIS process right now and an
+        exit would drop them (see ``server/retire.py::in_flight``). Counted per
+        (message id, socket) pair, like the broadcast loop does, so a socket
+        subscribed to two message ids reads as two subscriptions.
+        """
+        return sum(
+            len(sockets) for groups in self.connections.values() for sockets in groups.values()
+        )
+
     async def connect(
         self,
         websocket: WebSocket,

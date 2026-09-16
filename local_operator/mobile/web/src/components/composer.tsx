@@ -272,6 +272,16 @@ export function Composer({
 	   streaming off, and only an aborted turn should offer "resume". */
 	const showResume = projection.stop_reason === "aborted";
 
+	/* WHICH word, when it does, follows the verdict the notice above it states.
+	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
+	   red `Stopped with an error — ...` row sitting a few rows up made
+	   `interrupted — tap to resume` name one act two ways (design round 2, D7).
+	   `cut_off` is absent from an older daemon's payload, so absence keeps
+	   today's word rather than inventing a verdict nobody sent. */
+	const resumeLabel = projection.cut_off
+		? "turn cut off — tap to resume"
+		: "interrupted — tap to resume";
+
 	/* Auto-grow: reset to auto so shrink works, then clamp at six lines. */
 	useEffect(() => {
 		const el = textareaRef.current;
@@ -432,7 +442,7 @@ export function Composer({
 					onClick={() => void send("continue", "prompt")}
 					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface text-body-sm text-ink active:bg-elevated"
 				>
-					interrupted — tap to resume
+					{resumeLabel}
 				</button>
 			) : null}
 

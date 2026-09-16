@@ -15,9 +15,13 @@ from typing import Any
 
 import httpx
 
-from local_operator.tunnels import config
+from local_operator.tunnels import config, gateway
 from local_operator.tunnels.api import RadientTunnels, credential_id
-from local_operator.tunnels.service import cloudflared_binary, tunnel_path
+from local_operator.tunnels.service import (
+    authorization_failure_reason,
+    cloudflared_binary,
+    tunnel_path,
+)
 
 
 def _read_origin_auth(path: Path) -> dict[str, str]:
@@ -313,21 +317,68 @@ async def dispatch(args: argparse.Namespace) -> str:
                 record = await RadientTunnels(value["credential_id"], client).request(
                     "GET", tunnel_path(value)
                 )
-        except (ValueError, httpx.HTTPError):
-            return _summary(record) + "\nCloud status unavailable; check /login radient."
+        except (ValueError, httpx.HTTPError) as failure:
+            # A network fault and an unusable login are different jobs for the
+            # operator, and one shared line sent both to /login radient. Telling
+            # them apart takes the classifier, not the exception class: a refresh
+            # that could not reach Radient during this very request arrives as a
+            # ValueError too (see `RadientTunnels.request`), and the cloud read is
+            # unavailable in both cases, so this is the only surface that can.
+            if authorization_failure_reason(failure) != gateway.UNREACHABLE:
+                return _summary(record) + "\nCloud status unavailable; check /login radient."
+            return (
+                _summary(record)
+                + "\nCloud status unavailable. "
+                + gateway.TERMINAL_DETAIL[gateway.UNREACHABLE]
+            )
         healthy = False
         connected = False
+        served = False
+        refusal = ""
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
                 reply = await client.get(
                     f"http://127.0.0.1:{value['gateway_port']}/_lop_tunnel/health", timeout=2
                 )
-                healthy = reply.status_code == 200 and reply.json().get("ok") is True
-                connected = healthy and reply.json().get("connected") is True
+                served = reply.status_code == 200
+                payload = reply.json() if served else {}
+                if not isinstance(payload, dict):
+                    # A stale or foreign listener on this port can answer 200 with
+                    # any JSON at all. Anything but an object is not a health
+                    # payload, and a status command must not raise over it.
+                    payload = {}
+                healthy = served and payload.get("ok") is True
+                connected = healthy and payload.get("connected") is True
+                if not healthy:
+                    # The gateway names why it is refusing relayed requests, and
+                    # this is the surface where a command can be offered at all.
+                    # A reason this build does not know falls back to the relay's
+                    # own sentence rather than printing nothing.
+                    refusal = gateway.terminal_detail(
+                        str(payload.get("reason") or ""), str(payload.get("detail") or "")
+                    )
         except (httpx.HTTPError, ValueError):
-            pass
-        state = "connected" if connected else "connecting" if healthy else "stopped"
-        return _summary(record) + f"\nLocal connector: {state}"
+            # A stopped connector and a gateway that is not there are also
+            # different jobs: the first is this process, the second is the unit.
+            refusal = (
+                "The local relay gateway is not answering on "
+                f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+            )
+        if connected:
+            state = "connected"
+        elif healthy:
+            state = "connecting"
+        elif served:
+            # The gateway answered and is refusing to serve. That is not a stopped
+            # connector — cloudflared may still hold the edge connection — and
+            # "stopped" beside a sentence promising it clears itself would
+            # contradict the payload this command just read.
+            state = "not serving"
+        else:
+            state = "stopped"
+        return (
+            _summary(record) + f"\nLocal connector: {state}" + (f" — {refusal}" if refusal else "")
+        )
     if action == "stop":
         value["stopped"] = True
         config.save(value)

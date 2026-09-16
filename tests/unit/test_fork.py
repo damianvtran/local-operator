@@ -1274,10 +1274,14 @@ class TestTheMobileSurfaceCarriesTheForkMark:
         fork_id = fork_session(tmp_path, PARENT_ID)
         monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
 
-        rows = {row["id"]: row for row in daemon_mod._past_sessions()}
+        # ``(rows, degraded)`` since the round that stopped an unreadable store
+        # from being published as an empty history; the degraded half is empty
+        # here and asserted by the mobile suite's own store-failure tests.
+        rows, _degraded = daemon_mod._past_sessions()
+        by_id = {row["id"]: row for row in rows}
 
-        assert rows[fork_id]["forked"] is True
-        assert rows[PARENT_ID]["forked"] is False
+        assert by_id[fork_id]["forked"] is True
+        assert by_id[PARENT_ID]["forked"] is False
 
     def test_the_search_payload_carries_it_and_matches_on_it(
         self, tmp_path: Path, monkeypatch
@@ -1288,10 +1292,14 @@ class TestTheMobileSurfaceCarriesTheForkMark:
         fork_id = fork_session(tmp_path, PARENT_ID)
         monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
 
-        empty = {row["id"]: row for row in daemon_mod._search_sessions("")}
+        # ``(rows, degraded)`` for the same reason ``_past_sessions`` is: the
+        # search route is the listing the shipped history screen renders, so a
+        # store it could not read is marked rather than answered as no matches.
+        empty_rows, _empty_degraded = daemon_mod._search_sessions("")
+        empty = {row["id"]: row for row in empty_rows}
         assert empty[fork_id]["forked"] is True
 
-        hits = daemon_mod._search_sessions("fork")
+        hits, _hits_degraded = daemon_mod._search_sessions("fork")
         assert [row["id"] for row in hits] == [fork_id]
 
 

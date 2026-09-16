@@ -50,6 +50,7 @@ import dataclasses
 import enum
 import functools
 import json
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Callable
@@ -57,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -66,6 +68,9 @@ from local_operator.providers.local import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.config import ConfigManager
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigUnreadableError(Exception):
@@ -292,8 +297,8 @@ SECTIONS: tuple[Section, ...] = (
         "model",
         "Model",
         Scope.NEW_SESSIONS,
-        "Provider and model for new conversations. Existing sessions keep their model; "
-        "/model saved adopts the default here.",
+        "Provider, model and reasoning effort for new conversations. "
+        "Existing sessions keep their model; /model saved adopts the default here.",
     ),
     # Split out of ``model`` (review round 1, M3). The design left this key in
     # ``model`` and proposed documenting the discrepancy, which was defensible
@@ -404,13 +409,15 @@ SECTIONS: tuple[Section, ...] = (
     ),
     # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
     # ``Session._apply_config_change`` (raising it lets the next launch through;
-    # lowering it lets running jobs finish — nothing is evicted), and the
-    # ``models.*`` tiers are read at every spawn.
+    # lowering it lets running jobs finish — nothing is evicted), the
+    # ``models.*`` tiers are read at every spawn, and ``model_choice`` is read
+    # both by the rebuild that re-renders the two tool schemas and by the
+    # tool-argument refusal itself.
     Section(
         "subagents",
         "Subagents",
         Scope.LIVE,
-        "Concurrency cap and the model each effort tier runs on.",
+        "Concurrency cap, who picks a child's model, and the model each tier runs on.",
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
@@ -491,6 +498,17 @@ SECTIONS: tuple[Section, ...] = (
         "Server endpoints and exact-model metadata. Use /login to connect; "
         "reselect with /model saved to apply model changes.",
     ),
+    # LIVE: the click handler is a FRESH PROCESS every time it runs
+    # (``lop resume-click`` is spawned by the notification), so it reads config
+    # at click time and an edit lands on the very next click. Nothing is
+    # threaded through a running session, which is why this cannot be
+    # NEW_SESSIONS like the knobs that gate a session's construction.
+    Section(
+        "desktop",
+        "Desktop app",
+        Scope.LIVE,
+        "Where a notification click sends you when the desktop app is not running.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -524,6 +542,215 @@ def _validate_openrouter_max_price(value: Any) -> None:
             raise ValueError(f"unknown price field: {name}")
         if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap < 0:
             raise ValueError(f"{name} must be a non-negative number")
+
+
+#: What separates a rejection's VALUE from its ADVICE.
+#:
+#: THE PAGE CAN ONLY SPEND ONE LINE ON A REJECTION and this widget's contract is
+#: that the line CLIPS WITHOUT A MARK, so a message whose length is the USER'S
+#: OWN INPUT has to be splittable "value first, advice after" — the value can be
+#: shed (it is what the user typed, and it is still in the row's value column)
+#: while the advice is pinned, then cut with a visible ellipsis. A message that
+#: uses this separator OPTS IN to that ladder, and the opt-in is checked by
+#: ASKING THE PRODUCER (:func:`split_value_rejection`) rather than by reading the
+#: head's token count — so prose notices ("config.yml is unreadable, nothing was
+#: written — …") are never shed while a QUOTED launcher path containing a space
+#: is (QA round 1, Q1; design round 2, D16).
+REJECTION_VALUE_SEP = " — "
+
+
+#: The ADVICE half of an interpolated-value rejection — the copy
+#: :func:`_validate_desktop_launch_command` pins after the value.
+#:
+#: NAMED BECAUSE THE RENDERER HAS TO RECOGNISE THE SHAPE INSTEAD OF GUESSING IT.
+#: The page sheds the value half and keeps this one, and it used to decide which
+#: half was which from the head's TOKEN COUNT — the wrong question, because a
+#: QUOTED launcher path containing a space is ONE token to the shell grammar the
+#: validator uses and SEVERAL to ``str.split``. For that shape the ladder
+#: degraded to a plain clip and cut the fault, the consequence and the remedy
+#: together at 80x24 (QA round 1, Q1). Writing the copy once, here, is what lets
+#: the producer and :func:`split_value_rejection` agree by construction.
+ADVICE_NOT_FOUND = "does not exist; clicks open a terminal. Clear this to discover the app."
+ADVICE_NOT_EXECUTABLE = "not executable; clicks open a terminal. Clear this to discover the app."
+ADVICE_NOT_ON_PATH = "not on PATH; clicks open a terminal. Clear this to discover the app."
+_VALUE_REJECTION_ADVICE: tuple[str, ...] = (
+    ADVICE_NOT_FOUND,
+    ADVICE_NOT_EXECUTABLE,
+    ADVICE_NOT_ON_PATH,
+)
+
+
+def split_value_rejection(message: str) -> tuple[str, str] | None:
+    """``(value, advice)`` when ``message`` is one THIS MODULE shaped that way.
+
+    The renderer's question is always "which half of this message is the user's
+    own input?" — the answer decides what may be shed and what has to be pinned
+    — and no amount of reading the rendered string answers it reliably: the
+    value is a shlex-parsed token, so it can contain spaces, and the page's
+    prose notices (``config.yml is unreadable, nothing was written — …``,
+    ``could not save — <path> has an unexpected structure…``) carry the same
+    separator in the same place while their HEAD is exactly the part that must
+    not be shed.
+
+    So the producer answers instead. Every value-shaped rejection ENDS in one of
+    :data:`_VALUE_REJECTION_ADVICE`, which nothing else in the tree writes, and
+    matching the TAIL (rather than the first separator) also keeps a value that
+    itself contains the separator split at the right place: the value is
+    whatever precedes the advice, wherever that lands.
+
+    ``None`` means the message is not one of ours — prose, a nested exception's
+    text, a validator that pinned no advice — and the ladder leaves it alone.
+    """
+    for advice in _VALUE_REJECTION_ADVICE:
+        suffix = REJECTION_VALUE_SEP + advice
+        if message.endswith(suffix):
+            return message[: -len(suffix)], advice
+    return None
+
+
+@functools.cache
+def _user_shell_path() -> str | None:
+    """The PATH a USER'S OWN SHELL would have, or ``None`` if unreadable.
+
+    WHY THE WRITER'S PATH IS NOT THE QUESTION (agent review round 1, M3). Write
+    time validation used to ask ``shutil.which`` alone, i.e. "can THIS process
+    resolve the token?" — and that is not what the reader of a click needs. The
+    window the validation exists for is a writer whose PATH is not the user's:
+    a GUI-launched settings page, ``PATCH /v1/settings`` from a service, or
+    ``lop config edit`` under a login-less PATH. Driven, on this machine:
+
+        PATH=/opt/homebrew/bin:/usr/bin:/bin   accepted  'local-operator-ui …'
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin     REFUSED  'local-operator-ui …'
+
+    — the second is the literal example in this setting's own help text, and a
+    value the CLICK can run. So a bare name that the writer cannot resolve is
+    re-checked against the login-shell PATH, which is the PATH the rest of the
+    CLI already adopts for subprocess work (``helpers.setup_cross_platform_
+    environment``).
+
+    RESIDUAL LIMITATION, recorded rather than papered over: the click runs in
+    the NOTIFIER's environment, which write-time code cannot observe, so a bare
+    name can still fail at click time. This makes the check agree with the value
+    the user could reach by hand instead of with the incidental PATH of whoever
+    wrote it, and the refusal tells the user the route that does not depend on a
+    PATH at all — clearing the field hands discovery back.
+
+    CACHED, and consulted ONLY on the branch that is about to refuse. The read
+    is a login-shell round trip (bounded inside ``helpers``); caching it is what
+    keeps a second refusal free, and asking it last is what keeps it off the
+    accept path, where a user is waiting on a keystroke.
+
+    THE CACHE IS PER-PROCESS, and that is safe because it is consulted ONLY on
+    the refusing side (agent review round 2, M2). A stale PATH can therefore
+    produce a FALSE REFUSAL — a directory the login shell gained after this
+    process started is not seen — and never a wrong ACCEPT, because an accepted
+    name still has to satisfy ``shutil.which``, which re-stats. Nothing that
+    refuses is silently allowed through, and the refusal names the way out.
+    """
+    try:
+        import platform
+
+        from local_operator import helpers
+
+        system = platform.system()
+        if system == "Windows":
+            return helpers.get_windows_registry_path()
+        if system in ("Darwin", "Linux"):
+            return helpers.get_posix_shell_path()
+    except Exception:  # noqa: BLE001 — an unreadable PATH is an ordinary answer
+        logger.debug("could not read the user's shell PATH", exc_info=True)
+    return None
+
+
+def _resolvable_for_the_user(executable: str) -> bool:
+    """Is ``executable`` on the user's own PATH as well as this writer's?
+
+    A PATH-PREFIXED token (``./launcher``, ``/opt/app/bin/ui``) is not asked —
+    ``any PATH`` cannot change where that points, which is why the separator
+    branch above checks existence instead. See :func:`_user_shell_path`.
+    """
+    import shutil
+
+    path = _user_shell_path()
+    if not path:
+        return False
+    return shutil.which(executable, path=path) is not None
+
+
+def _validate_desktop_launch_command(value: Any) -> None:
+    """Reject a click launcher that cannot be run at all, at the moment it is written.
+
+    WRITE-TIME BECAUSE THE CLICK HAS NOWHERE ELSE TO COMPLAIN (UX round 1, U4).
+    ``desktop.launch_command`` REPLACES app discovery rather than leading it —
+    a configured command is the user's own answer and is not second-guessed by
+    a fallback chain — so a typo in it diverts every notification click to a
+    terminal instead, indefinitely, and the handler that would have noticed is
+    a detached process whose only trace was a ``logger.debug``. The value is
+    checked here, where the user is still looking at the field and can be told
+    what is wrong. ``tui.resume_click`` warns at click time as well, which is
+    what covers a value that reached ``config.yml`` by hand.
+
+    THE CHECK IS "CAN THIS BE RUN", NOT "IS THIS SHAPED NICELY". The first word
+    has to resolve to an executable — an existing executable file for a path,
+    a name on the writer's PATH or on the user's login PATH otherwise — because
+    that is precisely the question ``Popen`` answers at click time with an
+    ``OSError``. A launcher that is not installed yet, or whose path has moved,
+    is a click that lands in a terminal, so it is refused while it is still in
+    front of the user.
+
+    TWO PORTS, NOT ONE (agent review round 1, M3). Asking only the WRITER's PATH
+    refused the value in this setting's own help text whenever the writer was
+    not a login shell — see :func:`_user_shell_path`, which is consulted only
+    when the writer's PATH has already failed and is cached when it is.
+
+    EVERY MESSAGE NAMES THE REMEDY, not just the fault (UX round 2, U12 / design
+    round 1, D13). This rejection REPLACES the row's own help while it is on
+    screen, so the sentence that answers "what do I type instead" would
+    otherwise be exactly the one the error displaces. Each message is therefore
+    shaped ``<token> — <fault>; <consequence>. <remedy>``, and the ADVICE half
+    is capped at 74 cells — the row's budget at 80x24, the narrowest width the
+    page measures — so it is never cut at all (design round 1, D11).
+
+    THAT CAP IS WHY THE REMEDY IS ONE CLAUSE. Fault, consequence and a two-way
+    remedy are ~90 cells together: one of the three has to give, and the fix
+    direction for D13 itself drops the consequence to afford the remedy. The
+    remedy kept is the one a user cannot derive — clearing the field is what
+    hands discovery back — and the fault already names the path as the problem,
+    which is the other half of what "fix the path" would say.
+
+    EMPTY IS NOT CHECKED: ``""`` is the default and it MEANS "discover the app
+    for me", and ``empty_unsets`` clears the key rather than storing it.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            "expected a command line, e.g. 'local-operator-ui --open-session {session}'"
+        )
+    if not value.strip():
+        return
+    import os
+    import shlex
+    import shutil
+    import sys
+
+    try:
+        # The same grammar the handler reads it with (`resume_click`), so a
+        # value that validates here is one that will parse there: on Windows
+        # the command line is not POSIX-quoted and `shlex` would strip the
+        # backslashes out of every path.
+        parts = shlex.split(value, posix=sys.platform != "win32")
+    except ValueError as error:
+        raise ValueError(f"not a valid command line ({error})") from None
+    if not parts:
+        return
+    executable = parts[0]
+    if os.sep in executable or (os.altsep and os.altsep in executable):
+        if not os.path.exists(executable):
+            raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_FOUND}")
+        if not os.access(executable, os.X_OK):
+            raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_EXECUTABLE}")
+        return
+    if shutil.which(executable) is None and not _resolvable_for_the_user(executable):
+        raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_ON_PATH}")
 
 
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
@@ -577,6 +804,53 @@ def _theme_choices() -> tuple[Choice, ...]:
     return tuple(choices)
 
 
+#: One-line meaning for each rung of :data:`EFFORT_ORDER`, for the
+#: ``model_effort`` row's expanded list. Every member is a 3-argument
+#: :class:`Choice` here (value, label, description), so the descriptions live
+#: beside the ladder's own names rather than in the row. A rung with no entry
+#: falls back to an EMPTY description rather than raising: this table is built
+#: at import, and a KeyError there would take the whole CLI down for a missing
+#: sentence. ``tests/unit/test_settings_io.py`` pins that no rung is missing one,
+#: which is the loud failure this avoids at runtime.
+_EFFORT_LEVEL_HELP: dict[str, str] = {
+    # `reasoning off`, not `no reasoning — fastest, cheapest` (review round 1,
+    # m2): every other rung's description names a DEPTH, and the two benefits
+    # named the one row that costs the least, in a picker where the row directly
+    # above it is `auto`. A description has one job here — say what the member
+    # means — and the ladder's cheapest end is not the place to sell.
+    "none": "reasoning off",
+    "minimal": "the least reasoning the model offers",
+    "low": "light reasoning",
+    "medium": "moderate reasoning",
+    "high": "deep reasoning",
+    "xhigh": "very deep reasoning",
+    "max": "the model's deepest reasoning",
+}
+
+
+def _effort_choices() -> tuple[Choice, ...]:
+    """``model_effort``'s value space: the shared ladder plus the ``auto`` rung.
+
+    ``""`` leads as its own member rather than as an ``empty_unsets`` empty —
+    the same shape ``providers.openrouter.sort`` uses — so the page shows
+    ``auto`` BESIDE the real rungs as a peer to pick between (a bare empty
+    field would not), and the schema knows a stored empty string means "no
+    opinion" rather than a missing key.
+
+    The ladder comes from :data:`EFFORT_ORDER`, not a re-listing: the vocabulary
+    is the one place a rung is defined, and a second copy here would drift the
+    moment a level is added or removed. A rung the chosen model lacks is NOT
+    hidden — it is CLAMPED at use (``configure_model``), which is precisely what
+    makes offering the full ladder safe: the row needs no model to render, which
+    is required on the CLI path (a paint must not resolve a model) and in the
+    no-model setup state.
+    """
+    return (
+        Choice("", "auto", "the model's own default"),
+        *(Choice(level, level, _EFFORT_LEVEL_HELP.get(level, "")) for level in EFFORT_ORDER),
+    )
+
+
 SETTINGS: tuple[Setting, ...] = (
     # -- model --------------------------------------------------------------
     Setting(
@@ -604,6 +878,29 @@ SETTINGS: tuple[Setting, ...] = (
         # 72 cells — see the note on `hosting` above.
         help="Model for new conversations. /model saved adopts it here.",
         empty_unsets=True,
+    ),
+    Setting(
+        key="model_effort",
+        path=("model_effort",),
+        section="model",
+        label="Default reasoning effort",
+        kind=Kind.ENUM,
+        # "" is the unset member: the stored empty string means "no opinion"
+        # (the model's own default), exactly like `providers.openrouter.sort`.
+        # An ENUM member rather than `empty_unsets` so the page shows `auto`
+        # beside the real rungs as a peer to pick between.
+        default="",
+        # 57 cells, and that is the point (design round 1, D4+D5; round 2, D10):
+        # it has to hold the row's own meaning AND the resting state inside the
+        # 74-cell detail budget at 80 columns, which the off-default line spends
+        # as `<help> · default: —`. The first cut sat EXACTLY on 74 with zero
+        # headroom, so one more word anywhere would shed the whole sentence in the
+        # state a user reads it in. `the model's default` rather than `the
+        # model's own default` recovers 4 cells; the clamp sentence the original
+        # cut carried is documented in the README and named where it happens, on
+        # the `/model default` receipt.
+        help="Effort for new conversations. Unset: the model's default.",
+        choices=_effort_choices(),
     ),
     # -- providers ----------------------------------------------------------
     Setting(
@@ -669,6 +966,28 @@ SETTINGS: tuple[Setting, ...] = (
     # then price/perf. Labels carry no "OpenRouter " prefix — the section
     # header already says it, and the prefix pushed the distinguishing words
     # past the 29-cell label budget (design round 1, D5).
+    # Leads the section despite the reading order below, because it is the one
+    # row that is ON by default and every row after it OVERRIDES it: a user who
+    # sets `sort`, `order`, `only` or `ignore` has expressed a host preference,
+    # and the harness then stops pinning entirely (`SessionStreamFn._affinity_
+    # enabled`). Reading it first is what makes that relationship visible.
+    #
+    # Also the one row here that is NOT a wire key. The four `provider` object
+    # keys below are resolved by `_openrouter_provider_preferences` and sent to
+    # OpenRouter; this one is a HARNESS switch, deliberately not read by that
+    # resolver — see the note on the parity test in tests/unit/test_settings_io.
+    Setting(
+        key="providers.openrouter.provider_affinity",
+        path=("providers", "openrouter", "provider_affinity"),
+        section="openrouter",
+        label="cache affinity",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Reuses the host that served the previous turn so the prompt cache "
+            "stays warm. Off = OpenRouter's price-weighted load balancing."
+        ),
+    ),
     Setting(
         key="providers.openrouter.sort",
         path=("providers", "openrouter", "sort"),
@@ -1175,11 +1494,22 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         # Leads with the CONSEQUENCE, not the mechanism: the decision being
-        # asked for is whether a model-written session name appears on a lock
-        # screen, which is the one fact that changes someone's answer. The
-        # neighbours ("Fires only while the terminal is unfocused.") are worded
-        # the same way (design round 1, D6).
-        help="A session's name appears on banners, including the lock screen.",
+        # asked for is whether model-written content (session name, last
+        # line, error cause) appears on a lock screen, which is the one fact
+        # that changes someone's answer. The neighbours ("Fires only while
+        # the terminal is unfocused.") are worded the same way (design
+        # round 1, D6). All three legs are named because this flag gates
+        # banner BODIES too, not just names (design round 2, D1): OFF drops
+        # the error cause that makes an error banner actionable, and a row
+        # that hides that trade surprises someone who turns it off.
+        # Implicit concatenation keeps the rendered string one sentence while
+        # holding the line under the 100-column flake8/black budget; a
+        # `noqa: E501` on the joined form is reserved in this repo for
+        # unsplittable content (URLs, embedded code), not prose.
+        help=(
+            "A session's name, last line and error causes appear on banners, "
+            "including the lock screen."
+        ),
         # `off` no longer means "app name only" on every route — a background
         # session with no stored title is titled "A session finished" — so the
         # label names what the user gets rather than a fallback that is now one
@@ -1432,13 +1762,96 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=64,
     ),
     Setting(
+        key="subagents.model_choice",
+        path=("subagents", "model_choice"),
+        section="subagents",
+        label="Who picks a subagent's model",
+        kind=Kind.ENUM,
+        # The literal, not an import: this module reports defaults for the page
+        # and deliberately keeps `local_operator.tools.*` off its own import
+        # path (`BASH_SHELL_DEFAULT` is restated for the same reason). The
+        # consumer constant the value must equal is `DEFAULT_MODEL_CHOICE` in
+        # `harness/subagent.py`, and `test_settings_io`'s `_consumer_defaults`
+        # guards that pair — which is what stops this literal and the reader's
+        # fallback drifting apart into a page that lies about the default.
+        default="operator",
+        # Says what the ROW decides, never what a capability would do: the help
+        # line is one string for both values, and the first version ("Lets a
+        # delegating model swap a child onto a configured model tier") described
+        # the capability, so at the default it read as the opposite of the
+        # stored value — the resting state of the row claimed the picker was
+        # open. Length matters twice: the detail line sheds the WHOLE help once
+        # the key path stops fitting beside it (settings_view._detail_clause),
+        # so this is 66 cells against a 69-cell budget at 100 columns, and the
+        # key path keeps its place beside it (66 + 3 + 22 = 91 of the row's 94).
+        # The rewrite is length-NEUTRAL: the sentence it replaced also measured
+        # 66, so the 80-column rung behaves identically on both sides.
+        #
+        # It also carries the operator's own route to a deliberate pin, which is
+        # the half this row was missing: the model-side pin is refused on
+        # purpose (a pin is how the incident stayed invisible), so an operator
+        # who wants one strong reviewer must be told there is a place to put it
+        # — the ROLE's own profile — rather than handed the picker back.
+        help="Who picks a subagent's tier; the operator pins one in its profile.",
+        # Both descriptions are sized to the EXPANDED choice row, which is the
+        # only place they render, and they are measured on a RENDERED FRAME at
+        # 100 columns — the frame, not the row-text painter, because the
+        # expansion's own cursor marker and indent cost cells the row-text
+        # arithmetic does not charge: the operator row renders 26 cells of
+        # description there (its `(default)` marker takes 11 of the column) and
+        # the model row 40. The previous pair measured 93 and 120 painted cells,
+        # so "role pins still apply" and "different, costlier model" — the two
+        # consequences this row exists to state — were clipped at every width the
+        # page is measured at. The pins half now lives in the help above; the
+        # money half is here.
+        #
+        # "inherits the session model" is 26 exactly, which is why it is not
+        # "inherits this session's model" (29, and clipped to "…session's mo…").
+        choices=(
+            Choice(
+                "operator",
+                "the operator",
+                "inherits the session model",
+            ),
+            Choice(
+                "model",
+                "the model",
+                "may run the subagent on a costlier model",
+            ),
+        ),
+    ),
+    Setting(
         key="subagents.models.lo",
         path=("subagents", "models", "lo"),
         section="subagents",
         label="Subagent model: lo",
         kind=Kind.TEXT,
         default="",
-        help="provider/model for the lo effort tier. Empty keeps the parent's model.",
+        # The billing fact and the picker pointer are the two things this row
+        # was missing, and the incident is why: a deliberate tier pin read as
+        # harmless because nothing said a child on it RUNS, and is billed, at
+        # that model's rates, or that "Who picks a subagent's model" is what
+        # decides who may choose it.
+        #
+        # Length is budgeted, not styled, and the budget is TIGHT: the detail
+        # line sheds the WHOLE help once the key path no longer fits beside it
+        # (settings_view._detail_clause), and at 100 columns that row is 94 cells
+        # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
+        # of help. An earlier version measured 73 and shed the key path, which
+        # the comment beside it wrongly claimed it did not; this is 71 and was
+        # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        # At 80 the key path RENDERS (the row is 74 cells there and the rung
+        # paints `help · clause · key`), so the earlier note that it was "still
+        # shed" at that width was wrong in the safe direction — the frame is the
+        # only thing that settles it, which is why the bounds below are measured
+        # rather than derived.
+        #
+        # The pointer names the row (by the key the page greppable from, which is
+        # also the spelling `lop config edit` takes) instead of saying "row
+        # above": registry order is max_running, model_choice, lo, med, hi, so
+        # "above" would point med at lo and hi at med — and `hi` is the row this
+        # incident ran through.
+        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
     Setting(
@@ -1448,7 +1861,31 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: med",
         kind=Kind.TEXT,
         default="",
-        help="provider/model for the med effort tier. Empty keeps the parent's model.",
+        # The billing fact and the picker pointer are the two things this row
+        # was missing, and the incident is why: a deliberate tier pin read as
+        # harmless because nothing said a child on it RUNS, and is billed, at
+        # that model's rates, or that "Who picks a subagent's model" is what
+        # decides who may choose it.
+        #
+        # Length is budgeted, not styled, and the budget is TIGHT: the detail
+        # line sheds the WHOLE help once the key path no longer fits beside it
+        # (settings_view._detail_clause), and at 100 columns that row is 94 cells
+        # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
+        # of help. An earlier version measured 73 and shed the key path, which
+        # the comment beside it wrongly claimed it did not; this is 71 and was
+        # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        # At 80 the key path RENDERS (the row is 74 cells there and the rung
+        # paints `help · clause · key`), so the earlier note that it was "still
+        # shed" at that width was wrong in the safe direction — the frame is the
+        # only thing that settles it, which is why the bounds below are measured
+        # rather than derived.
+        #
+        # The pointer names the row (by the key the page greppable from, which is
+        # also the spelling `lop config edit` takes) instead of saying "row
+        # above": registry order is max_running, model_choice, lo, med, hi, so
+        # "above" would point med at lo and hi at med — and `hi` is the row this
+        # incident ran through.
+        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
     Setting(
@@ -1458,7 +1895,31 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: hi",
         kind=Kind.TEXT,
         default="",
-        help="provider/model for the hi effort tier. Empty keeps the parent's model.",
+        # The billing fact and the picker pointer are the two things this row
+        # was missing, and the incident is why: a deliberate tier pin read as
+        # harmless because nothing said a child on it RUNS, and is billed, at
+        # that model's rates, or that "Who picks a subagent's model" is what
+        # decides who may choose it.
+        #
+        # Length is budgeted, not styled, and the budget is TIGHT: the detail
+        # line sheds the WHOLE help once the key path no longer fits beside it
+        # (settings_view._detail_clause), and at 100 columns that row is 94 cells
+        # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
+        # of help. An earlier version measured 73 and shed the key path, which
+        # the comment beside it wrongly claimed it did not; this is 71 and was
+        # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        # At 80 the key path RENDERS (the row is 74 cells there and the rung
+        # paints `help · clause · key`), so the earlier note that it was "still
+        # shed" at that width was wrong in the safe direction — the frame is the
+        # only thing that settles it, which is why the bounds below are measured
+        # rather than derived.
+        #
+        # The pointer names the row (by the key the page greppable from, which is
+        # also the spelling `lop config edit` takes) instead of saying "row
+        # above": registry order is max_running, model_choice, lo, med, hi, so
+        # "above" would point med at lo and hi at med — and `hi` is the row this
+        # incident ran through.
+        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
     # -- fork ---------------------------------------------------------------
@@ -1652,6 +2113,7 @@ SETTINGS: tuple[Setting, ...] = (
         members=(
             "duckduckgo",
             "tavily",
+            "deepseek",
             "perplexity",
             "brave",
             "exa",
@@ -1678,6 +2140,31 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.TEXT,
         default="",
         help="Base URL of a self-hosted SearXNG instance.",
+    ),
+    Setting(
+        key="web_search.deepseek_evidence",
+        path=("web_search", "deepseek_evidence"),
+        section="web_search",
+        label="DeepSeek page evidence",
+        kind=Kind.BOOL,
+        default=False,
+        # Off by default: it is a SECOND model turn (measured 4-11s on top of the
+        # search) that buys a verbatim quote and a relevance score per source,
+        # for the "which page do I fetch next" decision. Only the deepseek
+        # provider consumes it; every other provider already returns snippets.
+        help="Adds a per-page quote and relevance score after a DeepSeek search.",
+    ),
+    Setting(
+        key="web_search.read_enabled",
+        path=("web_search", "read_enabled"),
+        section="web_search",
+        label="Read from search",
+        kind=Kind.BOOL,
+        default=True,
+        # On by default because it is inert until used: the tool refuses (telling
+        # the model to fetch instead) whenever no readable page context exists,
+        # so a session that never uses it pays nothing but a tool schema.
+        help="Offer web_read: answer from pages a search already retrieved, no refetch.",
     ),
     # -- web fetch ----------------------------------------------------------
     Setting(
@@ -1768,6 +2255,27 @@ SETTINGS: tuple[Setting, ...] = (
         help="Try .md, llms.txt and content negotiation before scraping HTML.",
         choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
     ),
+    Setting(
+        key="web_fetch.max_attempts",
+        path=("web_fetch", "max_attempts"),
+        section="web_fetch",
+        label="Attempts per hop",
+        kind=Kind.INT,
+        default=3,
+        help="Retries share the call's timeout, so more attempts never take longer.",
+        minimum=1,
+        maximum=5,
+    ),
+    Setting(
+        key="web_fetch.blocked_retry",
+        path=("web_fetch", "blocked_retry"),
+        section="web_fetch",
+        label="Browser-profile retry",
+        kind=Kind.BOOL,
+        default=True,
+        help="After a refusal, retry once with browser-shaped headers.",
+        choices=_bool_choices("retry refusals once", "stay self-identifying"),
+    ),
     # -- tools --------------------------------------------------------------
     # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
     # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
@@ -1840,6 +2348,65 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.READONLY,
         default=50,
         help="Deprecated. Superseded by the compaction engine.",
+    ),
+    Setting(
+        key="desktop.launch_command",
+        path=("desktop", "launch_command"),
+        section="desktop",
+        label="launch command",
+        # TEXT, NOT LIST, and the reason is the separator rather than the type.
+        # ``Kind.LIST`` is a COMMA-SEPARATED token list (``web_search.providers``
+        # and the OpenRouter host slugs), and a comma is a legal character in an
+        # argv word — a path, a title, an argument. Storing argv in a
+        # comma-delimited field would therefore corrupt a perfectly valid
+        # command line silently, at click time, on the one path a user has no
+        # other way to reach. The string is split with ``shlex`` by the reader,
+        # which is the same grammar the user would type into a shell.
+        #
+        # ``{session}`` is substituted rather than appended, so an install whose
+        # launcher wants the id somewhere other than last can say so without a
+        # second setting.
+        kind=Kind.TEXT,
+        # RESTATED, not imported from the reader, matching the `tui.theme`
+        # precedent above: this module is loaded by every CLI invocation and by
+        # the TUI, and reaching into `tui.resume_click` from here would be an
+        # import edge in the wrong direction for one empty string. The
+        # divergence that restating invites is guarded by name:
+        # `tests/unit/test_settings_io.py::_consumer_defaults` maps this key to
+        # `resume_click.DESKTOP_LAUNCH_COMMAND_DEFAULT`, and
+        # `test_every_default_matches_its_consumer` fails if the two part ways.
+        default="",
+        # The order in this copy IS the code's order and is asserted against it:
+        # `_launch_desktop` appends `shutil.which(DESKTOP_BIN_NAME)` (the npm
+        # bin) first and the `open -b` bundle second, and `docs/DESKTOP_API.md`
+        # states the same order. It said the reverse here, on the one surface a
+        # user browses to learn it (UX round 1, U3).
+        #
+        # BOTH CANDIDATES ARE NAMED, AND THE BUDGET IS THE REASON THE SECOND
+        # SENTENCE IS THIS SHORT (design round 1, D12/D14). The first clause used
+        # to say "the npm bin" and "the packaged bundle" — names that identify
+        # neither artifact for a reader who has to find one — while the code
+        # appends the bundle candidate ONLY on darwin, so Linux and Windows were
+        # told about a discovery step that cannot happen there. Naming the bin
+        # costs ~19 cells, and the old second sentence was 128 of a 194-cell
+        # string against a `width − 6` slot that is at most 94 cells (100x30),
+        # so its tail was dead copy at every width the page measures: the
+        # `{session}` semantics are now the SHORT half and the placeholder
+        # carries the command's shape.
+        help=(
+            "Empty = discover the app (local-operator-ui, then the macOS app). "
+            "{session} is the session id."
+        ),
+        placeholder="local-operator-ui --open-session {session}",
+        # Empty is the DEFAULT that must not be disturbed, and it has a real
+        # meaning here ("discover it for me"), so it clears the key rather than
+        # storing "".
+        empty_unsets=True,
+        # THE ONLY PLACE THIS CAN BE REPORTED (UX round 1, U4): the handler runs
+        # detached from the notification, so a launcher that cannot be run turns
+        # every click into a terminal with nothing on screen or in the log
+        # saying why. Rejecting it here keeps the user in front of the field.
+        validate_value=_validate_desktop_launch_command,
     ),
 )
 

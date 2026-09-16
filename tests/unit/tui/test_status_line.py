@@ -822,6 +822,168 @@ def test_the_two_groups_never_crowd_closer_than_their_own_separator() -> None:
         assert max(gaps) >= _MIN_GROUP_GAP, f"width {width}: seam {max(gaps)} < {_MIN_GROUP_GAP}"
 
 
+def test_the_connection_row_never_asks_for_more_cells_than_the_band(monkeypatch) -> None:
+    """D1 on #1040: the connection row reserved a literal 3 for the group seam.
+
+    ``_compose`` pads with ``max(_MIN_GROUP_GAP, …)`` — 4 cells — while this row
+    cut the name to ``width - left - 3``, the width of the ` · ` separator that
+    lives INSIDE a group. So the row it asked for came out exactly one cell
+    wider than its own box, and Textual word-wraps the overflow: the last word
+    of the conversation name moved onto a row the 1-row band cannot show, and
+    the name painted short with no ellipsis. At the operator's own width
+    (100x30, sidebar docked, band content 62) the failed row asked 63 and
+    painted 55, and the name read ``Fix``.
+
+    Pinned as ARITHMETIC rather than as pixels: the ask (``render_text``) must
+    fit the budget, because a row that fits is never wrapped. The glyph-on
+    variant is the one that tipped over — it spends the two cells the
+    animation-off row does not — so both are swept, at the three widths the app
+    actually docks a sidebar at as well as across the whole narrow range.
+
+    Design round 1 on #1048 then found that the FIRST cut — an ellipsis-truncate
+    of the ``Text`` — left a detached mark, because ``Text.truncate`` does not
+    rstrip: at 80x24 the name painted as ``Fix sidebar reconnect …``. The row
+    takes ``truncate_name`` now, the same word-boundary cut the ladder's own
+    title uses, and the second half of this test is the property that bought:
+    the mark only ever sits against the word it cut.
+    """
+    failed = "Saved · Reconnect failed · Select again to retry"
+    connecting = "Saved · Connecting…"
+    name = "Fix sidebar reconnect on session switch"
+    # 62 is the band's own ``content_region`` at 100x30 with the sidebar
+    # docked — the operator's worst case, because the tighter budget sits at the
+    # WIDER terminal; 75 at 80x24, where the sidebar is an overlay and the band
+    # keeps its width; 55 at 60x20, the narrowest a sidebar is docked at.
+    measured = (62, 75, 55)
+
+    for glyph in (True, False):
+        if glyph:
+            monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+        else:
+            # The suite's autouse fixture already pins this; re-stating it keeps
+            # the pair explicit and survives that fixture moving.
+            monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+        for connection in (connecting, failed):
+            status = StatusLine(_dock(200))
+            status.update(connection=connection, conversation_name=name)
+            status.set_connecting(glyph)
+            status._spinner_index = 2
+
+            for width in (*measured, *range(10, 101)):
+                row = status.render_text(width).plain
+                cells = cell_len(row)
+                assert cells <= width, (
+                    f"width {width}, glyph={glyph}, {connection!r}: the row asks "
+                    f"{cells} cells, so Textual wraps the overflow onto a row the "
+                    f"1-row band cannot show and the name paints short: {row!r}"
+                )
+                # The name is the row's right group, and it starts after the
+                # seam (the widest run of spaces). A cut mark left floating —
+                # `Fix sidebar reconnect …` — reads as a rendering fault rather
+                # than as a cut, which is what the design round rejected. Only
+                # asserted when there IS a right group: with the name dropped the
+                # row is the left group alone, and that group's own cut is not
+                # this row's name arithmetic.
+                seams = [m for m in re.finditer(r" {2,}", row)]
+                if not seams:
+                    continue
+                name_area = row[seams[-1].end() :]
+                assert not name_area.endswith(" …"), (
+                    f"width {width}, glyph={glyph}, {connection!r}: the ellipsis is "
+                    f"detached from the name it cuts: {row!r}"
+                )
+
+            for width in measured:
+                row = status.render_text(width).plain
+                # The name is what this row exists to spend, and an ELISION is
+                # the honest outcome — a name the user can see is there and was
+                # cut, where the wrap hid the tail while the row still read as
+                # complete. So the row ends in either the whole name or a
+                # visible ellipsis run, never in nothing.
+                assert row.endswith("…") or row.endswith(name), f"width {width}: {row!r}"
+                # …separated from the left group by the real group seam, never
+                # the 3-cell separator that belongs inside a group. ANCHORED on
+                # ink at both ends (review NIT-2): an unanchored run would also
+                # pass on a trailing pad, and this test is about the seam.
+                assert re.search(rf"\S {{{_MIN_GROUP_GAP},}}\S", row), f"width {width}: {row!r}"
+
+    # The operator's own frame, verbatim: 100x30 with the sidebar docked leaves
+    # the band a 62-cell content box, and the failed row is the one whose name
+    # read `Fix`. Stated as the exact elision so a later change cannot quietly
+    # return to a name that is wrapped away rather than cut. 75 is the design
+    # round's other named budget — 80x24, where the sidebar is an overlay and
+    # the band keeps its width — and it is pinned because that is the frame the
+    # detached mark was measured on.
+    for glyph, width, expected in (
+        (True, 62, "Fix sid…"),
+        (False, 62, "Fix sideb…"),
+        (False, 75, "Fix sidebar reconnect…"),
+    ):
+        if glyph:
+            monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+        else:
+            monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+        status = StatusLine(_dock(200))
+        status.update(connection=failed, conversation_name=name)
+        status.set_connecting(glyph)
+        status._spinner_index = 2
+        row = status.render_text(width).plain
+        assert cell_len(row) == width, f"glyph={glyph}: the row must fill its box: {row!r}"
+        assert row.endswith(expected), f"glyph={glyph} width={width}: {row!r}"
+
+    # No name, no right group: with nothing to align there is no seam to
+    # reserve, and ``_compose`` emits no filler at all. Asserted so a later
+    # change cannot start charging the gap against a row that has no group to
+    # separate it from.
+    nameless = StatusLine(_dock(200))
+    nameless.update(connection=failed, conversation_name="")
+    for width in measured:
+        row = nameless.render_text(width).plain
+        assert cell_len(row) == cell_len(failed), f"width {width}: {row!r}"
+        assert "  " not in row, f"width {width}: a filler was emitted: {row!r}"
+
+
+def test_the_connection_row_survives_a_non_positive_budget() -> None:
+    """REVIEW MINOR-1 on #1048: three rows passed a non-positive cap to truncate.
+
+    ``left.truncate(max(0, width))`` looks defensive but is the opposite: on
+    pinned rich 15.0.0 ``Text.truncate`` at a non-positive width does NOT empty
+    the text — ``truncate(0)`` keeps the cell count and swaps the tail for an
+    ellipsis, and ``truncate(-n)`` keeps ``cell_len - n`` cells (39 in, 38 out at
+    -1 and 34 at -5) — so a zero-width row would paint nearly 40 cells past a box
+    it was told was 0 wide. The connection row's left group and the irreducible
+    tail's two ``tail.truncate`` calls all had the same hole, so the guard sits
+    once at the top of ``_render`` rather than at each site. Unreachable today
+    only because ``refresh`` clamps to ``max(self._dock.size.width, 10)``; the row
+    should not depend on a caller's arithmetic for its own bound, and that clamp
+    is one line away from moving.
+    """
+    # A connection row and a plain one, because the two reach different
+    # builders below the guard: the connection branch, and the ladder-then-tail
+    # path every other band state takes.
+    rows = [StatusLine(_dock(200))]
+    rows[0].update(connection="Saved · Reconnect failed · Select again to retry")
+    rows[0].update(conversation_name="Fix sidebar reconnect on session switch")
+    plain = StatusLine(_dock(200))
+    plain.update(
+        model_label="openrouter/moonshotai/kimi-k2-thinking",
+        effort="high",
+        cwd="/Users/tester/work/local-operator",
+        context_tokens=496_000,
+        context_window=1_000_000,
+        conversation_name="Status band enrichment",
+    )
+    rows.append(plain)
+
+    for index, status in enumerate(rows):
+        for width in (0, -1, -5):
+            row = status.render_text(width)
+            assert cell_len(row.plain) == 0, (
+                f"row {index}, width {width}: a row that was given no cells still "
+                f"inked {cell_len(row.plain)}: {row.plain!r}"
+            )
+
+
 def test_a_terminal_too_narrow_for_anything_still_names_the_model() -> None:
     """The ladder's old final rung DROPPED the model, leaving a bare glyph on an
     empty tinted strip — which reads as broken rather than compressed, and

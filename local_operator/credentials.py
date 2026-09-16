@@ -5,8 +5,10 @@ It securely stores credentials in a local config file and provides methods
 for accessing them when needed.
 """
 
+import errno
 import getpass
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -40,6 +42,29 @@ def _reject_control_chars(key: str, value: str) -> None:
         raise ValueError(f"{key} contains control characters, which are not allowed.")
 
 
+def _open_regular_store(path: str, flags: int) -> int:
+    """Validate the opened object before a buffered reader can consume it.
+
+    A path probe races replacement and hides diagnostic errnos on newer Python.
+    Opening nonblocking first also avoids waiting for a FIFO writer; checking
+    that SAME descriptor rejects devices such as /dev/zero before an unbounded
+    read. Regular-file symlinks remain supported. The opener owns the descriptor
+    until it returns it to ``open``, including every validation failure.
+    """
+    fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            code = errno.EISDIR if stat.S_ISDIR(mode) else errno.EINVAL
+            raise OSError(code, "Credential store must be a regular file", path)
+        if hasattr(os, "O_NONBLOCK"):
+            os.set_blocking(fd, True)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class CredentialManager:
     """Manages secure storage and retrieval of API credentials.
 
@@ -58,16 +83,75 @@ class CredentialManager:
     credentials: Dict[str, SecretStr]
 
     def __init__(self, config_dir: Path) -> None:
-        self.config_dir = config_dir
-        self.config_file = self.config_dir / CREDENTIALS_FILE_NAME
+        self._bind(config_dir)
         self._ensure_config_exists()
         self.load_from_file()
+
+    def _bind(self, config_dir: Path) -> None:
+        """Point this instance at ``config_dir``. The ONE place the paths are set.
+
+        Both construction paths come through here — ``__init__`` and
+        :meth:`read_key_names` — so state a reader needs cannot be added to one
+        of them and silently missing from the other. Anything that WRITES
+        (creating the store, tightening its mode) goes in ``__init__`` after
+        this call, because ``read_key_names`` deliberately runs none of
+        ``__init__``'s body past this method.
+        """
+        self.config_dir = config_dir
+        self.config_file = config_dir / CREDENTIALS_FILE_NAME
+
+    @classmethod
+    def read_key_names(cls, config_dir: Path, *, non_empty: bool = True) -> List[str]:
+        """Credential KEY NAMES from the store at ``config_dir``, read WITHOUT creating it.
+
+        ``__init__`` calls ``_ensure_config_exists()``, which creates the config
+        directory and an empty ``credentials.env`` and re-tightens the mode of a
+        loose file it finds. That is correct for a writer and wrong for a
+        READ-ONLY consumer: ``/info`` exists to describe a host — including a
+        broken one — and a diagnostic that leaves new state (or new permissions)
+        on the machine it is describing is the fault class that bans
+        ``update.check_latest()`` from that path. The class therefore owns the
+        read-only construction rather than letting callers reach past
+        ``__init__`` with ``__new__`` from a sibling module: the post-conditions
+        of construction stay in one file, and an edit to :meth:`_bind` or to the
+        parser has one place to keep true.
+
+        A store that is ABSENT is an answer — "no credentials recorded" — and
+        returns ``[]``; it is not a reason to create one. Absent means exactly
+        one errno: ``ENOENT``. Everything else is a "could not look" and is
+        raised for the caller to report as degraded — ``EACCES`` on the store or
+        on a directory on the way to it, ``ELOOP`` from a store symlinked to
+        itself, ``ENOTDIR`` when the config root is not a directory at all,
+        ``EISDIR`` for a directory in the store's place — because "none set" and
+        "could not look" are different answers and ``[]`` states the first.
+
+        That policy cannot be expressed with an existence probe, which is what
+        the previous ``Path.is_file()`` spelling got wrong: it answers ``False``
+        for ``ENOENT``, ``ENOTDIR``, ``EBADF`` and ``ELOOP`` (pathlib's
+        ``_ignore_error`` tuple, i.e. the errors it chose to treat as "no"), and
+        CPython 3.14 changed it again to delegate to ``os.path.isfile()``, which
+        swallows EVERY ``OSError``. So the same call told two different lies —
+        an untraversable root read as "no store" on 3.14, a symlink loop on
+        3.12 — neither of them the file's absence (QA round 1, Q1/Q2). An errno
+        comparison is what makes the answer version-independent. The read
+        itself is asked rather than a separate probe, so there is also no window
+        in which the store disappears between the two calls.
+        """
+        manager = cls.__new__(cls)
+        manager._bind(config_dir)
+        try:
+            manager.load_from_file()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return []
+            raise
+        return manager.list_credential_keys(non_empty=non_empty)
 
     def load_from_file(self) -> Dict[str, SecretStr]:
         """Load credentials from the config file."""
         self.credentials = {}
 
-        with open(self.config_file, "r") as f:
+        with open(self.config_file, "r", opener=_open_regular_store) as f:
             for line in f:
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):

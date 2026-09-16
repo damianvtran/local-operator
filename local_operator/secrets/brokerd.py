@@ -14,6 +14,7 @@ import signal
 import sys
 from types import FrameType
 
+from local_operator import procname
 from local_operator.secrets.broker import IDLE_SHUTDOWN_S, run_broker
 
 
@@ -38,6 +39,17 @@ def main(argv: list[str] | None = None) -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _terminate)
+
+    # Linux only, and it does NOT replace the argv label the parent set in
+    # `client._spawn_broker` — the two are independent name axes (see
+    # `procname`). `prctl(PR_SET_NAME)` does not survive an exec, so a child
+    # that wants a `comm` must set its own; without this the broker's `comm` is
+    # whatever image it was exec'd through, which for a branded launch is the
+    # bare product name. `comm` truncates at 15 bytes so only BRAND fits there,
+    # which is exactly why the argv label carries the detail and this call
+    # carries only the family name.
+    procname.brand_this_process()
+
     return run_broker(idle_shutdown_s=args.idle_shutdown)
 
 

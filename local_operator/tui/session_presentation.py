@@ -111,6 +111,58 @@ def live_projection_call_ids(session: Any) -> set[str]:
     return live
 
 
+def live_tool_start_epochs(session: Any) -> dict[str, float | None] | None:
+    """The session's own start epoch per live tool call.
+
+    ``None`` when the session cannot answer AT ALL, and that is a third answer
+    rather than a detail: the accessor is probed rather than called directly, so
+    a reduced facade — a test double, an embedding host — may not implement it
+    at all, and a caller that read its absence as an empty map would be reading
+    "no call has started" into an answer the session never gave. That reading is
+    load-bearing now: a call absent from the map is one with no start, which a
+    replay paints ``queued`` rather than ``running``. So the two shapes are
+    kept apart here — ``None`` is "cannot say, keep today's behaviour (paint the
+    call live and withhold its clock)" and ``{}`` is "says so, and nothing has
+    started".
+
+    The same shape is answered by BOTH real session kinds, and it is the SAME
+    fact either way: the epochs a producer stamped on its
+    ``tool_execution_start`` events, folded per call. That is what lets a live
+    row and the switched-to row for one call share an anchor instead of
+    differing by when each was painted.
+
+    Two answers ride in one map and the callers of this helper need both: a
+    MISSING ID is a call that never started (so a replayed row for it must not
+    be painted running), while a present id whose value is ``None`` started
+    under a producer that stamped no epoch (so the row keeps the blank clock it
+    already had).
+    """
+    accessor = getattr(session, "live_tool_start_epochs", None)
+    if not callable(accessor):
+        return None
+    return dict(cast("dict[str, float | None]", accessor()))
+
+
+def activity_phase_clock(session: Any) -> tuple[str, float | None]:
+    """The session's folded phase and its zero, or ``("", None)`` for none.
+
+    The companion to the accessor above, for the arm of the working line that
+    has no tool call behind it: ``thinking``, ``responding`` and ``composing``
+    are dated by a phase edge rather than by a call, so a viewer that arrived
+    mid-turn has no other way to know how long the model call has been going.
+
+    ``("", None)`` is the answer for a facade with no fold and for a session
+    that has not been published yet. The consumer compares the phase against
+    the one it derived itself and withholds the clock on any mismatch, so the
+    empty value matches nothing and no age is invented from it.
+    """
+    accessor = getattr(session, "activity_phase_clock", None)
+    if not callable(accessor):
+        return ("", None)
+    phase, started_at = cast("tuple[str, float | None]", accessor())
+    return str(phase or ""), started_at
+
+
 class CompactionMarkerBlock(NoticeBlock):
     """The compaction seam, spaced apart from whatever it lands beside.
 
@@ -182,8 +234,8 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
             super().__init__()
             self.notice = notice
 
-    def __init__(self, text: str) -> None:
-        super().__init__(text, "note")
+    def __init__(self, text: str, *, fold_width: int = 0) -> None:
+        super().__init__(text, "note", fold_width=fold_width)
         self._interactive = True
         self.add_class("interactive-notice")
 
@@ -379,7 +431,11 @@ class ReplayTarget(Protocol):
     ) -> None: ...
 
     def _append_image_blocks(
-        self, images: list[ImageContent], *, marker_text: str | None = None
+        self,
+        images: list[ImageContent],
+        *,
+        marker_text: str | None = None,
+        fold_width: int = 0,
     ) -> list[ImageBlock]: ...
 
     def _painted_tool_card(self, call_id: str) -> Any: ...
@@ -387,7 +443,12 @@ class ReplayTarget(Protocol):
     def _settle_painted_tool_card(self, card: Any, result: Any) -> None: ...
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, user_run: bool = False
+        self,
+        call: Any,
+        results: dict[str, Any],
+        *,
+        user_run: bool = False,
+        fold_width: int = 0,
     ) -> None: ...
 
 
@@ -415,9 +476,23 @@ class PreparedReplay(ReplayState):
         self.blocks.append(block)
 
     def _append_image_blocks(
-        self, images: list[ImageContent], *, marker_text: str | None = None
+        self,
+        images: list[ImageContent],
+        *,
+        marker_text: str | None = None,
+        fold_width: int = 0,
     ) -> list[ImageBlock]:
-        return append_image_blocks(self, images, marker_text=marker_text, navigation_visible=False)
+        # ``fold_width`` is accepted to satisfy ``ReplayTarget``: a prepared
+        # replay is built OFFSCREEN, so there is no laid-out destination to
+        # name and the caller passes nothing (its blocks are folded when the
+        # presentation is committed into a mounted view).
+        return append_image_blocks(
+            self,
+            images,
+            marker_text=marker_text,
+            navigation_visible=False,
+            fold_width=fold_width,
+        )
 
     def _painted_tool_card(self, call_id: str) -> None:
         return None
@@ -426,9 +501,15 @@ class PreparedReplay(ReplayState):
         raise AssertionError("a prepared replay cannot contain a live tool card")
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, user_run: bool = False
+        self,
+        call: Any,
+        results: dict[str, Any],
+        *,
+        user_run: bool = False,
+        fold_width: int = 0,
     ) -> None:
-        replay_tool_call(self, call, results, user_run=user_run)
+        # Zero for a prepared replay — see `_append_image_blocks` above.
+        replay_tool_call(self, call, results, user_run=user_run, fold_width=fold_width)
 
     def prepare(
         self,
@@ -465,6 +546,9 @@ class PreparedReplay(ReplayState):
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
+            # No width: a prepared replay is authored offscreen for a parked
+            # view (see `project_settled_rows`' `fold_width` note), and this
+            # notice is folded when that view is laid out.
             self._resume_head_notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
@@ -505,6 +589,13 @@ class SessionPresentation:
     #: poller append a second `Interrupted` under the live `interrupted` — the
     #: duplicate row `OperatorApp._adopt_own_interrupt_notice` exists to remove.
     own_interrupt_notice: Any = None
+    #: Which outcome kind ``own_interrupt_notice`` was painted for — "interrupted"
+    #: or "error". The adoption must refuse when the published kind differs from
+    #: the row it holds, and the block cannot be asked (its kind is consumed into
+    #: a token and a glyph at construction). Carried WITH the block, because the
+    #: pair is what makes the dedupe survive a session switch: the block alone
+    #: would come back unable to recognise its own outcome.
+    own_interrupt_kind: str = ""
     welcome: Any = None
     welcome_visible: bool | None = False
 
@@ -663,7 +754,12 @@ class SessionPresentation:
 
 
 def project_settled_rows(
-    self: ReplayTarget, history: list[Any], *, bound: int | None = None, end: int | None = None
+    self: ReplayTarget,
+    history: list[Any],
+    *,
+    bound: int | None = None,
+    end: int | None = None,
+    fold_width: int = 0,
 ) -> bool:
     """Mount settled transcript rows through the ONE role-aware renderer.
 
@@ -688,6 +784,32 @@ def project_settled_rows(
     projection — never sees the split at all. The gap-replay caller passes
     no bound, because a reconnect gap is by definition the small set of
     rows no frontend painted and bounding it could hide one.
+
+    ``fold_width`` is the width every block this pass BUILDS will be given.
+    Zero means "not supplied", and it is only right where there is no
+    destination to name: a prepared replay authors offscreen for a parked view
+    and is laid out inside it before that view is revealed.
+
+    Every other caller has a destination and must name it, because a block
+    built without one folds at the 80-column fallback, pins that fold as its
+    height, and is re-authored by the first layout's resize — a second build
+    per block and a painted frame whose rows wrap at 78 cells inside a 96 or
+    146-cell pane. `OperatorApp._project_settled_rows` derives it from the live
+    transcript for the tail, the reconnect gap replay, the sidebar commit's
+    top-up and the older-page collect, so those four cannot disagree about the
+    destination. It is threaded to CONSTRUCTION rather than applied after,
+    because a block that wraps in ``__init__`` never reads a hint set later.
+
+    The one authoring seam on a live transcript that still has no width is
+    ``TranscriptView.append_block`` / ``OperatorApp._append_block``: a live
+    prompt, notice or running card is built first and mounted second, so its
+    rows come out of the fallback too and are saved only by that same resize.
+    Deliberately not part of this seam: no painted narrow frame was observed on
+    it (the append's mount and resize both complete before the paint; measured
+    at 150x40 and 160x40 by review round 1 and the design round), so it is a
+    wasted build rather than a visible defect — recorded in the PR's "not
+    addressed" list, and it cannot be fixed from here because a hint applied at
+    append arrives after the rows exist.
     """
     from contextlib import nullcontext
 
@@ -696,6 +818,7 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
     # hosts so neither owns them: every divergence the convergence review
@@ -707,10 +830,11 @@ def project_settled_rows(
         compaction_refused_notice,
         gate_timeout_notice,
         is_harness_chrome,
+        is_harness_notice_row,
+        turn_cut_tool_call,
         user_row_text,
     )
     from local_operator.tui.app import (
-        PEER_MESSAGE_MESSAGE_TYPE,
         RESUME_OLDER_NOTICE,
         WAKE_PROMPT_MESSAGE_TYPE,
         AssistantBlock,
@@ -786,7 +910,31 @@ def project_settled_rows(
     # #451/#452 exist to prevent. One extra mount of a one-line notice is
     # not the cost this bound is avoiding.
     if self._block_sink is None and self._resume_pending_head and self._resume_head_notice is None:
-        notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
+        # The width goes to construction here for the same reason every other
+        # block in this pass gets it: a notice wraps itself in `__init__`, and
+        # this one is authored and mounted in the same pass as the rows below
+        # it, so without it the row is folded at the 80-column fallback before
+        # any hint can reach it (QA round 1, Q1 caught exactly this row:
+        # `OlderHistoryNotice box=96 authored at 80`).
+        #
+        # The pane where that is VISIBLE is a narrow one, not the 96-cell pane
+        # the `box=` readout above happens to carry (design round 2, D6). The
+        # sentence is 40 cells and the body budget is `width - 6` (`body_budget`:
+        # the 2-cell spine indent plus the 4-cell glyph column), so the row stops
+        # wrapping at pane 46 — one row from 46 up, two rows at 44 and below.
+        # Measured by building the notice at fold widths 36..54 and reading each
+        # row's cell length: pane 44 → `[39, 8]` cells, pane 46 → `[44]`. An
+        # earlier cut of this comment carried the 40x20 PANE (36) as though it
+        # were the sentence's length — the sentence is 40, and a figure no
+        # reader can re-derive is worse than no figure.
+        #
+        # At 100x30 and 60x20 this notice therefore paints identically before
+        # and after, and the observable case is 40x20 (pane 36): the fallback
+        # build is one row ending `…scroll up`, and this one wraps to a second,
+        # hanging-indented row — `…scroll` / `up to load`. Below the wrap
+        # threshold the width is the difference between the whole sentence and
+        # a truncated one.
+        notice = OlderHistoryNotice(RESUME_OLDER_NOTICE, fold_width=fold_width)
         self._resume_head_notice = notice
         self._append_block(notice)
         appended = True
@@ -817,7 +965,13 @@ def project_settled_rows(
                     # Skip a receipt this session already painted live —
                     # replaying it would double the line (round 2, m2).
                     if key not in self._live_wake_receipts:
-                        self._append_block(WakeBlock(str(details.get("text", "")), catchup=False))
+                        self._append_block(
+                            WakeBlock(
+                                str(details.get("text", "")),
+                                catchup=False,
+                                fold_width=fold_width,
+                            )
+                        )
                         appended = True
                 continue
             # A peer message (`lop send` from another session) is also a
@@ -833,6 +987,7 @@ def project_settled_rows(
                         PeerMessageBlock(
                             str(details.get("body", "")),
                             details.get("sender") or {},
+                            fold_width=fold_width,
                         )
                     )
                     appended = True
@@ -851,7 +1006,9 @@ def project_settled_rows(
             # distinction the transcript row itself exists to preserve.
             if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
                 details = getattr(message, "details", None) or {}
-                self._append_block(NoticeBlock(gate_timeout_notice(details), kind="warning"))
+                self._append_block(
+                    NoticeBlock(gate_timeout_notice(details), kind="warning", fold_width=fold_width)
+                )
                 appended = True
                 continue
             # A compaction that did NOT run. Rendered here for the same
@@ -863,7 +1020,7 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == COMPACTION_REFUSED_TYPE:
                 details = getattr(message, "details", None) or {}
                 text, kind = compaction_refused_notice(details)
-                self._append_block(NoticeBlock(text, kind=kind))
+                self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
                 continue
             # The compaction boundary itself. The replay layer has always
@@ -883,7 +1040,11 @@ def project_settled_rows(
             # error — the rows below are real history, they are simply outside
             # what the agent can still see.
             if getattr(message, "custom_type", None) == COMPACTION_MARKER_TYPE:
-                self._append_block(CompactionMarkerBlock(COMPACTION_MARKER_NOTICE, kind="note"))
+                self._append_block(
+                    CompactionMarkerBlock(
+                        COMPACTION_MARKER_NOTICE, kind="note", fold_width=fold_width
+                    )
+                )
                 appended = True
                 continue
             role = getattr(message, "role", None)
@@ -910,6 +1071,16 @@ def project_settled_rows(
                 # painting the other two as the user's own words.
                 if is_harness_chrome(text):
                     continue
+                # A row the harness wrote and re-seated, or minted from a
+                # ``CustomMessage`` (a model-switch notice, a session incident,
+                # a wake delivery) is neither the operator's words nor, on the
+                # live path, ever painted here — so skipping it is live/replay
+                # parity rather than a second opinion, and it also covers the
+                # rows an older build already wrote to existing transcripts
+                # (stamped, or carried forward in a compaction block without a
+                # stamp). See ``harness/rows.py`` for the one decision.
+                if is_harness_notice_row(message):
+                    continue
                 # A `$skill` invocation persists as its EXPANDED payload,
                 # because that is what the model was sent. Replaying it
                 # verbatim showed a resumed conversation the whole SKILL.md
@@ -931,8 +1102,10 @@ def project_settled_rows(
                     if isinstance(block, ImageContent)
                 ]
                 if text or replay_images:
-                    self._append_block(UserBlock(text, len(replay_images)))
-                    self._append_image_blocks(replay_images, marker_text=text)
+                    self._append_block(UserBlock(text, len(replay_images), fold_width=fold_width))
+                    self._append_image_blocks(
+                        replay_images, marker_text=text, fold_width=fold_width
+                    )
                     appended = True
                 # A bang-mode receipt replays as open as it lived: the
                 # user row is `! <command>` and the assistant message that
@@ -958,6 +1131,10 @@ def project_settled_rows(
             if assistant_row_text(text):
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
+                # Before `update_text`: this block authors its rows through the
+                # fold ladder on every update, and a hint set afterwards would
+                # only reach a rebuild that has already happened.
+                block.set_fold_hint(fold_width)
                 block.update_text(text)
                 block.finalize_text()
                 self._append_block(block)
@@ -971,7 +1148,7 @@ def project_settled_rows(
                 user_run = bool(
                     bang_pending and tool_calls[0] is call and getattr(call, "name", "") == "bash"
                 )
-                self._replay_tool_call(call, results, user_run=user_run)
+                self._replay_tool_call(call, results, user_run=user_run, fold_width=fold_width)
                 appended = True
             # A refused, failed or interrupted turn needs a notice the prose
             # alone does not carry — a refusal fires even when the model
@@ -985,10 +1162,18 @@ def project_settled_rows(
                 has_tool_calls=bool(tool_calls),
                 stop_reason=getattr(message, "stop_reason", None),
                 provider_payload=getattr(message, "provider_payload", None),
+                # The limit's ARM, from the turn's OWN results: this fold has
+                # them (`results` is keyed by call id), and without it the
+                # notice names a cause the call's own row contradicts -- a
+                # length-stopped turn whose every call arrived complete read
+                # "tool call cut off at the output limit" under a card saying
+                # "turn cut off at the output limit before this call ran"
+                # (design round 1, D1; QA Q-R2-1; review round 2, MINOR-2).
+                cut_tool_call=turn_cut_tool_call(tool_calls, results),
             )
             if notice is not None:
                 reason, severity = notice
-                self._append_block(NoticeBlock(reason, severity))
+                self._append_block(NoticeBlock(reason, severity, fold_width=fold_width))
                 appended = True
     # Every message this pass rendered, by stable id — the dedupe key a
     # later backward page is filtered through.
@@ -1013,7 +1198,12 @@ def project_settled_rows(
 
 
 def replay_tool_call(
-    self: ReplayTarget, call: Any, results: dict[str, Any], *, user_run: bool = False
+    self: ReplayTarget,
+    call: Any,
+    results: dict[str, Any],
+    *,
+    user_run: bool = False,
+    fold_width: int = 0,
 ) -> None:
     """Mount one settled tool row for a call from a previous session.
 
@@ -1043,6 +1233,7 @@ def replay_tool_call(
     empty there and killed-mid-turn calls still render ``interrupted``
     exactly as before.
     """
+    from local_operator.harness.rows import output_limit_call_receipt
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
@@ -1094,6 +1285,12 @@ def replay_tool_call(
         getattr(call, "arguments", None) or {},
         user_run=user_run,
     )
+    # Before the `restore`/`mark_*` calls below re-author the row: the
+    # constructor's own build is the throwaway one (a detached card has no
+    # width to ask and falls to the console fallback), and every state call
+    # that follows rebuilds through the fold ladder — so this is the moment
+    # the card can be told the width its rows should be authored at.
+    card.set_fold_hint(fold_width)
     self._append_block(card)
     if result is None:
         # No result recorded: the session ended between the call and its
@@ -1156,11 +1353,26 @@ def replay_tool_call(
         card.restore(state="interrupted", duration_s=duration_s)
         return
     if getattr(result, "is_error", False):
+        # A call the OUTPUT LIMIT kept from running carries a SYNTHETIC result,
+        # and that result's text is addressed to the MODEL ("Reply with the call
+        # itself, not with an explanation of why it cannot be sent"). Painting it
+        # here put a model-directed imperative on the operator's screen, under a
+        # red error row about a file that does not exist (review round 1, F2).
+        # The row takes the harness's own vocabulary instead, selected by the arm
+        # marker the result carries; every OTHER error result is untouched and
+        # keeps its own text.
+        #
+        # The status line AND the expanded body, because the body is that same
+        # model-facing string and leaving it there would only move the prose one
+        # click away. The result keeps its text in the transcript and on the wire
+        # -- this is a display decision, not a rewrite of what the model was
+        # told.
+        receipt = output_limit_call_receipt(details)
         card.restore(
             state="error",
-            result_text=result_text,
+            result_text=receipt or result_text,
             details=details,
-            error=_first_line(result_text),
+            error=receipt or _first_line(result_text),
             duration_s=duration_s,
         )
     else:
@@ -1188,6 +1400,7 @@ def append_image_blocks(
     *,
     marker_text: str | None = None,
     navigation_visible: bool = True,
+    fold_width: int = 0,
 ) -> list[ImageBlock]:
     """Mount one :class:`ImageBlock` per image, in order.
 
@@ -1232,6 +1445,7 @@ def append_image_blocks(
                 image.mime_type,
                 label=label,
                 navigation_visible=navigation_visible,
+                fold_width=fold_width,
             )
         except Exception:
             logger.debug("image block construction failed", exc_info=True)

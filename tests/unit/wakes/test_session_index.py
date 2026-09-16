@@ -208,3 +208,97 @@ async def test_install_hook_failure_never_breaks_wake_persistence(
         assert any("install hook failed" in rec.getMessage() for rec in caplog.records)
     finally:
         await session.dispose()
+
+
+# --- Lateness telemetry: the fields that make a missed wake visible ----------
+
+
+@pytest.mark.asyncio
+async def test_opening_a_session_stamps_last_attempt_at(tmp_path: Path, config_dir: Path) -> None:
+    """A runtime existing for this session is what the supervisor engages FOR.
+
+    Written by the session, never by the supervisor: the supervisor stays
+    read-only over schedule state, which is the property that keeps it from
+    ever disagreeing with the session about what has fired.
+    """
+    before = int(time.time() * 1000)
+    session = _open(tmp_path)
+    try:
+        await session.set_wake_schedules([_schedule()])
+        # The open-time rebuild is what stamps it; force one the way a reopen
+        # does rather than reaching into the private writer.
+        session._rebuild_wake_index_entry()
+        entry = wake_store.read_entry(config_dir, "sess")
+        assert entry is not None
+        assert entry["last_attempt_at"] >= before
+        assert "last_fired_at" not in entry, "nothing has fired yet"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_wake_stamps_last_fired_at(tmp_path: Path, config_dir: Path) -> None:
+    """The instant a wake actually went off, which is what makes lateness
+    computable: `next_due_at` says when it SHOULD have fired, and the gap to
+    this is how late it was. Nothing recorded it before, so "did this fire at
+    all" was unanswerable without reading the transcript."""
+    before = int(time.time() * 1000)
+    session = _open(tmp_path)
+    try:
+        # A repeating wake, already due: the pump delivers it and persists the
+        # ADVANCED schedule, so the entry survives for the assertion.
+        await session.set_wake_schedules(
+            [
+                WakeSchedule(
+                    id="w1",
+                    message="check in",
+                    next_due_at=before - 1_000,
+                    every_ms=3_600_000,
+                    created_at=1_700_000_000_000,
+                )
+            ]
+        )
+        await session.wake_scheduler.pump()
+
+        entry = wake_store.read_entry(config_dir, "sess")
+        assert entry is not None
+        assert entry["last_fired_at"] >= before, entry
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_persist_does_not_restamp_a_fire(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """The flag is CONSUMED by the persist that follows the delivery.
+
+    Otherwise a later unrelated persist — the wake tool adding a schedule,
+    say — would restamp a fire that did not happen, and the lateness figure
+    would quietly become a lie.
+    """
+    session = _open(tmp_path)
+    try:
+        await session.set_wake_schedules(
+            [
+                WakeSchedule(
+                    id="w1",
+                    message="check in",
+                    next_due_at=int(time.time() * 1000) - 1_000,
+                    every_ms=3_600_000,
+                    created_at=1_700_000_000_000,
+                )
+            ]
+        )
+        await session.wake_scheduler.pump()
+        fired = wake_store.read_entry(config_dir, "sess")
+        assert fired is not None
+        fired_at = fired["last_fired_at"]
+
+        await session.set_wake_schedules([_schedule("w2")])
+
+        entry = wake_store.read_entry(config_dir, "sess")
+        assert entry is not None
+        assert entry["last_fired_at"] == fired_at, "an unrelated persist restamped the fire"
+    finally:
+        await session.dispose()

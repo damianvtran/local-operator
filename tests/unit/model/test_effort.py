@@ -10,11 +10,15 @@ outlive the model it was chosen for.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from local_operator.config import ConfigManager
 from local_operator.model.configure import build_model_spec
 from local_operator.model.effort import (
     EFFORT_ORDER,
+    configured_effort,
     default_effort,
     next_effort,
     resolve_effort,
@@ -380,3 +384,105 @@ class TestClampingAgainstAnExplicitLadder:
             assert resolve_effort("claude-opus-5", requested) == resolve_effort_in(
                 supported_efforts("claude-opus-5"), default_effort("claude-opus-5"), requested
             )
+
+
+class TestConfiguredEffort:
+    """``configured_effort`` — the one reader of the ``model_effort`` key.
+
+    The registered key is the only vocabulary; this function just resolves it
+    and normalises the value. What matters most here is the property a rewrite
+    is most likely to lose: it sits on the BOOT path (``_prepare`` and
+    ``bootstrap.resolve_model_configuration``), so it must NEVER raise. A
+    broken, missing or hand-edited config degrades to "no opinion" — exactly
+    the behaviour before the key existed — rather than failing a launch.
+    """
+
+    @staticmethod
+    def _stored(tmp_path, value: Any) -> ConfigManager:
+        """A manager holding ``value`` at the key, as a hand-edit would.
+
+        ``set_config_value`` rather than the ``write_setting`` facade, because
+        the facade VALIDATES: a mis-cased or off-vocabulary value can only get
+        into the file by hand, which is the case this reader has to survive.
+        """
+        manager = ConfigManager(tmp_path)
+        manager.set_config_value("model_effort", value)
+        return manager
+
+    def test_absent_key_is_no_opinion(self, tmp_path) -> None:
+        assert configured_effort(ConfigManager(tmp_path)) is None
+
+    def test_empty_and_whitespace_are_no_opinion(self, tmp_path) -> None:
+        """The registry's own "no opinion" is the empty string, and the reader
+        must agree with the schema rather than inventing a second spelling."""
+        assert configured_effort(self._stored(tmp_path, "")) is None
+        assert configured_effort(self._stored(tmp_path, "   ")) is None
+
+    def test_a_level_is_normalised_to_lowercase(self, tmp_path) -> None:
+        assert configured_effort(self._stored(tmp_path, "High")) == "high"
+
+    def test_an_unknown_word_is_passed_through(self, tmp_path) -> None:
+        """Deliberately NOT validated away: ``resolve_effort_in`` answers an
+        off-vocabulary request with the model's own default, so a typo degrades
+        to the model default instead of raising on the boot path — and the
+        settings page can still show the user the odd token they stored."""
+        assert configured_effort(self._stored(tmp_path, "turbo")) == "turbo"
+
+    def test_it_never_raises(self) -> None:
+        """A manager that cannot answer, and the crudest wrong type, both mean
+        "no configured effort". This is the one property a boot path cannot
+        compromise on."""
+        assert configured_effort(None) is None
+        assert configured_effort(object()) is None
+
+    def test_a_yaml_null_is_no_opinion_not_the_none_rung(self, tmp_path) -> None:
+        """B1: ``model_effort:`` with no value, ``model_effort: null`` and
+        ``model_effort: ~`` all parse to Python ``None``, and ``str(None)``
+        lowercases to ``"none"`` — a REAL rung of ``EFFORT_ORDER``.
+
+        So the plainest spelling of "clear the key" silently turned reasoning
+        OFF for every new conversation of any model whose ladder offers it, and
+        durably: D6's clause 2 reads the same value back, so a later
+        ``/model default`` re-persists it. This docstring's own promise — "a
+        missing key, an unreadable file and a non-string value all read as
+        ``None``" — was exactly the case that failed. Read through the FILE,
+        because a YAML null is how a hand edit spells it.
+        """
+        for stored in ("model_effort:\n", "model_effort: null\n", "model_effort: ~\n"):
+            (tmp_path / "config.yml").write_text(
+                "version: 0.0.0\nvalues:\n  hosting: anthropic\n"
+                "  model_name: claude-opus-5\n  " + stored
+            )
+            assert configured_effort(ConfigManager(tmp_path)) is None, stored
+
+    def test_a_null_stored_effort_leaves_the_boot_on_the_model_default(self, tmp_path) -> None:
+        """The consequence, composed the way ``session_factory._prepare``
+        composes it: the reader's answer goes through ``resolve_effort_in``
+        against the model's own ladder.
+
+        A null used to arrive there as the literal REQUEST ``none``, which clamps
+        onto the nearest rung instead of degrading to the documented default —
+        ``low`` on ``claude-opus-5``, reasoning at its floor, with no warning
+        anywhere (the boot clamp is silent by design and the band names the rung
+        in force, which is why nothing contradicted it on screen)."""
+        (tmp_path / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: anthropic\n"
+            "  model_name: claude-opus-5\n  model_effort:\n"
+        )
+        spec = build_model_spec("anthropic", "claude-opus-5")
+        resolved = resolve_effort_in(
+            spec.reasoning_efforts,
+            spec.reasoning_default_effort,
+            configured_effort(ConfigManager(tmp_path)),
+        )
+        assert resolved == "high"
+
+    def test_other_non_string_types_are_no_opinion(self, tmp_path) -> None:
+        """The mirror half of B1: an ``int`` read as ``'3'`` and a ``bool`` as
+        ``'true'``/``'false'``. Both were harmless only by accident — they are
+        off-vocabulary, so ``resolve_effort_in`` happened to reject them — and
+        neither is a level this key should answer with. ``none`` was the one
+        wrong type that is also in the vocabulary, which is why the guard has to
+        be a TYPE check rather than the vocabulary check downstream."""
+        assert configured_effort(self._stored(tmp_path, 3)) is None
+        assert configured_effort(self._stored(tmp_path, True)) is None

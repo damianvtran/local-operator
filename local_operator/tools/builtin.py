@@ -58,11 +58,11 @@ import time
 import traceback
 import unicodedata
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, cast
+from typing import Any, BinaryIO, Literal, NamedTuple, cast
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -82,6 +82,7 @@ from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
+    model_may_choose_tier,
 )
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
@@ -177,10 +178,25 @@ BASH_SHELL_FALLBACK = "/bin/sh"
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
-#: Files larger than this are refused by read as TEXT (serve 2MB+ blobs
-#: through bash with head/tail instead); the cap serves the per-tool output
-#: budget. Images are governed by :data:`READ_IMAGE_LIMIT_BYTES` instead.
+#: Files larger than this are refused by ``read`` as a WHOLE-file text read.
+#: That is a CONTEXT-budget decision, not a performance one: the bytes become
+#: context, and the per-tool output budget is what this cap serves.
+#: It deliberately does NOT apply to a ranged read, which streams only the
+#: lines the caller named (see :func:`_stream_text_window`): the window is
+#: bounded by the request, and refusing it pushed agents into
+#: ``bash sed -n 'A,Bp'``, losing the numbering, the clamp footer and the
+#: ``range`` key compaction supersedes on. Images are governed by
+#: :data:`READ_IMAGE_LIMIT_BYTES` instead, which bounds DECODE cost.
 READ_FILE_LIMIT_BYTES = 2 * 1024 * 1024
+#: Bytes a ranged read pulls from disk per iteration. This is what makes peak
+#: memory independent of file size: a forward pass over the bytes to locate
+#: line boundaries is exactly what ``sed -n 'A,Bp'`` does, but no single bytes
+#: object ever holds the file.
+_RANGED_READ_CHUNK_BYTES = 64 * 1024
+#: Bytes of a file's head used to classify it as text or binary. Named because
+#: two call sites must agree on it: the whole-file read, which has all the
+#: bytes, and the streamed ranged read, which only sees its first chunk.
+_BINARY_PEEK_BYTES = 8000
 #: Byte ceiling for a file read as an IMAGE, 8x the text ceiling. The text cap
 #: exists because bytes become context; an image's context cost is its PIXELS
 #: (~w*h/750 tokens on Anthropic and OpenAI alike) and is bounded downstream by
@@ -2544,9 +2560,33 @@ def _parse_line_range(spec: str) -> tuple[int, int | None]:
     return start, end
 
 
-def _number_lines(lines: list[str], start: int) -> str:
-    width = len(str(start + len(lines) - 1))
+def _number_lines(lines: list[str], start: int, span: int | None = None) -> str:
+    """Number ``lines`` from ``start`` in a right-aligned column.
+
+    ``span`` overrides the line count the column is sized from. A streamed
+    ranged read may hold fewer lines than the window it heads — it stops
+    keeping line bodies once no more of them could survive the clamp (see
+    :func:`_stream_text_window`) — while the numbering width must stay the one
+    the full window would have produced, or the same range would render
+    different bytes on a small file than it did before it was streamed.
+    """
+    width = len(str(start + (len(lines) if span is None else span) - 1))
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
+
+
+def _fits_output_budget(body: str) -> bool:
+    """Whether a rendered ``read`` body escapes the per-result clamp.
+
+    One definition of the threshold, because two callers must agree on it to
+    the character: :func:`_clamp_file_body` reads it to decide whether a
+    footer is appended, and the streamed ranged read reads it to decide
+    whether the file's exact line total is needed at all — the footer is the
+    ONLY consumer of that total (see :func:`_read_ranged_snapshot`). Two
+    restatements of ``len(body) <= READ_OUTPUT_LIMIT_CHARS`` would let a
+    future edit to one of them stop the scan early on a body that then gets
+    clamped, which is precisely the ``None`` leak the footer must never see.
+    """
+    return len(body) <= READ_OUTPUT_LIMIT_CHARS
 
 
 def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
@@ -2562,7 +2602,7 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     "carry on from where this stopped"; splicing in a tail would break the
     contiguity that makes a numbered listing readable.
     """
-    if len(body) <= READ_OUTPUT_LIMIT_CHARS:
+    if _fits_output_budget(body):
         return body
     clipped = body[:READ_OUTPUT_LIMIT_CHARS]
     cut = clipped.rfind("\n")
@@ -3269,6 +3309,270 @@ def _decode_text_lines(data: bytes) -> tuple[str, list[str]]:
     return text, text.splitlines()
 
 
+#: The Unicode line breaks ``str.splitlines`` splits on beside ``\r``, ``\n``
+#: and ``\r\n``. A streamed ranged read must agree with the whole-file path
+#: line for line, so it cannot assume ``\n``: a ``\n``-only splitter returns
+#: different lines for any file whose "lines" end in one of these, which is a
+#: silent behaviour change in the middle of a file-format edge case.
+_LINE_BREAK_CHARS = "\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+#: The same set plus ``\r``, as a scanner. The scan steps break to break rather
+#: than character to character — reading a range out of an ordinary file is a
+#: hot path (agents read ranges constantly) and a per-character Python loop
+#: measured ~20x the cost of the C-level ``splitlines`` it replaces on a 2.2 MB
+#: file, for identical results. Iterating the break POSITIONS keeps the loop
+#: count proportional to the lines, not to the bytes.
+_LINE_BREAK_RE = re.compile(f"[{_LINE_BREAK_CHARS}\r]")
+
+#: Characters of a window a streamed ranged read accumulates before it stops
+#: keeping line bodies and only counts boundaries. The budget is the clamp's
+#: own threshold rather than an arbitrary slice: while the kept text fits in
+#: one clamp's worth the head is provably a character-prefix of what the
+#: whole-file path would have rendered, so a clipped window is clipped at
+#: exactly the same character (see :func:`_stream_text_window`). This is what
+#: bounds peak memory for an open-ended ``range="30000-"``, where "the
+#: requested lines" is the whole tail of the file.
+_RANGED_KEEP_CHARS = READ_OUTPUT_LIMIT_CHARS
+
+
+class _RangedRead(NamedTuple):
+    """What one coherent ranged snapshot found.
+
+    ``info`` is the image classification; when it is set it is the only
+    meaningful field, and the caller falls back to the whole-file path so a
+    ``range`` on an image behaves exactly as it always has. ``binary`` means
+    the head carried a NUL byte, so there is no text window at all. ``lines``
+    is the window head actually kept — at most :data:`_RANGED_KEEP_CHARS`
+    worth of it — while ``window_lines`` is how many lines the window really
+    holds, which is what sizes the numbering column. ``total_lines`` is the
+    file's exact line count, or ``None`` when the scan stopped as soon as the
+    window was complete and so never learned the total; that ``None`` is only
+    ever reachable for a window the output clamp never touches, and the caller
+    re-counts before it can.
+    """
+
+    info: ImageInfo | None
+    binary: bool
+    lines: list[str]
+    window_lines: int
+    total_lines: int | None
+
+
+def _stream_text_window(
+    handle: BinaryIO, start: int, end: int | None, *, count_only: bool = False
+) -> tuple[bool, list[str], int, int | None]:
+    """Scan a byte stream for a 1-based inclusive line window.
+
+    Returns ``(binary, kept, window_lines, total_lines)``. Peak memory is the
+    chunk size plus the kept window, never the file.
+
+    The scanner IS the semantics: it reproduces ``str.splitlines`` with the
+    separator set in :data:`_LINE_BREAK_CHARS` and the ``\r``/``\r\n`` state
+    below, instead of retyping the whole-file path's ``text.splitlines()``. A
+    ``\n``-only splitter would have been a behaviour change, not an
+    implementation detail.
+
+    A BOUNDED window (``end is not None``) stops the scan the moment the break
+    that closes line ``end`` is seen: every later line is outside the window,
+    so the only thing a longer pass could add is the file's exact total — and
+    that total is consumed solely by the clamp footer, which exists only when
+    the rendered head overflows the budget. ``total_lines`` is then ``None``
+    ("the scan stopped; the exact total is not known") and the caller decides
+    whether it must be recovered (:func:`_read_ranged_snapshot`). An
+    open-ended window (``end is None``) has no such bound and still scans to
+    EOF, because its window is the whole tail.
+
+    ``count_only`` is that recovery pass, not a second splitter: the same
+    scanner with retention off and the early exit disabled, so the count it
+    reports is accounted for by exactly the state machine that produced the
+    window. It returns an exact total and therefore never ``None``.
+    """
+    # ``errors="replace"`` throughout, deliberately: the whole-file path's
+    # strict-then-replace pair exists only so the common valid case skips a
+    # second pass, and an incremental STRICT decoder would abort the scan at
+    # the first invalid byte instead of reporting the window around it. The
+    # two agree on every input — valid UTF-8 never reaches the replacement.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    kept: list[str] = []
+    window_lines = 0
+    total_lines = 0
+    line_no = 1
+    keeping = start <= line_no and (end is None or line_no <= end)
+    kept_chars = 0
+    partial = ""
+    # Whether the line being scanned has any character in it yet. Deliberately
+    # NOT ``bool(partial)``: ``partial`` holds only what is RETAINED, so a last
+    # line outside the window (or past the retention budget) would look empty
+    # and the file's final line would go uncounted.
+    line_open = False
+    # A chunk ending in "\r" cannot tell yet whether the next character is the
+    # "\n" of the same break. That is why the pairing lives in scanner state:
+    # a chunk boundary must never turn one break into two lines.
+    pending_cr = False
+    # Set once the break closing line ``end`` has been scanned: the window is
+    # then complete and nothing left in the file can enter it, so the scan may
+    # stop. Never set in ``count_only``, which exists to reach EOF.
+    window_done = False
+
+    def finish_line(*, at_eof: bool = False) -> None:
+        """Close the scanned line the way ``splitlines`` does at a break.
+
+        ``at_eof`` marks the trailing call for a last line with no break
+        behind it. The window-complete check is suppressed there: we already
+        reached the end of the file, so the scan has the exact total anyway
+        and recording a stop would throw it away for nothing.
+        """
+        nonlocal window_lines, total_lines, line_no, keeping, kept_chars, partial, line_open
+        nonlocal window_done
+        total_lines += 1
+        if keeping and not count_only:
+            window_lines += 1
+            if kept_chars <= _RANGED_KEEP_CHARS:
+                kept.append(partial)
+                # Charge the body plus its joining separator and a floor for
+                # the numbering prefix. Charging at or below the rendered
+                # length is what guarantees the rendered body is never shorter
+                # than this budget, so the caller's clamp can still clip the
+                # kept head at the same character the full window would have
+                # been clipped at.
+                kept_chars += len(partial) + 2
+        line_no += 1
+        keeping = start <= line_no and (end is None or line_no <= end)
+        partial = ""
+        line_open = False
+        if not at_eof and not count_only and end is not None and line_no > end:
+            # The window is complete. Every later line is outside it, so the
+            # only thing left in the file is the exact total — needed only
+            # when the rendered head is clamped. Stopping here is what keeps
+            # ``range="1-5"`` off a full O(file) pass.
+            window_done = True
+
+    def keep(segment: str) -> None:
+        """Extend the current line body, inside the retention budget.
+
+        Bounded per segment as well as per line, so one gigantic line in the
+        window cannot grow the buffer past the budget either.
+        """
+        nonlocal partial
+        if not count_only and keeping and segment:
+            room = _RANGED_KEEP_CHARS + 1 - kept_chars - len(partial)
+            if room > 0:
+                partial += segment[:room]
+
+    def consume(text: str) -> None:
+        """Advance the scan across one decoded piece of the file."""
+        nonlocal pending_cr, line_open
+        if pending_cr and text:
+            pending_cr = False
+            if text.startswith("\n"):
+                # The other half of the previous chunk's break, not a break of
+                # its own. An empty piece leaves the question open for the next.
+                text = text[1:]
+        cursor = 0
+        for match in _LINE_BREAK_RE.finditer(text):
+            if match.start() < cursor:
+                # The "\n" of a "\r\n" already consumed as one break.
+                continue
+            if match.start() > cursor:
+                line_open = True
+                if keeping:
+                    keep(text[cursor : match.start()])
+            if match.group() == "\r":
+                if match.end() < len(text) and text[match.end()] == "\n":
+                    cursor = match.end() + 1
+                else:
+                    # Either the next character is not a newline, or it is not
+                    # in this piece at all — the state carries that question.
+                    cursor = match.end()
+                    pending_cr = match.end() == len(text)
+            else:
+                cursor = match.end()
+            finish_line()
+            if window_done:
+                # The loop that opened this line is the only place a stop is
+                # legitimate: everything after it is outside the window.
+                return
+        if cursor < len(text):
+            line_open = True
+            keep(text[cursor:])
+
+    first = True
+    while not window_done:
+        raw = handle.read(_RANGED_READ_CHUNK_BYTES)
+        if not raw:
+            break
+        if first and not count_only and b"\x00" in raw[:_BINARY_PEEK_BYTES]:
+            # The same classification the whole-file path applies to the head
+            # of the bytes it holds; the scan stops here rather than reading a
+            # binary file to the end just to report that it is one. Not applied
+            # in ``count_only``: that pass runs only on bytes already
+            # classified as text by the window pass, and a ``0`` here would be
+            # a silent, wrong total.
+            return True, [], 0, 0
+        first = False
+        consume(decoder.decode(raw))
+    if not window_done:
+        consume(decoder.decode(b"", final=True))
+        if line_open:
+            # A file that ends without a break still has a last line; a file that
+            # ends WITH one gets no trailing empty line. That is ``splitlines``.
+            finish_line(at_eof=True)
+    return False, kept, window_lines, (None if window_done else total_lines)
+
+
+def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRead:
+    """Classify and stream one line window under the mutation stripe.
+
+    Everything the caller decides from — image versus text, NUL in the head,
+    and the window's lines and counts — comes from this single transaction, so
+    a concurrent in-process write cannot swap the file between the
+    classification and the bytes served. The whole-file cap is deliberately
+    not consulted: the caller named a bounded window, and that is precisely the
+    case the cap must not refuse.
+
+    The window pass stops as soon as a bounded window is complete, so
+    ``total_lines`` comes back ``None`` whenever the file was not scanned to
+    EOF. Resolving it is this function's job, not the caller's, because the
+    re-scan must read the SAME bytes: the exact total is only ever rendered by
+    the clamp footer, and the rendered head is what tells us whether there is
+    one. Rendering it here to decide — with the very primitives the caller
+    renders with — keeps the two decisions on one threshold
+    (:func:`_fits_output_budget`) and the whole read in one transaction.
+    """
+    with _file_transaction(path):
+        info = sniff_image_file(str(path))
+        if info is not None:
+            # An image has no line window; the caller re-reads it through the
+            # whole-file path, which owns the image cap and the caption that
+            # says the ``range`` was ignored.
+            return _RangedRead(info, False, [], 0, 0)
+        with path.open("rb") as handle:
+            binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
+            body = _number_lines(lines, start, span=window_lines)
+            if total_lines is None and not _fits_output_budget(body):
+                # The head would be clamped and the footer needs the exact
+                # count, so recover it: the same scanner with retention off,
+                # over the same bytes, never a second divergent splitter.
+                handle.seek(0)
+                _, _, _, total_lines = _stream_text_window(handle, start, end, count_only=True)
+        return _RangedRead(None, binary, lines, window_lines, total_lines)
+
+
+def _binary_read_error(tool_call_id: str, path: Path) -> ToolResult:
+    """The NUL-byte classification, shared by the whole-file and ranged paths."""
+    guessed = mimetypes.guess_type(path.name)[0] or ""
+    if guessed.startswith("image/"):
+        # The extension is the only evidence left, and it says image. Name
+        # the format instead of reporting a generic binary: "not readable
+        # as text" reads as a bug in read when the caller can see a .bmp.
+        return _error(
+            tool_call_id,
+            "read",
+            f"Unsupported image format ({guessed}): {path}. read returns PNG, JPEG, "
+            "GIF, WebP and HEIC; convert it first (bash + sips/magick).",
+        )
+    return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
+
+
 @_guard("read")
 async def execute_read(
     tool_call_id: str,
@@ -3398,6 +3702,65 @@ async def execute_read(
             details={"path": str(path), **(spill_details or {})},
         )
 
+    # A ranged read streams the window off disk instead of loading the file.
+    # The 2 MiB cap below is a CONTEXT budget for a whole-file read, and a
+    # range is bounded by the caller's request, so applying the cap here refused
+    # the cheap thing for being part of something expensive — agents fell back
+    # to `bash sed -n 'A,Bp'` and lost the numbering, the clamp footer and the
+    # `range` key compaction supersedes on. Images and binaries still classify
+    # first and fall through to the same branches an unranged read uses, so the
+    # two paths cannot disagree about what the file is.
+    if params.range:
+        try:
+            start, end = _parse_line_range(params.range)
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
+        ranged = await asyncio.to_thread(_read_ranged_snapshot, path, start, end)
+        if ranged.info is None:
+            if ranged.binary:
+                return _binary_read_error(tool_call_id, path)
+            if ranged.window_lines == 0:
+                # Explicitly "the window holds no line", which is also what
+                # ``not ranged.lines`` tested by accident: an in-window empty
+                # line IS retained as "" (``finish_line`` appends the partial
+                # body unconditionally), so the list is truthy for ``"\n\n\n"``
+                # and this branch must not be reached. Reading the count says
+                # that rather than relying on it.
+                return _text(
+                    tool_call_id,
+                    "read",
+                    f"(range {params.range} is beyond end of file {path})",
+                    useless=True,
+                    details={"path": str(path), "useless": True},
+                )
+            # ``window_lines`` sizes the number column: a streamed read may
+            # keep fewer lines than the window holds, and the width must
+            # still be the one the full window renders with.
+            body = _number_lines(ranged.lines, start, span=ranged.window_lines)
+            if _fits_output_budget(body):
+                # No footer, so the file's exact total was never needed and
+                # the scan was allowed to stop as soon as the window was
+                # complete (see _stream_text_window): this is the common
+                # shape — read(path, range="1-5") on a large file — and it
+                # must not pay a forward pass over the whole file.
+                rendered = body
+            else:
+                total = ranged.total_lines
+                # Not None by construction: _read_ranged_snapshot recovers the
+                # exact total with a count-only pass over the same bytes
+                # whenever the rendered head does not fit this budget.
+                assert total is not None
+                rendered = _clamp_file_body(body, path, start, total)
+            return _text(
+                tool_call_id,
+                "read",
+                rendered,
+                # The range rides in details: compaction's supersede key must
+                # distinguish ranged reads of the same file, or a read of lines
+                # 900-1000 blanks an unrelated 1-100 read as "superseded".
+                details={"path": str(path), "range": params.range},
+            )
+
     # Stat, content sniff and body read are one worker-thread transaction.
     # Classification is by CONTENT, never extension — and it must describe
     # the same bytes returned below. A concurrent in-process edit/write takes
@@ -3408,7 +3771,7 @@ async def execute_read(
         advice = (
             "Resize it first (bash + sips/magick)."
             if info
-            else "Use bash (head/tail) or a 'range' on a smaller file."
+            else "Pass a 'range' to read the lines you need, or use bash (head/tail)."
         )
         return _error(
             tool_call_id,
@@ -3438,48 +3801,14 @@ async def execute_read(
             details={"path": str(path), "mime_type": wire_mime},
         )
 
-    if b"\x00" in data[:8000]:
-        guessed = mimetypes.guess_type(path.name)[0] or ""
-        if guessed.startswith("image/"):
-            # The extension is the only evidence left, and it says image. Name
-            # the format instead of reporting a generic binary: "not readable
-            # as text" reads as a bug in read when the caller can see a .bmp.
-            return _error(
-                tool_call_id,
-                "read",
-                f"Unsupported image format ({guessed}): {path}. read returns PNG, JPEG, "
-                "GIF, WebP and HEIC; convert it first (bash + sips/magick).",
-            )
-        return _error(tool_call_id, "read", f"Binary file not readable as text: {path}")
+    if b"\x00" in data[:_BINARY_PEEK_BYTES]:
+        return _binary_read_error(tool_call_id, path)
 
     # Decode + split in a thread: a 2 MB text read is a 2 MB decode and a
     # full pass to break lines, and the same loop renders the TUI. Keep the
     # source beside the lines for the structural-summary path below.
     text, lines = await asyncio.to_thread(_decode_text_lines, data)
 
-    if params.range:
-        try:
-            start, end = _parse_line_range(params.range)
-        except InvalidToolArgumentsError as exc:
-            return _invalid_arguments(tool_call_id, "read", str(exc))
-        selected = lines[start - 1 : end]
-        if not selected:
-            return _text(
-                tool_call_id,
-                "read",
-                f"(range {params.range} is beyond end of file {path})",
-                useless=True,
-                details={"path": str(path), "useless": True},
-            )
-        return _text(
-            tool_call_id,
-            "read",
-            _clamp_file_body(_number_lines(selected, start), path, start, len(lines)),
-            # The range rides in details: compaction's supersede key must
-            # distinguish ranged reads of the same file, or a read of lines
-            # 900-1000 blanks an unrelated 1-100 read as "superseded".
-            details={"path": str(path), "range": params.range},
-        )
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
     # body, and re-reads only the ranges it needs. The repo's own benchmark
@@ -5843,14 +6172,6 @@ TODO_STORE: dict[str, list[TodoPhase]] = {}
 #: as a string, so every todo store in this module has one key type.
 _CONTEXT_TODO_STORE: dict[str, list[TodoPhase]] = {}
 
-#: The custom-message type the session's continuation guardrail injects at the
-#: yield boundary (``Session._todo_continuation``). It lives beside the store
-#: because the todo feature owns the vocabulary and session.py imports it —
-#: the same shape as ``HUB_MESSAGE_TYPE`` (harness/comms.py) and
-#: ``WAKE_PROMPT_MESSAGE_TYPE`` (harness/wake.py), neither of which is defined
-#: in the session that renders them.
-TODO_REMINDER_MESSAGE_TYPE = "todo_reminder"
-
 #: Statuses that no longer need work. ``blocked`` is NOT here: a blocked item
 #: is unfinished work waiting on someone, and counting it as progress would
 #: let a stalled list read as a finished one.
@@ -7175,18 +7496,19 @@ BROWSER_ACTIONS = (
     "click",
     "type",
     "close",
-    # scroll and logs are served ONLY by the extension bridge; the cmux backend
-    # degrades with a typed "use the extension" error rather than faking them
-    # (see execute_browser). They are actions so they ride the same schema,
-    # approval tier and dispatch as everything else.
+    # scroll and logs are served by BOTH non-cmux hosts (the paired Local
+    # Operator browser extension and the desktop app's browser host); the cmux
+    # backend degrades with a typed "use a non-cmux host" error rather than
+    # faking them (see execute_browser). They are actions so they ride the same
+    # schema, approval tier and dispatch as everything else.
     "scroll",
     "logs",
-    # tabs lists every live extension-owned tab (all sessions', read-only
+    # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
-    # handle to close. Bridge-only like scroll/logs: cmux keeps no multi-surface
-    # registry, so it degrades with the same typed "use the extension" error.
+    # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
+    # multi-surface registry, so it degrades with the same typed error.
     "tabs",
-    # The async site-approval flow, extension-only like scroll/logs. open/goto
+    # The async site-approval flow, non-cmux only like scroll/logs. open/goto
     # to a not-yet-allowed origin fails EARLY with a typed error naming these
     # two actions, because the old behaviour — blocking the navigation RPC on
     # the popup prompt — expired unseen and read as "bridge unreachable".
@@ -7205,14 +7527,24 @@ BROWSER_ACTIONS = (
 #: capability no agent should exercise, so this asymmetry between METHODS and
 #: BROWSER_ACTIONS is intentional rather than an oversight to be "fixed".
 
-#: Actions that only the Local Operator browser extension can serve. cmux has no
-#: console-log tap and no background-tab scroll primitive, so rather than fake a
-#: partial result these degrade with a clear, actionable error naming the
-#: extension. Kept as a set beside BROWSER_ACTIONS so the degrade check and the
-#: advertised action list can never drift apart.
-BRIDGE_ONLY_BROWSER_ACTIONS = frozenset(
+#: Actions that cmux cannot serve. It is NOT "the extension's actions any more:
+#: the desktop app's browser host serves every one of them, so the only host this
+#: set still describes is cmux (no console-log tap, no background-tab scroll
+#: primitive, no multi-surface registry, no permission model). The name used to be
+#: `BRIDGE_ONLY_BROWSER_ACTIONS`, which on a three-host machine asserted that the
+#: EXTENSION was the only alternative — false, and the source of copy that sent
+#: users of the desktop app into `lop browser install`. Kept as a set beside
+#: BROWSER_ACTIONS so the degrade check and the advertised action list can never
+#: drift apart.
+CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
 )
+
+#: The actions whose whole handler lives in the ownership lane (see
+#: `execute_browser`), and which therefore have NO meaning on a host that owns no
+#: surfaces. Every one of them used to fall through to the screenshot tail when
+#: the lane was skipped — a silent wrong action rather than a refusal.
+OWNERSHIP_BROWSER_ACTIONS = frozenset({"recover", "retain", "release"})
 
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
@@ -7298,23 +7630,30 @@ class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: str = Field(
-        description="open (start a surface at a URL; on the extension backend a "
-        "fresh open creates a NEW tab — your session then owns it and reuses it) "
+        description="open (start a surface at a URL) "
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
-        "(console + errors) | tabs (list all extension-driven tabs, other "
-        "sessions' included) | request_access (raise the site-approval prompt "
-        "for a not-yet-allowed origin; returns pending/allowed/denied immediately) "
-        "| await_access (wait for the user's decision on that prompt) | "
+        "(console + errors) | tabs (list agent-driven tabs) | request_access "
+        "(raise the site-approval prompt for a not-yet-allowed origin; returns "
+        "pending/allowed/denied immediately) | "
+        "await_access (wait for the user's decision on that prompt) | "
         "cancel_access (cancel YOUR pending exact-origin request) | "
-        "recover (recover YOUR tab after an interrupted action) | "
-        "retain (hold it, reason in text) | release (end that hold) | close (end "
-        "YOUR tab when done with it)."
+        "recover (recover YOUR tab) | "
+        "retain (hold it) | release (end that hold) | close (end "
+        "YOUR tab)."
     )
     url: str = Field(
         default="",
         description=(
             "http(s) URL for 'open'/'goto'/'request_access'/'await_access'/" "'cancel_access'."
+        ),
+    )
+    tab: str = Field(
+        default="",
+        description=(
+            "'open' only: ADOPT a tab the USER handed to this session, "
+            "named by the FULL handle 'tabs' reported for it. Omit it to create a "
+            "new tab; a redacted handle is not yours to drive."
         ),
     )
     path: str = Field(default="", description="Destination file for 'screenshot'.")
@@ -7428,6 +7767,73 @@ def cmux_browser_available() -> bool:
         return False
     except Exception:  # noqa: BLE001 — detection must never break session start
         return False
+
+
+def _browser_update_note(state: BrowserSurfaceProtocol, result: ToolResult) -> ToolResult:
+    """Append the extension-update advisory to the FIRST browser result of a session.
+
+    The LAST-resort of the three advisory surfaces, and the only one that costs
+    tokens: a tool result is re-billed on every later turn, so the line is
+    emitted AT MOST ONCE per session. The flag lives on the host-owned
+    ``BrowserSurface`` — the ``ToolContext`` is rebuilt each turn, so a flag
+    stored there would reset — and is read through ``getattr`` because a host
+    that injects its own holder should simply never see the line rather than
+    fail on the missing slot.
+
+    Read from the DISCOVERY FILE, not a socket: this runs on every browser
+    result and the session side may not open one. The daemon publishes the
+    predicate there (``BridgeState.extension_update_available``), so the answer
+    is the same one ``/health`` would give without the round-trip.
+
+    Read from the SESSION'S OWN host. The advisory is an extension fact, and on a
+    session driving the desktop app's browser tab it must not be sourced from the
+    bridge daemon's file: with an old extension paired alongside a healthy app, a
+    bridge read would nag about a browser this session is not using. The UI
+    host's record carries no such field (there is nothing in it to compare
+    against — the app updates itself), so the honest answer there is no note at
+    all, and `getattr` is what makes that a fact about the record rather than a
+    crash. When the app does publish an update predicate, this is the one place
+    it gets rendered.
+
+    Skipped on an ERROR result: "nothing is blocked" printed beside a failure
+    reads as a contradiction, and the failure copy is already the thing the
+    agent needs to act on.
+
+    The readers are called under a blanket guard, and it is not redundant: the
+    two state modules swallow `(OSError, ValueError, TypeError)` themselves, so
+    the guard is the second line of defence — but it also covers the LAZY
+    IMPORTS on this path (the UI state module is imported here, on a tool result
+    the caller has already produced). An advisory is never worth costing the
+    result it rides on, so nothing on this path is allowed to raise.
+    """
+    if getattr(state, "extension_update_notified", False) or result.is_error:
+        return result
+    from local_operator.browser_bridge.protocol import extension_update_note
+
+    try:
+        if _host_of_surface(str(getattr(state, "surface_id", ""))) == HOST_UI_PREFIX:
+            current: Any = _ui_state().read()
+        else:
+            from local_operator.browser_bridge import state as state_store
+
+            current = state_store.read()
+    except Exception:  # noqa: BLE001 - an advisory may never break a tool result
+        return result
+    if current is None or not getattr(current, "extension_update_available", False):
+        return result
+    note = extension_update_note(str(getattr(current, "extension_version", "")))
+    try:
+        state.extension_update_notified = True  # type: ignore[attr-defined]
+    except AttributeError:  # pragma: no cover - a holder with __slots__
+        return result
+    # Appended to the first TEXT block, which is the caption on an image result
+    # (`_image`) and the whole body otherwise — never a new `details` key, which
+    # would ride the renderer and compaction-pruning paths it has no business in.
+    for block in result.content:
+        if isinstance(block, TextContent):
+            block.text = f"{block.text}\n\n{note}" if block.text else note
+            return result
+    return result
 
 
 def _browser_state(context: ToolContext | None) -> BrowserSurfaceProtocol:
@@ -7604,6 +8010,42 @@ def _validate_typed_text(raw: str) -> str:
     return ""
 
 
+def _validate_adoption_handle(action: str, params: BrowserParams) -> str:
+    """Return a refusal for an unusable `tab` adoption handle, or "".
+
+    TWO REFUSALS, and the second is the one that keeps this from being a way to
+    address a tab that is not yours:
+
+    * the handle must be in the two non-cmux hosts' published grammar, checked by
+      the SAME expression the rest of the tool uses so the grammars cannot drift
+      apart;
+    * it is only meaningful for `open`, so naming a handle on any other action is
+      refused rather than silently ignored — an ignored selector would leave the
+      model believing it had addressed a specific tab.
+
+    What this deliberately does NOT do is decide WHICH tabs may be adopted. That
+    is the host's question, and it answers it from the capability it minted for a
+    handover: an agent cannot adopt a tab the user did not hand to THIS session,
+    whatever it passes here. Python's job is to not manufacture authority, so it
+    forwards the handle unchanged and never enumerates or guesses tab ids.
+    """
+    handle = params.tab.strip()
+    if not handle:
+        return ""
+    if action != "open":
+        return (
+            f"'tab' is only valid for 'open' (got it on '{action}'): it names a tab "
+            "to ADOPT, and adoption happens once, when the surface is taken"
+        )
+    if not NON_CMUX_SURFACE_HANDLE_RE.fullmatch(handle):
+        return (
+            f"refusing 'tab' handle {params.tab!r}: expected the surface handle "
+            "'tabs' reported for a tab handed to this session "
+            "(e.g. ui:3:<capability>)"
+        )
+    return ""
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -7615,6 +8057,15 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     Googles a non-URL and still exits 0, and a flag-shaped value in a
     positional or ``--text`` slot is parsed as an option.
     """
+    adoption = _validate_adoption_handle(action, params)
+    if adoption:
+        return adoption
+    if action == "open" and params.tab.strip():
+        # Adoption legitimately carries NO url: taking over a tab the user handed
+        # you does not have to navigate it, and the host's `open` adopts without
+        # navigating when no URL is named. A URL that IS given is validated by the
+        # same rule as any other open, because it is the same navigation.
+        return _validate_browser_url(params.url, action) if params.url.strip() else ""
     if action in ("open", "goto", "request_access", "await_access", "cancel_access"):
         # The access actions take the SAME url validation as open/goto: they
         # exist to pre-approve exactly the navigation open/goto would make, so
@@ -8187,6 +8638,98 @@ def _bridge_liveness() -> tuple[Any, Any]:
         return None, None
 
 
+# ---------------------------------------------------------------------------
+# The desktop app's browser host: the same four availability answers the bridge
+# supplies, because `_execute_browser` branches on all of them for every host.
+# A host that answered three of them and guessed the fourth would make the
+# decision and the diagnostic disagree — the failure the daemon-side "classify
+# ONCE per action" rule exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def ui_browser_available() -> bool:
+    """Cheap file-only discovery of the desktop app's browser host."""
+    from local_operator.ui_browser.backend import ui_browser_available as available
+
+    return available()
+
+
+def ui_browser_advertisable() -> bool:
+    """Tool-GATING discovery: cheap, file-only, honest about a stale host.
+
+    The same weaker-commitment rule the bridge's gate uses: `createIf` asks
+    whether the agent may ASK, and `_execute_browser` still spends a probe
+    before it commits to the host.
+    """
+    from local_operator.ui_browser.backend import (
+        ui_browser_advertisable as advertisable,
+    )
+
+    return advertisable()
+
+
+async def ui_browser_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+    """Browser-path availability for the desktop app's browser host.
+
+    Mirrors :func:`bridge_browser_reachable` step for step, including the
+    short-circuit: the file probe runs first and answers `True` for free, and
+    only a STALE-but-alive record spends the one bounded `/health` dial that can
+    acquit it.
+    """
+    if ui_browser_available():
+        return True
+    from local_operator.ui_browser.backend import ui_browser_reachable as reachable
+
+    return await reachable(classified=classified)
+
+
+def _ui_liveness() -> tuple[Any, Any]:
+    """Classify the desktop app's host from the file, never raising."""
+    from local_operator.ui_browser.backend import ui_liveness
+
+    return ui_liveness()
+
+
+def _bridge_absent_result(tool_call_id: str, current: Any) -> ToolResult:
+    """The demotion diagnostic for a bridge that is UP with no browser attached.
+
+    Reached only when the discovery file shows a daemon whose pid is alive and
+    which remembers an extension from a real handshake (`extension_id`), i.e. the
+    bridge IS installed and was paired — the opposite of the state the generic
+    "set up the bridge" copy describes. Two shapes, because they need different
+    actions from the reader:
+
+    - the daemon has LATCHED a silent link (the incident's window). The worker is
+      mute and only a reload of the extension clears it, so this renders the same
+      copy `format_error` gives for the wire code, with the same typed
+      `error_code`, and the agent can branch on it.
+    - otherwise the browser is simply not attached right now (closed, or the
+      worker idle-suspended and is re-dialling). "install" and "open your
+      browser" are both wrong there; "check the state, then retry" is right, and
+      `lop browser status` is where the difference is visible.
+
+    A separate function rather than inline so both copies are reachable from a
+    unit test without standing up cmux, a daemon or a socket.
+    """
+    from local_operator.browser_bridge.backend import ERROR_MESSAGES
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    if bool(getattr(current, "extension_unresponsive", False)):
+        problem = _error(tool_call_id, "browser", ERROR_MESSAGES[ErrorCode.EXTENSION_UNRESPONSIVE])
+        problem.details = {"error_code": ErrorCode.EXTENSION_UNRESPONSIVE.value}
+        return problem
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"browser extension not attached: the bridge daemon (pid {current.pid}) is running and "
+        "remembers this browser, but nothing is connected to it right now. The extension "
+        "reconnects on its own when the browser is open — run 'lop browser status' to see the "
+        "current state, then retry this action.",
+    )
+    problem.details = {"error_code": ErrorCode.EXTENSION_DISCONNECTED.value}
+    return problem
+
+
 def _bridge_demotion_hint(classified: tuple[Any, Any] | None = None) -> str:
     """Why the extension is not being used, when it looked like it should be.
 
@@ -8537,27 +9080,311 @@ def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> 
     return identity
 
 
+#: The non-cmux hosts' surface-handle grammar, as ONE alternation.
+#: `bridge:<tab>:<nonce>` is the extension's; `ui:<tab>:<nonce>` is the desktop
+#: app's. Both are validated by the same expression because the SHAPE is what is
+#: being checked here (a prefix naming a transport, a numeric tab id, an opaque
+#: capability), and the two hosts must not drift into two grammars: a second
+#: regex per host is how one of them ends up accepting `--help` as a handle.
+NON_CMUX_SURFACE_HANDLE_RE = re.compile(r"^(?:bridge|ui):\d+:[A-Za-z0-9_-]+$")
+
+#: The handle-prefix spelling of each host. "ui" is the same word in the record,
+#: the handle and the copy; the bridge's handle says "bridge" while the prose says
+#: "the extension". `_host_label` is the ONE place that difference is applied.
+HOST_UI_PREFIX = "ui"
+HOST_BRIDGE_PREFIX = "bridge"
+
+
+def _host_of_surface(surface_id: str) -> str:
+    """Which non-cmux host owns a handle, or "" for cmux/unknown."""
+    if surface_id.startswith(f"{HOST_UI_PREFIX}:"):
+        return HOST_UI_PREFIX
+    if surface_id.startswith(f"{HOST_BRIDGE_PREFIX}:"):
+        return HOST_BRIDGE_PREFIX
+    return ""
+
+
+def _host_label(host: str) -> str:
+    """A short prose name for a host, for the few sentences that need one."""
+    if host == HOST_UI_PREFIX:
+        return "the Local Operator desktop app's browser host"
+    return "the browser extension"
+
+
+def _client_for(host: str) -> Any:
+    """A client for a surface's host name; "" and cmux resolve to the bridge.
+
+    Lazy imports, like the rest of this module's browser imports: the bridge
+    backend pulls in `httpx`, and this module is imported on the CLI path for
+    every session whether or not a browser exists.
+    """
+    if host == HOST_UI_PREFIX:
+        from local_operator.ui_browser.backend import UiHostClient
+
+        return UiHostClient()
+    from local_operator.browser_bridge.backend import BridgeClient
+
+    return BridgeClient()
+
+
+def _surface_host_or_first(pinned: str, *, ui: bool) -> str:
+    """The host to serve a surface-free action from (or a pinned surface's).
+
+    A pinned handle wins — the surface's transport is already decided — and with
+    no handle the order is the fresh-`open` precedence: the app's browser tab,
+    then the extension. Callers only reach this when at least one host is
+    available, so the fallback needs no third case.
+    """
+    if pinned:
+        return pinned
+    return HOST_UI_PREFIX if ui else HOST_BRIDGE_PREFIX
+
+
+def _non_cmux_host_hint(*, ui: bool, bridge: bool) -> str:
+    """Which non-cmux host to use, and how to reach it — ONE spelling.
+
+    Four degrade sites need this sentence, and the reason it is shared is that
+    the defect it fixes was four independently-worded claims that the EXTENSION
+    was the only alternative. On a host with the desktop app running, that advice
+    sent the user to install a bridge they did not need; on a host with neither,
+    it named one possibility out of two.
+    """
+    if ui and not bridge:
+        return (
+            "use the Local Operator desktop app's browser tab: open a browser tab there "
+            "and retry."
+        )
+    if bridge and not ui:
+        return (
+            "use the paired Local Operator browser extension (run 'lop browser status' to "
+            "see it, or 'lop browser install' to set it up)."
+        )
+    if ui and bridge:
+        return (
+            "use either the Local Operator desktop app's browser tab or the paired Local "
+            "Operator browser extension ('lop browser status' shows the latter)."
+        )
+    return (
+        "start the Local Operator desktop app and open a browser tab in it, or set up the "
+        "Local Operator browser extension with 'lop browser install'; 'lop browser status' "
+        "shows which is reachable."
+    )
+
+
+def _copy_host(host: str) -> str:
+    """The COPY spelling of a host name given in any of this codebase's spellings.
+
+    One host has three names by necessity: ``extension`` in prose, ``bridge`` in
+    the surface handle and in the resource record, and ``ui`` for the desktop app
+    everywhere. This function is the single translation between them, so no
+    branch can compare a handle prefix to a copy name by accident — and, more to
+    the point, so a failure raised by the UI host cannot be rendered in the
+    extension's voice (or the reverse) by a caller that passed the other
+    spelling.
+    """
+    from local_operator.browser_bridge.backend import HOST_EXTENSION, HOST_UI
+
+    return HOST_UI if host == HOST_UI_PREFIX else HOST_EXTENSION
+
+
+async def _ownership_lane_host(state: BrowserSurfaceProtocol, resource: Any) -> str:
+    """Which host can own a surface for this session, or "" when none can.
+
+    The ownership lane asks this BEFORE anything else, because everything it
+    does — `initialize`, `recover`, `allocate`, `retain`, `release`, and the
+    record write that lets an interrupted session be reclaimed — goes to one
+    host's transport. Asking "is the bridge reachable" was the defect (§10.5):
+    it made the lane conditional on a host the session may not be using.
+
+    Ordering mirrors the fresh-`open` precedence (UI, then bridge) so the lane
+    and the open cannot pick different hosts for the same session, and a pinned
+    handle overrides both: that surface's transport is already decided, and the
+    lane must speak to the host that owns it even when that host is
+    unreachable — otherwise the ownership contract silently lapses exactly when
+    the user most needs to be told what happened to their tab.
+
+    THE DURABLE PIN OUTRANKS THE PROBES, and it is a separate question from the
+    handle, not a second copy of it. A resumed session arrives with an empty
+    `state.surface_id` — the lane adopts it from the record later — so the only
+    thing that knows which host owns its tab is the record itself
+    (`resource.pinned_host()`). Consulting availability first there would hand
+    the lane to whichever host happened to be up, and the probe's answer lands in
+    `self.host`, which the record does not otherwise outrank: a `bridge` record
+    would move to the app as soon as the app was up, and a `ui` record would move
+    to the daemon as soon as the app was down (see `BrowserResource._lane`, where
+    only a HELD handle answers ahead of it).
+    That is §10.5's consequence 2 in mirror image, and it contradicts the same
+    section's fail-safe clause ("an old record behaves exactly as it does
+    today"). The probes therefore answer only the question the record cannot:
+    which host may a session that has no durable pin open its FIRST surface on.
+    `pinned_host()` draws the same line from the other side — it pins a HANDLE
+    (the surface is held), or a `host` field only while the record still owes a
+    reconciliation, and answers "" for a settled one — because a fresh `open`
+    has no transport to keep stable: the precedence below is
+    availability-based, and a record left over from a closed tab must not
+    override it. Governing that open is the mirror-image defect: a session whose
+    app is down refuses to open at all while the extension that would serve it
+    sits there running.
+    """
+    pinned = _host_of_surface(state.surface_id) or resource.pinned_host()
+    if pinned:
+        return pinned
+    if await ui_browser_reachable():
+        return HOST_UI_PREFIX
+    if await bridge_browser_reachable():
+        return HOST_BRIDGE_PREFIX
+    return ""
+
+
+def _ui_state() -> Any:
+    """This package's state module, imported lazily like every browser import."""
+    from local_operator.ui_browser import state as ui_state
+
+    return ui_state
+
+
+def _ui_demotion_hint(classified: tuple[Any, Any] | None = None) -> str:
+    """The desktop app's sibling of :func:`_bridge_demotion_hint`.
+
+    The same shape and the same purpose: when this action was forced off a host
+    the session could have used, say so — name the app, the measured fact and the
+    one-line repair — instead of quietly serving cmux. A user who sees an agent
+    driving a cmux panel with no explanation has no way to learn that the app's
+    host was up but its heartbeat had lapsed.
+    """
+    classification = _ui_liveness() if classified is None else classified
+    status, current = classification
+    if current is None or status is not _ui_state().Liveness.STALE:
+        return ""
+    age = _ui_state().heartbeat_age(current)
+    return (
+        f" NOTE: this action was DEMOTED to cmux — the Local Operator desktop app "
+        f"(pid {current.pid}) is running but its browser-host heartbeat is {age:.0f}s "
+        "stale, so it advertised itself as unavailable. Re-open a browser tab in the "
+        "app (or restart it) to re-establish that host, then retry."
+    )
+
+
+#: The session-side error code for an ownership action that has no ownership
+#: host. Deliberately NOT a `protocol.ErrorCode`: the wire never emits this — it
+#: is this process refusing before any host is dialled — and adding a code the
+#: peer could emit would need a `PROTO_VERSION` bump that closes every released
+#: store build. It lives in `details["error_code"]` beside the wire codes so a
+#: caller branching on that key still sees a typed answer.
+ERROR_CODE_OWNERSHIP_UNAVAILABLE = "ownership_unavailable"
+
+
+def _ownership_unavailable_result(tool_call_id: str, action: str, *, surface: str) -> ToolResult:
+    """The typed refusal for `recover`/`retain`/`release` with no ownership host.
+
+    Reaching this means the ownership lane did not run: the session has no host
+    that owns surfaces, or its surface is cmux's (cmux keeps no registry, so the
+    lane never serves it). Before this, the action fell through the dispatcher to
+    its last branch — a SCREENSHOT — and reported "Screenshot of … saved to …"
+    for a request to hold a tab open: a silent wrong action with a real side
+    effect (a PNG written) and no way for the model to notice.
+    """
+    why = (
+        f"this session's surface is {surface}, which cmux owns and which therefore has no "
+        "ownership verbs"
+        if surface.startswith("surface:")
+        else "no ownership host is reachable and no tab has been opened"
+    )
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"'{action}' controls whether an agent-owned browser tab is recovered, held open "
+        f"past your turn, or released, and that lifecycle is served only by a non-cmux "
+        f"host (the Local Operator desktop app's browser tab, or the paired Local Operator "
+        f"browser extension). Nothing was changed: {why}. Open a tab on a non-cmux host "
+        "first (action='open'), then retry.",
+    )
+    problem.details = {"error_code": ERROR_CODE_OWNERSHIP_UNAVAILABLE}
+    return problem
+
+
+def _bridge_failure_result(
+    tool_call_id: str, exc: BaseException, *, action: str, host: str = ""
+) -> ToolResult:
+    """Render one host failure so every site answers with the same voice.
+
+    `str(exc)` on a `BridgeError` is the RAW host message. For a recovery
+    timeout that is literally `owner_recover timed out`: an internal verb, no
+    remedy, and no typed code for the agent to branch on — while the identical
+    wedge in a session that had already recovered got `format_error`'s full copy
+    ("…ask the user to toggle the Local Operator extension OFF then ON in
+    chrome://extensions (pairing is preserved)"). The recovery command is the
+    one that must never be the useless one (design D5/D2-1, review R2-2).
+
+    `BridgeUnreachable` and `BrowserOwnershipError` already carry complete
+    human sentences written for exactly this audience, so they keep `str(exc)`;
+    only the typed wire error is re-rendered.
+
+    ``host`` names the host the exception came from, in ANY of its spellings
+    (""/"bridge"/"extension"/"ui"): the ownership lane passes the resource's
+    own record spelling, and `_copy_host` translates. Passing it matters on a
+    UI-only host, where the extension's remedy (reload the extension, restart
+    the daemon) names processes the user does not have.
+    """
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+
+    if isinstance(exc, BridgeError):
+        problem = _error(
+            tool_call_id, "browser", format_error(exc, action=action, host=_copy_host(host))
+        )
+        # The same typed code `_bridge_call` carries, so callers can branch on
+        # `extension_unresponsive` rather than substring-matching prose.
+        problem.details = {"error_code": exc.code.value}
+        return problem
+    return _error(tool_call_id, "browser", str(exc))
+
+
+def _host_of_client(client: Any) -> str:
+    """The handle-prefix host of a client: `client=None` is the bridge.
+
+    Reads the client's own `host` (`extension`/`ui`) and maps it to the handle
+    spelling (`bridge`/`ui`). One function, so the copy spelling and the handle
+    spelling are never compared directly by a branch.
+    """
+    if client is None:
+        return HOST_BRIDGE_PREFIX
+    if str(getattr(client, "host", "")) == HOST_UI_PREFIX:
+        return HOST_UI_PREFIX
+    return HOST_BRIDGE_PREFIX
+
+
 async def _bridge_call(
     tool_call_id: str,
     action: str,
     params: dict[str, Any],
     *,
     surface: str = "",
+    client: Any = None,
 ) -> tuple[dict[str, Any] | None, ToolResult | None]:
+    """One call against the surface's host, rendered in THAT host's voice.
+
+    ``client`` defaults to the extension bridge's, so every existing call site
+    keeps its meaning unchanged. The host used for the copy is read off the
+    client rather than passed separately, so the transport and the prose can
+    never disagree about which process the reader is being sent to look at.
+    """
     from local_operator.browser_bridge.backend import (
+        HOST_EXTENSION,
         BridgeClient,
         BridgeError,
         BridgeUnreachable,
         format_error,
     )
 
+    selected = client if client is not None else BridgeClient()
+    host = str(getattr(selected, "host", HOST_EXTENSION) or HOST_EXTENSION)
     try:
-        return await BridgeClient().call(action, params), None
+        return await selected.call(action, params), None
     except BridgeError as exc:
         problem = _error(
             tool_call_id,
             "browser",
-            format_error(exc, action=action, surface=surface),
+            format_error(exc, action=action, surface=surface, host=host),
         )
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
@@ -8577,21 +9404,48 @@ async def _bridge_open(
     state: BrowserSurfaceProtocol,
     raw_url: str,
     context: ToolContext | None = None,
+    *,
+    client: Any = None,
+    adopt: str = "",
 ) -> ToolResult:
+    """Open (or resume) a tab on a NON-CMUX host: `client` selects which.
+
+    `client=None` is the extension bridge, so every pre-existing call site keeps
+    its meaning. The host also decides the HANDLE GRAMMAR this function accepts
+    back from the wire (`bridge:` vs `ui:`), which is why the host is derived from
+    the client rather than passed as a second argument that could disagree with
+    it.
+
+    `adopt` names a tab the USER handed to this session, which the host turns into
+    an authorized adoption (design: the human hand-over flow). It is a THIRD mode
+    beside "resume our own handle" and "create a new tab", and the difference is
+    deliberate: adoption is the only one where the capability already exists and
+    the host, not this function, decides whether this session may have it.
+    """
+    host = _host_of_client(client)
+    prefix = HOST_UI_PREFIX if host == HOST_UI_PREFIX else HOST_BRIDGE_PREFIX
     # The session's pinned handle decides the mode. With one, `open` RESUMES
-    # that tab (extension-side it navigates exactly that surface); without one
-    # the extension creates a brand-new tab. The extension never falls back to
-    # reusing some other live surface — that reuse is how one session used to
-    # hijack another's tab mid-task when agents ran in parallel.
+    # that tab (host-side it navigates exactly that surface); without one the
+    # host creates a brand-new tab. Neither host ever falls back to reusing some
+    # other live surface — that reuse is how one session used to hijack another's
+    # tab mid-task when agents ran in parallel.
     params: dict[str, Any] = {
         "url": raw_url.strip(),
         **_browser_identity_params(context, tool_call_id),
     }
-    resuming = state.surface_id.startswith("bridge:")
+    resuming = _host_of_surface(state.surface_id) == prefix
+    adopting = bool(adopt.strip()) and not resuming
     created_new = not resuming
     if resuming:
         params["tab"] = state.surface_id
-    result, problem = await _bridge_call(tool_call_id, "open", params, surface=state.surface_id)
+    elif adopting:
+        # Passed through UNCHANGED. The host validates that this capability was
+        # handed to this requester; a rewritten or derived handle here would be
+        # Python inventing authority it does not have.
+        params["tab"] = adopt.strip()
+    result, problem = await _bridge_call(
+        tool_call_id, "open", params, surface=state.surface_id, client=client
+    )
     if (
         problem is not None
         and resuming
@@ -8606,17 +9460,20 @@ async def _bridge_open(
             tool_call_id,
             "open",
             {"url": raw_url.strip(), **_browser_identity_params(context, tool_call_id)},
+            client=client,
         )
     if problem is not None:
         pending = (problem.details or {}).pop("cleanup_surface", "")
-        if isinstance(pending, str) and re.fullmatch(r"bridge:\d+:[A-Za-z0-9_-]+", pending):
+        if isinstance(pending, str) and NON_CMUX_SURFACE_HANDLE_RE.fullmatch(pending):
             state.surface_id = pending
         return problem
     assert result is not None
     surface = str(result.get("tab", ""))
-    if not re.match(r"^bridge:\d+:[A-Za-z0-9_-]+$", surface):
+    if not NON_CMUX_SURFACE_HANDLE_RE.fullmatch(surface):
         return _error(
-            tool_call_id, "browser", "browser extension opened a tab but returned no valid handle"
+            tool_call_id,
+            "browser",
+            f"{_host_label(prefix)} opened a tab but returned no valid handle",
         )
     state.surface_id = surface
     href = str(result.get("url", ""))
@@ -8648,10 +9505,24 @@ _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
 def _access_result_text(
-    state: str, origin: str, *, position: int | None = None, pending_count: int | None = None
+    state: str,
+    origin: str,
+    *,
+    position: int | None = None,
+    pending_count: int | None = None,
+    host: str = "",
 ) -> str:
     """One agent-facing line per access state, including the next step — the
-    agent discovers this flow through error/result text, not documentation."""
+    agent discovers this flow through error/result text, not documentation.
+
+    ``host`` selects the sentence that tells the model WHERE the human answers.
+    That sentence is the load-bearing one in this whole flow (an un-notified
+    prompt sits unseen until its TTL), so it names the actual surface: the
+    extension's popup and badge, or the desktop app's browser tab. Telling the
+    user of the app to look in a browser toolbar sends them hunting for a window
+    that is not there.
+    """
+    extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
         return f"{origin} is allowed. 'open' or 'goto' the URL now."
     if state == "denied":
@@ -8660,28 +9531,37 @@ def _access_result_text(
             "origin; ask the user directly if it is essential."
         )
     if state == "pending":
-        # NOTIFY-FIRST is load-bearing: Chrome's own notification banner is
+        # NOTIFY-FIRST is load-bearing: the browser's own notification banner is
         # best-effort (macOS suppresses it without Notification Center
         # authorization), so if the agent does not message the user the prompt
         # sits unseen until its TTL — the exact incident this flow replaces.
+        where = (
+            "in the Local Operator extension popup (toolbar icon, numbered badge showing "
+            "the pending count) — the badge alone is not reliably seen"
+            if extension_host
+            else "in the Local Operator desktop app's browser tab — the prompt alone is not "
+            "reliably seen"
+        )
         return (
             f"approval for {origin} is pending"
             + (f" ({position} of {pending_count})" if position and pending_count else "")
             + ". FIRST notify the user (via the ask "
-            "tool or a message) to approve it in the Local Operator extension popup "
-            "(toolbar icon, numbered badge showing the pending count) — the badge alone "
-            "is not reliably seen — THEN "
+            f"tool or a message) to approve it {where} — THEN "
             "call action='await_access' with the same url to wait for the decision."
         )
     if state == "superseded":
-        # A DIFFERENT session's request replaced this one's prompt slot (the
-        # popup shows one origin at a time). The agent must know it was
-        # displaced — reading this as expiry would send it into a
-        # request/notify loop that keeps stealing the prompt back and forth
-        # between sessions (round-1 B1b).
+        # A DIFFERENT session's request replaced this one's prompt slot (one
+        # origin is shown at a time). The agent must know it was displaced —
+        # reading this as expiry would send it into a request/notify loop that
+        # keeps stealing the prompt back and forth between sessions (round-1 B1b).
+        shower = (
+            "the extension shows one prompt at a time"
+            if extension_host
+            else "the desktop app shows one prompt at a time"
+        )
         return (
             f"the approval prompt for {origin} was superseded by another session's "
-            "request — the extension shows one prompt at a time. Wait for the other "
+            f"request — {shower}. Wait for the other "
             "session's prompt to resolve, then call action='request_access' again "
             "if this origin is still needed."
         )
@@ -8700,15 +9580,23 @@ async def _bridge_access(
     action: str,
     params: BrowserParams,
     context: ToolContext | None,
+    *,
+    client: Any = None,
 ) -> ToolResult:
     """request_access / await_access / cancel_access — surface-free by design: they exist for
     the moment when 'open' has just FAILED, so requiring an open surface here
-    would deadlock the recovery path."""
+    would deadlock the recovery path.
+
+    ``client`` selects the host; the access flow itself is host-neutral (both
+    hosts answer the same three methods with the same states), and only the
+    "where does the human answer" sentence differs.
+    """
+    host = _host_of_client(client)
     url = params.url.strip()
     identity = _browser_identity_params(context, tool_call_id)
     if action == "request_access":
         result, problem = await _bridge_call(
-            tool_call_id, "request_access", {"url": url, **identity}
+            tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
             return problem
@@ -8723,6 +9611,7 @@ async def _bridge_access(
                 origin,
                 position=result.get("position"),
                 pending_count=result.get("pending_count"),
+                host=host,
             ),
             details={
                 "origin": origin,
@@ -8736,7 +9625,7 @@ async def _bridge_access(
         )
     if action == "cancel_access":
         result, problem = await _bridge_call(
-            tool_call_id, "cancel_access", {"url": url, **identity}
+            tool_call_id, "cancel_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
             return problem
@@ -8746,7 +9635,7 @@ async def _bridge_access(
         return _text(
             tool_call_id,
             "browser",
-            _access_result_text(state_value, origin),
+            _access_result_text(state_value, origin, host=host),
             details={
                 "origin": origin,
                 "state": state_value,
@@ -8763,11 +9652,16 @@ async def _bridge_access(
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
+            check = (
+                "the Local Operator extension popup"
+                if host != HOST_UI_PREFIX
+                else "the Local Operator desktop app's browser tab"
+            )
             return _text(
                 tool_call_id,
                 "browser",
                 f"still pending after {total_s:.0f}s: the user has not decided on {url} "
-                "yet. Remind them to check the Local Operator extension popup, then call "
+                f"yet. Remind them to check {check}, then call "
                 "await_access again.",
                 details={"origin": url, "state": "pending"},
             )
@@ -8776,7 +9670,7 @@ async def _bridge_access(
             "timeout_ms": min(remaining_ms, _BRIDGE_AWAIT_SLICE_MS),
             **identity,
         }
-        result, problem = await _bridge_call(tool_call_id, "await_access", wire)
+        result, problem = await _bridge_call(tool_call_id, "await_access", wire, client=client)
         if problem is not None:
             return problem
         assert result is not None
@@ -8791,6 +9685,7 @@ async def _bridge_access(
                     origin,
                     position=result.get("position"),
                     pending_count=result.get("pending_count"),
+                    host=host,
                 ),
                 details={
                     "origin": origin,
@@ -8874,12 +9769,14 @@ def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
 
 
 def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
-    """One listed tab: redacted handle, page, recency — the caller's own marked.
+    """One listed tab: handle, page, recency — the caller's own marked.
 
     The "(yours)" marker matters because the listing shows EVERY session's
     tabs: an agent must close its own when done, and must treat the rest as
-    read-only awareness. The handles are redacted by the extension and are NOT
-    driveable — driving needs the full token 'open' returned to its owner.
+    read-only awareness. A listed handle is a redacted token its reader cannot
+    drive — driving needs the full capability, which the host hands only to its
+    owner — and the one exception is a tab the user HANDED to this session,
+    which is listed in full so `open` can adopt it.
     """
     token = str(entry.get("tab", ""))
     title = str(entry.get("title", "")).strip() or "(untitled)"
@@ -8893,15 +9790,24 @@ def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
     return f"{token}{mine}: {title} — {url}{when}"
 
 
-async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
-    """List every live extension-driven tab (all sessions').
+async def _bridge_tabs(
+    tool_call_id: str, state: BrowserSurfaceProtocol, *, client: Any = None
+) -> ToolResult:
+    """List every live agent-driven tab (all sessions').
 
     Discovery deliberately needs no open surface of our own: its main use is a
     session deciding whether to resume, or being told the surface cap is hit
-    and needing to see what is already open. The extension prunes dead tabs as
-    part of answering, so the list is live by construction.
+    and needing to see what is already open. The host prunes dead tabs as part
+    of answering, so the list is live by construction.
+
+    The copy says "agent-driven", not "extension-driven": the desktop app's
+    browser host answers this method too, and copy that names one host is how
+    this action came to be documented as extension-only.
     """
-    result, problem = await _bridge_call(tool_call_id, "tabs", {}, surface=state.surface_id)
+    host = _host_of_client(client)
+    result, problem = await _bridge_call(
+        tool_call_id, "tabs", {}, surface=state.surface_id, client=client
+    )
     if problem is not None:
         return problem
     assert result is not None
@@ -8910,7 +9816,7 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
         return _text(
             tool_call_id,
             "browser",
-            "No extension-driven browser tabs are open. Use 'open' with a URL to start one.\n\n"
+            "No agent-driven browser tabs are open. Use 'open' with a URL to start one.\n\n"
             f"{_BROWSER_TABS_CLEANUP_FOOTER}",
             details={"tab_count": 0},
         )
@@ -8918,12 +9824,15 @@ async def _bridge_tabs(tool_call_id: str, state: BrowserSurfaceProtocol) -> Tool
     return _text(
         tool_call_id,
         "browser",
-        f"{len(entries)} extension-driven tab{'s' if len(entries) != 1 else ''} "
+        f"{len(entries)} agent-driven tab{'s' if len(entries) != 1 else ''} "
         "(most recently used first; handles are redacted — the listing is "
-        "awareness-only and cannot drive or close a tab. Your own tab is "
-        "marked '(yours)'; drive it with the handle your session already "
-        "holds):\n\n" + "\n".join(lines) + f"\n\n{_BROWSER_TABS_CLEANUP_FOOTER}",
-        details={"tab_count": len(entries), "surface_id": state.surface_id},
+        "awareness-only and cannot drive or close a tab, except a tab the user "
+        "handed to this session, which is listed in full and adopted with "
+        "'open'. Your own tab is marked '(yours)'; drive it with the handle "
+        "your session already holds):\n\n"
+        + "\n".join(lines)
+        + f"\n\n{_BROWSER_TABS_CLEANUP_FOOTER}",
+        details={"tab_count": len(entries), "surface_id": state.surface_id, "host": host},
     )
 
 
@@ -8933,7 +9842,17 @@ async def _bridge_action(
     action: str,
     params: BrowserParams,
     context: ToolContext | None,
+    *,
+    client: Any = None,
 ) -> ToolResult:
+    """Every non-cmux verb except `open`: one wire call plus its rendering.
+
+    ``client`` selects the host. The verb bodies are host-neutral by
+    construction — both hosts answer the same methods with the same result keys
+    — so this function is shared rather than forked, and only the handful of
+    sentences that name a PROCESS use the host.
+    """
+    host = _host_of_client(client)
     surface = state.surface_id
     wire: dict[str, Any] = {
         "tab": surface,
@@ -8967,7 +9886,7 @@ async def _bridge_action(
         wire["level"] = params.level.strip().lower() or "all"
         if params.limit is not None:
             wire["limit"] = params.limit
-    result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface)
+    result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface, client=client)
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
         # retaining it would make even the recovery verb target stale state.
@@ -9066,12 +9985,14 @@ async def _bridge_action(
     try:
         payload = base64.b64decode(str(result.get("data", "")), validate=True)
     except ValueError:
-        return _error(tool_call_id, "browser", "browser extension returned invalid screenshot data")
+        return _error(
+            tool_call_id, "browser", f"{_host_label(host)} returned invalid screenshot data"
+        )
     if not payload.startswith(PNG_MAGIC):
         return _error(
             tool_call_id,
             "browser",
-            f"browser extension capture is not a PNG ({len(payload)} bytes)",
+            f"{_host_label(host)} capture is not a PNG ({len(payload)} bytes)",
         )
     try:
         Path(target).parent.mkdir(parents=True, exist_ok=True)
@@ -9102,7 +10023,10 @@ async def retitle_browser_surface(state: BrowserSurfaceProtocol, context: ToolCo
 
     Entirely best-effort and never raised: grouping is presentation, and a
     rename must not cost the title, the turn, or a browse. Cmux surfaces have no
-    group chrome to rename, so they are skipped rather than errored.
+    group chrome to rename, so they are skipped rather than errored — and so is
+    the desktop app's browser host, which has no tab GROUPS at all: its tab label
+    is the page title, which is strictly more informative than a session title.
+    The early return below therefore covers both.
     """
     surface = state.surface_id
     if not surface.startswith("bridge:"):
@@ -9148,16 +10072,21 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
     surface = state.surface_id
     if not surface:
         return ""
-    if surface.startswith("bridge:"):
+    host = _host_of_surface(surface)
+    if host:
         resource = getattr(state, "resource", None)
         identity = resource.params() if resource is not None and resource.generation else {}
         _result, problem = await _bridge_call(
-            "teardown", "close", {"tab": surface, **identity}, surface=surface
+            "teardown",
+            "close",
+            {"tab": surface, **identity},
+            surface=surface,
+            client=_client_for(host),
         )
         if problem is None or (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
             return ""
-        return "browser extension could not close the tab; ownership retained for retry"
+        return f"{_host_label(host)} could not close the tab; ownership retained for retry"
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
@@ -9190,9 +10119,34 @@ async def execute_browser(
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
-        return await _execute_browser(tool_call_id, args, signal, on_update, context)
-    if not resource.generation and not await bridge_browser_reachable():
-        return await _execute_browser(tool_call_id, args, signal, on_update, context)
+        return _browser_update_note(
+            state, await _execute_browser(tool_call_id, args, signal, on_update, context)
+        )
+    if not resource.generation:
+        # THE GATE, and it is host-based on purpose. It used to read
+        # `not await bridge_browser_reachable()`, which made the lane's own
+        # `initialize()` — the only thing that ever sets `resource.generation` —
+        # both the effect and the precondition: on a host with no reachable
+        # bridge the lane was skipped on the first action and therefore on EVERY
+        # action, so `initialize`, `recover`, `allocate`, `remember`, `retain`
+        # and `release` never ran, a `ui:` surface was never recorded, and the
+        # ownership verbs fell through to the dispatcher's screenshot tail.
+        #
+        # The question the gate means to ask is "can any host own a surface for
+        # this session", so it now asks exactly that, of every non-cmux host —
+        # and of the session's own RECORD first, which is the one answer a
+        # resumed session has (see `_ownership_lane_host`).
+        lane_host = await _ownership_lane_host(state, resource)
+        if not lane_host:
+            return _browser_update_note(
+                state, await _execute_browser(tool_call_id, args, signal, on_update, context)
+            )
+        resource.select_host(lane_host)
+    # With a generation, the resource already knows its lane and must keep it:
+    # `initialize()` loaded the record (whose `host` is the surface's host) and
+    # the pinned prefix agrees with it, so re-deciding here would let a probe that
+    # answered differently between two actions move an established session to a
+    # host that does not own its tab.
     try:
         validated = BrowserParams(**args)
     except ValidationError as exc:
@@ -9217,7 +10171,16 @@ async def execute_browser(
                 await resource.recover()
                 state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
-            return _error(tool_call_id, "browser", str(exc))
+            # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
+            # here used to render a recovery timeout as the bare daemon message
+            # `owner_recover timed out` — an internal verb name, no remedy, and
+            # no typed code — while the SAME wedge in an already-recovered
+            # session got `format_error`'s full, actionable copy. Two qualities
+            # of answer for one fault, on the command whose whole job is
+            # recovery (design D2-1, mechanism added by review R2-2).
+            return _bridge_failure_result(
+                tool_call_id, exc, action="the browser tab recovery", host=resource.host
+            )
         action = str(args.get("action", "")).strip().lower()
         try:
             if action == "recover":
@@ -9229,8 +10192,6 @@ async def execute_browser(
                     _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
                 )
             if action in ("retain", "release"):
-                from local_operator.browser_bridge.backend import BridgeClient
-
                 reason = str(args.get("text", "")).strip()
                 if action == "retain" and not reason:
                     # Caught HERE because `text` defaults to "", so omitting it
@@ -9243,12 +10204,60 @@ async def execute_browser(
                         "'retain' needs a reason: pass text='pending login' (or similar) "
                         "describing why this tab must stay open past your turn.",
                     )
-                result = await BridgeClient().call(
+                if resource.ownership_mode() is False:
+                    # A peer with no `owner_*` lifecycle cannot be ASKED to hold a
+                    # tab, so both verbs become LOCAL record writes and the copy
+                    # says so plainly. Issuing the RPC anyway is a guaranteed
+                    # failure on a link that otherwise works — the class of
+                    # dead-end this change removes.
+                    #
+                    # The record is still written, but as a STATEMENT OF INTENT
+                    # rather than an obligation: the extension never accepted it
+                    # and cannot enforce it, which is exactly what the copy says.
+                    # `finish_degraded` clears it the moment the scope settles, so
+                    # a closed tab can never keep reading as "retained: the owning
+                    # session must release it" — a row that is neither cleanable
+                    # nor true (review R1-4).
+                    resource.record["retention"] = reason if action == "retain" else ""
+                    if action == "release" and resource.record.get("terminal"):
+                        # A release that also settles a terminal scope must still
+                        # close the tab, or the fallback strands the very surface
+                        # it opened. `finish_degraded` is the lock-free close.
+                        closed = await resource.finish_degraded()
+                        if closed.state == "closed":
+                            state.surface_id = ""
+                        resource.record["surface_id"] = state.surface_id
+                        resource.record["state"] = closed.state
+                        resource.assert_current()
+                        resource._save()
+                        return _text(
+                            tool_call_id,
+                            "browser",
+                            "Retention cleared locally; this extension cannot enforce retention, "
+                            f"so the tab was closed directly ({closed.state}).",
+                        )
+                    resource.record["surface_id"] = state.surface_id
+                    resource.assert_current()
+                    resource._save()
+                    return _text(
+                        tool_call_id,
+                        "browser",
+                        (
+                            "Retention recorded locally only: this browser extension runs "
+                            "without the ownership lifecycle, so it cannot enforce that this "
+                            "tab stays open past your turn. The intent is cleared when this "
+                            "scope finishes."
+                            if action == "retain"
+                            else "Retention cleared locally only; this extension cannot "
+                            "enforce retention."
+                        ),
+                    )
+                result = await resource.client().call(
                     f"owner_{action}", {**resource.params(), "reason": reason}
                 )
                 resource.record["retention"] = reason if action == "retain" else ""
                 if action == "release" and resource.record.get("terminal"):
-                    result = await BridgeClient().call(
+                    result = await resource.client().call(
                         "owner_finish",
                         {**resource.params(), "outcome": resource.record["terminal"]},
                     )
@@ -9267,7 +10276,17 @@ async def execute_browser(
             # Same containment the initialize/recover block above already has:
             # an expected ownership or bridge refusal is a sentence, never a
             # stack trace spent in the model's context.
-            return _error(tool_call_id, "browser", str(exc))
+            #
+            # `format_error` for the bridge errors, with the tool's own action
+            # name — except for `recover`, which is phrased the same way as the
+            # preamble above so the two render sites cannot drift into naming
+            # the wire verb (design D2-1).
+            return _bridge_failure_result(
+                tool_call_id,
+                exc,
+                action="the browser tab recovery" if action == "recover" else action,
+                host=resource.host,
+            )
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
@@ -9281,11 +10300,9 @@ async def execute_browser(
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
                 elif access_state and resource.record.get("retention") == "pending site approval":
-                    from local_operator.browser_bridge.backend import BridgeClient
-
-                    await BridgeClient().call("owner_release", resource.params())
+                    await resource.client().call("owner_release", resource.params())
                     resource.record["retention"] = ""
-            return result
+            return _browser_update_note(state, result)
         finally:
             # Lost responses retain the allocation intent. A retry/recover asks
             # the extension for that exact allocation instead of opening twice.
@@ -9301,6 +10318,7 @@ async def execute_browser(
                 resource.remember(
                     state.surface_id,
                     state="cleanup_pending" if failed_close else "allocating" if pending else None,
+                    host=_host_of_surface(state.surface_id),
                 )
             except (BrowserOwnershipError, OSError, ValueError):
                 logger.warning("browser ownership record not updated", exc_info=True)
@@ -9315,7 +10333,8 @@ async def _execute_browser(
     on_update: Callable[[AgentToolUpdate], None] | None = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    """Drive cmux when present, else the paired Local Operator extension."""
+    """Drive cmux when present, else a non-cmux host (the desktop app's browser
+    tab, preferring it, or the paired Local Operator extension)."""
     try:
         params = BrowserParams(**args)
     except ValidationError as exc:
@@ -9328,22 +10347,43 @@ async def _execute_browser(
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
     cmux_available = cmux_browser_available()
-    # Classify the daemon ONCE per action and reuse that answer for both the
+    # Classify EACH host ONCE per action and reuse that answer for both the
     # backend decision and the demotion diagnostic, so they can never describe
     # different readings of a file that may change between two reads.
     bridge_liveness = _bridge_liveness()
-    # The socket-confirming probe, not the bare file check: a healthy daemon
+    ui_liveness = _ui_liveness()
+    # The socket-confirming probes, not the bare file checks: a healthy host
     # whose heartbeat writer stopped must not silently demote this session to
-    # cmux. It costs a round-trip only in the stale-but-alive case.
+    # cmux. Each costs a round-trip only in its stale-but-alive case.
     bridge_available = await bridge_browser_reachable(classified=bridge_liveness)
-    if not cmux_available and not bridge_available:
+    ui_available = await ui_browser_reachable(classified=ui_liveness)
+    # Both hosts can be the one this action was forced off, so both hints are
+    # computed from the SAME readings as the decision above (empty when nothing
+    # was demoted).
+    demotion = _bridge_demotion_hint(bridge_liveness) + _ui_demotion_hint(ui_liveness)
+    if not cmux_available and not bridge_available and not ui_available:
+        # A bridge daemon that is UP but has no browser attached is not an
+        # unconfigured host: "run 'lop browser status' and 'lop browser install'
+        # to set up the bridge" sends a user with an installed, paired bridge to
+        # repair something that is not broken, which is what a session already
+        # recovered into the wedge window was told (design D3-2).
+        #
+        # The file separates the two without a socket: `liveness` answers ABSENT
+        # for both, but only the daemon case carries the extension id it
+        # remembers from a real handshake — and, while a drop for silence is
+        # still latched, the daemon publishes that latch too (see `state.py`).
+        current = bridge_liveness[1] if bridge_liveness is not None else None
+        if current is not None and current.extension_id:
+            return _bridge_absent_result(tool_call_id, current)
         return _error(
             tool_call_id,
             "browser",
-            "browser not available: neither cmux nor a connected Local Operator browser extension "
-            "is reachable. Run 'lop browser status' and 'lop browser install' to set "
-            "up the bridge. Do not install or script one instead; a separate browser engine "
-            "cannot preserve the user's real logins.",
+            "browser not available: none of cmux, the Local Operator desktop app's browser "
+            "tab, or a connected Local Operator browser extension is reachable. Open a "
+            "browser tab in the desktop app, or set up the extension with 'lop browser "
+            "install' ('lop browser status' shows which is reachable). Do not install or "
+            "script one instead; a separate browser engine cannot preserve the user's real "
+            "logins.",
         )
     # Before the state lookup and before every subprocess, including the
     # liveness probe below: see _validate_browser_args.
@@ -9352,81 +10392,167 @@ async def _execute_browser(
         return _error(tool_call_id, "browser", problem)
     state = _browser_state(context)
 
+    if action in OWNERSHIP_BROWSER_ACTIONS:
+        # Reachable ONLY when the ownership lane in `execute_browser` did not run,
+        # which means no host here can own a surface: either this session has no
+        # ownership host at all, or its surface is cmux's (cmux keeps no tab
+        # registry, so the lane never serves that surface even when another host
+        # is reachable). Refuse with a typed code instead of falling through —
+        # the tail of this function is a SCREENSHOT, so before this the model
+        # asked to hold a tab open and got "Screenshot of … saved to …" with a
+        # PNG on disk and no signal that its request was ignored.
+        return _ownership_unavailable_result(tool_call_id, action, surface=state.surface_id)
+
     # The access actions are dispatched BEFORE any surface logic: they exist
     # for the moment 'open' just failed with origin_not_allowed, so there is
     # usually no surface to key on, and gating them behind "no browser surface
-    # open — use 'open' first" would send the agent in a circle. They need the
-    # bridge (cmux has no permission model), so a cmux-pinned surface or a
-    # bridge-less host degrades with the same typed error as scroll/logs.
+    # open — use 'open' first" would send the agent in a circle. cmux has no
+    # permission model at all, so it degrades with the same typed error as
+    # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
-        if state.surface_id.startswith("surface:") or not bridge_available:
+        pinned = _host_of_surface(state.surface_id)
+        if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
                 "browser",
                 f"'{action}' is not supported on the cmux backend — cmux has no "
-                "site-permission prompts; navigation works directly. This action only "
-                "exists for the Local Operator browser extension ('lop browser status' / "
-                "'lop browser install')." + _bridge_demotion_hint(bridge_liveness),
+                "site-permission prompts; navigation works directly. "
+                + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+                + demotion,
             )
-        return await _bridge_access(tool_call_id, action, params, context)
+        return await _bridge_access(
+            tool_call_id,
+            action,
+            params,
+            context,
+            client=_client_for(_surface_host_or_first(pinned, ui=ui_available)),
+        )
 
     # Backend is selected only for an empty surface. A prefixed handle pins the
     # transport, so a browser opening or closing mid-session cannot silently
     # move the agent to a different surface.
     if action == "open":
-        # Backend precedence on a FRESH open: prefer the paired Local Operator
-        # browser extension over cmux when both are reachable. The extension
-        # drives a real Chromium profile with the user's own logins and — by
-        # construction (nav.ts creates its tab with ``active: false`` and never
-        # activates it, raises a window, or calls captureVisibleTab) — never
-        # steals focus, so a background agent can browse while the user works in
-        # another window. cmux remains a first-class FALLBACK: it is used when no
-        # extension is connected, and an already-open cmux surface stays on cmux.
+        # Backend precedence on a FRESH open: the desktop app's browser tab
+        # first, then the paired Local Operator browser extension, then cmux.
+        #
+        # UI first is the recommendation of the design, and its justification is
+        # that the app's jar is now PERSISTENT AND SHARED: "log in once, stay
+        # logged in" makes the app's tab the right default rather than a
+        # trade-off. The extension remains the right answer for one specific
+        # case — device trust, hardware keys and enterprise conditional access,
+        # where the session exists only in the user's real profile — and it is
+        # reachable by the explicit `backend` hint when the operator takes it.
+        #
+        # Both non-cmux hosts drive a real Chromium profile and — by construction
+        # (the extension's nav.ts creates its tab with ``active: false`` and never
+        # activates it, raises a window, or calls captureVisibleTab; the app's
+        # host is specified to the same contract) — never steal focus, so a
+        # background agent can browse while the user works in another window.
+        # cmux remains a first-class FALLBACK: it is used when no non-cmux host is
+        # reachable, and an already-open cmux surface stays on cmux.
         #
         # A prefixed handle still pins the transport for the life of the surface,
-        # so this only decides where a brand-new surface lands; a browser opening
-        # or closing mid-session can never silently move the agent between
-        # backends.
-        if state.surface_id.startswith("bridge:"):
-            return await _bridge_open(tool_call_id, state, params.url, context)
+        # so this only decides where a brand-new surface lands.
+        pinned = _host_of_surface(state.surface_id)
+        adopt = params.tab.strip()
+        if adopt and state.surface_id and adopt != state.surface_id:
+            # Two different tabs in one call: adopting while already holding
+            # another surface would leave the first one's cleanup to a lane that
+            # no longer names it. The model closes what it holds first.
+            return _error(
+                tool_call_id,
+                "browser",
+                "this session is already driving a browser tab; close it before "
+                "adopting the tab the user handed over",
+            )
+        if adopt and not (ui_available or bridge_available):
+            # cmux keeps no multi-surface registry, so a handed-over tab can only
+            # be adopted on a non-cmux host. Refused explicitly rather than
+            # falling through to a brand-new cmux surface, which would look like
+            # a successful adoption of a tab the agent is not actually driving.
+            return _error(
+                tool_call_id,
+                "browser",
+                "adopting a handed-over tab needs the desktop app's browser tab or "
+                "the browser extension; neither is reachable",
+            )
+        if pinned:
+            return await _bridge_open(
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(pinned),
+                adopt=adopt,
+            )
+        adopt_host = _host_of_surface(adopt)
+        if adopt_host:
+            # An explicit adoption is routed by the HANDLE's own host, not by the
+            # availability order below. The handle names the host that minted the
+            # capability, and that is the only host that can decide whether this
+            # session may have it: the other one never issued it, so asking it
+            # gets `owner_refused` "not yours" — a refusal that blames the model
+            # for our routing. Availability still governs a FRESH `open`, where no
+            # handle names a host. `_validate_adoption_handle` has already
+            # enforced the two prefix grammars, so this is never unreachable.
+            return await _bridge_open(
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(adopt_host),
+                adopt=adopt,
+            )
         if state.surface_id.startswith("surface:"):
             return await _browser_open(tool_call_id, state, params.url)
+        if ui_available:
+            return await _bridge_open(
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(HOST_UI_PREFIX),
+                adopt=adopt,
+            )
         if bridge_available:
-            return await _bridge_open(tool_call_id, state, params.url, context)
+            return await _bridge_open(tool_call_id, state, params.url, context, adopt=adopt)
         return await _browser_open(tool_call_id, state, params.url)
     if action == "close":
         return await _browser_close(tool_call_id, state)
     if action == "tabs":
         # Discovery works without an owned surface (its point is finding out
-        # what is open), but it is extension-only: cmux keeps no multi-surface
-        # registry, so a cmux-pinned session degrades exactly like scroll/logs.
-        if state.surface_id.startswith("surface:") or not bridge_available:
+        # what is open), but cmux keeps no multi-surface registry, so a
+        # cmux-pinned session degrades exactly like scroll/logs.
+        pinned = _host_of_surface(state.surface_id)
+        if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
                 "browser",
-                "'tabs' is not supported on the cmux backend — use the Local Operator "
-                "browser extension (run 'lop browser status' / 'lop browser install' to "
-                "set it up). cmux has no multi-tab surface registry, so this action only "
-                "works through the extension bridge." + _bridge_demotion_hint(bridge_liveness),
+                "'tabs' is not supported on the cmux backend — cmux has no multi-tab "
+                "surface registry, so this action needs a non-cmux host. "
+                + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+                + demotion,
             )
-        return await _bridge_tabs(tool_call_id, state)
+        return await _bridge_tabs(
+            tool_call_id, state, client=_client_for(_surface_host_or_first(pinned, ui=ui_available))
+        )
     if not state.surface_id:
         return _error(tool_call_id, "browser", "no browser surface open — use 'open' first")
-    if state.surface_id.startswith("bridge:"):
-        return await _bridge_action(tool_call_id, state, action, params, context)
-    # A cmux-backed surface cannot serve the extension-only actions. Degrade with
-    # a clear, actionable error naming the extension rather than faking a partial
-    # scroll or an empty log list — the operator asked for these to work on the
-    # bridge and to fail honestly on cmux.
-    if action in BRIDGE_ONLY_BROWSER_ACTIONS:
+    host = _host_of_surface(state.surface_id)
+    if host:
+        return await _bridge_action(
+            tool_call_id, state, action, params, context, client=_client_for(host)
+        )
+    # A cmux-backed surface cannot serve the actions cmux has no primitive for.
+    # Degrade with a clear, actionable error naming both non-cmux hosts rather
+    # than faking a partial scroll or an empty log list.
+    if action in CMUX_UNSUPPORTED_BROWSER_ACTIONS:
         return _error(
             tool_call_id,
             "browser",
-            f"'{action}' is not supported on the cmux backend — use the Local Operator "
-            "browser extension (run 'lop browser status' / 'lop browser install' to set it "
-            "up). cmux has no console-log tap or background-tab scroll primitive, so this "
-            "action only works through the extension bridge."
-            + _bridge_demotion_hint(bridge_liveness),
+            f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
+            "background-tab scroll primitive, multi-surface registry or site-permission "
+            "model. " + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available) + demotion,
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -9595,7 +10721,7 @@ def _parse_surface_id(out: str) -> str:
 
 
 def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
-    """Advertise the browser tool when cmux or the extension bridge is reachable.
+    """Advertise the browser tool when any browsable host is reachable.
 
     Mirrors the wake builder: an environment-specific capability that returns
     None (excluded from the inventory) when the host cannot support it.
@@ -9604,9 +10730,9 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     engine — playwright belongs to the pre-rewrite codebase and appears in no
     dependency group — and pulling one into the default install would add a
     ~150 MB browser download to a dependency set that is kept small on
-    purpose. A host without cmux therefore has no browser tool at all, which
-    is honest, and the agent still reaches static pages through `bash` and
-    curl.
+    purpose. A host without any browsable surface therefore has no browser tool
+    at all, which is honest, and the agent still reaches static pages through
+    `bash` and curl.
 
     The DESCRIPTION says what the surface is, not just which verbs it takes,
     because a verb list gave the model no reason to prefer it. Measured: a
@@ -9619,54 +10745,58 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
     between sessions and the user can sign in by hand when asked, which is
     exactly what a freshly downloaded headless Chromium can never do.
 
-    Backend precedence (see ``execute_browser``): when both a cmux panel and a
-    paired Local Operator browser extension are reachable, a fresh open prefers
-    the EXTENSION. It drives a real Chromium profile with the user's own logins
-    and never steals focus — its tab is created inactive and no action raises a
-    window — so a background agent can browse while the user works elsewhere.
-    cmux and (outside this tool) playwright are fallbacks for hosts without the
-    extension. The full setup/permissions playbook lives in ``guide://browser``.
+    Backend precedence (see ``execute_browser``): a fresh open prefers the
+    desktop app's browser tab, then the paired Local Operator browser extension,
+    then cmux. Both non-cmux hosts drive a real Chromium profile the user can
+    sign into and never steal focus, so a background agent can browse while the
+    user works elsewhere; cmux is a first-class fallback for hosts without
+    either. The full setup/permissions playbook lives in ``guide://browser``.
     """
     # Gating deliberately uses the WEAKER `advertisable` test, not the
-    # backend-selection one: a stale-but-alive daemon must still put the tool
-    # in the inventory so `execute_browser`'s bounded socket probe can acquit
-    # it (or produce the typed demotion diagnostic). With the strict check
-    # here, an extension-only host whose heartbeat writer had died offered no
-    # browser tool at all for the whole session — no fallback and no way to
-    # discover the healthy daemon. Still file-only and still synchronous: this
-    # runs while constructing every session and opens no socket.
-    if not cmux_browser_available() and not bridge_browser_advertisable():
+    # backend-selection one: a stale-but-alive host must still put the tool in
+    # the inventory so `execute_browser`'s bounded socket probe can acquit it
+    # (or produce the typed demotion diagnostic). With the strict check here, a
+    # host whose heartbeat writer had died offered no browser tool at all for
+    # the whole session — no fallback and no way to discover the healthy host.
+    # Still file-only and still synchronous: this runs while constructing every
+    # session and opens no socket. Three checks on ONE `createIf` entry, rather
+    # than a second gating convention beside it (AGENTS.md, tool-surface
+    # ladder).
+    if not (cmux_browser_available() or bridge_browser_advertisable() or ui_browser_advertisable()):
         return None
     return AgentTool(
         name="browser",
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
-            "Drive the user's REAL browser (a cmux browser panel or their paired "
-            "Local Operator browser extension): open/goto a URL, read page text, snapshot the "
+            "Drive the user's REAL browser (the Local Operator desktop app's browser "
+            "tab, their paired browser extension, or a cmux browser "
+            "panel): open/goto a URL, read page text, snapshot the "
             "accessibility tree for click refs, click, type, scroll, read console "
             "logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
             "to, so this reaches authenticated pages a throwaway headless browser "
-            "cannot. 'scroll' pages the view (default one screen down, or by "
-            "x/y pixels, a direction keyword, or a selector to reveal) and reports "
-            "whether more content remains; 'logs' returns the page's console "
-            "output and uncaught exceptions for debugging web apps. Parallel "
+            "cannot. 'scroll' pages the view (default: one screen down) and "
+            "reports whether more content remains; 'logs' returns the page's "
+            "console output and uncaught exceptions for debugging web apps. "
+            "Parallel "
             "sessions each drive their own tab: a fresh 'open' creates one NEW "
             "tab owned by this session; reuse it because later opens navigate it. "
             "Before your final response, call 'close' unless the user explicitly "
             "needs it left open for a pending or immediately continuing interaction. "
-            "'tabs' lists every extension-driven tab including other sessions' "
-            "(handles are redacted: the listing is awareness-only and cannot "
-            "drive or close anything), and 'close' ends only your own tab. "
+            "'tabs' lists every agent-driven tab including other sessions' "
+            "(handles are redacted: awareness-only, it cannot "
+            "drive or close anything — except a tab the user handed over, listed in "
+            "full for 'open'), and 'close' ends only your own tab. "
             "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
-            "your turn with 'retain' (reason in text) and end that hold with 'release'. "
+            "your turn with 'retain' and end that hold with 'release'. "
             "'scroll', 'logs' and "
-            "'tabs' need the extension backend (cmux says so). On the extension, "
+            "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt in the extension popup, "
-            "and 'await_access' to wait for their decision before navigating again. "
+            "user (ask tool or message) to approve the prompt in the extension popup "
+            "or the app's browser tab, "
+            "and 'await_access' before navigating again. "
             "Use it for every "
             "screenshot and page interaction; never install or script a browser "
             "engine instead."
@@ -9697,6 +10827,18 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 #: through ``ValidationInfo.context``.
 ADVERTISED_EFFORT_KEY = "advertised_effort"
 
+#: Key carrying whether the BUILD that produced the tool let a delegating model
+#: choose a tier at all (``values.subagents.model_choice``). See
+#: ``_ADVERTISED_MODEL_CHOICE`` for why the policy needs a second record beside
+#: the members it advertises.
+ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
+
+#: The one spelling that means "no tier" on both surfaces: on ``task`` it is a
+#: synonym for omitting the field, and on ``agent`` create/update it is the
+#: sentinel that CLEARS a role's pin. Named once because it is now shared policy
+#: between the two tools rather than a private value of the ``agent`` schema.
+INHERIT_EFFORT = "inherit"
+
 #: The advertised set for the tool currently executing, published by the
 #: builder's wrapper (:func:`_with_advertised_effort`) and read at the
 #: ``model_validate`` call.
@@ -9721,13 +10863,47 @@ _ADVERTISED_EFFORT: ContextVar[frozenset[str] | None] = ContextVar(
     "advertised_effort", default=None
 )
 
+#: Whether the BUILD that produced the tool let a delegating model choose a
+#: tier, published beside :data:`_ADVERTISED_EFFORT` by the same wrapper and for
+#: the same reason: only the build side knows what the model was shown.
+#:
+#: It is a SEPARATE record from the advertised members, not something derivable
+#: from them, because the two answer different questions about the same refusal.
+#: The gate itself is decided by the LIVE config at call time (an operator who
+#: flipped the key mid-session must not be able to have their choice spent
+#: before the tool rebuild lands — see :func:`_advertise_effort_tiers`), while
+#: the fault CLASS needs the build-time policy: a value the model was offered a
+#: menu for is the operator's change, and a value it invented is the model's
+#: mistake. Without this record a mid-session ``model`` → ``operator`` flip
+#: would bill an operator edit to the model's accuracy figure — the same
+#: misattribution :func:`_validate_effort_tier` was written to stop for a
+#: vanished tier.
+#:
+#: ``None`` means no build published a snapshot (a direct call to the
+#: module-level executor, or a route that builds an ``AgentParams`` itself).
+#: Both the gate and its fault class read that as "unknown provenance": a call
+#: outside the advertised surface is an OPERATOR-side caller, so it is allowed,
+#: exactly as an unknown tier's provenance is not billed to the model.
+_ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
+    "advertised_model_choice", default=None
+)
 
-def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) -> ToolExecutor:
+
+def _with_advertised_effort(
+    executor: ToolExecutor, parameters: dict[str, Any], *, model_choice: bool
+) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
     Wraps the builder's executor so the validator can tell an operator's
-    vanished tier from a value the model invented. Reset in a ``finally`` so a
-    raising tool cannot leak one tool's snapshot into the next call.
+    vanished tier from a value the model invented, and can tell a policy the
+    operator flipped mid-session from a value the model invented for a field it
+    was never offered. Reset in a ``finally`` so a raising tool cannot leak one
+    tool's snapshot into the next call.
+
+    ``model_choice`` is passed in rather than re-read here: it is the SAME value
+    the accompanying schema was rendered from, and reading the config a second
+    time inside the wrapper would let the two disagree if an edit landed between
+    the build and the call.
     """
     advertised = advertised_effort_members(parameters)
 
@@ -9739,10 +10915,12 @@ def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) 
         context: ToolContext | None = None,
     ) -> ToolResult:
         token = _ADVERTISED_EFFORT.set(advertised)
+        choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
+            _ADVERTISED_MODEL_CHOICE.reset(choice_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
@@ -9750,8 +10928,11 @@ def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) 
 
 
 def effort_validation_context() -> dict[str, Any]:
-    """Validation context carrying the advertised ``effort`` members."""
-    return {ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get()}
+    """Validation context carrying the advertised ``effort`` members and policy."""
+    return {
+        ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
+        ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
+    }
 
 
 def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
@@ -9763,7 +10944,126 @@ def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
     return frozenset(members) if isinstance(members, (set, frozenset, list, tuple)) else None
 
 
-def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None:
+def _advertised_model_choice(info: ValidationInfo) -> bool | None:
+    """Whether the build let a model choose a tier, or ``None`` if unrecorded."""
+    context = info.context if isinstance(info.context, dict) else None
+    if not context:
+        return None
+    choice = context.get(ADVERTISED_MODEL_CHOICE_KEY)
+    return choice if isinstance(choice, bool) else None
+
+
+def _operator_choice_task_rejection(tier: str) -> str:
+    """The ``task`` refusal for a tier the model may not choose.
+
+    Names the tier's MODEL when it resolves, because the whole point of the
+    refusal is that ``effort`` buys a different model and not a reasoning
+    level — an operator reading ``'hi'`` as "think harder" is the misreading
+    that produced this change. Omitted when the tier is unconfigured (nothing
+    resolves, and inventing the selector would be a lie).
+
+    ORDER matters here and is not stylistic: the tool-result card truncates PER
+    LINE at the pane's width and never wraps, so on the surface a person reads
+    the refusal on, only the first line survives — and that line spends ~23
+    cells on ``- effort: Value error, `` before this text begins. Measured on a
+    rendered frame at 100 columns, the visible window inside the message is ~69
+    cells, and three facts compete for it: the remedy, who owns the field, and
+    the key that names it. The wording below puts the remedy and the ownership
+    inside the window; the KEY clause comes last, after the sentence that
+    explains the swap, so whatever the cut falls on is prose rather than half a
+    key — a partly-drawn `(subagents.` is the one rendering a reader can
+    mis-transcribe, and it was what the previous order painted at 100 columns.
+    The key is still the fact that gives way first, which is affordable: the
+    operator can read it off the `/settings` row's own detail line, and the
+    delegating model — this message's first reader — receives it whole either
+    way. Two earlier orders were measured and rejected: fact first put the
+    remedy at cell 73 (one word past the cut), and remedy-first with the key
+    inline cut the key mid-token.
+    """
+    selector = configured_effort_tiers().get(tier)
+    where = (
+        f": '{tier}' would run it on {selector} instead of this session's model" if selector else ""
+    )
+    return (
+        "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+        f"child's MODEL, not its reasoning level{where}. That switch is "
+        "subagents.model_choice."
+    )
+
+
+def _operator_choice_pin_rejection(tier: str) -> str:
+    """The ``agent`` create/update refusal for a tier the model may not pin.
+
+    This one carries the OPERATOR's remedy as well as the model's, because
+    refusing a model-side pin would otherwise leave the person who wants one
+    strong reviewer with no route at all.
+
+    The ORDER is load-bearing for the same reason as the ``task`` refusal, and
+    measured on the same frame: the card spends 23 cells on
+    ``- effort: Value error, `` and then truncates the message at cell 68, so the
+    copy leads with the ownership AND the operator's next step — the two things
+    the person reading the card can act on — and puts the model's own
+    instruction (omit the field, or pass ``inherit``) after them. Two routes
+    ride here, deliberately: the setting, which is in the TUI, and the role's own
+    profile, which the desktop editor writes today. Before this order the route
+    sentence began at cell ~260 of a ~356-cell message and was invisible even
+    expanded.
+
+    The lead ends at cell 64 of the 68-cell window with the key COMPLETE, so the
+    cut falls in the prose that follows rather than inside
+    ``subagents.model_choice`` — a half-drawn key is the one rendering a reader
+    can mis-transcribe (R-9), and ``=model``, which reads better, measured 70 and
+    would have put the ellipsis inside it.
+    """
+    selector = configured_effort_tiers().get(tier)
+    where = f" ('{tier}' → {selector})" if selector else ""
+    return (
+        "effort is the operator's; pin a role via subagents.model_choice. "
+        f"Setting it to 'model' hands the choice over, and a role's own profile can "
+        f"carry the pin instead. A pin runs that role on a different MODEL{where}, "
+        "not at a different reasoning level. Omit 'effort', or pass 'inherit' to "
+        "clear a pin."
+    )
+
+
+def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exception | None:
+    """Refuse an ``effort`` the operator has not delegated to the model, or ``None``.
+
+    The gate is evaluated against the LIVE config — an operator who has just
+    flipped ``model_choice`` back to ``operator`` must be obeyed by the very
+    next call, not after the tool rebuild reaches the inventory — while the
+    fault CLASS comes from the build-time record, exactly as
+    :func:`_validate_effort_tier` splits a vanished tier from an invented one:
+
+    - The build let the model choose AND the value was in the enum it published:
+      the model picked from a menu it was given, and the operator has since
+      taken that menu away. Environmental, not billed to the model.
+    - Anything else: the build never offered this model the field (the shipped
+      default deletes it outright), so the value was invented — the same kind of
+      mistake as a stray ``extra="forbid"`` key, and a model fault.
+
+    ``None`` from the build-time record means no advertised tool made this call
+    (a direct executor call, or ``server/routes/desktop_profiles.py`` building
+    ``AgentParams`` for an operator's own edit). That is an operator-side
+    caller, so it is ALLOWED: the key gates a model's choice, never the
+    operator's, and an absent context cannot be evidence of a model at all.
+    """
+    if model_may_choose_tier():
+        return None
+    advertised_choice = _advertised_model_choice(info)
+    if advertised_choice is None:
+        return None
+    message = (
+        _operator_choice_pin_rejection(value) if pin else _operator_choice_task_rejection(value)
+    )
+    if advertised_choice and value in (_advertised_effort(info) or frozenset()):
+        return EnvironmentDependentRejectionError(message)
+    return ValueError(message)
+
+
+def _validate_effort_tier(
+    value: str | None, info: ValidationInfo, *, pin: bool = False
+) -> str | None:
     """Refuse an ``effort`` the live config cannot honour, naming what can be.
 
     Shared by both ``task`` forms and the ``agent`` tool so the three fields
@@ -9772,6 +11072,19 @@ def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None
     agree except across a mid-session edit, and this is the side that must be
     right — an accepted-but-stale tier would reach the strict launch path and
     fail there with less context than the message here carries.
+
+    Three refusals now live here, and they are ordered by how much the model
+    could have known:
+
+    - ``inherit`` is not a refusal at all. It is the value the ``agent`` schema
+      advertises as "clear the pin", so a model copying that token onto
+      ``task`` means exactly "no tier" and gets omission (review of the
+      asymmetry: the two tools sit in one inventory, and a token that is valid
+      on one of them reads as valid on both).
+    - ``model_choice=operator``: the operator owns the choice, so no tier is
+      the model's to make — see :func:`_model_choice_refusal` for the fault
+      split.
+    - a tier the live config cannot honour: :func:`effort_tier_rejection`.
 
     **The refusal splits into two fault classes, and only the build-time
     record can tell them apart.** ``effort_tier_rejection`` says only "not
@@ -9796,6 +11109,11 @@ def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None
     """
     if value is None:
         return None
+    if value == INHERIT_EFFORT:
+        return None
+    refusal = _model_choice_refusal(value, info, pin=pin)
+    if refusal is not None:
+        raise refusal
     rejection = effort_tier_rejection(value)
     if rejection is None:
         return value
@@ -9813,9 +11131,13 @@ def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None
 
 
 def _advertise_effort_tiers(
-    schema: dict[str, Any], *, description: str, extra: tuple[str, ...] = ()
+    schema: dict[str, Any],
+    *,
+    description: str,
+    extra: tuple[str, ...] = (),
+    model_choice: bool,
 ) -> dict[str, Any]:
-    """Rewrite every ``effort`` property in ``schema`` to the CONFIGURED tiers.
+    """Rewrite every ``effort`` property in ``schema`` to what the model may pick.
 
     The params models declare ``effort`` as a free string so validation can
     consult the live config; the schema the model reads is patched here at
@@ -9827,24 +11149,37 @@ def _advertise_effort_tiers(
     guaranteed failure, and the schema never said that omitting the field was
     the one choice that worked.
 
-    With tiers configured, the enum lists exactly those and the description
-    names the ``provider/model`` each resolves to, so the model chooses on
-    information rather than a label. With none configured the property is
-    REMOVED rather than advertised as empty: Gemini function declarations
-    reject ``enum: []``, an always-invalid field is pure schema cost on every
-    turn, and a model that cannot see the field cannot pick it. Validation
-    still refuses a stray ``effort`` with the same guidance (see
-    :func:`_validate_effort_tier`). ``extra`` members (the ``agent`` tool's
-    ``inherit`` sentinel) follow the configured tiers and keep the property
-    alive on their own.
+    **A second way to advertise nothing: ``model_choice``.** With
+    ``values.subagents.model_choice=operator`` (the default) no tier is the
+    delegating model's to pick, so none is advertised on either tool — the
+    members come out empty and the property is DELETED, which is exactly the
+    zero-tier path below and therefore needs no second code path to get right.
+    The field's name is the reason that default exists: ``effort`` is this
+    harness's REASONING-effort vocabulary, so a model that reads it as "pick
+    how hard this child thinks" is reading it correctly and gets a different
+    provider/model instead. Handing it a menu made that misreading a menu item.
+    ``extra`` (the ``agent`` tool's ``inherit`` sentinel) survives either way,
+    so that tool keeps the property alive to say "clear the pin" while
+    refusing to offer a tier.
+
+    With model choice ON and tiers configured, the enum lists exactly those and
+    the description names the ``provider/model`` each resolves to, so the model
+    chooses on information rather than a label. With none configured the
+    property is REMOVED rather than advertised as empty: Gemini function
+    declarations reject ``enum: []``, an always-invalid field is pure schema
+    cost on every turn, and a model that cannot see the field cannot pick it.
+    Validation still refuses a stray ``effort`` with the same guidance (see
+    :func:`_validate_effort_tier`).
 
     Patches both the top-level property and every ``$defs`` entry, so the
     batch form's ``TaskItem`` mirror gets the same treatment as the single
     form. Tools are built once at session construction; a config edit is
     picked up by ``Session._apply_config_change``, which rebuilds the two
-    tools that carry this field.
+    tools that carry this field — for BOTH keys that decide what they render,
+    ``subagents.models.*`` and ``subagents.model_choice``, since an
+    unregistered key is invisible to the watcher's registry-key diff.
     """
-    tiers = configured_effort_tiers()
+    tiers = configured_effort_tiers() if model_choice else {}
     members = [*tiers, *extra]
 
     def patch(properties: Any) -> None:
@@ -9909,39 +11244,61 @@ def advertised_effort_members(parameters: dict[str, Any] | None) -> frozenset[st
 
 
 def _effort_tier_field_description() -> str:
-    """The ``task`` ``effort`` description, built from the configured tiers.
+    """The ``task`` ``effort`` description for the MODEL-CHOICE arm.
 
-    Only ever rendered when at least one tier exists (with none the property
-    is dropped), so it can lead with the tier list. Short on purpose: it is
-    billed on every turn of every session that can delegate.
+    Only rendered when the model is allowed to choose and at least one tier
+    exists (elsewhere the property is dropped), so it can lead with the tier
+    list. It says MODEL in capitals on purpose: the whole incident is that the
+    field's name is this harness's reasoning-effort vocabulary while its value
+    is a provider/model swap, and one word of the model's own prompt is the
+    cheapest place to say so. Short on purpose: it is billed on every turn of
+    every session that can delegate.
     """
     tiers = configured_effort_tiers()
     return (
-        f"Model tier for this subagent ({describe_effort_tiers(tiers)}). "
+        f"Swaps this child's MODEL (not its reasoning level): {describe_effort_tiers(tiers)}. "
         "Omit to inherit this session's model and reasoning effort."
     )
 
 
-def _task_tool_description() -> str:
+#: The ``task`` tool's effort sentence in the SHIPPED default, where the field
+#: is not in the schema at all. It has to carry the whole contract that the
+#: absent field would otherwise imply, and it names the key so an operator (or
+#: a model asked to explain the refusal) can find the switch that changes it.
+_OPERATOR_CHOICE_EFFORT_SENTENCE = (
+    "No effort tiers are yours to choose (subagents.model_choice=operator): "
+    "children inherit this session's model — do not pass 'effort'."
+)
+
+
+def _task_tool_description(model_choice: bool) -> str:
     """The ``task`` tool description, with the effort sentence matching the schema.
 
     A model told "effort picks a configured model tier" while no tier is
     configured infers that some tier must be pickable; the sentence has to
     say which state it is in. One sentence either way — prompt text is paid on
-    every turn.
+    every turn. ``model_choice`` is the flag the accompanying schema was
+    rendered from, passed in rather than re-read so the description and the
+    schema cannot disagree about which arm they are in.
     """
-    tiers = configured_effort_tiers()
-    if tiers:
-        effort = (
-            "Omit 'effort' to inherit this session's model and reasoning effort, "
-            "or set it to one of the configured tiers the schema lists."
-        )
+    if not model_choice:
+        # The whole field is gone from this schema, so the description is the
+        # only place left to say so — and it must, or a model that remembers
+        # `effort` from another session's prompt has nothing telling it no.
+        effort = _OPERATOR_CHOICE_EFFORT_SENTENCE
     else:
-        effort = (
-            "No effort tiers are configured (values.subagents.models), so every "
-            "child inherits this session's model and reasoning effort; do not pass "
-            "'effort'."
-        )
+        tiers = configured_effort_tiers()
+        if tiers:
+            effort = (
+                "Omit 'effort' to inherit this session's model and reasoning effort, "
+                "or set it to one of the configured tiers the schema lists."
+            )
+        else:
+            effort = (
+                "No effort tiers are configured (subagents.models), so every child "
+                "inherits this session's model and reasoning effort; do not pass "
+                "'effort'."
+            )
     return (
         "Launch background subagents — one, or a whole concurrent batch "
         "('tasks' + shared 'context') in a single call. 'agent' names a "
@@ -9954,8 +11311,21 @@ class TaskItem(BaseModel):
     """One slice of a task batch. ``agent`` names the ROLE the child runs as —
     a registered profile or a packaged starter (reviewer, coder, architect,
     manager, designer, scout); the role supplies standing guidance and may
-    restrict the child's tools. ``effort`` routes to a configured model tier
-    (a key of values.subagents.models)."""
+    restrict the child's tools."""
+
+    # What ``effort`` does is deliberately NOT stated in the docstring above,
+    # and the sentence that used to state it ("``effort`` routes to a
+    # configured model tier") is gone rather than reworded. That docstring
+    # becomes the ``$defs.TaskItem`` description on EVERY build — including the
+    # builds where the property is deleted because the operator owns the
+    # choice — so any sentence here is a claim about a field that may not be
+    # present. The field's own description and the tool's description are the
+    # two places that know which mode they render for.
+    #
+    # It lives here, as a comment, because the docstring above is prompt text:
+    # it rides every request and is charged to the context-budget ratchet
+    # (``scripts/bench_context_budget.py``), which is why the explanation of a
+    # missing field must not itself cost tokens.
 
     model_config = ConfigDict(extra="forbid")
 
@@ -9976,14 +11346,21 @@ class TaskItem(BaseModel):
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
-    # configured under ``values.subagents.models`` at CALL time, and a Literal
-    # would freeze one guess at import. The schema the model sees is rewritten
-    # to the configured tiers by ``_advertise_effort_tiers``; validation below
-    # is what refuses anything else.
-    effort: str | None = Field(
-        default=None,
-        description="Model tier for this subagent (a configured values.subagents.models key).",
-    )
+    # configured under ``subagents.models`` at CALL time, and a Literal would
+    # freeze one guess at import. The schema the model sees is rewritten to the
+    # configured tiers by ``_advertise_effort_tiers`` — and REMOVED entirely
+    # when the operator owns the choice (``subagents.model_choice``), which is
+    # the shipped default — while validation below is what refuses anything
+    # else.
+    #
+    # NO field description, deliberately. There is no path that renders this
+    # field without the patch: the patcher either replaces the description or
+    # deletes the property, in the top-level form and in ``$defs`` alike, so a
+    # fallback string here was text nobody could read — and it carried a second
+    # spelling of the key (`values.`-prefixed) that the `/settings` page never
+    # shows and `lop config edit` does not take. Two spellings for one key in
+    # one file is how the next reader learns the wrong one.
+    effort: str | None = Field(default=None)
 
     @field_validator("effort")
     @classmethod
@@ -10012,10 +11389,10 @@ class TaskParams(BaseModel):
         default=None,
         description="Single-task form: role for the subagent (see 'tasks[].agent').",
     )
-    effort: str | None = Field(
-        default=None,
-        description="Single-task form: model tier for the subagent.",
-    )
+    # Same reason as ``TaskItem.effort`` above, including the missing
+    # description: the rendered one replaces it on every build path, and the
+    # fallback it used to carry spelled the key a second way.
+    effort: str | None = Field(default=None)
 
     @field_validator("effort")
     @classmethod
@@ -10433,9 +11810,10 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     """Return a context-bounded handoff while keeping the full report readable.
 
     A task job's header names the model the child ran on, as recorded by the
-    harness (``job.model_label``, set from the child's own model-change event),
-    so the parent can STATE which model produced a delegated result rather
-    than assume it. This is the parent-visible half of the pinned-tier work:
+    harness (``job.model_label``, stamped by the launch at registration and
+    OVERWRITTEN from the built child — see :attr:`AsyncJob.model_label`), so the
+    parent can STATE which model produced a delegated result rather than assume
+    it. This is the parent-visible half of the pinned-tier work:
     ``subagent_start.model`` tells a stream consumer, this tells the model
     that launched the child. It is deliberately the harness's record and not
     anything the child said about itself, which is what makes it evidence
@@ -10450,6 +11828,96 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     if job.status == "failed" and job.error_text:
         text += f"\n{job.error_text}"
     return spill_truncate(text, "wait", context)
+
+
+def _job_model_label(context: ToolContext | None, job_id: str) -> str:
+    """The model the registered job says its child runs on, or ``""``.
+
+    Read off the JOB rather than off the arguments, because the job row knows
+    two things the arguments cannot: a ROLE PIN resolved inside the session, and
+    the model a child parked behind the capacity gate was stamped with before it
+    ever started. Empty when the host keeps no job manager (a reduced host or a
+    test double) or the row is unknown, and the caller then says nothing about
+    models rather than inventing one.
+    """
+    jobs = getattr(context, "jobs", None)
+    if jobs is None:
+        return ""
+    try:
+        job = jobs.get(job_id)
+    except Exception:  # noqa: BLE001 — a label is decoration, never a launch
+        return ""
+    return str(getattr(job, "model_label", None) or "")
+
+
+def _job_owns_model(context: ToolContext | None, job_id: str) -> bool | None:
+    """Whether a TIER or ROLE PIN chose the registered job's model, or ``None``.
+
+    Read off the JOB, exactly as the label beside it is, because the job row is
+    stamped at registration and therefore knows this before the child exists. A
+    label comparison cannot answer it: a tier that resolves to the session's own
+    model produces the same string as an inherit, which is how a child that a
+    pin had moved was reported as inheriting while every tier in the operator's
+    config pointed at their session's model.
+
+    ``None`` — not ``False`` — when the host keeps no job manager, the row is
+    unknown, or the row predates the stamp (a resumed legacy row): the caller
+    then falls back to comparing labels rather than asserting an inherit it
+    cannot know.
+    """
+    jobs = getattr(context, "jobs", None)
+    if jobs is None:
+        return None
+    try:
+        job = jobs.get(job_id)
+    except Exception:  # noqa: BLE001 — an attribution is decoration, never a launch
+        return None
+    owns = getattr(job, "owns_model", None)
+    return owns if isinstance(owns, bool) else None
+
+
+def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str:
+    """One launched child, NAMING the model it will run on.
+
+    Why this is on the launch line: the failure it answers is a delegated child
+    that moved to a different — and costlier — model without the operator
+    learning it before the bill. ``effort`` is this harness's reasoning-effort
+    vocabulary while its value is a provider/model swap, so the swap has to be
+    stated in the one place the delegating model reads immediately: the result
+    of the call that made it.
+
+    Two wordings, because they are two different facts. ``on <model>`` is a
+    child that owns a model (a tier, or a role's own pin). ``on this session's
+    model (<model>)`` is a child that owns none — saying so is what stops the
+    other wording from reading as "someone chose the model you already had".
+    Which one applies comes from the job row's ``owns_model`` stamp, NOT from
+    comparing the two labels: those are equal whenever a pin resolves to the
+    session's own model, and the inherit wording then reports the one fact the
+    line exists to carry. Only when the stamp is absent (no job manager, an
+    unknown row, a legacy row) does this fall back to the comparison. The
+    session's own label comes from the context (see
+    ``ToolContext.session_model_label``); when the host supplies none the line
+    falls back to today's shape rather than claiming a model it cannot name.
+    """
+    label = entry["label"]
+    agent = entry["agent"]
+    job_id = entry["job_id"]
+    model = str(entry.get("model") or "")
+    session_model = str(getattr(context, "session_model_label", "") or "")
+    if not model:
+        return f"- {label} ({agent}): job {job_id}"
+    # `owns is not True` rather than `owns is False`: the inherited wording needs
+    # the label comparison BESIDE it, never instead of it. A `False` stamp means a
+    # tier or pin chose this child but its label has since moved away from the
+    # session's (a restored fallback rewrites ``model_label`` and never
+    # ``owns_model``), and asserting "on this session's model (<a model it is not
+    # on>)" there would be the same class of lie this stamp was added to fix
+    # (R-1). Today's only call site renders at launch, where the two agree — this
+    # keeps the next one honest.
+    owns = _job_owns_model(context, job_id)
+    if owns is not True and model == session_model:
+        return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
+    return f"- {label} ({agent}) on {model}: job {job_id}"
 
 
 @_guard("task")
@@ -10525,11 +11993,24 @@ async def execute_task(
             else:
                 failures.append(f"{item.label}: {exc}")
             continue
-        launched.append({"job_id": job_id, "label": item.label, "agent": item.agent})
+        launched.append(
+            {
+                "job_id": job_id,
+                "label": item.label,
+                "agent": item.agent,
+                # The model this child WILL run on, read off the job row rather
+                # than guessed from the arguments: the row is stamped at
+                # registration from the spec the launch resolved, so it is
+                # already true for a child parked behind the capacity gate (see
+                # ``run_subagent``), and it covers a ROLE PIN the arguments do
+                # not mention at all.
+                "model": _job_model_label(context, job_id),
+            }
+        )
     if not launched:
         detail = failures[0] if failures else "no tasks to launch"
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
-    lines = [f"- {entry['label']} ({entry['agent']}): job {entry['job_id']}" for entry in launched]
+    lines = [_launched_line(entry, context) for entry in launched]
     body = (
         f"launched {len(launched)} subagent(s) as concurrent background jobs:\n"
         + "\n".join(lines)
@@ -10548,32 +12029,52 @@ async def execute_task(
 def build_task_tool(context: ToolContext) -> AgentTool | None:
     if context.subagent_launcher is None:
         return None
+    # ONE read of the policy per build, handed to the schema renderer, the
+    # description and the validator's wrapper, so the three cannot disagree
+    # about which arm this tool instance is in.
+    model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
         description=_effort_tier_field_description(),
+        model_choice=model_choice,
     )
     return AgentTool(
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=_task_tool_description(),
+        description=_task_tool_description(model_choice),
         parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
         approval_tier="write",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_task, parameters),
+        execute=_with_advertised_effort(execute_task, parameters, model_choice=model_choice),
     )
 
 
 #: What ``wait`` tells the model for each kind of inbound arrival that woke it,
 #: keyed by the producer's ``CustomMessage.custom_type``. Spelled as literals
-#: rather than imported: ``session.session`` and ``harness.comms`` both import
-#: this module, so naming ``PEER_MESSAGE_MESSAGE_TYPE`` / ``WAKE_PROMPT_MESSAGE_TYPE``
-#: / ``HUB_MESSAGE_TYPE`` here would be a cycle. ``test_wait_budget.py`` pins
-#: the three keys against the real constants so a rename cannot silently
-#: demote a kind to the generic fallback wording.
+#: rather than imported — for WEIGHT, not for the cycle this comment used to
+#: assert, which was never there: at the merge base (``de9a9f94f``) importing
+#: this module together with the three homes is clean in either order, because
+#: none of the three homes reaches this module (the 7 modules that join the
+#: process are the control that those imports ran). What held at that base is
+#: that naming them here would put their homes on the import path of every
+#: importer of the tool layer — ``session.peer`` for the peer marker,
+#: ``harness.comms`` with its transcript-replay closure for ``HUB_MESSAGE_TYPE``
+#: — taking this module's denied-module count from 11 to 17 (``incidents``,
+#: ``session.attachments``, ``session.creation``, ``session.peer``,
+#: ``session.spend``, ``session.transcript``). That cost is gone now
+#: (``PEER_MESSAGE_MESSAGE_TYPE`` and ``HUB_MESSAGE_TYPE`` live in the
+#: import-free ``harness/message_types.py``, and ``WAKE_PROMPT_MESSAGE_TYPE`` in
+#: ``harness/wake.py``, which imports only stdlib and pydantic — measured, the
+#: same import together now adds one module and no denied ones), so the literals
+#: are kept for the reason that never depended on it. They are a display table
+#: keyed by the persisted wire value; ``execute_wait`` reads ``"peer_message"``
+#: again as its generic fallback key below; and ``test_wait_budget.py`` pins the
+#: key set against the real constants, so a rename cannot silently demote a kind
+#: to the generic fallback wording.
 _ARRIVAL_NOTES: dict[str, str] = {
     "peer_message": "a message arrived from another session",
     "wake_prompt": "a scheduled wake fired — read the reminder before re-waiting",

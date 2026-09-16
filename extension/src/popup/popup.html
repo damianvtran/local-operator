@@ -41,6 +41,13 @@
         <section id="connected" class="state hidden">
           <h1 class="title">Connected.</h1>
           <p class="sub">Local Operator can use this browser.</p>
+          <!-- The extension-update advisory. A FIXED RESERVED SLOT, the same
+               treatment the pairing form's error line uses (#pair-error): the
+               slot's height is paid whether or not there is anything to say, so
+               the line appearing cannot resize the popup WINDOW under the user's
+               cursor. It is a note, never a fault: an older extension is driven
+               normally, and the copy says nothing is blocked. -->
+          <p class="advisory hidden" id="connected-advisory"></p>
           <!-- Shown only while the Settings-page "allow all websites" switch is
                on: the one state where no prompt will ever appear, so the popup
                must say so instead of looking merely idle. -->
@@ -79,6 +86,16 @@
 
         <section id="pairing" class="state hidden">
           <h1 class="title">Pair with Local Operator</h1>
+          <!-- Shown when the worker was told this browser was UNPAIRED (a
+               per-identity revoke, close code 4003), and hidden otherwise. The
+               form alone is indistinguishable from a fresh install, which left
+               the one destructive-feeling transition in this flow with no
+               signal in the surface that shows it (UX round 3, U5). A separate
+               line rather than rewritten sub-copy, so the never-paired case
+               keeps the exact wording it was reviewed with. -->
+          <p class="sub hidden" id="pair-unpaired">
+            This browser was unpaired from Local Operator.
+          </p>
           <p class="sub">Enter the code shown in Local Operator.</p>
           <form id="pair-form">
             <label class="field-label" for="pair-code">Pairing code</label>
@@ -108,18 +125,48 @@
 
         <!-- Ships HIDDEN like every other section. A diagnostic error state must
              never be the pre-render default: render() is async (it awaits
-             getSession() and a real /health fetch), so whichever section ships
+             its storage projections and a real /health fetch), so whichever
+             section ships
              visible is what Chrome paints before any show() runs. This one used
              to be it, and every popup open flashed "Not connected." for the
              length of the health round trip — worst exactly when the daemon is
              slow rather than dead, and it resized the auto-sizing popup window
              as the card swapped. The neutral #pending section below is the
              first paint instead. -->
-        <section id="disconnected" class="state hidden">
-          <h1 class="title">Not connected.</h1>
-          <p class="sub">
+
+        <!-- THE ONE CARD THAT CARRIES TWO COPIES, because two different failures
+             reach it and only one of them measured anything. The first pair is
+             the MEASURED one — a /health probe that answered nothing — and it
+             keeps the shipped diagnosis. The second pair is what popup.ts swaps
+             in when the RENDER itself failed: a saved-state read that threw or
+             stalled past CHROME_API_DEADLINE_MS. That path established nothing
+             about the daemon, and can even have thrown away a HEALTHY probe
+             result (the third member of the Promise.all a render awaits IS the
+             probe, so a rejected read discards it), so the diagnosis would send
+             the user to start an app that is running — and on QA's stalled cell,
+             one that was never asked. Both pairs are markup rather than one
+             paragraph rewritten from TS: the sentences stay readable in this
+             file (the pairing-jitter test reads them here), and the `lop
+             browser status` affordance keeps its <code> chip on both paths. Only
+             one pair is ever rendered — `hidden` is `display: none !important`,
+             so the other is out of layout and out of the accessibility tree,
+             and no two headings compete. -->
+        <section id="disconnected" class="state hidden" role="status">
+          <h1 class="title" id="disconnected-title-measured">Not connected.</h1>
+          <p class="sub" id="disconnected-sub-measured">
             Local Operator isn't reachable on this computer. Make sure it's running
             (<code>lop browser status</code>).
+          </p>
+          <!-- What a render that failed to gather its own state can conclude:
+               the check itself did not complete, which is true whether the
+               saved-state read or the probe was the member that failed, and
+               false of neither. It names no daemon fault, and the Retry below
+               is the same next move on both paths — a failed state read as well
+               as a probe that came back empty. -->
+          <h1 class="title hidden" id="disconnected-title-unchecked">Couldn't check the connection.</h1>
+          <p class="sub hidden" id="disconnected-sub-unchecked">
+            The extension couldn't complete its connection check, so it can't tell whether Local
+            Operator is running. Retry, and check with (<code>lop browser status</code>).
           </p>
           <div class="actions"><button id="retry" class="btn block">Retry</button></div>
         </section>
@@ -150,6 +197,150 @@
           </p>
           <div class="actions">
             <button id="retry-incompatible" class="btn block">Check again</button>
+          </div>
+        </section>
+
+        <!-- The honest rendering of a wedged worker, and the state that used to
+             be a LIE: the browser is open and paired and the daemon is
+             reachable, but the extension has stopped answering, so nothing can
+             be driven. Before this section the popup showed the GREEN connected
+             card in exactly that state (health.extension_unresponsive was in
+             its type and never read), i.e. the incident's own symptom on the
+             one surface the GUIDE sends the user to (design D4).
+             The remedy is the measured one, and the wording is matched to the
+             CLI/error copy so the user meets one instruction rather than three
+             spellings of it: toggle OFF then ON (pairing survives). The list of
+             what the reload costs is the ERROR COPY's list verbatim — an earlier
+             draft said only "open tabs the agent was driving are lost", so a user
+             who read this surface alone would re-`open` and then be surprised by
+             the snapshot refs and pending site decisions going with the worker
+             (design D2-2). -->
+        <section id="unresponsive" class="state hidden">
+          <h1 class="title">Extension stopped answering.</h1>
+          <!-- "this popup closes while it restarts, so open it again to check"
+               is the forewarning the primary action needs (D6): clicking a
+               button and having the window vanish with no confirmation is
+               indistinguishable from the dead-click symptom this card exists to
+               cure, and the likely next move is another toolbar click — the
+               very loop being fixed. -->
+          <p class="sub">
+            This browser is paired, but the extension has stopped responding, so the agent can't
+            drive it. Reloading usually clears it — this popup closes while it restarts, so open
+            it again to check. Pairing is kept; open tab handles, snapshot refs and pending site
+            decisions are lost.
+          </p>
+          <!-- Primary = the one-click remedy, because the manual instruction
+               below is four steps through a page this popup cannot even link to
+               (an extension page may not open a chrome:// URL). chrome.runtime
+               .reload() restarts the worker from here, and the popup CLOSES as
+               a side effect of its own extension being torn down — expected,
+               and why the copy below tells the user what to do next rather than
+               promising them a result on this card. -->
+          <div class="actions">
+            <button id="reload-extension" class="btn primary block">Reload the extension</button>
+            <button id="retry-unresponsive" class="btn block">Check again</button>
+          </div>
+          <!-- The FALLBACK, and it is not a softer restatement of the button: a
+               reload demonstrably did NOT clear the stale worker on 2026-09-11
+               20:23 (the bridge log took no /extension dial for a whole session
+               and a reload did not wake it) — only disable→enable did. So the
+               certain remedy stays on the card, named by URL rather than linked
+               because an extension page may not open a chrome:// URL.
+               It does NOT repeat the loss list above: both remedies discard the
+               same worker, so the paragraph above states that cost once for
+               both. Restating it here read as a second, larger price for the
+               fallback and cost the card 164px of height it has no room for at
+               600px (measured). -->
+          <p class="sub">
+            Still stuck? Toggle it OFF then ON in <code>chrome://extensions</code> — that clears
+            a stale registration a reload can't, at the same cost.
+          </p>
+          <!-- The verdict of a "Check again" that changed nothing. Without it
+               an unchanged answer is invisible: the card is byte-identical, so
+               a probe that genuinely ran looks exactly like a dead click (U4).
+               role="status" so AT hears the result rather than only seeing it;
+               popup.ts writes it only when the card did not change.
+
+               BELOW the manual fallback, deliberately. Above it, this 65.6px
+               line pushed the certain remedy off the bottom at 125% zoom — so
+               asking "did it recover?" cost the user the sentence telling them
+               what to do about the answer (UX U10). Ordered by what the user
+               needs next: the remedies first, then the status of the last
+               probe. -->
+          <p class="recheck hidden" id="unresponsive-outcome" role="status"></p>
+        </section>
+
+        <!-- Paired and connected, but NOT driving: another authorised install of
+             this same extension holds the wheel. Deliberately not an error state
+             — nothing here needs fixing — and deliberately not the connected
+             card, which would claim the agent can drive a browser it is
+             receiving no commands for.
+
+             The copy states the arrangement, the failover, and the COST in the
+             reader's terms (copy review round 1, C2; round 2, C12/C14). The
+             previous wording — "another Local Operator install is driving the
+             agent … because a tab handle belongs to the install that opened it" —
+             inverted the subject (the agent drives the browser, not the reverse),
+             spent the word "driving" in the opposite sense to the Connected
+             card's "Driving" label, and explained the cost with an internal noun
+             ("handle") that its reader has no way to look up; the em dash joining
+             the two clauses was the surface's one AI-ism tell. Round 2 then
+             pointed out the composition still used "driving" twice on one card
+             with two subjects — the agent drove one browser while an extension
+             drove the wheel — so the paragraph says "connected to" and leaves
+             "driving" to mean exactly one thing everywhere; "it" in the last
+             clause is named rather than inferred.
+
+             The second line names the other install when /health reports a
+             label for it — plus its id prefix, because with two installs of the
+             SAME build the label is a string this popup also prints about itself
+             and the prefix is the token `lop browser drive` accepts (UX U2 /
+             design D3). Where the label or the id is unknown the line degrades
+             to "The other install is driving right now." -->
+        <section id="standby" class="state hidden" role="status">
+          <h1 class="title">Standing by.</h1>
+          <!-- The promise carries an id because popup.ts now rewrites it: two
+               further sentences qualify it, both built from facts the daemon
+               already publishes and neither true of the healthy case above
+               (UX round 4, U9). While the wheel is attached and merely silent
+               it gains the clause naming THIS event (the driver going mute),
+               because the driver's silence is what a standby usually waits
+               through; once the daemon commits it is replaced by the countdown
+               from /health.takeover_within_s. The paragraph this ships with is
+               what every other case renders — including the healthy one, which
+               is why it must keep rendering byte-identically to the frame the
+               earlier design and UX rounds approved. -->
+          <p class="sub" id="standby-promise">
+            This browser is paired, but the agent is connected to another browser right now.
+            If that one disconnects, this browser takes over and the agent opens a new tab;
+            the tab the agent was using stays open where it is.
+          </p>
+          <p class="sub" id="standby-driver"></p>
+        </section>
+
+        <!-- Paired, and connected to NOTHING: the daemon severed the wheel-holder
+             for silence and no install has taken the wheel since, so
+             `driver_extension_id` is empty, `link_attached` is false and the
+             unresponsive latch is up (UX round 4, U10).
+
+             This is not the `paired` card's state — that card says "Code
+             accepted. Connecting this browser…" over a connection that does not
+             exist and offers the user nothing to do — and it is not the
+             `unresponsive` card either, because once the driver field is cleared
+             the daemon cannot say WHICH install went mute, so the copy has to be
+             true of both installs and the sentence must not claim "yours"
+             stopped answering. The same condition also covers a healthy
+             standby's ~0.5 s pre-promotion window, which is why the tone is the
+             neutral hairline rather than danger: a red flash there would be a
+             false alarm about a browser that is about to start serving. -->
+        <section id="severed" class="state hidden" role="status">
+          <h1 class="title">Not connected.</h1>
+          <p class="sub">
+            Local Operator isn't driving this browser right now. If this browser's extension
+            has stopped answering, reload it.
+          </p>
+          <div class="actions">
+            <button id="severed-reload" class="btn block">Reload the extension</button>
           </div>
         </section>
 
@@ -195,6 +386,47 @@
                URL/host value, so a long host reads as an intact string and a
                mid-token break reads as "this is a URL", not a typo (D11). -->
           <h1 class="title" id="origin-title">Let the agent use this site?</h1>
+          <!-- THE REMEDY, INLINE, when the worker is wedged while a decision is
+               queued — the exact shape of the reported incident (the operator's
+               dead clicks happened while the agent was driving), and the one
+               state where #unresponsive is unreachable: renderOnce() paints
+               this card and returns before that branch (reviewer/UX U1, QA Q5,
+               design D3, three independent streams).
+
+               Inline rather than reordering the branches. The pending decision
+               is what the user opened the popup for, and hiding it behind the
+               wedge card would answer "the remedy is unreachable" by making the
+               request unreachable instead. So the prompt stays answerable and
+               the card stops pretending the answer will land: popup.ts sets the
+               danger tone and unhides this banner from the SAME
+               `extension_unresponsive` signal #unresponsive uses, so there is
+               one source of truth for "the worker is not answering" and no
+               chance of offering a reload to a healthy worker.
+
+               The manual chrome://extensions fallback is deliberately NOT
+               repeated here: this is a banner on a consent card, not the
+               recovery card, and #unresponsive carries the full remedy once the
+               queue drains. -->
+          <!-- role="alert", not "status": this is the danger register, and an
+               already-open popup that transitions INTO the wedged state should
+               announce the banner ahead of the surrounding prose rather than
+               after it (design N1). "won't be applied" rather than "can't be
+               applied right now" states the certainty the danger tone is
+               already claiming (N3). -->
+          <p class="wedge hidden" id="origin-wedge" role="alert">
+            The extension has stopped answering, so this won't be applied.
+            <button type="button" class="linkish" id="origin-wedge-reload">Reload the extension</button>
+            <!-- The manual remedy, named here too. The banner deliberately does
+                 not repeat the reload's LOSS LIST (that is the recovery card's
+                 job), but it must not leave the user without the certain cure:
+                 while a request is queued this card is the ONLY card they can
+                 see, and `ACCESS_REQUEST_TTL_MS` is 10 minutes — so a user whose
+                 reload failed had ten minutes of a card offering only the remedy
+                 that just failed (UX U11, QA Q6). One sentence, no second
+                 button: the reload stays the single primary action. -->
+            <span class="wedge-manual">Still stuck after that? Toggle it OFF then ON in
+            <code>chrome://extensions</code>.</span>
+          </p>
           <p class="sub" id="origin-body">
             The agent wants to open a page on this site with your current login. It can only use
             sites you allow, and you can take this back any time in Settings.

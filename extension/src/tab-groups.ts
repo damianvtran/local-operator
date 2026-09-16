@@ -1,3 +1,4 @@
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getSurfaces, putSurface, resolveSurfaceToken, type StoredSurface } from "./state";
 
 const GROUP_PREFIX = "LO · ";
@@ -6,7 +7,12 @@ const MAX_LABEL_CLUSTERS = 30;
 const NO_GROUP = -1;
 
 /** Browser grouping is presentation only: every failure is swallowed so a
- * missing, partial, or policy-disabled Chromium API can never block browsing. */
+ * missing, partial, or policy-disabled Chromium API can never block browsing.
+ *
+ * That swallow is why each chrome call below is BOUNDED: a rejected op would
+ * drain the chain, but a hung one would not — `.catch()` never runs on a
+ * promise that never settles — and this queue is module-global, so one stuck
+ * `chrome.tabGroups.get` would park every later command for every session. */
 let groupQueue: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = groupQueue.catch(() => {}).then(op);
@@ -47,13 +53,23 @@ function appliedTitle(base: string, ordinal: number): string {
 }
 
 async function tabOrUndefined(tabId: number): Promise<chrome.tabs.Tab | undefined> {
-  try { return await chrome.tabs.get(tabId); } catch { return undefined; }
+  try {
+    return await deadline(
+      chrome.tabs.get(tabId),
+      CHROME_API_DEADLINE_MS,
+      `chrome.tabs.get(${tabId})`,
+    );
+  } catch { return undefined; }
 }
 
 async function isAppliedGroup(surface: StoredSurface, groupId: number): Promise<boolean> {
   if (surface.appliedGroupId !== groupId || !surface.groupAppliedLabel) return false;
   try {
-    const group = await chrome.tabGroups.get(groupId);
+    const group = await deadline(
+      chrome.tabGroups.get(groupId),
+      CHROME_API_DEADLINE_MS,
+      `chrome.tabGroups.get(${groupId})`,
+    );
     // IDs can be recycled after browser/worker churn. Matching the exact title
     // and colour LO last applied prevents a recycled personal group with the
     // same numeric ID from becoming writable through stale session storage.
@@ -217,17 +233,29 @@ export function reconcileTabGroup(
       if (groupId === undefined) {
         const sibling = await existingSiblingGroup(surface, ownerKey, tab.windowId);
         groupId = sibling === undefined
-          ? await chrome.tabs.group({ tabIds: [surface.tabId] })
-          : await chrome.tabs.group({ groupId: sibling, tabIds: [surface.tabId] });
+          ? await deadline(
+            chrome.tabs.group({ tabIds: [surface.tabId] }),
+            CHROME_API_DEADLINE_MS,
+            `chrome.tabs.group(${surface.tabId})`,
+          )
+          : await deadline(
+            chrome.tabs.group({ groupId: sibling, tabIds: [surface.tabId] }),
+            CHROME_API_DEADLINE_MS,
+            `chrome.tabs.group(${surface.tabId} into ${sibling})`,
+          );
         created = sibling === undefined;
       }
 
       // Omitting `collapsed` on updates preserves a user's collapsed group.
-      await chrome.tabGroups.update(groupId, {
-        title: allocation.title,
-        color: "cyan",
-        ...(created ? { collapsed: false } : {}),
-      });
+      await deadline(
+        chrome.tabGroups.update(groupId, {
+          title: allocation.title,
+          color: "cyan",
+          ...(created ? { collapsed: false } : {}),
+        }),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabGroups.update(${groupId})`,
+      );
       surface.groupAppliedLabel = allocation.title;
       surface.appliedGroupId = groupId;
       await putSurface(surface);

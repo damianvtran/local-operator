@@ -343,7 +343,12 @@ _DEFAULT_ROW_WIDTH = 120
 
 
 def status_glyph(
-    status: str, *, queued: bool = False, spinner_glyph: str = "", paused: bool = False
+    status: str,
+    *,
+    queued: bool = False,
+    spinner_glyph: str = "",
+    paused: bool = False,
+    cut_off: bool = False,
 ) -> tuple[str, str, str]:
     """``(glyph, word, semantic colour token)`` for one task job's state.
 
@@ -358,6 +363,15 @@ def status_glyph(
     ``_ChildRecord.paused``, which the comms graph owns. It outranks every
     other state here exactly as it does in ``SubagentComms._describe``, so one
     child cannot read as two things on two surfaces.
+
+    ``cut_off`` is passed in for the same reason and is the taxonomy's split,
+    not a fourth state (design round 2, D8): a restored child whose run was cut
+    off by a runtime death carries ``status == "interrupted"`` — that is the
+    only word the ROSTER has — while the same word is reserved everywhere else
+    for a stop the user's own act recorded. The row and the page both say
+    ``cut off`` instead, which is the word the live notice and the stranded
+    tool card already use, and the fact reaches them on ``AsyncJob.cut_off_cause``
+    (``JobState.from_job`` carries it on both restore paths).
 
     The WORD comes back with the glyph rather than being read off the job,
     and that is not tidiness: a queued job's ``status`` is still ``running``,
@@ -383,11 +397,16 @@ def status_glyph(
     if status == "cancelled":
         return GLYPH_CANCELLED, "cancelled", "dim"
     if status == "interrupted":
-        # Rehydrated from a previous process's roster; the run was cut off, not
-        # finished or failed. Muted rather than danger — nothing went wrong, the
-        # process simply ended — and its own word so a reader can tell it apart
-        # from a clean cancel and know it may be resumable.
-        return GLYPH_INTERRUPTED, "interrupted", "muted"
+        # Rehydrated from a previous process's roster. Muted rather than
+        # danger — the run ended without settling, and the ink already says so
+        # on the notice that named the cause — and its own word so a reader can
+        # tell it apart from a clean cancel and know it may be resumable.
+        #
+        # WHICH word is the taxonomy's: ``interrupted`` is a positively
+        # recorded deliberate stop, ``cut off`` is the involuntary end
+        # (design round 2, D8). The glyph is shared, because it means
+        # "rehydrated and resumable" — which is true of both.
+        return GLYPH_INTERRUPTED, ("cut off" if cut_off else "interrupted"), "muted"
     return GLYPH_DONE, status or "completed", "dim"
 
 
@@ -648,8 +667,10 @@ def _read_row(job: Any, *, fallback_id: str, current: bool, paused: bool = False
             # never settled), so like the cancelled-mid-run case it would rest
             # on a 1-cell glyph alone. Spell the word so the row says WHY it is
             # not a clean outcome — the process ended under it — and reads the
-            # same as the page it opens.
-            activity = status_glyph(status)[1]
+            # same as the page it opens. WHICH word is the taxonomy's: a job
+            # carrying a ``cut_off_cause`` was cut off, and only a recorded
+            # deliberate stop is ``interrupted`` (design round 2, D8).
+            activity = status_glyph(status, cut_off=bool(getattr(job, "cut_off_cause", "")))[1]
     if current and not running:
         # The page IS this row's detail, three rows above it. Repeating a
         # SETTLED outcome here printed a failed child's error string twice in

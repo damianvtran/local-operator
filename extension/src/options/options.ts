@@ -1,4 +1,5 @@
 import { DEFAULT_PORT, getLocal } from "../state";
+import { PROTO_VERSION } from "../protocol.gen";
 import { allowAllView, nextAllowAllView, type AllowAllAction, type AllowAllView } from "./allow-all-flow";
 import { grantRows, removeGrantAccessibleName, revokeMessageFor } from "./grant-list";
 import { runWorkerMutation } from "./mutation-flow";
@@ -173,7 +174,7 @@ document.getElementById("unpair")?.addEventListener("click", async () => {
     wire.send(
       JSON.stringify({
         event: "hello",
-        proto: 1,
+        proto: PROTO_VERSION,
         token: beforeUnpair.token ?? "",
         extension_version: chrome.runtime.getManifest().version,
         browser: navigator.userAgent,

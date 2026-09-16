@@ -379,6 +379,12 @@ def collect_sessions(
                 # lists cleanly rather than raising mid-table.
                 pending=getattr(rec, "pending", None),
                 busy=bool(getattr(rec, "busy", False)),
+                # The runtime's own statement that it is leaving and finishing
+                # work first. Defaulted like the two fields above so a record
+                # written by an OLDER runtime lists cleanly rather than raising
+                # mid-table — `lop sessions` is the surface a host mid-upgrade
+                # is inspected WITH.
+                leaving=getattr(rec, "leaving", "") or "",
                 detached=bool(getattr(rec, "detached", False)),
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
@@ -398,6 +404,8 @@ def collect_sessions(
 
     if include_stored and root is not None:
         lines.extend(_stored_lines(root, {line.session_id for line in lines}, stored_limit))
+
+    lines = _with_stored_outcomes(lines, root)
 
     # The roll-up counters describe the RUNNING fleet, so they count only the
     # rows the registry published. A ``stored`` row (``include_stored``) names a
@@ -446,6 +454,76 @@ def collect_sessions(
         fleet_session_trajectories=session_trajectories,
         fleet_trajectories=session_trajectories + fleet_running,
     )
+
+
+def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[SessionLine]:
+    """Each session's last stored outcome (kind and reason) attached to its row.
+
+    ONE READ FOR THE WHOLE LISTING rather than a lookup per row: ``state_many``
+    chunks its SQL parameters over one connection, so a fleet of forty sessions
+    costs what one costs. The read is also why the fields come from the store
+    and not from the record — see :attr:`SessionLine.completion_kind` for why
+    the OUTCOME is what answers "why did this die".
+
+    THE STORE IS KEYED BY CONVERSATION IDENTITY, not by session id: a row's
+    completion lives under ``session/<id>`` or ``agent/<id>``, and which one it
+    is is a property of the conversation's DIRECTORY (``conversation_identity``
+    reads the parent's name), not of the discovery record — a record in one run
+    namespace can name either kind of conversation. Both spellings are therefore
+    asked for in the same chunked read and ``session/`` wins a tie, which cannot
+    normally happen: ids are uuid4. A row whose identity is in neither is simply
+    a row with no recorded outcome.
+
+    REBUILT RATHER THAN MUTATED, because ``SessionLine`` is ``frozen=True`` and
+    that is a tested redaction invariant, not a habit (see the model's own
+    note): the row is the shape that must never grow a field a dump can reach,
+    so a second field-carrying constructor call is the cheap and legal way to
+    enrich it.
+
+    TOLERANT, like every other read on this path and for the same reason an
+    older runtime's record is: ``lop sessions`` is what a host mid-upgrade is
+    inspected WITH, so an unreadable or missing store leaves the two fields
+    empty and the listing otherwise intact. The store's own reader already
+    degrades to "no completion" states for a database that predates the
+    ``reason``/``cause`` columns, so no version handling is repeated here.
+
+    NO AMBIENT FALLBACK WHEN ``root`` IS NONE, deliberately: unlike
+    ``AttentionStore()``'s own default, a listing built for a caller that named
+    no root must not acquire the outcome of whatever store happens to be on the
+    operator's machine. A caller that wants the read passes the root it read
+    the rows from — the CLI and ``/info`` both do.
+    """
+    from dataclasses import replace
+
+    from local_operator.session.attention import AttentionStore
+
+    if root is None:
+        return lines
+    ids = [line.session_id for line in lines if line.session_id]
+    if not ids:
+        return lines
+    # The store is opened against the SAME root the rows came from.
+    store = AttentionStore(root / "attention.db")
+    try:
+        states = store.state_many(
+            [f"{namespace}/{sid}" for sid in ids for namespace in ("session", "agent")]
+        )
+    except Exception:  # noqa: BLE001 — a listing must survive an unreadable store
+        logger.debug("attention store unavailable for the sessions listing", exc_info=True)
+        return lines
+    enriched: list[SessionLine] = []
+    for line in lines:
+        state = states.get(f"session/{line.session_id}") or {}
+        if not state.get("kind"):
+            state = states.get(f"agent/{line.session_id}") or {}
+        enriched.append(
+            replace(
+                line,
+                completion_kind=str(state.get("kind") or ""),
+                completion_reason=str(state.get("reason") or ""),
+            )
+        )
+    return enriched
 
 
 #: How many stored sessions ``lop sessions --all`` lists when no ``--limit`` is
@@ -567,6 +645,31 @@ def session_rows(
             # ``heartbeat_age_s`` instead. Last in the dict so the pinned order
             # above is untouched.
             "last_activity_s": line.last_activity_s,
+            # THE LAST OUTCOME, and the one key that answers "why did this die"
+            # without a log hunt: the attention store's kind and the reason the
+            # harness recorded (``the runtime disappeared without exiting
+            # cleanly…``, or the deliberate stop's sentence with the rung and
+            # the killer). Appended at the END for the same reason
+            # ``last_activity_s`` is — the established key order is a published
+            # contract, and this EXTENDS it rather than re-flowing it. Empty
+            # string, never ``None``: the store's own readers use "" for "no
+            # reason was recorded" so no consumer has to branch on key
+            # existence per row.
+            "completion_kind": line.completion_kind,
+            "completion_reason": line.completion_reason,
+            # WHETHER THIS RUNTIME IS FINISHING A TURN BEFORE LEAVING, and why:
+            # appended at the END for the same reason the two keys above are —
+            # the established key order is a published contract and this EXTENDS
+            # it. Empty string, never ``None``, matching its neighbours so no
+            # consumer branches on key existence per row.
+            #
+            # It rides here rather than only on the record because the record is
+            # the runtime's own file: a consumer diagnosing a fleet (or
+            # scripting a rotation) reads this table or its JSON, and "which of
+            # these is leaving" has to be answerable without opening a config
+            # root per session. ``lop sessions`` also prints it (its own LEAVING
+            # column, present only when some row carries one).
+            "leaving": line.leaving,
         }
         for line in info.lines
     ]
@@ -773,7 +876,6 @@ def collect_agents(
 def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
     """The bug-report extras. Names only — never a credential value."""
     from local_operator.browser_bridge import state as bridge_state
-    from local_operator.credentials import CredentialManager
     from local_operator.guides.discovery import discover_guides
     from local_operator.paths import config_dir
 
@@ -843,23 +945,62 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
         # KEY NAMES ONLY. ``get_credentials`` returns SecretStr values and this
         # screen is pasted into issues; a name answers the diagnostic question
         # ("is it even set?") and a value answers nothing this screen asks.
-        credential_keys=_safe(
-            "env.credentials",
-            lambda: tuple(CredentialManager(root).list_credential_keys()),
-            (),
-            errors,
-        ),
+        # Read through ``_credential_key_names`` because constructing the manager
+        # CREATES its store — see that function.
+        credential_keys=_safe("env.credentials", lambda: _credential_key_names(root), (), errors),
         guides=_safe("env.guides", lambda: len(discover_guides()), 0, errors),
         skills=live.skills,
     )
+
+
+def _credential_key_names(root: Path) -> tuple[str, ...]:
+    """Credential KEY NAMES from the store, read WITHOUT creating it.
+
+    ``CredentialManager.__init__`` calls ``_ensure_config_exists()``, which makes
+    the config directory and an empty ``credentials.env`` (and tightens the mode
+    of a loose file it finds). On this path that is a WRITE on a read: ``/info``
+    exists to describe a host — including a broken one — and leaving new state
+    on it is the same fault class as ``check_latest()`` rewriting the cache,
+    which this module's docstring bans outright. The read-only construction and
+    the "only ``ENOENT`` means the store is absent, every other failure raises"
+    policy both live on the class now (``CredentialManager.read_key_names``);
+    what is left here is the collector's own policy about the ROOT.
+
+    ``_require_root`` FIRST, and it is load-bearing rather than defensive. The
+    previous form short-circuited on ``is_file()``, which is False on the
+    unresolvable-root sentinel, so the probe returned ``()`` — indistinguishable
+    to ``_safe`` from a genuinely empty store. ``env.credentials`` therefore
+    dropped out of the degraded block and the panel stated "no credentials"
+    about a host it had never managed to look at (review round 2, F2). Raising
+    here is the disclosure ``profiles`` and ``teams`` already get.
+    """
+    from local_operator.credentials import CredentialManager
+
+    return tuple(CredentialManager.read_key_names(_require_root(root)))
 
 
 #: Stand-in config root for when `config_dir()` itself cannot be resolved.
 #: Deliberately a path that cannot exist and cannot be created, so a probe whose
 #: constructor would otherwise MATERIALISE a store (``CredentialManager`` writes
 #: a ``credentials.env``) fails into `_safe` and is reported as degraded,
-#: instead of silently writing into the process's current directory. `/info`
-#: reads; it must never leave anything behind on the host it is describing.
+#: instead of silently writing into the process's current directory.
+#:
+#: What `/info` may leave behind on the host it describes is the credential
+#: store: it is neither created nor re-tightened, because the probe reads
+#: through ``CredentialManager.read_key_names`` (review round 2, F3). The
+#: registry scan this same snapshot runs is a different case and is accepted as
+#: it stands — ``registry.scan`` is the ONE implementation ``lop sessions`` also
+#: calls, and reading a shared registry means doing its housekeeping: it creates
+#: ``<config>/run/mobile/`` (0700, idempotent) and reaps records whose pid is
+#: gone. The claim here is only that this read does not write the things it
+#: reads, not that an absolute no-touch of the host is achievable.
+#:
+#: The credential probe still needs this sentinel even though it can no longer
+#: CREATE a store: on an unresolvable root it must RAISE (see
+#: :func:`_credential_key_names`) so ``_safe`` names it in the degraded block,
+#: rather than reporting an authoritative empty list about a host it never
+#: looked at. ``AgentRegistry`` and the other probes still construct their
+#: stores here, so the sentinel keeps its original job for them.
 _UNREADABLE_ROOT = Path("/nonexistent/local-operator-info-unreadable-config-root")
 
 

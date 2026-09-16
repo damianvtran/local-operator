@@ -68,8 +68,10 @@ from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_TERMINATE_DENIED,
     EVIDENCE_TERMINATE_UNCONFIRMED,
 )
+from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
     GUEST_COMMAND_TIMEOUT_S,
+    bounded_observation_cause,
     guest_deadline_for,
 )
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
@@ -339,6 +341,119 @@ class _JudgeErrorCapture(logging.Handler):
             self.messages.append(record.getMessage())
         except Exception:  # pragma: no cover - a broken format must not mask the error
             self.messages.append(record.msg if isinstance(record.msg, str) else "judge error")
+
+
+# The upstream frame path, pinned: ``desktop_env/controllers/python.py``
+# (OSWorld-V2 @ d578d2d, ``get_screenshot`` at 455-481). The handler is attached
+# to the one logger those records are written on, and each record is
+# additionally checked for the MODULE it came from. Neither half is enough on
+# its own: attachment alone would accept any record routed to that logger from
+# elsewhere, and a bare ``python.py`` basename is not unique in a package this
+# size. Together they name one function, which is what makes matching safe here
+# (an upstream rename disarms the capture, and it then degrades to no cause
+# rather than to a wrong one).
+_SCREENSHOT_LOGGER = "desktopenv.pycontroller"
+_SCREENSHOT_SOURCE_FILE = "python.py"
+
+# Upstream's per-attempt failure lines, matched as PREFIXES. A record is
+# reduced to a closed KIND plus, when the pinned format carries one, an integer
+# status code -- nothing else in the record is read, and upstream's own words
+# are never copied (see ``_ScreenshotFailureCapture``).
+_SCREENSHOT_RECORD_KINDS = (
+    ("Failed to get screenshot. Status code: ", "status"),
+    ("Invalid screenshot payload", "payload"),
+    ("An error occurred while trying to get the screenshot", "transport"),
+    ("Failed to get screenshot.", "exhausted"),
+)
+
+#: How many upstream failure records a bounded cause may name. The COUNT is
+#: always the true total; only the per-record detail is capped, so the cap can
+#: never understate how long the guest was failing.
+MAX_CAUSE_RECORDS = 8
+
+
+class _ScreenshotFailureCapture(logging.Handler):
+    """Records upstream's FAILED screenshot attempts during one ``observe``.
+
+    ``get_screenshot`` swallows its own failure: it retries ``retry_times``
+    times with ``retry_interval`` sleeps, logs each attempt at ERROR and
+    returns ``None``. By the time the adapter sees that ``None`` the reason is
+    gone, and "environment returned no screenshot frame" is all the bundle can
+    say -- which is how two canary episodes (285 and 248 model cycles, $1.08
+    and $2.24) died with nothing left to read.
+
+    WHAT IS RECORDED, AND WHAT IS DELIBERATELY NOT. Each record contributes a
+    closed KIND and, when the pinned format has one, an integer status code;
+    its message and ``args`` are never copied. That is the point: upstream's
+    text can carry a URL, a credential or a guest path, and a provider that
+    clipped it to a wire bound would sever any secret straddling the cut -- the
+    leak the harness closes by scanning BEFORE bounding (``worker._redacted``),
+    an ordering this side cannot reproduce. Structured facts contain no
+    third-party bytes, so bounding them is safe by construction. Upstream's own
+    words are surfaced by the HARNESS instead, as the worker's stderr tail.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        #: (kind, status_or_None, monotonic_seconds) per failed attempt.
+        self.records: list[tuple[str, int | None, float]] = []
+        self.started = time.monotonic()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if os.path.basename(record.pathname) != _SCREENSHOT_SOURCE_FILE:
+            return
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover - a broken format must not mask the error
+            return
+        for prefix, kind in _SCREENSHOT_RECORD_KINDS:
+            if not message.startswith(prefix):
+                continue
+            status: int | None = None
+            if kind == "status":
+                tail = message[len(prefix) :].strip()
+                # A malformed code is not a reason to drop the record: the KIND
+                # is still known, only the OPTIONAL number is lost.
+                status = int(tail) if tail.isdigit() else None
+            self.records.append((kind, status, time.monotonic()))
+            return
+
+    def cause(self, *, elapsed_ms: int) -> str | None:
+        """One bounded, value-free line, or None when upstream said nothing.
+
+        ``elapsed_ms`` is the whole ``_get_obs`` call and ``first_ms`` the time
+        from its start to upstream's first failure record. Those readings are
+        the fact the harness could not otherwise obtain, and they separate the
+        two mechanisms it had to guess between: a refused or instantly-erroring
+        request leaves upstream's own 5 s retry sleep standing (a gap near
+        5000 ms), while a request that burned its 10 s client timeout adds that
+        much again (a gap near 15000 ms).
+        """
+
+        if not self.records:
+            return None
+        records = self.records[:MAX_CAUSE_RECORDS]
+        parts = [
+            f"upstream_failures={len(self.records)}",
+            "kinds=" + ",".join(kind for kind, _, _ in records),
+        ]
+        codes = [str(status) for _, status, _ in records if status is not None]
+        if codes:
+            parts.append("codes=" + ",".join(codes))
+        parts.append(f"first_ms={_since_ms(self.started, records[0][2])}")
+        gaps = [
+            _since_ms(records[index - 1][2], records[index][2]) for index in range(1, len(records))
+        ]
+        if gaps:
+            parts.append("gaps_ms=" + ",".join(str(gap) for gap in gaps))
+        parts.append(f"elapsed_ms={max(0, elapsed_ms)}")
+        return bounded_observation_cause("screenshot unavailable: " + " ".join(parts))
+
+
+def _since_ms(earlier: float, later: float) -> int:
+    """A non-negative millisecond delta between two monotonic readings."""
+
+    return max(0, int((later - earlier) * 1000))
 
 
 class AwsProvider:
@@ -812,8 +927,27 @@ class AwsProvider:
 
     async def observe(self) -> dict[str, Any]:
         env = self._require_env()
-        raw = await asyncio.to_thread(env._get_obs)
-        return dict(raw)
+        # Attached only for the duration of upstream's own retry loop, exactly as
+        # ``evaluate`` captures judge errors. The records are the ONLY trace of
+        # why a capture failed (``get_screenshot`` logs and returns None), and
+        # this call is the last place they exist.
+        capture = _ScreenshotFailureCapture()
+        screenshot_logger = logging.getLogger(_SCREENSHOT_LOGGER)
+        screenshot_logger.addHandler(capture)
+        started = time.monotonic()
+        try:
+            raw = await asyncio.to_thread(env._get_obs)
+        finally:
+            screenshot_logger.removeHandler(capture)
+        observation = dict(raw)
+        if observation.get("screenshot") is None:
+            # A frameless read with no captured record adds NOTHING: an absent
+            # cause must stay absent rather than be invented, and the builder
+            # then fails with the same fixed text it always did.
+            cause = capture.cause(elapsed_ms=_since_ms(started, time.monotonic()))
+            if cause is not None:
+                observation[SCREENSHOT_CAUSE_KEY] = cause
+        return observation
 
     async def execute(self, statements: list[str], *, settle: bool = True) -> None:
         env = self._require_env()

@@ -88,8 +88,9 @@ import json
 import math
 import os
 import re
+import textwrap
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from rich.cells import cell_len
@@ -106,6 +107,21 @@ from local_operator.tui.widgets.transcript import (
     ExpandableActionBlock,
     TranscriptView,
     wrap_cells,
+)
+
+# The blocked-refusal sentence and the attempt summary live in the web_fetch
+# package and are imported rather than re-typed. That is a deliberate exception
+# to this widget's "no service-package import" habit (see ``_humanize_bytes``):
+# a FORMAT has one obvious right answer and can be duplicated safely, while this
+# sentence is a BEHAVIOUR — it names a vendor we detected and must stay
+# silent-or-explicit about bot protection — and the review that prompted this
+# round found the two hand-rolled copies had already drifted apart. ``failure``
+# is a pure module (no I/O, no settings, no client); ``httpx``, its only
+# third-party import, is already a hard dependency of this app.
+from local_operator.web_fetch.failure import (
+    RETRY_AFTER_NOTE_LEAD,
+    attempt_summary,
+    block_lead,
 )
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
@@ -140,6 +156,19 @@ COLLAPSE_HINT = "⟨collapse⟩"
 #: row, and the app already owns a bracket for "this is chrome, not content".
 NO_OUTPUT_NOTICE = "⟨no output⟩"
 RUNNING_NOTICE = "⟨still running⟩"
+#: The third answer: the call has been announced, the model has finished
+#: writing it, and it has not started executing. ``RUNNING_NOTICE`` would be a
+#: lie about a call nothing has run, and the point of the slot is to say which
+#: of the two waits the user is in.
+#:
+#: NOT the state's own word, which is where this rung started: the status column
+#: one cell away already says ``queued``, and two identically-worded runs two
+#: cells apart read as a repaint fault rather than as an answer — the same class
+#: the working line's docstring cites for ``· compacting context…`` sitting
+#: above ``· compacting context``. The slot answers a CLICK ("why did nothing
+#: expand?"), so it names the wait in the family's own vocabulary:
+#: ``still running`` → ``waiting``.
+QUEUED_NOTICE = "⟨waiting⟩"
 
 #: The same two answers at three cells, for a row too narrow to spell them.
 #: The feedback has to survive FURTHER DOWN the width ladder than the expand
@@ -152,11 +181,21 @@ RUNNING_NOTICE = "⟨still running⟩"
 #: content, and both inner glyphs are measured single-width below.
 TERSE_NO_OUTPUT_NOTICE = "⟨∅⟩"
 TERSE_RUNNING_NOTICE = "⟨⋯⟩"
+TERSE_QUEUED_NOTICE = "⟨⋯⟩"
+#: The two live rungs are the SAME three cells on purpose. At that width the
+#: slot has room for one answer — "not yet" — and which of the two waits the
+#: user is in is already on the row, one column to the right, as the status
+#: word (``running`` / ``queued``). A distinct glyph would exist to re-encode a
+#: distinction the row makes by itself, in the one place with no room to spell
+#: it out; the full rungs stay distinct above because there the slot has to
+#: answer in words.
+#:
 #: Full phrase -> glyph -> nothing, per notice. The row walks this in order
 #: and takes the first rung that fits.
 NOTICE_LADDER: dict[str, tuple[str, ...]] = {
     NO_OUTPUT_NOTICE: (NO_OUTPUT_NOTICE, TERSE_NO_OUTPUT_NOTICE),
     RUNNING_NOTICE: (RUNNING_NOTICE, TERSE_RUNNING_NOTICE),
+    QUEUED_NOTICE: (QUEUED_NOTICE, TERSE_QUEUED_NOTICE),
 }
 #: How long that answer stays on the row. Long enough to read at a glance,
 #: short enough that it is gone before the eye returns — it is feedback for
@@ -273,6 +312,28 @@ def row_indent(width: int) -> int:
     return ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
 
 
+def row_body_width(width: int) -> int:
+    """Cells a ledger row's CONTENT is built in, given the width it is given.
+
+    The card's own 1-cell inner padding each side and the ledger inset come off
+    the budget before anything is measured, which is why this is a named
+    derivation rather than a subtraction repeated in a builder and again in the
+    question "would a rebuild change this row's name column?". Those two must
+    answer with the SAME number: the name column is gated on width
+    (``NAME_GROWTH_MIN_ROW``), and the gate is applied to the width the row
+    builds at — the reduced one — while the row's own width is what a resize
+    reports. Recording the column of the outer width and then asking the
+    question of the outer width measures a row that does not exist: at a 72-cell
+    row the outer width clears the gate (14) while the painted content is built
+    in 69 cells and floors at 8, so the record and the paint disagree and the
+    guard cannot see it.
+
+    ``max(..., 10)`` is the builder's own floor, kept here so the two callers
+    cannot drift apart on the degenerate widths either.
+    """
+    return max(width - 2 - row_indent(width), 10)
+
+
 NAME_COL = TOOL_NAME_COL
 #: The ceiling that widening respects. Past roughly this width the eye stops
 #: scanning a column of names and starts reading a list of them.
@@ -296,6 +357,20 @@ DURATION_COL = 5
 #: other width makes the row reflow on settling at narrow widths. Any
 #: replacement must keep that equality; assert it rather than eyeballing it.
 RUNNING_LABEL = "running"
+#: What a call that has been announced but NOT started puts in the status
+#: column (see ``_status_runs``). A state word rather than a clock, because
+#: there is no execution to time and the dictation clock it replaces has ended.
+#:
+#: One cell NARROWER than the settled spine the label above matches, and that
+#: is safe for a reason specific to this state: both of its transitions REPLACE
+#: the summary instead of re-budgeting one string. Entering it rebuilds the
+#: summary from the dictation facts (``mark_queued``), and leaving it — the
+#: call finally starting — rebuilds it from the call's arguments
+#: (``begin_running``). The equality the label above protects binds only where
+#: the summary is the same text on both sides of the width change, which is why
+#: a shadow of it here would buy nothing and cost a trailing cell that would
+#: push the whole status run one cell off the right edge.
+QUEUED_LABEL = "queued"
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
 #: Indent of the expanded output block, aligned under the tool name column.
@@ -304,6 +379,36 @@ OUTPUT_INDENT = 2
 #: transcript into a scroll trap. The head is kept (it carries the command's
 #: framing) and the remainder is announced on a dim marker row.
 EXPAND_MAX_LINES = 40
+#: The failure REASON's paint budget: sentence CELLS, and the block's ROWS.
+#:
+#: The per-line crop above is load-bearing for CAPTURED output — a tool's own
+#: bytes are unbounded by design (a whole file, a minified payload, a 40 MB
+#: stdout) and the expansion is a receipt rather than a log viewer. The reason is
+#: bounded differently: the collapsed row DOES carry it, but its status cap
+#: (``max(8, width // 3)``) is a fraction of a row the status SHARES with the
+#: glyph and the clock, so the sentence is unreachable there at every width and
+#: the expansion is its only home.
+#:
+#: Two bounds, because one cannot do both jobs:
+#:
+#: - :data:`REASON_MAX_CELLS` (432) is a CONTENT bound, and it is the one that
+#:   binds on a normal frame. 432 cells is six rows at the canonical 80-column
+#:   measure (72) — over twice the longest failure sentence this codebase builds
+#:   (the 201-cell web-search refusal, 3 rows there) — and it does not grow with
+#:   the frame, so a pathological single-line payload (an HTTP body echoed back,
+#:   a model-authored error) paints the same amount at 200 columns as at 80.
+#: - :data:`REASON_MAX_ROWS` (8) is a SHAPE bound on the painted block, and it
+#:   is the one that binds on a narrow frame: a cell budget alone would let a
+#:   16-column terminal (an 8-cell measure) turn those 432 cells into 54 rows.
+#:   Eight is the smallest backstop that still carries the shipped 201-cell
+#:   sentence whole down to 40 columns (8 rows at the 32-cell measure); below
+#:   the width where the two cross (~62 columns) the tail is announced instead
+#:   of painted. Both bounds are on the SENTENCE's rows and cells; a dropped tail
+#:   costs one additional dim marker row (~15 cells), so the painted block is at
+#:   most one row more than this bound and the marker is never inside the cell
+#:   budget it is reporting on.
+REASON_MAX_CELLS = 432
+REASON_MAX_ROWS = 8
 #: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
 #: a payload argument is unbounded by design — `write` carries a whole file in
 #: `content` — and the block exists to answer "what was this call", which a
@@ -474,6 +579,30 @@ def format_duration(seconds: float) -> str:
         return "100d+"
     hours = remainder // 3600
     return f"{days}d{hours}h" if hours else f"{days}d"
+
+
+def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
+    """A monotonic instant whose age is ``now - epoch``, for a threaded clock.
+
+    The one conversion from the wall-clock stamps that travel on events
+    (``ToolExecutionStartEvent.started_at_epoch``, the session's folded
+    ``activity_phase_started_at``) into the clocks the widgets tick on. It is
+    one function because both widgets that seed a counter from a producer's
+    instant — ``ToolCard`` and ``WorkingBlock`` — must divide, negate and clamp
+    it identically; the status band's ``seed_duration`` applies the same rule
+    to the turn's own start instant, and keeps its own spelling because it
+    takes an injectable ``now_epoch`` this helper has no use for.
+
+    Conversion is AGE-ONLY and happens ONCE. Everything that ticks afterwards
+    counts on ``clock()``, so a system-clock adjustment, a DST jump or a
+    laptop resuming from sleep after the seed cannot move a counter that is
+    already running: only the interval that had already elapsed is taken from
+    wall time. The clamp matters for the same reason — an epoch in the future
+    (a peer's clock ahead of ours, a stamp written by a machine whose clock
+    was later corrected) means "age unknown, treat as new" rather than a
+    negative elapsed time that would render as a nonsense duration.
+    """
+    return clock() - max(0.0, time.time() - epoch)
 
 
 def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
@@ -709,12 +838,22 @@ def _is_fetch_details(tool_name: str, details: dict[str, Any] | None) -> bool:
     apart. A fetch's details carry ``render_method`` and ``final_url`` (a file
     read carries neither), so the presence of those keys is what selects the
     fetch card without a fragile name check on every ``read``.
+
+    A TERMINAL fetch failure carries neither of those keys — no response ever
+    arrived, so there is no final URL and nothing was rendered — and it used to
+    fall through to the generic output body. That made one tool's two failure
+    shapes read as two different tools, the stall one indistinguishable from a
+    bash error (design review round 1, D5). ``failure_kind`` is the key BOTH
+    shapes carry, so it keys the fetch treatment as well. A file read never has
+    it: nothing in the read path classifies a failure.
     """
     if tool_name == "web_fetch":
         return True
     if tool_name != "read" or not isinstance(details, Mapping):
         return False
-    return "render_method" in details and "final_url" in details
+    if "render_method" in details and "final_url" in details:
+        return True
+    return isinstance(details.get("failure_kind"), str)
 
 
 def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
@@ -722,10 +861,20 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
 
     Rendered from ``details`` (which never reaches the provider) rather than the
     model-facing preview, so the card can always show the final URL, status,
-    content-type, render method, byte/line counts, cache state, and \u2014 when the
-    render looked sparse \u2014 a one-line nudge toward ``browser``. The preview body
+    content-type, render method, byte/line counts, cache state, and — when the
+    render looked sparse — a one-line nudge toward ``browser``. The preview body
     itself is appended by the body painter from the result text; this helper owns
     only the header rows, mirroring ``_search_result_output``'s split of duties.
+
+    Two round-1 refinements live here. The attempt count rides the ``Rendered:``
+    row (D1): §3.6 promises the reader can see that a fetch took more than one
+    try, and the header meta line that carries it model-side is stripped from the
+    card, so without this the successful-on-escalation fetch was
+    character-for-character a one-attempt success. And the byte count is dropped
+    for the ``blocked`` class (DN2): the number describes the discarded challenge
+    page, which the card deliberately never shows, while the line count beside it
+    describes the statement that replaced it — two subjects on one row, with the
+    subject the reader cannot check winning.
     """
     if not isinstance(details, Mapping):
         return []
@@ -765,17 +914,74 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         http_error = not (200 <= status < 300)
     if http_error and isinstance(status, int):
         reason = _HTTP_REASONS.get(status, "Error")
-        rows.append(f"⚠ HTTP {status} {reason} — error/block page, not page content.")
+        # A CONFIRMED bot-block carries the classified sentence — the same one
+        # the model-facing lead uses — so the card does not print two wordings of
+        # one fact with the vendor-less one winning on the surface the user reads
+        # (design review round 1, D2). An UNSIGNED refusal keeps the generic copy,
+        # which is right as it stands: it claims nothing we did not detect.
+        vendor = details.get("block_vendor")
+        if details.get("failure_kind") == "blocked" and vendor:
+            clause = block_lead(str(vendor))
+            rows.append(f"⚠ HTTP {status} {reason} — {clause}.")
+        else:
+            rows.append(f"⚠ HTTP {status} {reason} — error/block page, not page content.")
     rows.append(fetched)
 
+    # D1/D7: ``Rendered: markdownify · 2 attempts (default, browser-profile) ·
+    # 800 lines · 51.8 KB``. The escalation that WON is the case a reader most
+    # needs to see — it is the reason a slow fetch succeeded — and it was exactly
+    # the case that looked character-for-character like an ordinary one, because
+    # the meta line carrying the count model-side is stripped from the card. It
+    # rides this row rather than a new one: §5.4's "no new card row" decision
+    # stands, and this row has the room that ``Fetched:`` does not.
+    #
+    # It is placed directly after the method, BEFORE the line/byte counts. D7
+    # caught the original order appending it last, which made the fact §3.6
+    # promises visible the FIRST thing clipped at the standard 80 columns:
+    # ``… · 800 lines · 51.8 KB · 2 attempts (default, brow…``. Leading with the
+    # identity means only a byte count can ever be dropped, and the escalation
+    # survives every width the card is read at.
+    #
+    # D12 (round 3): the summary is EVIDENCE ABOUT A RENDER, so it may only ride a
+    # row that has a render field of its own — the method, the line count, the
+    # byte count. A terminal no-response card (the silent-block stall this PR
+    # exists for) has none of them: nothing was rendered and no response ever
+    # arrived, so the summary alone was painting ``Rendered: 2 attempts (default,
+    # browser-profile)`` — a false claim, in the card's own words for what was
+    # produced, duplicating the ``(N attempts: …)`` clause one row up in the ⚠
+    # lead, and landing wholly in ``dim`` because a clause at the start of a row
+    # is not what :func:`_split_attempt_clause` matches. Gating the summary on the
+    # row's own fields drops that row and leaves D7's ordering untouched: on a
+    # response-bearing card the escalation still leads the row it rides, so it is
+    # still the last thing clipped.
+    #
+    # Bound to locals so the narrowing holds for the type checker, the row's own
+    # fields read as one decision, and ``summary`` can be gated on them.
+    attempts_n = details.get("attempts")
+    profiles_n = details.get("profiles")
+    summary = attempt_summary(
+        attempts_n if isinstance(attempts_n, int) else 1,
+        profiles_n if isinstance(profiles_n, list) else (),
+    )
+    own_bits = (
+        method,
+        f"{lines_n} lines" if isinstance(lines_n, int) else "",
+        # D2: humanise (KB/MB) so the structured row agrees with the binary
+        # notice body two lines below, which already prints e.g. "2.4 MB".
+        # Suppressed for a replaced body: see the docstring (DN2).
+        (
+            _humanize_bytes(byte_n)
+            if isinstance(byte_n, int) and details.get("failure_kind") != "blocked"
+            else ""
+        ),
+    )
     render_bits = " · ".join(
         part
         for part in (
-            method,
-            f"{lines_n} lines" if isinstance(lines_n, int) else "",
-            # D2: humanise (KB/MB) so the structured row agrees with the binary
-            # notice body two lines below, which already prints e.g. "2.4 MB".
-            _humanize_bytes(byte_n) if isinstance(byte_n, int) else "",
+            own_bits[0],
+            summary if any(own_bits) else "",
+            own_bits[1],
+            own_bits[2],
         )
         if part
     )
@@ -819,6 +1025,30 @@ _FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
 #: the error response. Stripped from the card body alongside the lead/meta lines
 #: (the structured error row already carries the "not page content" message).
 _FETCH_HEADER_NOTE_RE = re.compile(r"^\(The body below is the error response")
+
+
+#: The attempt summary clause on a painted fetch row, exactly as
+#: :func:`local_operator.web_fetch.failure.attempt_summary` writes it —
+#: ``· 2 attempts (default, browser-profile)``, or ``· 2 attempts`` when the
+#: retries never changed identity. Matched by VALUE rather than position, so the
+#: painter can lift it to ``signal`` (D9) without caring where D7 placed it in
+#: the row, and a future reorder cannot silently drop the escalation back into
+#: the metadata ink.
+_ATTEMPT_CLAUSE_RE = re.compile(r" · \d+ attempts?(?: \([^)]*\))?")
+
+
+def _split_attempt_clause(line: str) -> tuple[str, str, str]:
+    """Split a painted fetch row into ``(before, clause, after)`` around its
+    attempt summary.
+
+    ``clause`` is empty for a card that made one attempt — no summary is painted,
+    which is the common case — and for a terminal failure, whose count rides its
+    promoted lead instead of a ``Rendered:`` row.
+    """
+    match = _ATTEMPT_CLAUSE_RE.search(line)
+    if match is None:
+        return line, "", ""
+    return line[: match.start()], match.group(0), line[match.end() :]
 
 
 def _humanize_bytes(count: int) -> str:
@@ -915,6 +1145,27 @@ def _row_text() -> Text:
     return Text(no_wrap=True, overflow="ellipsis")
 
 
+class _UnknownStart:
+    """Sentinel type for :data:`START_UNKNOWN`; never instantiated twice."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - a debugging aid only
+        return "START_UNKNOWN"
+
+
+#: Passed as :class:`ToolCard`'s ``started_at`` when the card is being mounted
+#: for a call that is ALREADY in flight and no epoch for it exists anywhere —
+#: a legacy producer re-delivered to a rebuilt transcript, or a facade whose
+#: fold carries nothing for the call. It exists because ``None`` already means
+#: something else on that parameter ("this call begins now", true for a card
+#: built by the event that starts it), and the two must not be conflated: the
+#: first mounts CLOCKLESS, the second legitimately takes the mount instant as
+#: zero. Any other consumer that can only say "unknown" must use this rather
+#: than ``clock()``, which would print the viewer's arrival as the call's age.
+START_UNKNOWN = _UnknownStart()
+
+
 class ToolCard(ExpandableActionBlock):
     """A tool execution: ONE row, on a state-tinted elevation step.
 
@@ -947,8 +1198,17 @@ class ToolCard(ExpandableActionBlock):
         args: dict[str, object] | None = None,
         intent: str | None = None,
         user_run: bool = False,
+        clock: Callable[[], float] = time.monotonic,
+        started_at: float | None | _UnknownStart = None,
     ) -> None:
         super().__init__()
+        #: Injected so elapsed time is testable without sleeping, exactly as
+        #: ``StatusLine`` takes one. Monotonic, not wall clock: a duration that
+        #: jumps when the system clock is adjusted is worse than no duration,
+        #: which is why the epochs that arrive from outside this widget are
+        #: converted to an AGE once (:func:`monotonic_from_epoch`) and every
+        #: tick after that is taken from here.
+        self._clock = clock
         self.tool_call_id = tool_call_id
         self.navigation_anchor_id = f"tool:{tool_call_id}"
         # tool_name is MODEL-CONTROLLED: the loop takes it from the tool call
@@ -1023,6 +1283,15 @@ class ToolCard(ExpandableActionBlock):
         self._clock_timer: Timer | None = None
         self._duration: float | None = None
         self._error: str = ""
+        #: The word this card's ``interrupted`` state prints. Set by
+        #: :meth:`mark_interrupted` from the turn's verdict — an involuntary
+        #: cut-off earns ``cut off``, because ``interrupted`` is now reserved for
+        #: a positively recorded stop and a stranded ``interrupted`` row beside a
+        #: ``turn cut off`` notice re-states the exact ambiguity the taxonomy
+        #: removed (design review round 1, D2). Defaulted to the historical word
+        #: because every other route into this state (a replayed row with no
+        #: result, a viewer teardown that knows no verdict) still means it.
+        self._interrupt_label: str = "interrupted"
         #: When THIS card's execution began, or ``None`` when the card cannot
         #: know. ``None`` is the replay case and it is not a missing value to
         #: be defaulted: a card rebuilt by a surface that is re-painting a
@@ -1031,7 +1300,35 @@ class ToolCard(ExpandableActionBlock):
         #: measured from here would be how long ago the panel drew the row.
         #: The settled states already refuse to invent that number — see
         #: :meth:`restore` — and the running state has to refuse it too.
-        self._started: float | None = time.monotonic()
+        #:
+        #: A card constructed for a call that is LIVE right now takes ``clock()``
+        #: here, and that is correct for the call this row was mounted for: the
+        #: row appears with the event that started it, so the two instants
+        #: coincide. The case it is NOT correct for is a start event whose call
+        #: began EARLIER than this card — a re-delivered seed on a view that has
+        #: no row for the call, which is the same switch a restored row takes.
+        #: ``started_at`` is then passed and the row wears the call's real age
+        #: instead of the handler's arrival. It is the same conversion the two
+        #: adopt paths use (:meth:`restore`, :meth:`begin_running`), and it is
+        #: deliberately one rule in three places rather than a constructor that
+        #: quietly disagreed with them about what "running" means.
+        #:
+        #: That leaves the case where the call began earlier AND no epoch
+        #: exists, which neither ``None`` ("begins now") nor a float can
+        #: express — hence :data:`START_UNKNOWN` and the withheld clock above.
+        if isinstance(started_at, _UnknownStart):
+            # The third answer, and the one the two-valued signature could not
+            # say: this row is mounted for a call ALREADY in flight and nobody
+            # recorded when it began. `None` here would mean "the call begins
+            # now", which is a lie for this row — the age it would print is the
+            # viewer's arrival wearing the call's name — and a real epoch is
+            # simply absent. So the row mounts CLOCKLESS, the same withheld
+            # reading `restore` and `begin_running` take for a missing epoch.
+            self._started = None
+        elif started_at is not None:
+            self._started = monotonic_from_epoch(started_at, clock=self._clock)
+        else:
+            self._started = self._clock()
         self._expanded = False
         #: A host that knows the user ran this call TO SEE its output (the
         #: composer's bang-mode) asks the card to open the moment it settles,
@@ -1069,6 +1366,20 @@ class ToolCard(ExpandableActionBlock):
         #: result, so the body painter and the rest-visibility rule can select
         #: the fetch presentation. Set in :meth:`_absorb_result`.
         self._is_fetch_card = False
+        #: True when the card's BODY is our own prose rather than page content
+        #: (a replaced challenge body, or a terminal failure whose whole text is
+        #: the diagnosis). Only then may the painter re-wrap it: re-flowing an
+        #: origin's own bytes — a code sample, a log excerpt — would change what
+        #: the card claims the origin said.
+        self._fetch_statement = False
+        #: True when the fetch reported a parsed ``Retry-After`` interval, i.e.
+        #: when ``tool.py::_header_line`` emitted §3.4's interval sentence into
+        #: the body. That sentence is OUR prose but sits beside the origin's own
+        #: bytes, so it needs its own reflow permission (design review round 3,
+        #: D13); requiring the key makes that permission structural rather than a
+        #: bare prefix match, since no card that reported no interval can carry
+        #: the sentence at all. Set in :meth:`_absorb_result`.
+        self._fetch_reported_retry_after = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -1156,6 +1467,98 @@ class ToolCard(ExpandableActionBlock):
         self._apply_open_on_settle()
         self.finalize()
 
+    def mark_queued(self) -> None:
+        """The model stopped writing this call, and it has not started yet.
+
+        The state between ``composing`` and ``running``, and the ledger needed
+        it: a composing row is a PREDICTION that a call exists, and the
+        producer's terminal dictation frame says the prediction is final — the
+        call will execute, but not necessarily now. A batch whose second call is
+        ``exclusive`` behind a long ``shared`` sibling (a
+        ``wait(wait_ms=1800000)``) leaves it waiting for the sibling's whole
+        duration, and until this state existed the row went on saying
+        ``composing…`` — with a ticking clock — for the whole half-hour. That is
+        how it was reported.
+
+        Stays in ``_composing_cards``, which is the announcement registry: the
+        row is still waiting for its call to start (``on_tool_started`` adopts
+        it through ``_adopt_composing_card``), and a turn that dies before it
+        does must settle it as ``never sent · N composed`` rather than as an
+        interruption (``_retire_live_tool_cards``). A third registry would put
+        it outside both.
+
+        The clock STOPS here, and that is not cosmetic: nothing changes while
+        the call waits, so a ticking row would claim work is happening, and the
+        number it would report is a dictation duration that ended the moment
+        the model stopped writing — the operator's row read 1m58s of ``compose``
+        beside a sibling's 9m25s of real execution.
+        """
+        if self._state not in ("composing", "running"):
+            return
+        self._settle_live()
+        self._state = "queued"
+        # The dictation facts stay; the ``composing…`` boilerplate and its clock
+        # go, because the STATUS column now names the state and the clock it
+        # held has ended. ``_compose_facts`` is kept exactly equal to what the
+        # summary is built from — the invariant ``_build_row``'s shed ladder
+        # reads (see ``begin_running``): it sheds the label to keep the moving
+        # numbers, so a card whose summary no longer contains them must not
+        # carry them here.
+        self._compose_facts = _format_bytes(self._compose_bytes) if self._compose_bytes else ""
+        self._summary = self._compose_facts
+        self._refresh_row()
+
+    def mark_not_run(self, reason: str, argument_bytes: int | None = None) -> None:
+        """The call will NEVER run: settle the row under the harness's reason.
+
+        A call parked at planning (an unknown tool, invalid arguments, a
+        duplicate id whose twin won the slot) or skipped by steering gets no
+        start and — deliberately — no end event either, because the API server
+        pairs tool records by id. Until the producer grew a terminal compose
+        frame, the row announcing such a call therefore sat ``composing…`` until
+        the TURN died and was then labelled ``interrupted``, which describes a
+        call that was not interrupted. This settles it when the verdict exists,
+        in the harness's own words (``Tool not found: wake``), as the error
+        class it is.
+
+        The summary keeps the ``never sent · N composed`` record the retirement
+        path already used for a composing row: the call was never sent to a
+        tool, and the size is how far the model got before it was told nothing
+        would receive the call.
+
+        No ``measured_s``: nothing executed, so there is no interval — and the
+        outcome column's blank is the honest reading rather than a lost number
+        (same asymmetry ``mark_interrupted`` documents).
+
+        ``argument_bytes`` is the terminal compose frame's own final count, and
+        the row takes it when it carries one. It has to be HANDED OVER rather
+        than inherited from the frames before it, because the terminal frame is
+        often the ONLY frame a surface sees: the live relay keeps one compose
+        frame per call, in place, and the reconnect seed keeps exactly one entry
+        per call id — so a row born from the seed has never been through
+        :meth:`set_composing` at all, and would print ``nothing composed`` over
+        a frame that carried the true size. (``set_composing`` cannot be the
+        fix there: it early-returns for a row already in a latched state.)
+        """
+        self._settle_live()
+        if argument_bytes:
+            # A zero is left alone: an earlier frame that measured nothing and a
+            # frame that carries nothing agree, and a terminal frame for a call
+            # with an empty payload must not erase a size a live frame already
+            # measured.
+            self._compose_bytes = int(argument_bytes)
+        size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
+        self._compose_facts = f"{size} composed"
+        self._summary = f"never sent · {self._compose_facts}"
+        self._error = _strip_control_sequences(" ".join((reason or "").split())) or "not run"
+        self._duration = None
+        self._state = "error"
+        self.remove_class("tool-running")
+        self.add_class("tool-error")
+        self._refresh_row()
+        self._apply_open_on_settle()
+        self.finalize()
+
     def mark_waiting(self) -> None:
         """Project a canonical pending gate without inventing execution events."""
         self._settle_live()
@@ -1166,8 +1569,15 @@ class ToolCard(ExpandableActionBlock):
         self._refresh_row()
         self.finalize()
 
-    def mark_interrupted(self) -> None:
-        """Turn ended before this tool completed: dim 'interrupted' state.
+    def mark_interrupted(self, *, cut_off: bool = False) -> None:
+        """Turn ended before this tool completed: dim state, and WHY it ended.
+
+        ``cut_off`` selects the word from the TURN's verdict, which is knowledge
+        only the caller has: a turn cut off by anything but a deliberate stop
+        prints ``cut off`` here, so the stranded row agrees with the ``✗ turn cut
+        off`` notice under it instead of calling the same death ``interrupted``
+        (design review round 1, D2). The glyph and the dim tier do not move — the
+        word was the ambiguity.
 
         Takes NO ``measured_s``, unlike :meth:`mark_done` and
         :meth:`mark_failed`, and the asymmetry is a property of the path rather
@@ -1184,11 +1594,13 @@ class ToolCard(ExpandableActionBlock):
         watched its own start still prints its own elapsed below, which is the
         one clock here that is true.
         """
-        was_composing = self._state == "composing"
+        was_composing = self._state in ("composing", "queued")
         self._settle_live()
         if was_composing:
             # The call was never sent, so the row must stop saying it is being
             # written. It keeps the size as a record of how far the model got.
+            # (`queued` is the same record one state later: the dictation is
+            # over, the call still never started, and the turn died first.)
             size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
             # Facts first, and `_compose_facts` set so the label-shed ladder can
             # reach this row too: gated on the composing STATE, the ladder built
@@ -1197,8 +1609,22 @@ class ToolCard(ExpandableActionBlock):
             # from 40 columns down.
             self._compose_facts = f"{size} composed"
             self._summary = f"never sent · {self._compose_facts}"
-        self._duration = self._elapsed()
+            # The outcome column stays BLANK for this row. ``_elapsed`` here
+            # measures from the moment the ROW was built — `ToolCard.__init__`
+            # takes its own zero — so on this branch it is the dictation plus
+            # whatever queue the call waited in, i.e. an execution interval is
+            # the one thing it is not; at the half-hour queue the operator
+            # reported, this column printed the wait beside a row that says
+            # `never sent`. `mark_not_run` blanks the same number for the same
+            # reason, and the two endings of one fact must agree. Blank rather
+            # than lost: nothing on this surface ever knew this call's zero.
+            self._duration = None
+        else:
+            # A row that watched its own START has a true interval, and prints
+            # it.
+            self._duration = self._elapsed()
         self._state = "interrupted"
+        self._interrupt_label = "cut off" if cut_off else "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
@@ -1245,7 +1671,7 @@ class ToolCard(ExpandableActionBlock):
         never learned when its call started must paint a blank column, not a
         number that says the tool returned instantly.
         """
-        return None if self._started is None else time.monotonic() - self._started
+        return None if self._started is None else self._clock() - self._started
 
     @property
     def started_at(self) -> float | None:
@@ -1265,6 +1691,24 @@ class ToolCard(ExpandableActionBlock):
         """
         return self._started
 
+    @property
+    def state(self) -> str:
+        """Which state this row is in: ``running``/``composing``/``queued``/…
+
+        Exposed because a LIVE row is no longer necessarily an EXECUTING one:
+        ``queued`` is announced-and-not-started, and the app has to be able to
+        ask which of the two a card in its registry is — the working line
+        labels the turn from these cards, and the compose-adoption path must
+        not colour a row whose call has already started.
+
+        Read-only on purpose. Every transition belongs to one of the ``mark_*``
+        / ``restore`` methods, which also stop the clock, restyle the row and
+        re-derive the columns behind it; a writable state would let a caller
+        change the word without any of that and leave a card claiming one thing
+        while rendering another.
+        """
+        return self._state
+
     def restore(
         self,
         *,
@@ -1273,6 +1717,7 @@ class ToolCard(ExpandableActionBlock):
         details: dict[str, Any] | None = None,
         error: str = "",
         duration_s: float | None = None,
+        started_at: float | None = None,
     ) -> None:
         """Adopt a card for a call from a PREVIOUS session, or another agent's.
 
@@ -1292,18 +1737,40 @@ class ToolCard(ExpandableActionBlock):
 
         ``state`` is ``"success"``, ``"error"``, ``"interrupted"`` — the third
         for a call whose result is not in the transcript, which is what a
-        session killed mid-turn leaves behind — or ``"running"``.
+        session killed mid-turn leaves behind — or ``"running"``, or
+        ``"queued"`` for a call that was announced, dictated to completion and
+        never started (a batch queued behind a long sibling, or a turn that
+        died before its group ran).
 
         ``"running"`` exists for the same reason the other three do, one step
         further on. `subagent_view.entry_block` rebuilds a child's whole
         trajectory as blocks, and an entry with no outcome yet is a call that
         is STILL GOING: the card has to stay live. It just must not time
-        itself, because its ``_started`` is when the page painted the row —
-        so ``_started`` is cleared here and the running row blanks its
-        duration exactly as its settled siblings blank theirs. Without this
-        the replayed live row counted up from zero (and reset to zero every
-        time an earlier entry changed and the page rebuilt it), inventing
-        precisely the number this method exists to refuse.
+        itself, because its ``_started`` was when the page painted the row —
+        so ``_started`` is cleared here and the running row blanks its duration
+        exactly as its settled siblings blank theirs. Without this the replayed
+        live row counted up from zero (and reset to zero every time an earlier
+        entry changed and the page rebuilt it), inventing precisely the number
+        this method exists to refuse.
+
+        ``started_at`` is what makes the running arm able to KNOW its zero, and
+        it is passed only when that is true: the session's folded
+        ``ToolExecutionStartEvent.started_at_epoch`` for this call — the
+        producer's own stamp of when the tool began, which a viewer that
+        attaches mid-turn otherwise has no way to recover. Given one, the row
+        resumes the call's TRUE age instead of counting from the switch (the
+        reported frame: a `bash` row reading `27s` that restarted at the
+        moment the reader returned to the conversation). Given ``None`` — a
+        legacy producer, a `subagent_view` child row, any facade with no fold —
+        the arm keeps its old clockless behaviour, because stamping the fold or
+        arrival instant in its place is the one thing this path must never do:
+        for an attached viewer that number is invented, not measured.
+
+        The conversion is AGE-ONLY and happens once, here
+        (:func:`monotonic_from_epoch`); every tick afterwards is taken from
+        ``self._clock()``, so a wall-clock adjustment after the seed cannot
+        move a counter that is already running. Settled states ignore
+        ``started_at`` entirely — they are rendered from ``_duration``.
         """
         self._settle_live()
         self._state = state
@@ -1333,7 +1800,29 @@ class ToolCard(ExpandableActionBlock):
             # the freeze comes back with the outcome.
             self._finalized = False
             # Only the clock stays withheld; the expansion still offers the
-            # command.
+            # command. Seeded first, in that order, so a row whose start IS
+            # known arms from the call's true age and its tick timer starts
+            # with it; a row whose start is not known reaches `_refresh_row`
+            # with `_started` still None and blanks the column.
+            if started_at is not None:
+                self._started = monotonic_from_epoch(started_at, clock=self._clock)
+                self._start_clock()
+            self._refresh_row()
+            return
+        if state == "queued":
+            # A call the durable tail cannot pair with a result AND whose start
+            # was never announced: the model finished dictating it and it is
+            # waiting its turn to execute (see ``mark_queued``). It is LIVE — the
+            # work may still come — so it wears the live tier and must not answer
+            # ``settled_rows()``, exactly as the arm above, and for the same
+            # reasons; only the clock differs, and it differs by having nothing
+            # to show. There is no ``started_at`` to seed from and no
+            # ``duration_s``: the dictation clock this state replaced on the live
+            # path belonged to the MODEL writing the call, and a replayed row
+            # never had one.
+            self.remove_class("tool-interrupted", "tool-error", "tool-success")
+            self.add_class("tool-running")
+            self._finalized = False
             self._refresh_row()
             return
         self.remove_class("tool-running")
@@ -1388,13 +1877,13 @@ class ToolCard(ExpandableActionBlock):
                 parent.invalidate_name_col()
         self._compose_bytes = argument_bytes
         if self._compose_started is None:
-            self._compose_started = time.monotonic()
+            self._compose_started = self._clock()
         self._start_clock()
         self._render_composing()
 
     def _render_composing(self) -> None:
-        started = self._compose_started or time.monotonic()
-        elapsed = max(0, int(time.monotonic() - started))
+        started = self._compose_started or self._clock()
+        elapsed = max(0, int(self._clock() - started))
         clock = format_duration(elapsed)
         # The FACTS lead and the label sheds whole, the same shape this file
         # already uses for a tool summary. Boilerplate-first, `composing…` was
@@ -1436,9 +1925,12 @@ class ToolCard(ExpandableActionBlock):
         no clock the row simply stops animating between events, which is the
         right degradation for a timer whose entire job is cosmetic.
 
-        A REPLAYED live card (``restore(state="running")``) gets none: it has
-        no start time to count from and nothing streams into it, so every
-        tick would repaint an unchanged row. See :attr:`_started`.
+        A live card with NO start time to count from gets none — a replayed
+        row with no epoch, a mount for a call already in flight whose start
+        nobody stamped — because every tick would repaint a duration the row
+        cannot know. A ``restore(state="running")`` that IS given the call's
+        epoch does arm the timer: the guard is ``_started``, not the path that
+        set it. See :attr:`_started`.
         """
         if self._started is None or not self._navigation_visible:
             return
@@ -1524,7 +2016,11 @@ class ToolCard(ExpandableActionBlock):
         self._live_dirty = False
 
     def begin_running(
-        self, tool_name: str, args: dict[str, object] | None, intent: str | None
+        self,
+        tool_name: str,
+        args: dict[str, object] | None,
+        intent: str | None,
+        started_at: float | None = None,
     ) -> None:
         """Adopt a composing row as the real execution of the call it announced.
 
@@ -1532,33 +2028,89 @@ class ToolCard(ExpandableActionBlock):
         in the transcript in the right place, and replacing it would make the
         ledger flicker a row out and an identical row back in at the moment the
         call finally starts.
+
+        ``started_at`` is the session's folded epoch for this call — the
+        producer's own stamp of when the tool began — and it is what lets a
+        re-delivered ``ToolStarted`` give the row back its TRUE age. Without it
+        the re-entry had only two options, both wrong: restart the clock from
+        the re-entry instant (`0s` on arrival, ticking from the switch), or keep
+        the clock withheld because no surface ever learned when the call began.
+        A live row and the switched-to row for the same call now share one
+        anchor rather than differing by event→handler latency.
         """
         self._stop_clock()
         # A card restored onto the screen mid-execution (`restore(state="running")`)
-        # holds ``_started=None`` DELIBERATELY: no surface ever learned when
-        # the call began, so it refuses to invent an elapsed time. A re-delivered
+        # holds ``_started=None`` DELIBERATELY whenever NOBODY learned when the
+        # call began, so it refuses to invent an elapsed time. A re-delivered
         # ``ToolStarted`` reaches exactly that card — `/resume` onto the running
         # turn, or a switch away and back replaying the owner's live seed — and
         # restarting the clock here would fabricate `0s` at arrival, tick from
         # the RESUME instant, and settle the receipt to "time since the
-        # command" instead of the call's life. The withheld clock survives
-        # re-entry; only a card that can date itself restarts.
-        clockless = self._state == "running" and self._started is None
+        # command" instead of the call's life.
+        #
+        # So the withheld clock survives re-entry, and it is *filled in* when
+        # the call's start is knowable after all (a `started_at` epoch): the
+        # row's own zero is then the call's, not the viewer's. The two are the
+        # same rule, not two arms — a card with no zero and no epoch stays
+        # clockless, which is the honest rendering for a legacy producer.
+        clockless = self._state == "running" and self._started is None and started_at is None
+        # Whether this call PROMOTES the row: the two things that decide whether
+        # the spine may move because of it (see the invalidation at the end).
+        # ``queued`` counts, and it is the state that needs it most: a call that
+        # waited behind a long sibling spent that whole wait NOT contributing a
+        # name to the shared column (``contributes_name``), so the moment it
+        # starts is the moment a long MCP name has to widen that column.
+        was_composing = self._state in ("composing", "queued")
         # The name comes from the EXECUTION, not from the announcement. The first
         # compose event fires on the first name fragment — deliberately, so the
         # row appears immediately — and a provider that splits `write` into `wr`
         # and `ite` would otherwise leave `wr` on the settled row forever, in the
         # ledger, on the icon, and in the summary built from it.
+        renamed = tool_name != self.tool_name
         self.tool_name = _strip_control_sequences(tool_name)
         # The duration clock RESTARTS here. `_started` was set when the row was
         # mounted, which for an adopted row is when the model began dictating —
         # so a `write` that executed in 0.1s settled as `✓ 2.4s`, and on the
         # reported 1m41s case would have read `✓ 101s`. Two receipts on one
         # ledger would then be measuring different things with no way to tell
-        # which from the row. Unless the clock was withheld (above): a
-        # clockless card has no zero to restart from.
-        self._started = None if clockless else time.monotonic()
+        # which from the row. Unless the clock was withheld (above): a clockless
+        # card has no zero to restart from.
+        #
+        # The restart is also the reason the epoch has to be threaded THIS far
+        # rather than only into `restore`: a switch back re-delivers the seed's
+        # start event through the event controller, which reaches this method on
+        # the very card `restore` just restored. Seeding only one of the two
+        # left the other resetting the row to zero — the reported frame.
+        if started_at is not None:
+            self._started = monotonic_from_epoch(started_at, clock=self._clock)
+        else:
+            self._started = None if clockless else self._clock()
         self._state = "running"
+        # A row this method adopts may have been SETTLED before its call
+        # started. Two routes reach here that way: a replayed row the reveal
+        # path ``restore``d from the transcript, and — since the producer grew
+        # terminal compose frames — a row a never-run verdict settled on one of
+        # two calls sharing an id, whose twin then executed. The live classes
+        # are ASSERTED rather than assumed for the reason the
+        # ``restore(state="running")`` arm documents: ``mark_done`` removes
+        # ``tool-running`` and nothing else, so a card that arrived wearing
+        # ``tool-error`` or ``tool-interrupted`` would keep that tint on the row
+        # the user is watching execute.
+        self.remove_class("tool-interrupted", "tool-error", "tool-success")
+        self.add_class("tool-running")
+        # The failure TEXT goes with the failure TINT. A row revived by this
+        # method may have been settled as an error first (a never-run verdict on
+        # one of two calls sharing an id, whose twin then executed) — leaving
+        # `_error` set would keep the danger line from the verdict inside the
+        # expansion, over a call that is running fine, and keep `hasDetails`
+        # true because of it. Not visible on the summary today, which is why it
+        # is cleared here rather than left as a trap.
+        self._error = ""
+        # Un-finalized for the same reason as the restore arm: a settled card
+        # answers ``settled_rows()``, and the transcript's spacing and scroll
+        # accounting read that number. Only the row's own repaint is at stake
+        # here, and every settle path finalizes again.
+        self._finalized = False
         # The same construction the constructor uses, so an adopted row is
         # byte-identical to one that had never been a composing row — including
         # taking the ARGUMENTS rather than the intent (see the constructor for
@@ -1605,6 +2157,25 @@ class ToolCard(ExpandableActionBlock):
         # would only burn a repaint per second.
         if not clockless:
             self._start_clock()
+        # A promotion can move the ledger's shared name column, and nothing else
+        # here will say so. `contributes_name` is False while the row is
+        # dictating and True once the call it names has started, so THIS is the
+        # moment a long MCP name starts counting towards the spine — the exact
+        # inverse of the transition `set_composing` already answers, and for the
+        # same reason: without it the row keeps the column it did NOT earn (the
+        # card is mounted and dictated at the floor) and paints its own name
+        # truncated (`list_va…`) for the rest of the session. A hover cannot
+        # repair it either — `_refresh_row` re-fits the row at the stale
+        # column — so the only cure would be an unrelated later resync.
+        #
+        # After every field above, so the derivation sees the RUNNING row and
+        # the broadcast repaints it from its final state: this runs inside the
+        # one event that promotes the card, so no frame is composited between
+        # the column moving and the rows being told.
+        if was_composing or renamed:
+            parent = self.parent
+            if isinstance(parent, TranscriptView):
+                parent.invalidate_name_col()
         self._refresh_row()
 
     def set_partial_detail(self, detail: str) -> None:
@@ -1678,7 +2249,15 @@ class ToolCard(ExpandableActionBlock):
         # then the rendered preview body, so the card shows what was fetched and
         # a slice of the content, with the spill footer already inside the text.
         fetch_output: list[str] = []
+        # Reset per result: a card is written once, but a rebuilt card must never
+        # inherit the previous body's reflow permission.
+        self._fetch_statement = False
+        self._fetch_reported_retry_after = False
         if not search_output and _is_fetch_details(name, details):
+            # Bound once: everything below reads the same mapping, and the
+            # narrowing has to survive the type checker to keep the guards
+            # readable (one alias instead of an isinstance per key).
+            fetch_details = details if isinstance(details, Mapping) else {}
             fetch_header = _fetch_result_output(details)
             if fetch_header:
                 # D1: the structured rows above OWN the metadata (status, final
@@ -1689,6 +2268,42 @@ class ToolCard(ExpandableActionBlock):
                 # is purely the CARD's presentation, mirroring how web_search lets
                 # its structured rows replace, not duplicate, the model text.
                 body = _strip_fetch_header(self._clean_output(result_text))
+                # D5: a TERMINAL failure has no HTTP status to lead with, and its
+                # body IS the tool's diagnosis — the same sentence the settled row
+                # already shows. Promoting it to the card's danger row is the same
+                # move `_strip_fetch_header` makes for the response family (the
+                # lead becomes a structured row, the body keeps the rest), and it
+                # adds no wording: the sentence is the tool's own.
+                terminal = isinstance(fetch_details.get("failure_kind"), str)
+                # A failure with NO response — a stall or a transport throw —
+                # carries neither ``render_method`` nor ``final_url``, so this is
+                # the exact test for "the body below is OUR diagnosis, not the
+                # origin's bytes" (``service.py`` only builds an explanation when
+                # no response arrived). It is deliberately NOT ``terminal``
+                # alone: that is true for every classified non-2xx too, and a
+                # 404/500/429's body is the ORIGIN's own response, kept verbatim
+                # on purpose — re-flowing it would change what the card claims
+                # the origin sent (design review round 2, D6, which caught this
+                # flag re-wrapping a 404/500 body round 1 had proved
+                # byte-identical).
+                terminal_no_response = terminal and "render_method" not in fetch_details
+                if terminal_no_response and body:
+                    if not fetch_header[0].startswith("⚠ "):
+                        fetch_header = [f"⚠ {body[0]}"] + fetch_header
+                        body = body[1:]
+                    while body and not body[0].strip():
+                        body.pop(0)
+                # D3: only a body that is OUR prose may be re-wrapped at paint
+                # time — the replaced challenge statement, or a no-response
+                # failure's diagnosis. Origin content is painted as it arrived.
+                self._fetch_statement = (
+                    fetch_details.get("failure_kind") == "blocked" or terminal_no_response
+                )
+                # D13: ``_header_line`` emits the §3.4 interval sentence ONLY for a
+                # failure whose ``retry_after_s`` it parsed, so this key is the
+                # exact precondition for the body painter's per-line carve-out —
+                # no card that reported no interval can reflow a body line.
+                self._fetch_reported_retry_after = bool(fetch_details.get("retry_after_s"))
                 fetch_output = fetch_header + [""] + body
         # Remembered so the body painter and the rest-visibility rule can select
         # the fetch presentation without re-inspecting details every repaint.
@@ -1767,17 +2382,23 @@ class ToolCard(ExpandableActionBlock):
     def _flash_notice(self) -> None:
         """Put the inert-row answer in the hint slot for a couple of seconds.
 
-        A call still being DICTATED has no output yet but will; a settled one
-        never will. Saying which is the difference between "wait" and "there is
-        nothing here", and the row is the only place the user is looking.
+        A call still being DICTATED has no output yet but will; a call QUEUED
+        behind a sibling has none yet either, for a different reason; a settled
+        one never will. Saying which is the difference between "wait" and "there
+        is nothing here", and the row is the only place the user is looking.
 
-        ``composing`` is now the ONLY live state that reaches here. A running
-        card expands — onto its command and its streamed output — so
+        ``composing`` and ``queued`` are the only live states that reach here. A
+        running card expands — onto its command and its streamed output — so
         ``activate`` toggles it rather than falling through to this, and the
-        `⟨still running⟩` answer belongs to the row that genuinely has nothing
+        ``⟨still running⟩`` answer belongs to the row that genuinely has nothing
         behind the affordance yet.
         """
-        self._notice = RUNNING_NOTICE if self._state == "composing" else NO_OUTPUT_NOTICE
+        if self._state == "composing":
+            self._notice = RUNNING_NOTICE
+        elif self._state == "queued":
+            self._notice = QUEUED_NOTICE
+        else:
+            self._notice = NO_OUTPUT_NOTICE
         self._refresh_row()
         if self._notice_timer is not None:
             self._notice_timer.stop()
@@ -1803,7 +2424,7 @@ class ToolCard(ExpandableActionBlock):
 
     # -- resize (TUI-017: rebuild the row when the width changes) -----------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the row at the new width.
+        """Re-fit the row at the new width — or at a new shared column.
 
         Guarded on the WIDTH, because the card's content is a pure function of
         its state and the width it is folded to — a resize that only changed
@@ -1812,9 +2433,16 @@ class ToolCard(ExpandableActionBlock):
         raises a Resize that landed straight back here. Measured on a session
         replay, this handler was a third of the ``_refresh_row`` calls: 645
         builds for 215 cards, ~366 ms.
+
+        The other term is the ledger's shared name column, which the same claim
+        needs and which the width cannot stand in for: a card authored before it
+        was appended builds parentless, so it bakes the floor, and a fold hint
+        promising the width it will be given made the width term report
+        "unchanged" when it landed. See
+        :meth:`ExpandableActionBlock._layout_moved`.
         """
         size = getattr(event, "size", None)
-        if size is not None and size.width == self._built_width:
+        if size is not None and not self._layout_moved(size.width):
             return
         self._refresh_row()
 
@@ -1841,8 +2469,8 @@ class ToolCard(ExpandableActionBlock):
         duration are the receipt, and a user who selects a settled row wants it.
 
         Below the summary, every row is written by
-        ``_append_input_body``/``_append_output_body``/``_append_diff_body``/
-        ``_append_live_body``, each of which opens with
+        ``_append_input_body``/``_append_output_body``/``_append_search_body``/
+        ``_append_diff_body``/``_append_live_body``, each of which opens with
         ``"\\n" + " " * OUTPUT_INDENT``. That indent is the card's own layout,
         and it is the thing standing between a copied stderr and a paste that
         goes straight into a bug report — or, for a diff, between ``+ added``
@@ -1875,25 +2503,33 @@ class ToolCard(ExpandableActionBlock):
         return row_indent(self._built_width)
 
     # -- rendering ----------------------------------------------------------
-    def refresh_row(self) -> None:
+    def refresh_row(self, width: int | None = None) -> None:
         """Repaint at the current width — the ledger's shared column moved.
 
         Public because the transcript owns the name column and has to be able to
         say "re-render, the spine changed"; everything else about the row is the
-        card's own business.
+        card's own business. ``width`` is the LANE the transcript published when
+        its own width changed (:meth:`TranscriptView._refit_ledger_lane`) — the
+        container's number, which outranks re-deriving one here because this
+        row's own `Resize` is the notification that cannot be relied on.
         """
-        self._refresh_row()
+        self._refresh_row(width)
 
-    def _refresh_row(self) -> None:
+    def _refresh_row(self, width: int | None = None) -> None:
         """Rebuild the card at its OWN width (D3).
 
-        Width resolution walks from the most authoritative source down: the
-        widget's laid-out size, its container, the app console, and only
-        then :data:`FALLBACK_WIDTH`. Reaching the last step means there is
-        no app to paint into yet, so the content is measured but not
-        applied: ``_row_count`` — which the spacing and scroll accounting
-        both read — stays truthful, and ``on_resize`` paints the real thing
-        the moment there is a real width.
+        Width resolution walks from the most authoritative source down: a lane
+        published by the container, the widget's laid-out size, its container,
+        the app console, and only then :data:`FALLBACK_WIDTH`. Reaching the
+        last step means there is no app to paint into yet, so the content is
+        measured but not applied: ``_row_count`` — which the spacing and scroll
+        accounting both read — stays truthful, and ``on_resize`` paints the real
+        thing the moment there is a real width.
+
+        A published lane that the row is ALREADY built at is a no-op: the
+        container broadcasts to every mounted row on a lane change, and the
+        rows that re-fitted themselves off their own `Resize` in the same pass
+        have nothing left to redo.
 
         Finalization is bypassed deliberately: a resize or an expand must be
         able to re-fit a settled card, and the content it produces is a pure
@@ -1908,6 +2544,8 @@ class ToolCard(ExpandableActionBlock):
         pointer crossing a card's edge, each reflowed the entire screen to
         repaint one row.
         """
+        if width is not None and width > 0 and width == self._built_width:
+            return
         # `fold_width(0)` walks size → container → the parent transcript's
         # scrollable content region, and returns 0 only when none of the three
         # can answer. That third rung is new and is what stops a card built
@@ -1917,7 +2555,7 @@ class ToolCard(ExpandableActionBlock):
         # re-fitted a frame later. The console rung is kept as the last resort
         # BEFORE the fallback because reaching it is also how this method
         # detects that there is no app to paint into at all.
-        width = self.fold_width(0)
+        width = self.fit_width(width)
         detached = False
         if width <= 0:
             try:
@@ -1930,6 +2568,11 @@ class ToolCard(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
+        # The shared column is the OTHER input this content was built from, and
+        # the one a parentless build cannot read, so it bakes the floor. Recorded
+        # beside the width because `ExpandableActionBlock._layout_moved` reads the
+        # pair to decide whether this row still fits the ledger it landed in.
+        self._built_name_col = self._name_col(row_body_width(width))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -2008,12 +2651,17 @@ class ToolCard(ExpandableActionBlock):
         # rewriting itself around a moving middle.
         #
         # Both trailing clauses are dropped for a REPLAYED live card, which
-        # knows neither. It has no start time (see :attr:`_started`), and
-        # nothing streams into it — the surface rebuilding it never calls
-        # `set_partial_detail` — so `no output yet` there is not a caveat that
-        # will lift, it is a permanent claim about a child's tool that this
-        # card has no way to make. `⋯ running` alone is the whole of what it
-        # honestly knows.
+        # knows neither. Its start time is absent unless the session supplied
+        # the call's own epoch (see :attr:`_started`), and nothing streams into
+        # it — the surface rebuilding it never calls `set_partial_detail` — so
+        # `no output yet` there is not a caveat that will lift, it is a
+        # permanent claim about a child's tool that this card has no way to
+        # make. `⋯ running` alone is the whole of what it honestly knows.
+        #
+        # The two clauses are dropped together even though the start can now be
+        # known: `no output yet` is what genuinely cannot be claimed here, and
+        # the elapsed half is painted by the status column instead, next to the
+        # outcome glyph it will settle into.
         header = LIVE_HEADER_RUNNING
         elapsed = self._elapsed()
         if elapsed is not None:
@@ -2088,36 +2736,200 @@ class ToolCard(ExpandableActionBlock):
                 marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
                 row.append(truncate_cells(marker, line_width), style=dim)
 
+    def _failure_reason(self) -> str:
+        """The body's LEADING line, when the collapsed row's status leads with it too.
+
+        That is the whole invariant, and it is about REACHABILITY rather than
+        authorship. The row's status cap is a fraction of the row the status
+        SHARES with the glyph and the clock (``_outcome_runs``), so on the
+        canonical 80-column frame a failure whose remedy fits can still lose its
+        cause entirely, and the expansion is the only state that can carry the
+        line whole. On the bash surfaces (``app.py``'s ``mark_failed(_first_line(
+        result.text), result.text, …)``) that line is the TOOL's own first output
+        line rather than a sentence this card wrote — which is why the guard is a
+        text comparison and why the wrap it licenses is bounded by
+        :data:`REASON_MAX_CELLS`/:data:`REASON_MAX_ROWS` instead of by who
+        composed the text.
+
+        Only the head line qualifies, because the expansion is documented as the
+        tool's full OUTPUT (module docstring): when ``mark_failed`` is given a
+        ``result_text`` whose first line is not the start of the error, that line
+        is captured output and keeps the crop — the expansion must not grow a
+        synthetic row restating what the collapsed row already carries. Empty
+        for every state but ``error``, and for the fetch card, whose diagnosis
+        is PROMOTED into its own header row by ``_absorb_result`` (D5) and
+        already reflows there (D8).
+
+        The comparison is made like-for-like, which is subtler than it looks:
+        ``mark_failed``/``restore`` store the error WHITESPACE-COLLAPSED
+        (``" ".join(error.split())``) while ``_output`` keeps the caller's
+        spacing (``_clean_output`` only expands tabs and rstrips), so testing the
+        raw line against ``_error`` refused every reason whose head line carried
+        a run of whitespace or a tab, and the wrap silently no-opped for that
+        whole input class.
+
+        A MULTI-LINE ``str(error)`` is claimed too, deliberately. The collapsed
+        sentence is then the head line plus everything after it, so equality can
+        never match — but the head line still LEADS it (``reason.startswith(
+        head + " ")``) and it is still the line the status cap truncates. Only
+        the head line is returned: the rest of the error stays where it belongs,
+        in ``_captured_output``, cropped like every other captured line, so the
+        sentence is never painted twice.
+        """
+        if self._state != "error" or self._is_fetch_card or not self._output:
+            return ""
+        head = self._output[0]
+        collapsed = " ".join(head.split())
+        reason = self._error.strip()
+        if not collapsed or not reason:
+            return ""
+        if collapsed != reason and not reason.startswith(f"{collapsed} "):
+            return ""
+        return head
+
+    def _captured_output(self) -> list[str]:
+        """``_output`` minus the leading line :meth:`_failure_reason` just claimed.
+
+        ``mark_failed`` defaults ``result_text`` to the error itself, so the
+        common failure arrives as one line that is BOTH the claimed line and the
+        first output row; painting it in both places would print the sentence
+        twice. A MULTI-line error claims only its head line, so the rest of it
+        stays here and is cropped like every other captured line.
+        """
+        return self._output[1:] if self._failure_reason() else self._output
+
+    def _append_reason_body(
+        self, row: Text, line_width: int, indent: str, dim: Style, ink: Style
+    ) -> None:
+        """Paint the failure reason WRAPPED, every continuation keeping the indent.
+
+        Wrapped rather than cropped because the collapsed row's status cap cannot
+        carry the line in ANY state, and the leading line here is the one that cap
+        truncates (:meth:`_failure_reason`). Captured output keeps the
+        one-line-per-row crop: wrapping it would let a single 397-cell stdout line
+        spend six rows at the 80-column frame's 72-cell measure, so a 40-line
+        expansion would reflow the transcript from 40 rows to 240 — +200 rows on
+        one tool call.
+
+        The INDENT on every row is load-bearing, not cosmetic: a continuation
+        landing at column 0 reads as a new transcript block rather than the rest
+        of this sentence — the defect ``session_panel._Body.note`` was fixed for.
+        ``wrap_cells`` (the cell-aware house wrapper, the same one the argument
+        block uses) rather than ``textwrap`` so a CJK reason wraps by the width
+        it is actually drawn at.
+
+        After the indent every row of the block carries a two-cell LEAD —
+        :data:`ICON_ERROR` on the first, two blanks on the continuations. (The
+        glyph needs no state lookup: :meth:`_failure_reason` answers "" for
+        every state but ``error``, so a non-error card cannot reach this painter
+        and this is the state's own glyph.) The lead is the cue that tells these
+        rows from the tool's captured bytes on the
+        same card (design round 1, D1: same fill, same ``OUTPUT_INDENT``, nothing
+        separating one paragraph of prose from a log dump), and it is a GLYPH
+        because a glyph is this card's monochrome-safe state vocabulary — see
+        :data:`ICON_ERROR`'s own note. An ink step cannot do the job here: the
+        plain body paints its reason in ``tool.output.error``, which IS the
+        captured rows' ink on an error card (both resolve to ``tint-danger``),
+        and an ink step would carry nothing on a colourless terminal anyway. The
+        glyph echoes the collapsed row's own, and the fetch card already opens
+        its own prose the same way (the promoted ``⚠ `` lead,
+        ``_append_fetch_body``). Drawn AFTER the indent, so the row still opens
+        with ``OUTPUT_INDENT``; the measured text budget is unchanged
+        (``line_width``), so the block grows two cells further right rather than
+        re-wrapping — a full-measure block row is exactly the card's width.
+
+        The block is bounded by both :data:`REASON_MAX_CELLS` (sentence content)
+        and :data:`REASON_MAX_ROWS` (the sentence's rows), and a tail that does
+        not fit is announced on one ADDITIONAL dim ``… N more lines`` marker row —
+        the same vocabulary the captured crop and the live body use, so a reader
+        knows what was dropped instead of reading the head of a sentence as the
+        whole of it (design round 1, D2; QA round 1, Q1). The marker sits outside
+        both budgets: it is the report ON the cut, not sentence content.
+        """
+        reason = self._failure_reason()
+        if not reason:
+            return
+        lead = ICON_ERROR + " "
+        blanks = " " * cell_len(lead)
+        lead_ink = bindings.style("tool.status.error_glyph")
+        wrapped = wrap_cells(reason, line_width)
+        # Greedy fit inside both budgets: the cell budget bounds the CONTENT at
+        # every width and the row budget bounds the SHAPE on narrow frames, where
+        # a cell budget alone would turn 432 cells into 54 rows at 16 columns.
+        # The first row is exempt from the cell budget — at least one row is
+        # always painted, because a reason the reader cannot see at all is the
+        # bug this exists to fix.
+        shown: list[str] = []
+        spent = 0
+        for line in wrapped:
+            cells = cell_len(line)
+            if len(shown) >= REASON_MAX_ROWS or (shown and spent + cells > REASON_MAX_CELLS):
+                break
+            shown.append(line)
+            spent += cells
+        for index, line in enumerate(shown):
+            row.append("\n" + indent, style=dim)
+            row.append(lead if index == 0 else blanks, style=lead_ink if index == 0 else dim)
+            row.append(line, style=ink)
+        hidden = len(wrapped) - len(shown)
+        if hidden > 0:
+            marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
+            row.append("\n" + indent, style=dim)
+            row.append(blanks, style=dim)
+            row.append(truncate_cells(marker, line_width), style=dim)
+
     def _append_output_body(self, row: Text, width: int) -> None:
         """The plain-result expansion (bash/read/etc.): one line per row.
 
         The output block reuses the card's own inner padding budget and
         truncates per line: one output line is one row, so the expanded
-        height is exactly what the marker promises and never reflows.
+        height is exactly what the marker promises and never reflows — the
+        crop is what keeps a 40-line dump inside 40 rows.
+
+        The one line exempted from that crop is the leading line the collapsed
+        row also carries, which wraps (:meth:`_append_reason_body`): the status
+        cap provably truncates it at every width, and on this surface that line
+        is frequently the tool's OWN first output line rather than a sentence the
+        card wrote (``app.py`` settles a failed call with
+        ``mark_failed(_first_line(result.text), result.text, …)``). What scopes
+        the exemption is the guard, not the provenance: the line is claimed only
+        when the collapsed status leads with it, and the wrap it licenses is
+        bounded by :data:`REASON_MAX_CELLS`/:data:`REASON_MAX_ROWS`.
         """
         dim = bindings.style("tool.output.dim")
-        body = bindings.style("tool.output.error") if self._state == "error" else dim
+        ink = bindings.style("tool.output.error") if self._state == "error" else dim
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        shown = self._output[:EXPAND_MAX_LINES]
+        self._append_reason_body(row, line_width, indent, dim, ink)
+        captured = self._captured_output()
+        shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
             row.append("\n" + indent, style=dim)
-            row.append(truncate_cells(line, line_width), style=body)
-        hidden = len(self._output) - len(shown)
+            row.append(truncate_cells(line, line_width), style=ink)
+        hidden = len(captured) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
     def _append_search_body(self, row: Text, width: int) -> None:
-        """Search expansion hierarchy: titles lead, URLs signal, snippets recede."""
+        """Search expansion hierarchy: titles lead, URLs signal, snippets recede.
+
+        A FAILED search (no sources, so ``_absorb_result`` falls back to the
+        model-facing text) arrives on its leading line when that line is also
+        what the collapsed row's status leads with, and wraps ahead of the result
+        rows exactly as the plain body does — the snippet ink it already fell to
+        is kept, so this changes the wrap and not the treatment.
+        """
         fg = bindings.style("tool.search.title")
         signal = bindings.style("tool.search.url")
         muted = bindings.style("tool.search.snippet")
         dim = bindings.style("tool.search.dim")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        shown = self._output[:EXPAND_MAX_LINES]
+        self._append_reason_body(row, line_width, indent, dim, muted)
+        captured = self._captured_output()
+        shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
             stripped = line.strip()
             if stripped.startswith(("http://", "https://")):
@@ -2131,7 +2943,7 @@ class ToolCard(ExpandableActionBlock):
                 ink = muted
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
-        hidden = len(self._output) - len(shown)
+        hidden = len(captured) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more search line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
@@ -2144,6 +2956,29 @@ class ToolCard(ExpandableActionBlock):
         so the rendered preview beneath them \u2014 the actual page content \u2014 reads at
         normal contrast, the same hierarchy the search card uses to keep its
         structural rows from competing with the result.
+
+        Three things this painter now owes the design review round 1:
+
+        - **A statement body is fitted to the card's own width** (D3). It used to
+          arrive pre-wrapped to 76 cells, which is simultaneously too wide for an
+          80-column card (clipped mid-word) and far too narrow for a 150-column
+          one (the block stopped half-way across). A constant cannot be right at
+          both ends; ``line_width`` is.
+        - **The statement's two roles are separated** (D4). ``Next step:`` is the
+          one actionable sentence and rides ``signal``; the opaque
+          ``Origin reference:`` is quotable metadata and recedes to ``dim``. The
+          body itself stays ``snippet`` — ``dim`` measures 3.32:1 on the light
+          tinted panel, below the floor for prose.
+        - **The danger row is recognised structurally in the header region**, so a
+          failure with no HTTP status (a stall, a transport error) can lead with
+          its own classified sentence without a page line further down that
+          happens to open with ⚠ being promoted to danger ink. A header ⚠ row
+          that is a SENTENCE — the classified ``⚠ HTTP …`` one and the promoted
+          lead — reflows to the measure rather than clipping mid-sentence (D8):
+          a headline is not a fixed-width ledger cell.
+        - **The attempt summary is ``signal``, not the row's ``dim``** (D9). It
+          is the actionable escalation, not metadata about the page, so it obeys
+          the same one rule D4 set for ``Next step:``.
         """
         signal = bindings.style("tool.fetch.signal")
         muted = bindings.style("tool.fetch.snippet")
@@ -2152,29 +2987,110 @@ class ToolCard(ExpandableActionBlock):
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         shown = self._output[:EXPAND_MAX_LINES]
-        for line in shown:
+        # ``_absorb_result`` joins the structured rows to the body with one blank
+        # separator, so everything before it is header and everything after is
+        # content. That is a property of how the card BUILDS its rows, not of
+        # what they happen to say.
+        header_end = next(
+            (index for index, line in enumerate(shown) if not line.strip()), len(shown)
+        )
+        for index, line in enumerate(shown):
             stripped = line.strip()
+            is_header = index < header_end
+            # Wrapping is allowed for OUR prose only: the statement body, and the
+            # promoted terminal-failure lead. Other structured rows clip like
+            # every other fixed-width row; the promoted lead is a sentence that
+            # carries the attempt count, and clipping it would hide the count the
+            # body no longer repeats (D5).
+            wrap = not is_header
+            # D13: set by the §3.4 interval-note branch below. A DEFAULT of False
+            # keeps every origin byte on the clip rule unless a branch here has
+            # positively identified the line as ours.
+            our_note = False
             if stripped.startswith("⚠ HTTP"):
-                # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1).
+                # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1). D8: this
+                # classified row IS the card's headline now, so it reflows like the
+                # promoted lead below rather than clipping mid-sentence. The
+                # 58-cell generic row it replaced fitted whole at 70 columns; the
+                # 74-cell classified one does not. ``wrap = wrap or is_header``
+                # keeps the old clip for an origin body line that merely opens with
+                # ``⚠ HTTP`` (a body is never reflowed — ``_fetch_statement``
+                # already gates that) while letting the header row wrap.
                 ink = danger
+                wrap = wrap or is_header
+            elif is_header and stripped.startswith("⚠ "):
+                ink = danger
+                wrap = True
             elif stripped.startswith("Fetched:"):
                 # See `bindings.BY_ELEMENT["tool.fetch.signal"].note` (D3).
                 self._append_fetched_row(row, line, line_width, indent, dim, signal)
                 continue
             elif stripped.startswith("Rendered:"):
+                self._append_rendered_row(row, line, line_width, indent, dim, signal)
+                continue
+            elif stripped.startswith("Next step:"):
+                ink = signal
+            elif stripped.startswith("Origin reference:"):
                 ink = dim
             elif stripped.startswith("sparse/JS-gated"):
                 # See `bindings.BY_ELEMENT["tool.fetch.signal"].note`.
                 ink = signal
+            elif self._fetch_reported_retry_after and stripped.startswith(RETRY_AFTER_NOTE_LEAD):
+                # D13: §3.4's interval sentence is OUR prose, but on a
+                # response-bearing failure (a 503 or 429 carrying the header) it
+                # rides the BODY beside the origin's own bytes, where
+                # ``_fetch_statement`` is deliberately false (D6). Painted with
+                # the body's clip rule it lost exactly the clause it exists for
+                # at 80 columns — ``…the wait was not spen…`` — even though the
+                # header it reports on had already been read. It keeps the body's
+                # ink on purpose: the terminal shape of the same sentence (a 429
+                # with no response at all) rides the statement path, which paints
+                # ``muted``, so the two shapes of one sentence must not disagree
+                # about ink. Only the wrap permission is granted, and only when the
+                # result itself reported a parsed interval AND the line matches the
+                # lead ``failure.py`` exports — recognised BY VALUE, so no origin
+                # byte is reflowed by a blanket "this body is ours" flag.
+                our_note = True
+                ink = muted
             else:
                 ink = muted
-            row.append("\n" + indent, style=dim)
-            row.append(truncate_cells(line, line_width), style=ink)
+            for segment in self._fetch_segments(
+                line, line_width, wrap=wrap, prose=self._fetch_statement or our_note
+            ):
+                row.append("\n" + indent, style=dim)
+                row.append(truncate_cells(segment, line_width), style=ink)
         hidden = len(self._output) - len(shown)
         if hidden > 0:
             marker = f"… {hidden} more line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
+
+    def _fetch_segments(self, line: str, line_width: int, *, wrap: bool, prose: bool) -> list[str]:
+        """The painted row(s) for one body line: the line itself, or its reflow.
+
+        Two facts have to hold, and the caller ANDs them: ``wrap`` (the line is in
+        the body, not a fixed-width structured row) and ``prose`` (the text is
+        OURS). Wrapping is a claim about the text, so a code sample, a log excerpt
+        or a table silently re-flowed would change what the card says the origin
+        sent — that is why ``prose`` is false for every origin byte. It is
+        ``_fetch_statement`` for the statement body, with one carve-out: the §3.4
+        interval sentence, recognised by its own lead and only on a result that
+        reported a parsed interval (D13), which is ours but rides the body of a
+        response-bearing failure where ``_fetch_statement`` is deliberately false.
+        Long tokens are never broken — a URL stays one token
+        and is clipped by ``truncate_cells`` exactly as it was before — and an
+        empty line stays an empty line rather than becoming no row at all.
+        """
+        if not wrap or not prose or not line.strip():
+            return [line]
+        wrapped = textwrap.wrap(
+            line,
+            width=line_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+            drop_whitespace=True,
+        )
+        return wrapped or [line]
 
     def _append_fetched_row(
         self,
@@ -2205,6 +3121,38 @@ class ToolCard(ExpandableActionBlock):
             if not painted:
                 break
             ink = signal if token.startswith(("http://", "https://")) else dim
+            row.append(painted, style=ink)
+            remaining -= cell_len(painted)
+
+    def _append_rendered_row(
+        self,
+        row: Text,
+        line: str,
+        line_width: int,
+        indent: str,
+        dim: Style,
+        signal: Style,
+    ) -> None:
+        """Paint the ``Rendered:`` row with its attempt summary in ``signal`` (D9).
+
+        The row's method/line/byte fields are metadata about the page and stay
+        ``dim``. The attempt summary is not that: it is the actionable escalation
+        — "we changed identity and that is why this succeeded" — and D1 exists to
+        make that findable, so it wears ``signal`` (4.32:1 light / 6.52:1 dark)
+        rather than the row's pre-existing ``dim`` (3.32:1 light, below the body
+        floor). One rule with D4: the sentence a reader may act on is ``signal``,
+        the metadata recedes. Match is by value (``_split_attempt_clause``), so
+        the clause is found wherever D7 places it in the row.
+        """
+        row.append("\n" + indent, style=dim)
+        head, clause, tail = _split_attempt_clause(line)
+        remaining = line_width
+        for chunk, ink in ((head, dim), (clause, signal), (tail, dim)):
+            if not chunk or remaining <= 0:
+                continue
+            painted = truncate_cells(chunk, remaining)
+            if not painted:
+                continue
             row.append(painted, style=ink)
             remaining -= cell_len(painted)
 
@@ -2275,8 +3223,12 @@ class ToolCard(ExpandableActionBlock):
         """The single summary row — the ONE-LINE guarantee lives here."""
         dim = bindings.style("tool.row.dim")
         # See `bindings.BY_ELEMENT["tool.row.name_running"].note` for the
-        # two-step fade this implements.
-        running = self._state in ("running", "composing")
+        # two-step fade this implements. `queued` is live but not executing, and
+        # it keeps the live fade deliberately: its row is still waiting for the
+        # work the call names, and dropping the green the moment dictation ended
+        # would read as the row having stopped — which is the impression the
+        # whole stuck-compose report is about.
+        running = self._state in ("running", "composing", "queued")
         # Liveness outranks identity: a live row keeps the fade's green, and
         # the category hue applies only once the row has settled. Two signals
         # on one span would mean the ledger said "what kind" and "is it live"
@@ -2298,7 +3250,10 @@ class ToolCard(ExpandableActionBlock):
         # (`_row_indent`), against the width being BUILT rather than the last
         # one built, because this runs before `_built_width` is updated.
         indent = row_indent(width)
-        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
+        # The content box this row is built in — the SAME derivation
+        # `_refresh_row` records the name column against, so the guard's question
+        # and the builder's answer cannot be asked of two different widths (R2).
+        width = row_body_width(width)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
@@ -2404,7 +3359,12 @@ class ToolCard(ExpandableActionBlock):
                 row_chip = ""
         else:
             row_chip = ""
-        composed = self._compose_facts and self._state in ("composing", "interrupted")
+        composed = self._compose_facts and self._state in (
+            "composing",
+            "queued",
+            "interrupted",
+            "error",
+        )
         if composed:
             # The label is shed WHOLE before the facts are touched, the same
             # ladder this file uses for the key hints and the approval clause.
@@ -2482,11 +3442,14 @@ class ToolCard(ExpandableActionBlock):
         A call still being DICTATED must not: the name is model-controlled and
         arrives in fragments, so one announced 200-character name took the column
         to its cap, shifted every settled receipt beside it, and kept the width
-        after the row settled as `never sent`. The same argument the column already
-        makes for a pending approval — a name earns the column when the call it
-        names has actually started.
+        after the row settled as `never sent`. ``queued`` inherits that refusal
+        for the same reason it inherits the state: the call it names has not
+        started, so the name has not been earned yet — and the transition that
+        does earn it (`begin_running`) already invalidates the column for a row
+        arriving from either state. The same argument the column already makes
+        for a pending approval.
         """
-        return self._state != "composing" and self._summary[:10] != "never sent"
+        return self._state not in ("composing", "queued") and self._summary[:10] != "never sent"
 
     def _ledger_name_col(self) -> int:
         """The shared column's current width, or the fixed floor off-ledger."""
@@ -2533,6 +3496,17 @@ class ToolCard(ExpandableActionBlock):
             # outcome glyph that falsely says the tool completed.
             text = "waiting" if not cap or cap >= len("waiting") else ""
             return [(text, bindings.style("tool.status.running_duration"))]
+        if self._state == "queued":
+            # Announced, dictated, not started. The state word is the whole
+            # content: there is no duration to show (nothing ran) and no clock
+            # to keep (the dictation ended). It sits in the status column rather
+            # than the summary because the column is where the ledger says what
+            # a row is DOING, which is exactly the question this row could not
+            # answer before (see `mark_queued`). Shed whole below its width,
+            # never truncated into a meaningless fragment — and never replaced
+            # by an outcome glyph, which would claim the call completed.
+            text = QUEUED_LABEL if not cap or cap >= len(QUEUED_LABEL) else ""
+            return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "composing":
             # Nothing has RUN, so there is no execution time to report. The
             # dictation clock rides in the summary instead (`_render_composing`)
@@ -2553,13 +3527,17 @@ class ToolCard(ExpandableActionBlock):
             # holds and the row does not jump on settling.
             #
             dim = bindings.style("tool.status.running_duration")
-            # A REPLAYED live row has no CLOCK. `subagent_view` rebuilds a
-            # child's trajectory into cards and leaves the outcome-less ones
-            # running, and `_mark_pending_tool_rows` repaints a row the owner is
-            # still executing; in both, `_started` is when the PAGE painted the
-            # row — so a clock here counted up from zero and reset to zero every
-            # time an earlier entry changed. A clock started from the wrong zero
-            # is worse than no clock.
+            # A REPLAYED live row has a clock only when its call's start is
+            # KNOWN. `subagent_view` rebuilds a child's trajectory into cards
+            # and leaves the outcome-less ones running, and
+            # `_mark_pending_tool_rows` repaints a row the owner is still
+            # executing; in both, the start is knowable only if somebody
+            # supplied it — the session's folded epoch for a call a live
+            # producer stamped (see `restore`), nothing at all for a child row
+            # or a legacy producer. Where nothing was supplied, `_started` would
+            # be when the PAGE painted the row, so a clock here counted up from
+            # zero and reset to zero every time an earlier entry changed. A
+            # clock started from the wrong zero is worse than no clock.
             #
             # "No clock" is NOT "no state", though, and returning `[]` made this
             # the only row in the ladder with an empty status column — silent in
@@ -2686,7 +3664,7 @@ class ToolCard(ExpandableActionBlock):
         if self._state == "interrupted":
             # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
             # keeps `dim`, not a hue: see its note.
-            glyph, reason = ICON_INTERRUPTED, "interrupted"
+            glyph, reason = ICON_INTERRUPTED, self._interrupt_label
             tint = bindings.style("tool.status.interrupted")
             abbreviates = False
         else:

@@ -1,0 +1,985 @@
+"""The suite-wide broker sweep: what it must reap, and what it must never touch.
+
+These are not unit tests of a fixture but of the behaviour the fixture hides.
+The sweep in ``tests/conftest.py`` is the only thing standing between a test run
+and a key-holding daemon left alive on the operator's machine, and it silently
+stopped finding its candidates when it began running after pytest had already
+reclaimed ``tmp_path`` — measured: one run of ``tests/unit/secrets/test_cli.py``
+left 28 live brokers, one per store-touching test, each holding a master key in
+memory.
+
+They start REAL brokers, because what broke was the path arithmetic and not a
+mock's return value: `socket_path` is a pure function of the config dir NAME, so
+the sweep can still reach a broker whose directory pytest has deleted, and only
+a real daemon proves that.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import suppress
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from local_operator import procname
+from local_operator.secrets import client
+from local_operator.secrets.keys import secrets_dir
+from local_operator.secrets.protocol import _runtime_fallback_dir, socket_path
+from local_operator.session.runtime.registry import pid_alive
+from tests.conftest import (
+    _SWEEP_ROOT_KEY,
+    _secret_config_dirs,
+    _stop_brokers_in,
+    _sweep_session_leftovers,
+)
+
+
+def _start(base: Path) -> int:
+    """Start a real broker for ``base`` and return its pid."""
+    assert client.ensure_broker(base), "the broker never came up"
+    status = client.broker_status(base) or {}
+    pid = status.get("pid")
+    assert isinstance(pid, int), status
+    return pid
+
+
+def _kill(base: Path) -> None:
+    """Stop a broker this test started, so the test never leaks one itself.
+
+    Deliberately the client's own status/pid route rather than `_stop_brokers_in`,
+    except where a test is *about* the sweep: a test that used the code under
+    test to clean up could not tell a broken sweep from a leaked broker.
+    """
+    status = client.broker_status(base) or {}
+    pid = status.get("pid")
+    if isinstance(pid, int):
+        with suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+
+
+def _uses_the_fallback_socket(base: Path) -> bool:
+    """Which layout `socket_path` chose for ``base`` — asked, not assumed.
+
+    A deep config dir cannot fit its socket under ``sun_path`` (104 bytes) and
+    gets the ``$TMPDIR/lop-secrets-<uid>-<digest>`` runtime dir; a shallow one
+    keeps the socket INSIDE ``<base>/secrets``. Which one a test sees is a
+    property of the machine's tmp depth — ``TMPDIR=/tmp`` on Linux CI against the
+    long ``/var/folders`` path here — so a test asserting either layout is
+    asserting the box it runs on. Ask the code what it did, and assert that.
+    """
+    return socket_path(base).parent == _runtime_fallback_dir(secrets_dir(base))
+
+
+def _deep_config_dir(tmp_path: Path) -> Path:
+    """A config dir whose socket MUST take the ``$TMPDIR`` fallback layout.
+
+    For the tests whose SUBJECT is that layout: constructing it makes them valid
+    on every runner instead of only where the tmp depth happens to be enough,
+    which is what made an earlier version of this file pass locally and fail on
+    CI. The assert is the construction's own guard — without it, a later change
+    to the nesting could quietly hand the test the other layout instead.
+    """
+    deep = tmp_path / ("d" * 60) / ("e" * 60) / "config"
+    deep.mkdir(parents=True)
+    assert _uses_the_fallback_socket(
+        deep
+    ), "the construction failed: this config dir took the in-directory layout"
+    return deep
+
+
+def _plant_socket(base: Path) -> Path:
+    """Put a plain file where ``base``'s broker socket would be.
+
+    For the tests whose subject is the net's CHEAP PRE-CHECK rather than a real
+    daemon: the guard is `socket_path(...).exists()`, and which layout
+    `socket_path` picks is a property of the machine's tmp depth (see
+    `_uses_the_fallback_socket`), so the file is planted at whatever
+    `socket_path` returns rather than at a path these tests guess. A plain file is
+    enough for the guard, and it keeps the test from depending on a daemon being
+    up.
+    """
+    path = socket_path(base)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
+
+
+def _cleanup_planted_socket(base: Path) -> None:
+    """Remove what `_plant_socket` created, in whichever layout it used.
+
+    The fallback runtime directory is derived from the config dir's NAME and is
+    the sweep's to remove; taking it here as well is what stops a mis-targeted
+    plant from leaving a runtime dir behind on the developer's machine.
+    """
+    with suppress(Exception):
+        socket_path(base).unlink(missing_ok=True)
+        shutil.rmtree(_runtime_fallback_dir(secrets_dir(base)), ignore_errors=True)
+
+
+def _wait_gone(pid: int, timeout: float = 5.0) -> bool:
+    """Wait for a signalled daemon to stop being a process at all.
+
+    `_stop_brokers_in` waits for the daemon to stop ANSWERING, which happens as
+    it closes its listener — a step before it exits. The zombie probe is what
+    tells those apart: signal-0 alone reports a zombie as alive (the trap
+    `registry.pid_alive` documents at length), and a daemon this process started
+    stays a zombie until this process reaps it. Asserting the kill without it
+    would flap on the scheduling of an exit already under way.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid, check_zombie=True):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _kill_pid(pid: int) -> None:
+    with suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
+
+
+def test_the_sweep_reaps_a_broker_under_a_candidate(config_root: Path) -> None:
+    """The happy path, against a real daemon and a real socket.
+
+    ``config_root`` is ``tmp_path/config`` with HOME redirected — the exact shape
+    ``test_cli.py`` uses — so this is the configuration whose broker the sweep
+    used to leave behind.
+    """
+    _start(config_root)
+    try:
+        assert client.is_running(config_root), "the broker is not reachable before the sweep"
+        _stop_brokers_in([config_root])
+        assert not client.is_running(config_root), "the sweep left the broker running"
+        # What the sweep owes on the FILESYSTEM depends on the layout it was
+        # handed: with the socket in the runtime dir, that dir is the sweep's to
+        # remove; with the socket inside the config dir, the file lives in a
+        # directory that is not the sweep's to unlink (pytest's tmp_path fixture
+        # removes it, and the daemon's death is the contract asserted above).
+        if _uses_the_fallback_socket(config_root):
+            assert not socket_path(config_root).exists(), "the socket outlived the broker"
+            assert not _runtime_fallback_dir(
+                secrets_dir(config_root)
+            ).exists(), "the runtime directory outlived the broker"
+    finally:
+        _kill(config_root)
+
+
+def test_the_sweep_leaves_a_broker_it_was_not_asked_about_alone(
+    tmp_path: Path, config_root: Path
+) -> None:
+    """The safety property: the sweep is scoped to the candidates it is given.
+
+    A broker under a config dir the candidate list does not name stands in for
+    the two processes the sweep must never kill — another agent's live session,
+    and the operator's own store under their real ``~/.local-operator``. Both are
+    reachable by name and neither is a candidate, which is the whole reason the
+    sweep takes a list instead of walking the process table. Driven against a
+    real daemon because that is the only way to catch a "reap" that goes looking
+    beyond its list.
+    """
+    other = tmp_path / "another-live-session"
+    other.mkdir()
+    _start(config_root)
+    _start(other)
+    try:
+        _stop_brokers_in([config_root])
+        assert not client.is_running(config_root), "the sweep missed its own candidate"
+        assert client.is_running(other), (
+            "the sweep killed a broker outside its candidate list — a live session's "
+            "store, or the operator's, is not this suite's to reap"
+        )
+    finally:
+        _kill(config_root)
+        _kill(other)
+
+
+def test_a_broker_survives_the_removal_of_its_config_dir(tmp_path: Path) -> None:
+    """Why the sweep records PATHS: a fallback socket does not live in the dir.
+
+    For the layout where a sweep running at teardown CAN still work: pytest has
+    just reclaimed the config directory, and the socket is in the runtime dir
+    derived from that directory's NAME rather than from anything on disk, so
+    naming a deleted directory is still enough to find and stop its broker.
+
+    The deep directory is CONSTRUCTED rather than inherited from ``tmp_path``:
+    on a runner whose tmp path is short enough (Linux CI runs ``TMPDIR=/tmp``)
+    the socket stays inside the config dir, dies with it, and this test's premise
+    is simply false there — which is what took CI red on this file. The other
+    layout is pinned by
+    `test_an_in_directory_socket_is_unreachable_once_its_config_dir_is_gone`.
+    """
+    base = _deep_config_dir(tmp_path)
+    pid = _start(base)
+    try:
+        shutil.rmtree(base)
+        assert not base.exists(), "the config dir was expected to be gone"
+        assert socket_path(
+            base
+        ).exists(), "the fallback socket must outlive the config dir it was derived from"
+        assert (client.broker_status(base) or {}).get("pid") == pid
+        _stop_brokers_in([base])
+        assert _wait_gone(pid), "a broker whose config dir is gone must still be reapable by name"
+    finally:
+        _kill(base)
+        _kill_pid(pid)
+
+
+def test_an_in_directory_socket_is_unreachable_once_its_config_dir_is_gone() -> None:
+    """The measurement behind the call-phase reap, pinned in-repo.
+
+    A SHORT config dir needs no fallback, so its socket lives inside its own
+    ``secrets`` directory. pytest's ``tmp_path`` fixture removes that directory at
+    its teardown, the socket file goes with it, and from then on no path-derived
+    lookup can reach the daemon — which is why a sweep running only at teardown
+    left 31 live key-holding brokers from one run of ``test_cli.py`` on exactly
+    this layout. That is why the reap happens while the socket still exists.
+
+    ``/tmp`` deliberately, not ``tmp_path``: the subject is a path short enough to
+    stay under ``sun_path`` (104 bytes), and a pytest tmp_path is not by
+    construction. The daemon is stopped by pid here — nothing in the suite can
+    reach it once the directory is gone, which is the point.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="lop-sweep-short-", dir="/tmp"))
+    try:
+        base = scratch / "config"
+        base.mkdir()
+        assert not _uses_the_fallback_socket(
+            base
+        ), "the test needs the in-directory layout, and /tmp is short enough for it"
+        pid = _start(base)
+        try:
+            shutil.rmtree(base)
+            assert not socket_path(
+                base
+            ).exists(), "the test's premise: the socket lived inside the config dir"
+            _stop_brokers_in([base])
+            assert pid_alive(pid, check_zombie=True), (
+                "a sweep can no longer reach this daemon, so the reap has to happen "
+                "while its socket exists — if this ever fails, the sweep got smarter "
+                "and the call-phase reap can be reconsidered"
+            )
+        finally:
+            _kill_pid(pid)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_the_sweep_does_nothing_where_the_broker_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The platform guard, driven by its effect.
+
+    The broker is a POSIX daemon — `local_operator.secrets.client` imports
+    `fcntl` at module scope — and the sweep now runs for every test from the call
+    phase as well as from teardown, so an unguarded call fails an entire Windows
+    run rather than one test: that is how the `filesystem-boundaries-windows` job
+    caught the first version of the call-phase reap, which had the guard only in
+    the fixture.
+
+    Pinned through the named seam rather than by mutating `os.name`, which would
+    have `pathlib` hand out `WindowsPath` objects on this host; a REAL broker under
+    a named candidate is what proves the guard: it survives, which it could not if
+    the import were reached (it raises there) or the kill were.
+    """
+    base = tmp_path / "config"
+    base.mkdir()
+    pid = _start(base)
+    try:
+        monkeypatch.setattr("tests.conftest._broker_daemon_is_available", lambda: False)
+        _stop_brokers_in([base])
+        assert client.is_running(base), "the sweep acted on a platform where it must not"
+    finally:
+        _kill(base)
+        _kill_pid(pid)
+
+
+def test_the_sweep_never_signals_its_own_pid_or_a_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusals that keep the reap from killing the run it is part of.
+
+    Driven through a spy on `os.kill` with the two things the sweep reads faked,
+    because the failure this pins is process death: `test_broker.py`'s `broker`
+    fixture serves the broker IN-PROCESS, so its status reports the test
+    process's own pid, and the first version of the call-phase reap signalled it
+    — `worker 'gw0' crashed while running ...`, 17 failed on the 3.12 shards, and
+    a whole `-n0` run dead with it. A test that actually delivered those signals
+    could only report its own disappearance, so the spy does the asserting.
+
+    `0` and `-1` are the other half: `kill(0, ...)` signals this process's entire
+    GROUP and `kill(-1, ...)` every process this user may signal, so a record
+    carrying one is never a broker to reap. The positive control (a pid far
+    outside any real range) proves the spy sees a signal when there is one to
+    send, so the three refusals are not passing by inertness.
+    """
+    base = tmp_path / "config"
+    base.mkdir()
+    decoy = tmp_path / "broker.sock"
+    decoy.touch()
+    sent: list[tuple[int, int]] = []
+    real_kill = os.kill
+
+    def spy(pid: int, sig: int) -> None:
+        sent.append((pid, sig))
+        if pid == 999_999_999:  # positive control: nothing to signal, don't try
+            raise ProcessLookupError
+        real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", spy)
+    monkeypatch.setattr("local_operator.secrets.protocol.socket_path", lambda base=None: decoy)
+    for pid in (os.getpid(), 0, -1):
+        monkeypatch.setattr(
+            "local_operator.secrets.client.broker_status",
+            lambda base=None, _pid=pid: {"ok": True, "pid": _pid},
+        )
+        sent.clear()
+        _stop_brokers_in([base])
+        assert sent == [], (
+            f"the sweep signalled {sent} for pid {pid} — its own process, or a whole "
+            "process group, instead of a separate broker"
+        )
+
+    monkeypatch.setattr(
+        "local_operator.secrets.client.broker_status",
+        lambda base=None: {"ok": True, "pid": 999_999_999},
+    )
+    sent.clear()
+    _stop_brokers_in([base])
+    assert sent == [
+        (999_999_999, signal.SIGTERM)
+    ], "the positive control sent nothing, so the refusals above prove nothing"
+
+
+class _StubNode:
+    """The two attributes `_secret_config_dirs` reads off a pytest item."""
+
+    def __init__(self, funcargs: dict[str, object], stash: pytest.Stash) -> None:
+        self.funcargs = funcargs
+        self.stash = stash
+
+
+class _StubRequest:
+    """A stand-in for the `pytest.FixtureRequest` the sweep is handed.
+
+    `_secret_config_dirs` reads only `request.node.funcargs` and `request.node.stash`,
+    so a stub is what lets this test put the sweep in the exact teardown-time state
+    (recorded paths, directories gone) without running a nested pytest session.
+    """
+
+    def __init__(self, node: _StubNode) -> None:
+        self.node = node
+
+
+def test_the_candidates_keep_paths_whose_directories_are_already_gone(
+    tmp_path: Path, config_root: Path
+) -> None:
+    """The regression guard for the leak, at the level the leak actually happened.
+
+    A teardown-time walk of ``tmp_path`` finds nothing once pytest has reclaimed
+    it — which is what made the sweep a no-op for every test that redirects its
+    config dir into ``tmp_path``. The recorded paths are what carry the sweep
+    over that window, so the candidate list must contain a directory that no
+    longer exists.
+    """
+    gone = tmp_path / "test_something0"
+    gone.mkdir()
+    (gone / "config").mkdir()
+    candidate = gone / "config"
+
+    stash: pytest.Stash = pytest.Stash()
+    stash[_SWEEP_ROOT_KEY] = (gone, candidate)
+    # `funcargs` still names the path, as pytest's does, but the directory it
+    # points at is gone — exactly the teardown-time state.
+    node = _StubNode({"tmp_path": gone}, stash)
+    shutil.rmtree(gone)
+
+    candidates = _secret_config_dirs(
+        cast(pytest.FixtureRequest, _StubRequest(node)), tmp_path / "home"
+    )
+
+    assert candidate in candidates, (
+        "a candidate recorded while the test ran is missing from the list, so its "
+        "broker would never be reaped"
+    )
+    assert not gone.exists(), "the test's premise: the directories are gone by teardown"
+
+
+def _run_nested_pytest(
+    tmp_path: Path, body: str, *, extra_argv: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    """Run one test file under a REAL nested pytest that loads this repo's conftest.
+
+    The end-to-end tests below cannot be expressed in-process: what they pin is
+    pytest's own FINALISATION ORDER — ``tmp_path`` is torn down before an autouse
+    fixture declared in ``tests/conftest.py``, because that fixture is set up
+    first and finalisers run in reverse — and a test cannot observe its own
+    teardown. A nested run can: the inner test records what it started, the outer
+    one reads the record after the inner session has finished tearing down.
+
+    ``pytest_plugins = ["tests.conftest"]`` rather than a copy of the fixture:
+    the subject is the SHIPPED conftest, so anything that reproduces it here
+    would pass while the real one leaked — which is precisely the failure issue
+    #958 describes. ``-n0`` keeps the inner session single-process so the pid the
+    inner test writes is the broker's parent-visible one, and ``-p
+    no:cacheprovider`` keeps the inner run from writing a cache into the repo.
+
+    **``tmp_path_retention_policy = "failed"`` is load-bearing, not inherited.**
+    A nested run given its own ``-c`` ini does NOT pick up the root
+    ``pyproject.toml``, and that setting is the entire precondition for the bug:
+    under it, `tmp_path`'s own finaliser REMOVES the directory when the test
+    passed, before an autouse fixture declared in ``tests/conftest.py`` is
+    finalised — so a teardown-time walk finds nothing. Verified both ways here:
+    with the default policy the directory still exists at teardown and a
+    teardown-only sweep would have worked, which would have made this test pass
+    against the very code it is meant to catch.
+    """
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / "conftest.py").write_text('pytest_plugins = ["tests.conftest"]\n')
+    (inner / "test_inner.py").write_text(body)
+    # Mirrors the root `pyproject.toml`'s `[tool.pytest.ini_options]` for the two
+    # settings this reproduction depends on. `-c` below points the inner run at
+    # it, which also stops it inheriting the root `addopts` (`-n auto`).
+    (inner / "pytest.ini").write_text(
+        "[pytest]\ntmp_path_retention_policy = failed\ntmp_path_retention_count = 3\n"
+    )
+    repo_root = Path(__file__).resolve().parents[3]
+    environment = dict(os.environ)
+    # The inner interpreter must import BOTH `local_operator` and `tests.conftest`
+    # from this worktree — see AGENTS.md on a subprocess resolving the root
+    # checkout's copy when it is launched with the wrong path.
+    environment["PYTHONPATH"] = str(repo_root)
+    environment["LO958_RECORD"] = str(tmp_path / "record.txt")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(inner / "test_inner.py"),
+            "-q",
+            "-n0",
+            "-p",
+            "no:cacheprovider",
+            "-c",
+            str(inner / "pytest.ini"),
+            f"--basetemp={tmp_path / 'inner-basetemp'}",
+            *extra_argv,
+        ],
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+#: The inner test for the end-to-end case: start a real broker under the config
+#: dir the test itself uses, and record its pid for the outer test to check.
+_INNER_STARTS_A_BROKER = '''
+import os
+from pathlib import Path
+
+from local_operator.secrets import client
+
+
+def test_starts_a_broker(tmp_path, monkeypatch):
+    """Stands in for every test that touches the store: it leaves a broker up."""
+    base = tmp_path / "config"
+    base.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(base))
+    assert client.ensure_broker(base), "the broker never came up"
+    pid = (client.broker_status(base) or {}).get("pid")
+    assert isinstance(pid, int), "no pid to hand to the outer test"
+    Path(os.environ["LO958_RECORD"]).write_text(f"{pid}\\n{base}")
+'''
+
+
+def test_a_broker_a_test_started_is_dead_once_that_test_has_torn_down(tmp_path: Path) -> None:
+    """The end-to-end regression guard for issue #958, at the level that broke.
+
+    Every other test in this file drives `_stop_brokers_in` or the candidate list
+    DIRECTLY, which is why the leak survived them all: the helper was correct and
+    the sweep still reaped nothing, because the candidate list it was given at
+    teardown had already collapsed to the default-config-dir entry. The bug lived
+    in the ORDERING, so only a test that submits to the real ordering can catch a
+    regression of it.
+
+    **What this test actually discriminates, corrected in round 1.** It fails
+    only when the call-phase work is absent ENTIRELY — the `_SWEEP_ROOT_KEY` stash
+    that the teardown sweep reads (the "recording") and the call-phase reap
+    together. Verified three ways against this head: with the stash and the
+    recording kept but the reap removed, it PASSES; with all three removed it
+    FAILS (`assert False / _wait_gone`). The stash alone is sufficient here,
+    because this inner test's config dir takes the ``$TMPDIR`` fallback socket
+    layout: its in-directory socket path is well past `MAX_SOCKET_PATH` (103
+    bytes, `secrets/protocol.py`) on every runner — measured 174 bytes here, 126
+    on a Linux runner by that path's arithmetic — so a fallback socket survives
+    ``tmp_path``'s reclaim and the recorded PATH is what lets the teardown sweep
+    still reach the daemon. The call-phase REAP is therefore not what this test
+    pins; it is an end-to-end guard that the reap survives that reclaim, not a
+    falsifier of the pre-#985 ordering on its own. No A/B against the pre-#985
+    tree is possible for it either: `3295042b0^` cannot even collect this file
+    (``ImportError: cannot import name '_SWEEP_ROOT_KEY'``, a symbol that
+    postdates it).
+
+    The two tests that DO discriminate the change are
+    `test_a_spawned_broker_names_itself_in_the_process_listing` and
+    `test_the_session_end_net_reaps_a_broker_started_after_the_per_test_reap`;
+    both fail on the PR's base for their stated reasons.
+
+    A change to the inner test's nesting depth could move this config dir back to
+    the in-directory layout and so change what this test proves — that is the
+    reason this layout fact is written down rather than left implicit.
+
+    Asserted through `_wait_gone` rather than a bare `pid_alive` for the reason
+    that helper documents, and it matters MORE here: the sweep waits for the
+    daemon to stop ANSWERING, which happens as it closes its listener — a step
+    before it exits — so the broker is reliably still a process for a moment
+    after the inner pytest returns (measured on this machine: alive at t+0s,
+    gone by t+0.25s). A bare probe would flap on that scheduling. The bounded
+    wait still separates the two outcomes the test is about, because a LEAKED
+    broker does not exit at all: it idles for 30 minutes.
+    """
+    result = _run_nested_pytest(tmp_path, _INNER_STARTS_A_BROKER)
+    assert result.returncode == 0, f"the inner run failed:\n{result.stdout}\n{result.stderr}"
+
+    record = (tmp_path / "record.txt").read_text().splitlines()
+    pid, base = int(record[0]), Path(record[1])
+    try:
+        assert _wait_gone(pid), (
+            f"broker {pid} for {base} outlived the test that started it — the sweep "
+            "saw no candidate naming this test's config dir (issue #958)"
+        )
+    finally:
+        _kill_pid(pid)
+
+
+#: The inner test for the session-end net: a MODULE-SCOPED fixture starts a
+#: broker in its teardown, under a directory from ``tmp_path_factory``. That
+#: directory is in no test's ``tmp_path``, so no per-test record can name it and
+#: the module finaliser runs after the last test's function-scoped sweep — the
+#: one shape neither per-test mechanism can reach. Verified to leak without the
+#: net: the broker was still alive a second after the inner run returned.
+_INNER_STARTS_A_BROKER_AT_TEARDOWN = """
+import os
+from pathlib import Path
+
+import pytest
+
+from local_operator.secrets import client
+
+
+@pytest.fixture(scope="module")
+def module_scoped_store(tmp_path_factory):
+    base = tmp_path_factory.mktemp("modcfg")
+    yield base
+    # Module teardown: after the last test's function-scoped autouse sweep, in a
+    # directory that was never any test's tmp_path. Only the session-end net
+    # sees this one.
+    assert client.ensure_broker(base)
+    pid = (client.broker_status(base) or {}).get("pid")
+    Path(os.environ["LO958_RECORD"]).write_text(f"{pid}\\n{base}")
+
+
+def test_touches_the_store(module_scoped_store, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(module_scoped_store))
+"""
+
+
+def test_the_session_end_net_reaps_a_broker_started_after_the_per_test_reap(
+    tmp_path: Path,
+) -> None:
+    """The case neither per-test mechanism can see, and the count the net reports.
+
+    A module-scoped fixture's directory comes from ``tmp_path_factory`` and so
+    belongs to no test's ``tmp_path``: no per-test record can name it, and its
+    finaliser runs after the last function-scoped sweep. That is a structural
+    gap rather than a bug in the per-test reap, and it is what
+    `pytest_sessionfinish` covers.
+
+    Issue #958 asked for the net to REPORT what it reclaimed, so a leak past the
+    per-test reap stays visible instead of being silently absorbed; the reported
+    count is asserted for that reason rather than as decoration.
+    """
+    result = _run_nested_pytest(tmp_path, _INNER_STARTS_A_BROKER_AT_TEARDOWN)
+    assert result.returncode == 0, f"the inner run failed:\n{result.stdout}\n{result.stderr}"
+
+    record = (tmp_path / "record.txt").read_text().splitlines()
+    pid, base = int(record[0]), Path(record[1])
+    try:
+        assert _wait_gone(pid), (
+            f"broker {pid} for {base} survived the session it was started in — the "
+            "session-end net did not reach it"
+        )
+        assert "[broker-sweep] session-end net reclaimed 1 live broker" in result.stderr, (
+            "the net reaped the broker but reported nothing, so a suite leaking "
+            f"past the per-test reap would look clean:\n{result.stderr}"
+        )
+    finally:
+        _kill_pid(pid)
+
+
+def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path) -> None:
+    """Issue #958's open question, and the ruling that closed its last exception.
+
+    Every pre-#954 CI teardown listed a bare ``Local Operator`` child and nothing
+    said what it was. It was this: `_spawn_broker` launches ``[sys.executable,
+    "-m", ...]``, and in any process that has been through
+    `procname.reexec_branded` — every real ``lop`` launch — ``sys.executable`` IS
+    the branded hardlink, so the broker inherited the product name alone.
+
+    Both axes are now resolved as a PAIR (`secrets.client._broker_identity` →
+    `procname.spawn_identity`), which is also what makes the label legal at all:
+    on Linux a labelled ``argv[0]`` leaves the child with an EMPTY
+    ``sys.executable``, so the label rides with the image or not at all (#1162).
+    Both halves are asserted here, read back from the REAL spawned process rather
+    than from the helper, so a label that never reaches the child fails this; and
+    which half is expected is decided by asking the code whether an image can be
+    planted on this host, not by naming the platform.
+
+    Rung 1 — the image is plantable (macOS): the row is the product name on the
+    IMAGE axis, ``ps -o ucomm``, which is what Activity Monitor shows and the axis
+    the complaint was about, plus the label with its store digest in
+    ``ps -o args``, the axis a teardown dump reads.
+
+    Rung 2 — no plantable image (Linux, and any interpreter `branded_link_path`
+    refuses): the argv row is deliberately UNLABELLED, and what names the broker
+    is ``comm``, which ``brokerd.main`` sets itself through
+    `procname.brand_this_process` — 15 bytes, so the brand and nothing else,
+    which is exactly why the store detail lives in argv wherever there is one.
+    """
+    pid = _start(config_root)
+    try:
+        # ``-ww`` is REQUIRED, and CI proved it: with stdout not a tty, Linux `ps`
+        # falls back to an 80-column screen width and CUTS the row, which took
+        # the 3.12 shard red on `... -m local_operator.secrets.brok`. The label
+        # was intact; the instrument was not. Anything reading this row in a
+        # teardown dump needs the same flag (or `/proc/<pid>/cmdline`), which is
+        # worth knowing for the issue this test belongs to.
+        listing = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        image = subprocess.run(
+            ["ps", "-o", "ucomm=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        # First, because every rung keeps it: the module must stay in argv, and it
+        # is how the issue's own reopen condition ('argv is not -m
+        # local_operator.secrets.brokerd') is checked.
+        assert "local_operator.secrets.brokerd" in listing, (
+            "the module must stay in argv: it is how the issue's reopen condition "
+            f"('argv is not -m local_operator.secrets.brokerd') is checked: {listing!r}"
+        )
+        # The rung is picked with the probe the SPAWN makes, and deliberately
+        # not with a neighbouring helper that answers a different question.
+        # ``branded_link_path()`` only names WHERE an image would live and never
+        # attempts the plant, so it disagrees with the spawn in reachable
+        # states — a static build or an interpreter whose dylib name cannot be
+        # derived (``spawn_identity`` refuses to plant a landmine there), an
+        # unwritable venv prefix, a cross-device prefix. Branching on it turned
+        # this test RED on a correct rung-2 tree, accusing the product of an
+        # unidentifiable child it had not spawned. ``spawn_identity(...)[1] is
+        # None`` is the call site's own decision, since ``_broker_identity``
+        # returns exactly this pair; the other axis is not read here, so the
+        # rendered field's value is irrelevant. Not ``_broker_identity`` itself:
+        # that is the code under test, and a probe that follows it would follow
+        # a regression through instead of catching it.
+        if procname.spawn_identity(procname.LABEL_BROKER, digest="probe")[1] is None:
+            # Rung 2. The ABSENCE is the assertion, not an omission: a labelled
+            # argv[0] on a child with no image is the shape that empties its
+            # sys.executable, so it is exactly what must not be here.
+            assert "[secret broker]" not in listing, (
+                "a label was handed to a broker with no image to ride with — on Linux "
+                f"that leaves the daemon unable to name its own interpreter: {listing!r}"
+            )
+            if sys.platform == "linux":
+                # The axis Linux actually has: `brand_this_process` is a
+                # documented no-op off Linux, and `comm` truncates at 15 bytes.
+                comm = subprocess.run(
+                    ["ps", "-o", "comm=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                ).stdout.strip()
+                assert comm.startswith(procname.BRAND), (
+                    f"a rung-2 broker is unidentifiable on every axis: comm={comm!r}, "
+                    f"args={listing!r} — this is the unexplained child of issue #958"
+                )
+            return
+        assert "[secret broker]" in listing, (
+            f"a spawned broker is unidentifiable in `ps`: {listing!r} — this is the "
+            "unexplained branded child of issue #958"
+        )
+        # The digest ties the row to the socket directory on disk, which is what
+        # makes the label actionable rather than merely decorative; and it is a
+        # digest and not the path because argv is world-readable.
+        digest = _runtime_fallback_dir(secrets_dir(config_root)).name.rsplit("-", 1)[-1]
+        assert f"store={digest}" in listing, (
+            f"the label does not name this broker's store: {listing!r}; expected the "
+            f"digest {digest} that also names its runtime directory"
+        )
+        # The image axis, and the reason this test changed: a broker started from a
+        # plain interpreter parent used to leave Activity Monitor a row of
+        # ``python3.12`` with the label only in argv.
+        assert image == procname.BRAND, (
+            f"the broker's image axis is not branded: `ps -o ucomm` says {image!r} — "
+            "this is the row Activity Monitor shows"
+        )
+    finally:
+        _kill(config_root)
+        _kill_pid(pid)
+
+
+def test_the_net_asks_the_protocol_only_about_a_candidate_that_has_a_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The net's cheap pre-check, pinned so the protocol round trip cannot creep back.
+
+    The candidate list at `pytest_sessionfinish` is almost entirely socket-less —
+    measured for `tests/unit/secrets` alone, 784 recorded roots from 261 tests —
+    and asking each one with a protocol round trip measured 199.4us against 7.4us
+    for the `socket_path(...).exists()` guard `_stop_brokers_in` already writes
+    twelve lines away. This pins the BEHAVIOUR rather than the timing: a candidate
+    with no socket on disk is never asked the expensive question.
+    """
+    with_socket = tmp_path / "has-socket"
+    without_socket = tmp_path / "no-socket"
+    with_socket.mkdir()
+    without_socket.mkdir()
+    _plant_socket(with_socket)
+    asked: list[Path | None] = []
+
+    def probe(base: Path | None = None) -> bool:
+        asked.append(base)
+        return False
+
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {with_socket, without_socket})
+    monkeypatch.setattr(client, "is_running", probe)
+    monkeypatch.setattr(
+        "tests.conftest._stop_brokers_in", lambda candidates: set()
+    )  # the contract under test is its return: the candidates it stopped
+    try:
+        assert _sweep_session_leftovers(tmp_path) == 0
+    finally:
+        _cleanup_planted_socket(with_socket)
+        _cleanup_planted_socket(without_socket)
+    assert asked == [with_socket], (
+        f"the net asked the protocol about {asked!r}; only a candidate with a socket "
+        "on disk can be a broker, and `socket_path(...).exists()` is the cheap way "
+        "to know — the same guard `_stop_brokers_in` uses"
+    )
+
+
+def test_the_net_reports_only_the_brokers_it_actually_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported count is what was STOPPED, not what was considered.
+
+    `_stop_brokers_in` refuses three shapes and the third — `pid == os.getpid()`,
+    the in-process `broker` fixture's shape — leaves the broker running, so a count
+    derived from the liveness probe alone reports a broker as reclaimed while it is
+    still there. This drives the REAL refusal through the real `_stop_brokers_in`
+    rather than stubbing the stop, so the test fails if either the refusal or the
+    count's source goes away.
+
+    **The candidate is a DEEP config dir on purpose** (`_deep_config_dir` asserts the
+    `$TMPDIR` fallback layout was chosen, which is the layout a real pytest
+    candidate takes — its in-directory socket path is ~145 bytes against the
+    103-byte limit). That matters because the sweep's runtime-dir removal is
+    unconditional and on this layout it deletes the socket of a broker it DECLINED
+    to signal, so a count taken from a probe afterwards is blind: no socket, read as
+    "reaped". The probe below therefore models what `is_running` actually does on
+    that layout — it answers False once the socket file is gone — instead of
+    returning a constant, because a constant answers the same way whether or not the
+    socket was destroyed and so cannot observe this defect at all.
+    """
+    candidate = _deep_config_dir(tmp_path)
+    _plant_socket(candidate)
+    # `is_running` answers by connecting to `socket_path(candidate)`, and on this
+    # layout that path stops existing when the runtime dir is removed — including for
+    # a candidate the sweep only declined.
+    monkeypatch.setattr(client, "is_running", lambda base=None: socket_path(candidate).exists())
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
+    # The in-process broker shape: `broker_status` reports THIS process's pid, so
+    # the sweep refuses to signal it and the daemon is still alive afterwards.
+    monkeypatch.setattr(client, "broker_status", lambda base=None: {"pid": os.getpid()})
+    try:
+        assert client.is_running(candidate), "the planted socket was not seen as live"
+        assert _sweep_session_leftovers(tmp_path) == 0, (
+            "the net reported a broker as reclaimed that `_stop_brokers_in` refused "
+            "to stop; the count must be what was stopped, not what was considered"
+        )
+        # The trap was genuinely live, so the assertion above is not vacuous: the
+        # sweep removed the socket's parent, which is exactly what a probe taken
+        # afterwards cannot see past.
+        assert not _runtime_fallback_dir(secrets_dir(candidate)).exists(), (
+            "the sweep did not remove the fallback runtime dir, so this test never "
+            "exercised the removal that blinds a later probe"
+        )
+    finally:
+        _cleanup_planted_socket(candidate)
+
+
+def test_the_net_hands_a_version_skewed_broker_to_the_sweep_and_counts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version-skewed broker is stopped and reported, not silently dropped.
+
+    `is_running` re-raises `BrokerIncompatible` on purpose — a version-mismatched
+    broker IS listening, and answering False would launder "live but unusable"
+    into "unreachable" — so a net that suppresses that exception drops the skewed
+    candidate out of `live` entirely: not stopped, and invisible in the count, on
+    exactly the axis this net exists to make visible. It must instead be handed to
+    `_stop_brokers_in`, which can still stop it because `broker_status` synthesises
+    a pid from the version refusal.
+
+    The stopper is recorded rather than run: the real one waits on `is_running`,
+    which re-raises on every poll while a stand-in daemon is still answering, so
+    driving a live one through it would make this test race rather than assert.
+    """
+    candidate = tmp_path / "config"
+    candidate.mkdir()
+    _plant_socket(candidate)
+    state = {"up": True}
+    stopped: list[Path] = []
+
+    def probe(base: Path | None = None) -> bool:
+        if state["up"]:
+            raise client.BrokerIncompatible("the broker speaks protocol 0", pid=4242, protocol=0)
+        return False
+
+    def stop(candidates: list[Path]) -> set[Path]:
+        stopped.extend(candidates)
+        state["up"] = False  # a stop that worked takes the daemon away
+        return set(candidates)  # ...and that is what the net counts
+
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
+    monkeypatch.setattr(client, "is_running", probe)
+    monkeypatch.setattr("tests.conftest._stop_brokers_in", stop)
+    try:
+        assert _sweep_session_leftovers(tmp_path) == 1, (
+            "the net neither stopped nor reported a version-skewed broker: "
+            "`is_running` re-raises BrokerIncompatible so it is not laundered into "
+            "'unreachable', and the net must not swallow it back"
+        )
+    finally:
+        _cleanup_planted_socket(candidate)
+    assert stopped == [candidate], "the skewed candidate never reached the sweep"
+
+
+def test_the_sweep_survives_a_skewed_probe_and_never_assumes_the_broker_died(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal in the post-SIGTERM wait loop cannot escape cleanup.
+
+    `_stop_brokers_in` waits for the daemon to stop ANSWERING, and the bare
+    `client.is_running` it used to call there RAISES for the one daemon that is
+    still there to refuse: `is_running` re-raises `BrokerIncompatible` on purpose
+    (a version-skewed broker is live), and such a daemon is very likely still
+    listening on the first poll after the signal. Because the call-phase reap runs
+    inside `finally` for every test, that refusal failed an unrelated passing test
+    — the same class of defect the net's `BrokerIncompatible` handling closes, one
+    call site over. The loop now asks `_broker_is_still_up`, which reads any
+    failure to answer as STILL UP, so the wait stays bounded and the broker's fate
+    is never assumed: the net's count refuses to call a broker it could not
+    confirm stopped "reclaimed".
+
+    A real process that IGNORES `SIGTERM` (and records that it received it) stands
+    in for the daemon the sweep cannot confirm dead, so both halves are pinned: the
+    sweep must not raise, and the count must be 0 rather than a broker assumed
+    dead. Only the probe and `broker_status` are patched. The test costs the wait
+    loop's own bound (~5s), which is the behaviour under test.
+
+    **Baseline note, so the obvious A/B is not misread (R2-2).** Against `512d5c0f8`
+    — the head this fix is on — it fails with `BrokerIncompatible` escaping the
+    reap, which IS the defect. Against `dc725c88a`, the head the other tests are
+    A/B'd against, it fails on a DIFFERENT assertion, `the wait loop returned after
+    0.00s`: at that tree R1-3's `suppress(Exception)` drops the skewed candidate
+    before it ever reaches the stop loop, so nothing is signalled and the escape
+    cannot happen. Both are failures for a stated reason, but only `512d5c0f8`
+    isolates this one — do not read the `dc725c88a` result as an unrelated error.
+    """
+    candidate = tmp_path / "config"
+    candidate.mkdir()
+    _plant_socket(candidate)
+    marker = tmp_path / "sigterm-received"
+    ready = tmp_path / "sigterm-handled"
+    # The handler is what makes the signal observable rather than merely deliverable,
+    # and it is also why this daemon survives: a bare ignore would prove delivery no
+    # better but leave the process alive for the same reason. The `ready` file is not
+    # decoration — without it the TEST can signal a child that has not installed the
+    # handler yet, and a default-action SIGTERM would kill it and turn the count into
+    # a spurious 1.
+    daemon = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, signal, time\n"
+            "ready = os.environ['LO958_READY']\n"
+            "marker = os.environ['LO958_SIGTERM_MARKER']\n"
+            "signal.signal(signal.SIGTERM, lambda *_: open(marker, 'w').write('SIGTERM'))\n"
+            "open(ready, 'w').write('ready')\n"
+            "time.sleep(60)\n",
+        ],
+        env={
+            **os.environ,
+            "LO958_SIGTERM_MARKER": str(marker),
+            "LO958_READY": str(ready),
+        },
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.05)
+    assert ready.exists(), "the stand-in daemon never installed its SIGTERM handler"
+
+    def skewed(base: Path | None = None) -> bool:
+        if daemon.poll() is None:
+            raise client.BrokerIncompatible(
+                "the broker speaks protocol 0", pid=daemon.pid, protocol=0
+            )
+        return False
+
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
+    monkeypatch.setattr(client, "is_running", skewed)
+    monkeypatch.setattr(
+        client, "broker_status", lambda base=None: {"pid": daemon.pid, "incompatible": True}
+    )
+    started = time.monotonic()
+    try:
+        # Before the wait loop was fixed this raised BrokerIncompatible straight out
+        # of the reap — an error in whatever test was running, not a suppressed
+        # cleanup.
+        reclaimed = _sweep_session_leftovers(tmp_path)
+        waited = time.monotonic() - started
+        assert reclaimed == 0, (
+            "the net counted a broker it could not confirm stopped — an unanswerable "
+            "probe reads as STILL UP, never as a reclaim"
+        )
+        assert waited >= 1.0, (
+            f"the wait loop returned after {waited:.2f}s: it must wait out its bound "
+            "for a daemon that never answers, not declare it stopped"
+        )
+        assert marker.exists(), (
+            "the sweep never signalled the daemon: the refusal above must come from a "
+            "stop that was actually attempted"
+        )
+        assert daemon.poll() is None, "the stand-in daemon was expected to survive SIGTERM"
+    finally:
+        _cleanup_planted_socket(candidate)
+        with suppress(OSError):
+            daemon.kill()
+        daemon.wait(timeout=5)

@@ -64,6 +64,48 @@ def test_exec_resume_unowned_proceeds_to_exec(config: Path, monkeypatch) -> None
     assert seen and seen[0][0] == "task"
 
 
+def test_exec_resume_zombie_owner_proceeds_to_exec(config: Path, monkeypatch) -> None:
+    """A killed runtime's corpse is not "another process".
+
+    The guard's premise is that a pid in the marker means someone is hosting
+    the session and this process must not become a second writer. Signal 0 is
+    not enough to establish that: it succeeds against an exited-but-unreaped
+    process, which is exactly what a SIGKILLed runtime leaves behind when its
+    parent (a long-lived TUI) never reaps it. The reported symptom was a
+    session refused by every interface with "already open in another process
+    (pid N)", where N was a corpse — so the guard must not fire here, and the
+    exec must proceed.
+    """
+    from tests.unreaped import unreaped_child
+
+    seen: list[tuple[object, object]] = []
+
+    def fake_run_exec(command, args):  # noqa: ANN001
+        seen.append((command, args))
+        return 0
+
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry",
+        lambda a: ("anthropic", "claude-x"),
+        raising=False,
+    )
+    import local_operator.cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_preflight_api_key", lambda *a, **k: None)
+    monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
+    # Held for the whole assertion: the marker must name a pid that is a zombie
+    # at the moment the guard probes it, not one that has been reaped since.
+    with unreaped_child() as zombie_pid:
+        _own(config, "sess-zombie", zombie_pid)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["local-operator", "exec", "--resume", "sess-zombie", "do the thing"],
+        )
+        code = cli_main()
+    assert code == 0
+    assert seen and seen[0][0] == "do the thing"
+
+
 def test_standalone_attach_modules_are_deleted() -> None:
     """Cold resume cannot regress to the projection screen or exit-75 shim."""
     import importlib.util

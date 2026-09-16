@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import inspect
 import logging
 import secrets
@@ -33,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
 
+from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
@@ -42,6 +44,8 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
     from local_operator.secrets.session import SessionRegistration
+    from local_operator.session.errors import RuntimeRetiring
+    from local_operator.session.runtime.publication import PublicationGate
 
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -56,6 +60,7 @@ from local_operator.session.runtime.server import (
 )
 from local_operator.session.runtime.types import (
     RUNNING_SUBAGENT_STATUSES,
+    SIGNAL_DRAIN_CAUSE,
     runtime_must_complete,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
@@ -81,6 +86,53 @@ _ADMISSION_PRELUDE_TURNS = 3
 #: child that will not die must delay the receipt by a beat, never hold it.
 _ABORT_SETTLE_BUDGET_S = 1.0
 _ABORT_SETTLE_POLL_S = 0.02
+
+
+def _mcp_boot_discovery_failure(session: Any) -> str | None:
+    """The boot record's DISCOVERY failure as one honest line, or ``None``.
+
+    Only the synthetic :data:`~local_operator.session.mcp_status.MCP_DISCOVERY_KEY`
+    entry is read, because this is asked when the roster came back EMPTY, and a
+    PER-SERVER entry cannot describe that state honestly. A config change
+    produces the pair that way: ``/mcp remove`` reloads the manager into an empty
+    roster while nothing rewrites ``session.mcp_startup`` — only the boot wiring
+    and its settle sink write that, and the sink fires only when a round
+    deferred something — so reporting its stale entry would name a server the
+    session no longer configures (review round 2, R2-MINOR-1).
+
+    A fresh boot CAN produce the pair too, and the reference is a pathological
+    config rather than a stale one (QA round 2; reproduced here):
+    ``json.loads`` raises ``RecursionError`` on a deeply nested document, and
+    ``mcp/config.py::_read_json`` catches only ``OSError``/``ValueError``/
+    ``UnicodeDecodeError`` — so the raise escapes the reader, reaches the
+    discovery wrapper's own ``except Exception`` (``mcp/__init__.py:145-149``),
+    and comes back as the manager with an EMPTY roster plus the synthetic entry
+    ``session_factory`` keys as ``discovery``, on a boot where ``_connect_round``
+    never assigned ``_configs``. Both routes want the same answer, which is why
+    this keys on the roster rather than on how the emptiness arose.
+
+    The predicate this matches is the startup TOAST's, not the band's:
+    ``discovery_failed=not outcome.configured and outcome.failed``
+    (``tui/widgets/toast.py:417``). ``tui.app._mcp_status`` reads the boot record
+    only when there is no manager, so in this shape the band paints no segment
+    while this names the failure — a gap in the band itself, unchanged code and
+    out of scope here (review round 2, R2-NIT-1).
+    """
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    outcome = getattr(session, "mcp_startup", None)
+    failures = getattr(outcome, "failures", None) or {}
+    if MCP_DISCOVERY_KEY not in failures:
+        return None
+    # MEMBERSHIP decides, then the value is read: a present-but-EMPTY message is
+    # still a failure on the record — ``str(exc)`` is ``""`` for an exception
+    # raised with no args, and ``session_factory`` stores it with no falsy
+    # filter — so testing the VALUE fell through to the empty-state sentence and
+    # had ``/mcp list`` deny a failure it was holding (review round 3,
+    # MINOR-1). The fallback keeps that arm non-empty and says what is missing
+    # rather than inventing a cause.
+    detail = failures[MCP_DISCOVERY_KEY] or "no error detail was recorded"
+    return f"MCP discovery failed: {detail}"
 
 
 def _log_detached_admission(task: "asyncio.Task[str]") -> None:
@@ -132,6 +184,37 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
+
+#: THE RUNG-4 RETRY LADDER (review round 1, R7).
+#:
+#: The only attempt used to be the turn-settled task, so a spawn that failed
+#: transiently, or a deferral to a desktop lease that then went away, lost the
+#: banner PERMANENTLY — production had no second caller, and the only reason the
+#: round-1 test looked recovered is that the test called the arm again by hand.
+#: Three retries, and the delays are chosen against the timeouts that can make
+#: the first attempt wrong rather than at random:
+#:
+#: * 2 s is ``PRESENCE_CACHE_TTL_S`` — the deferral in rung 2 is a cached
+#:   answer, so retrying sooner than this can only re-read the same stale lease.
+#: * 8 s is half a beat, so a desktop that dropped its socket is caught while
+#:   its 45 s TTL is still fresh enough that a reader would otherwise believe it.
+#: * 30 s is two beats: past the point where a live app has certainly re-beaten,
+#:   so a deferral that survives this one is a real app and not a dying one.
+#:
+#: BOUNDED ON PURPOSE. The ladder's total span is about 40 s and it ends there.
+#: Giving up costs the OS banner, never the event: the completion keeps its
+#: durable unseen mark, so every catalogue still shows it as unread. A retry loop
+#: with no end would be the "unbounded runtime residency" the review forbids.
+_COMPLETION_RETRY_DELAYS_S: tuple[float, ...] = (2.0, 8.0, 30.0)
+
+#: What one rung-4 attempt concluded. Retry is driven by the DIFFERENCE, not by
+#: a blanket timer: ``delivered`` and ``settled`` are terminal, and only a
+#: deferral (a richer surface is expected to deliver) or a failure (this one was
+#: owed and could not) is worth another attempt.
+_ANNOUNCE_DELIVERED = "delivered"
+_ANNOUNCE_SETTLED = "settled"
+_ANNOUNCE_DEFERRED = "deferred"
+_ANNOUNCE_FAILED = "failed"
 
 
 def _already_bounded(images: Any) -> bool:
@@ -229,6 +312,16 @@ class ServingSessionHandle(SessionHandle):
     entry point that wiring uses.
     """
 
+    #: The latch ``RuntimeServer._serve`` opens once this runtime's record is
+    #: published, or ``None`` when nothing publishes one. Declared at CLASS
+    #: level as well as assigned per instance, unlike the handle's other state,
+    #: because the server reaches for it with a ``getattr`` capability probe and
+    #: the capability-surface guard reads ``hasattr(ServingSessionHandle, name)``
+    #: — an attribute that existed only on the instance would read as a
+    #: capability the handle cannot answer, which is the defect class that guard
+    #: exists to catch. See ``create_session`` for what waits on it.
+    mcp_publication_gate: PublicationGate | None = None
+
     def __init__(
         self,
         session: Any,
@@ -239,6 +332,7 @@ class ServingSessionHandle(SessionHandle):
         approval_pinned: bool = False,
         install_gates: bool = True,
         config_dir: Path | None = None,
+        mcp_publication_gate: PublicationGate | None = None,
     ) -> None:
         self._session = session
         self._goal_loop: Any = None
@@ -353,6 +447,16 @@ class ServingSessionHandle(SessionHandle):
         #: session was built from because the runtime is spawned with it in the
         #: environment.
         self._config_dir = config_dir
+        #: The latch the runtime opens when its record is published, or
+        #: ``None``. PUBLIC because it is deliberately read by ANOTHER object —
+        #: ``RuntimeServer._serve`` — the same way ``on_stop_requested`` is:
+        #: the runtime's contract with its handle is an attribute read, not a
+        #: method call, so a fake handle in a test simply does not have it and
+        #: the runtime's ``getattr`` default keeps that inert. Set only by
+        #: ``spawn_owned_session`` — the one spawn site whose runtime publishes
+        #: a record, and therefore the only one whose deferred MCP wiring must
+        #: wait for it (see ``create_session``'s ``mcp_publication_gate``).
+        self.mcp_publication_gate = mcp_publication_gate
         # Conversation naming is a TUI-only errand today (OperatorApp owns the
         # naming worker), so a phone-started session used to stay "mobile
         # session" forever — the session list and the header both read the
@@ -388,6 +492,28 @@ class ServingSessionHandle(SessionHandle):
         self._command_reservations = CommandReservations(session)
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         self._disposing = False
+        #: Set once this handle has COMMITTED to retiring, by
+        #: :meth:`begin_retire` OR :meth:`begin_drain`. Non-empty means the
+        #: admission paths refuse (see those methods) — a runtime that is
+        #: leaving must not start a turn it will abort one await later.
+        #: Deliberately never cleared: a retirement is a one-way door for the
+        #: process.
+        self._retiring_cause: str = ""
+        #: Set by :meth:`begin_drain`, the latch that does NOT require an idle
+        #: runtime. It says the leaving is a HANDOVER with time left in it: the
+        #: runtime still has work to finish, so a message that arrives in the
+        #: meantime is SPOOLED for the successor (``inbox.jsonl``, drained at
+        #: boot) rather than refused — the sender asked this session to act, and
+        #: a refusal would lose that where a deferral does not. Cleared by
+        #: nothing: the drain ends in an exit.
+        self._draining = False
+        #: Set by :meth:`begin_retire`, the rung that takes the exit IN THIS
+        #: STEP. The distinction is what keeps the cut-off taxonomy honest: a
+        #: turn aborted after THIS flag must be labelled with the retirement
+        #: (there is no gap left to attribute anything else to), while a turn
+        #: aborted during a DRAIN is a user's own stop arriving before the exit
+        #: the drain was still waiting for — see :meth:`_note_deliberate_stop`.
+        self._exit_committed = False
         #: Installed by the runtime process (``process.amain``): fires the
         #: process's stop event so a socket ``stop`` op exits the way SIGTERM
         #: does. ``None`` under a host that has no process to exit.
@@ -410,18 +536,37 @@ class ServingSessionHandle(SessionHandle):
         # synchronously, so the publish reads the settled state
         # (``test_busy_settles`` pins the ordering). Probed so reduced
         # sessions in tests that never grew the attribute keep working.
+        #
+        # ONE SLOT, TWO CONSUMERS. The session offers exactly one turn-boundary
+        # hook and it is already claimed by the busy settle, so the runtime's
+        # own handler owns the slot and calls BOTH — see `_on_turn_settled`.
+        # Adding a second attribute to `Session` would be a second seam to keep
+        # in step for no gain; dropping either call here would leave a record
+        # stuck busy or a completion announced by nobody.
         if hasattr(session, "on_turn_settled"):
-            session.on_turn_settled = self._publish_busy_soon
+            session.on_turn_settled = self._on_turn_settled
+        #: Strong reference to the in-flight rung-4 announcement. A bare
+        #: ``create_task`` whose result nobody holds can be collected before it
+        #: runs, which is the failure this attribute exists to prevent.
+        self._completion_task: asyncio.Task[None] | None = None
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
         if hasattr(session, "_publish_session_started"):
-            session._publish_session_started = self._publish_session_started
-        # Discovery/attachment does not authorize replacing a headless deny
+            session._publish_session_started = (
+                self._publish_session_started
+            )  # Discovery/attachment does not authorize replacing a headless deny
         # gate with a parked interactive gate. Exec opts into that separately.
         #: Why the most recent admitted turn failed, for a headless caller that
         #: has no front end reading the projection. See the drain's handler.
         self._last_prompt_failure = ""
+        #: The runtime's turn journal (``session/runtime/journal.py``), attached
+        #: by ``process.amain`` at boot. ``None`` for every in-process host (the
+        #: TUI, the tests, a reduced handle): only a DETACHED runtime owns a
+        #: death that a successor has to be able to read from disk, and a row
+        #: written by a host that cannot die that way would be noise on every
+        #: boot rather than evidence.
+        self._turn_journal: Any | None = None
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
@@ -811,6 +956,23 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # THE RETRY LADDER ENDS WITH THE RUNTIME (R7). A pending attempt sleeps
+        # up to the ladder's last delay, and a runtime that is going away must
+        # not keep a task — or a banner scheduled behind it — alive afterwards.
+        task = self._completion_task
+        if task is not None and not task.done():
+            task.cancel()
+        # The dispose rung of EVERY exit that is not a viewer-driven retirement:
+        # SIGTERM/SIGINT in ``amain``, the reaper's ``_clean_exit``, and a host
+        # that disposes in place. Recorded BEFORE the abort below so the turn's
+        # end event carries it (``_classify_cut_off`` reads it from the emitted
+        # event), and suppressed when a deliberate stop was already noted for
+        # this turn — the graceful ``stop`` op reaches here too, and relabelling
+        # a user's own cancel as an error is the worse mistake.
+        session = getattr(self, "_session", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(self._retiring_cause or "runtime-shutdown")
         # Revoke the broker registration along with the session: descendants of
         # a session that is going away must not stay authorized behind it
         # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
@@ -1061,6 +1223,240 @@ class ServingSessionHandle(SessionHandle):
             return False
         return True
 
+    def begin_retire(self, cause: str, detail: str = "") -> bool:
+        """Commit this runtime to retiring, iff it is idle RIGHT NOW.
+
+        Sets ``_retiring_cause`` in the SAME synchronous step that asks
+        :meth:`may_refresh`, and from that instant the admission paths
+        (:meth:`prompt`, :meth:`receive_peer_message`) REFUSE rather than queue.
+        That is the whole point: both retire paths sample the predicate and then
+        act across an ``await`` — the reaper's stagger plus ``announce_retiring``
+        (which drains each viewer's writer), and ``dispose`` is async — so the
+        "idle" claim was only ever true at ONE instant, and a ``prompt`` or a
+        ``peer_message`` arriving in the gap opened a turn the dispose then
+        aborted (design §5.1). The latch makes the claim true by construction
+        rather than by timing.
+
+        ``cause`` names the retirement for the refusal and the log; the session
+        is told as well, so a turn aborted while retiring is labelled with the
+        retirement rather than a generic shutdown.
+        """
+        try:
+            reason = str(self.may_refresh() or "")
+        except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
+            reason = "busy probe failed"
+        if reason:
+            return False
+        self._retiring_cause = cause or "retiring"
+        self._exit_committed = True
+        session = getattr(self, "_session", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(self._retiring_cause, detail)
+        return True
+
+    def begin_drain(self, cause: str, detail: str = "") -> bool:
+        """Commit this runtime to leaving WITHOUT requiring it to be idle.
+
+        THE HARD-STALE RUNG, and the session-runtime expression of the shape
+        ``server/retire.py`` gives the ``serve`` daemon — notice the install
+        move, announce the handover, refuse new work, leave when nothing is in
+        flight. Three things differ, and each is what a VIEWER makes different:
+
+        * the daemon announces into its RECORD and keeps serving while anything
+          is attached, latching only once its drain has emptied; this
+          announcement is a frame to a client that is waiting on this very
+          connection and is followed by the latch in the same step, because a
+          runtime that waited for its viewer would be the defect rather than the
+          fix (see ``process._begin_drain`` for the ordering argument);
+        * the drain is BOUNDED by the caller (``process._BuildWatch``), because
+          a session runtime can be busy for hours and the process that runs its
+          next engage is waiting on this one leaving;
+        * a message that arrives mid-drain is SPOOLED for the successor rather
+          than refused, because a session has a successor to defer to.
+
+        :meth:`begin_retire` refuses while any work would be lost, which is
+        right for a refresh that can wait — the runtime will retire on its own
+        at the next instant nothing is running — and wrong for a runtime whose
+        loaded build has been replaced on disk: a session busy for hours never
+        reaches such an instant, so "ask again next check" is a promise the
+        build breaks. This latch drops the idle gate and keeps everything else:
+
+        * admissions refuse from HERE — invariant (i), no new work after the
+          commit. ``prompt`` refuses; ``receive_peer_message`` SPOOLS, because
+          a wake or a steer is a message somebody is waiting on rather than a
+          turn this runtime is being asked to run now;
+        * nothing in flight is touched — invariant (ii). The live turn, its
+          subagents, its jobs and a parked gate run to completion, and the
+          process leaves at the first instant the reaper finds the work done;
+        * wakes that fire from now on are spooled for the successor rather than
+          run against a build that is leaving — invariant (iv), see
+          ``Session.retire_wakes_to_inbox``.
+
+        Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
+        running when this latches is expected to FINISH, and arming a cut-off
+        for it would relabel a completed turn as an error — that note belongs
+        to the rung that actually takes the exit, which is still
+        :meth:`begin_retire`.
+
+        ``cause`` is the vocabulary token the refusal and the eventual cut-off
+        note carry; ``detail`` is free text for the log. Returns whether the
+        drain is latched — False only when this handle is already disposing, in
+        which case the disposal owns the exit and a second one must not race it.
+        """
+        if getattr(self, "_disposing", False):
+            return False
+        self._draining = True
+        self._retiring_cause = cause or "retiring"
+        session = getattr(self, "_session", None)
+        divert = getattr(session, "retire_wakes_to_inbox", None)
+        if callable(divert):
+            try:
+                divert()
+            except Exception:  # noqa: BLE001 — a failed divert must not block the drain
+                logger.debug("could not divert wakes to the inbox", exc_info=True)
+        return True
+
+    def _retiring_refusal(self) -> RuntimeRetiring:
+        """The refusal an admission gets once this runtime has committed to leaving.
+
+        A TYPED admission category (``session.errors``), not a bare
+        ``RuntimeError``: the sentence is user-facing copy that must be rebuilt
+        on the far side of the transport like every other refusal, and the
+        client has to be able to BRANCH on it — the TUI's claim over the refused
+        message (it was never delivered, so its painted row is withdrawn and the
+        text handed back) hangs on recognising this exact case (design round 1,
+        D1; UX round 1, U1).
+
+        The wording lives with the category; this is only the accessor, so the
+        text cannot be composed in two places. The import is FUNCTION-LOCAL for
+        the reason this file imports ``session.errors`` that way everywhere
+        else: the module is tiny, the call is rare, and a module-scope import
+        here re-sorts the runtime-server import block around it.
+
+        WHICH DEPARTURE IS READ OFF THE LATCHED CAUSE, AND THIS SIDE NAMES IT.
+        ``prompt`` refuses for the whole of any drain and ``begin_drain`` latches
+        from the SIGTERM arm too, so a signalled runtime reaching this accessor
+        used to describe itself as switching to a newer build — a build that does
+        not exist on disk under it and is not coming (design round 4, D10; agent
+        review round 4, MAJOR-2). It is REACHED, measured on a real signalled
+        runtime with the turn parked: a non-streaming prompt (``prompt_and_wait``
+        — the shape a loop, a second viewer, a supervisor or a CLI caller uses)
+        is refused within milliseconds of the signal, while the same runtime's
+        record and ``/info`` row say "signalled; leaving when its turn ends". The
+        interactive composer does not reach it mid-turn, because its text rides
+        the running turn as a steer; a peer wake or steer is spooled for the
+        successor for as long as the drain runs and reaches this refusal only
+        once the exit is committed. ``_retiring_cause`` is the token
+        ``begin_drain``/``begin_retire`` latched and ``_drain_for`` carries to
+        the exit rung, so the departures stay distinguishable all the way to the
+        last refusal.
+
+        AND A DEPARTURE THIS SIDE CANNOT NAME IS SENT AS NO TOKEN RATHER THAN AS
+        A BUILD. It was sent as a build by omission until round 5: the token was
+        "SIGNAL or nothing", and "nothing" meant the build sentence on the far
+        side, which is false for a signalled runtime from this branch's pre-key
+        builds — they announce the signal drain with no phrase key either — and
+        for the reaper's ``idle-exit`` latch, which owes no successor and checked
+        no build (agent review round 5, MINOR-1; UX round 5, U14; design round 5,
+        D11). Those runtimes cannot be taught to send a token, so the far side
+        answers an unnamed departure from the phrase the frame published and with
+        the sentence that names no departure when there is none. The field stays
+        additive and closed either way: ``server`` emits ``error_trigger`` only
+        when the token is truthy, and an older client drops the key.
+
+        WHY THE BUILD CAUSE IS NOT NAMED HERE, though this side does know it. The
+        ``runtime-retired`` latch is shared by the stale-build refresh and by
+        ``/move`` (``server._retire_for``: ``"stale-build"`` with a successor, or
+        ``"moved"`` with none), and the cause token is the same for both — the
+        cause is what a restored session renders, so it cannot be split without
+        changing that vocabulary. Naming it ``BUILD`` would therefore claim "the
+        one it loaded is gone from disk" for a session that merely changed
+        directory. The phrase is the carrier that CAN tell them apart for a
+        drain, and for a build drain the frame publishes it; a move publishes
+        none, and correctly gets the sentence that names no departure.
+        """
+        from local_operator.session.errors import RuntimeRetiring
+
+        # ``SIGNAL_DRAIN_CAUSE`` is the token ``process._drain_for_signal``
+        # commits its drain with — imported from the drain vocabulary rather
+        # than spelled here, because a rename that missed this file would
+        # silently restore the build sentence for a signalled runtime. It is the
+        # ONLY departure this side names: the build arm is left unnamed on
+        # purpose, because its cause token is shared with ``/move`` (see above),
+        # and the far side reads the trigger off the phrase the frame published
+        # instead — which a build drain carries and a move does not.
+        trigger = RuntimeRetiring.SIGNAL if self._retiring_cause == SIGNAL_DRAIN_CAUSE else ""
+        return RuntimeRetiring(trigger=trigger)
+
+    async def _spool_for_successor(
+        self, text: str, *, mode: str, wake: bool, sender: dict[str, Any]
+    ) -> str:
+        """Spool one message for the successor runtime, and receipt it.
+
+        The draining alternative to refusing. ``inbox.jsonl`` is drained by the
+        successor at boot (``process._drain_inbox_into``) BEFORE its control
+        socket listens, so a row written here lands ahead of anything a socket
+        client could send — the ordering guarantee is the whole reason this
+        vehicle works for a message that arrived at a dying process. It is
+        also the one channel that survives the handover: a peer wake or a
+        steer is someone asking THIS session to do something, and turning that
+        into a refusal they must re-issue is a worse answer than a deferral
+        they were told about.
+
+        ``wake`` rides the ROW, because it is the sender's ask rather than the
+        reader's choice: ``send --wake`` asked for a turn, and a successor that
+        filed the text as a quiet note would keep the message and never do the
+        work (review round 1, MINOR 3 — the field used to be written and then
+        ignored, so every spooled wake could only be read). The receipt names
+        which of the two shapes the sender bought, because that is the part
+        they can act on: re-issuing a spooled wake is not necessary.
+
+        ``mode`` is recorded and deliberately NOT honoured on delivery, which
+        is the one thing a reader of this row has to know: both drain paths
+        deliver ``mailbox`` (plus ``wake`` when the sender asked for one),
+        because a boot has no live turn for a ``steer`` to join — mailbox-plus-
+        wake is the only shape that can land at all. Keeping the sender's
+        stated intent in the row is for whoever reads the spool later, not an
+        instruction to the successor (review round 2, NIT 1).
+
+        Falls back to the refusal when there is nowhere to spool to (no session
+        directory, an unwritable inbox): the caller then gets the sentence that
+        tells it to send again, which is the same contract every other admission
+        gets once a runtime is leaving.
+        """
+        from local_operator.session.runtime.inbox import (
+            SPOOL_RECEIPT_NOTE,
+            SPOOL_RECEIPT_WAKE,
+            InboxLine,
+            append_inbox,
+        )
+
+        session = getattr(self, "_session", None)
+        transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        if directory is None:
+            raise self._retiring_refusal()
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(
+                    text=text,
+                    sender=dict(sender),
+                    mode=mode,
+                    written_at=time.time(),
+                    wake=wake,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
+            logger.warning("could not spool a peer message for the successor", exc_info=True)
+            written = False
+        if not written:
+            raise self._retiring_refusal()
+        logger.info("session runtime: spooled a peer message for the successor")
+        return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
+
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
         ``""`` when it may.
@@ -1093,13 +1489,31 @@ class ServingSessionHandle(SessionHandle):
                 return "busy"
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             return "busy probe failed"
-        # Term 2 is the reaper's own helper, not a re-derivation: one place
-        # decides what "inside the warm window" means. Lazy import — the
-        # process module imports this one inside ``amain``, never at load.
-        from local_operator.session.runtime.process import _wake_within_window
-
-        if _wake_within_window(self):
-            return "wake due within the warm window"
+        # Term 2 is the SHARED helper, not a re-derivation: one place decides
+        # what "inside the warm window" means, and it lives in
+        # ``local_operator.buildwatch`` so that reaching it cannot fail here.
+        # It used to be a function-local import of the runtime module, which is
+        # answered from DISK whenever ``sys.modules`` has no entry — and the
+        # runtime runs that module as ``__main__``, so at the one moment this
+        # predicate matters most (the loaded tree has been replaced) the import
+        # raised ``ImportError``; ``_idle_for_refresh`` reads a failing
+        # predicate as "not idle", so a draining runtime could never reach its
+        # exit (QA round 1, Q-1 — a session refused forever, holding the lease
+        # so that no successor could boot). ``buildwatch`` is stdlib-only and
+        # imported at module scope by both sides, so it is still importable
+        # then.
+        #
+        # The consult is ALSO under the policy this file applies to the busy
+        # probe above: a predicate that cannot be evaluated must not pin the
+        # runtime. Failing open ("no wake") is the same answer
+        # ``wake_within_window`` gives its own accessor, and it is what makes
+        # this class of failure a degraded-but-alive runtime instead of a
+        # wedged one.
+        try:
+            if _wake_within_window(self):
+                return "wake due within the warm window"
+        except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
+            logger.debug("warm-window probe failed; treating as no wake", exc_info=True)
         return ""
 
     def next_wake_due_at(self) -> int | None:
@@ -1145,7 +1559,15 @@ class ServingSessionHandle(SessionHandle):
 
         Sync and non-raising by contract (see SessionHandle): called on the
         runtime loop from the ``stop`` dispatch, which acks right after.
+
+        DELIBERATE STOP vs PLANNED RETIREMENT, told apart HERE because both
+        reach this one rung. A retirement is driven by the runtime itself and
+        has already latched the handle (``begin_retire``) before calling this;
+        an un-latched call is therefore the user's own ``/stop`` or
+        ``lop stop``, and it must be recorded as such or the taxonomy (which
+        now requires positive evidence for ``interrupted``) would have to guess.
         """
+        self._note_deliberate_stop()
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -1163,13 +1585,50 @@ class ServingSessionHandle(SessionHandle):
 
         self._loop.create_task(_dispose_in_place())
 
-    def _deny_pending_gates(self) -> None:
+    def _note_deliberate_stop(self) -> None:
+        """Record that the USER ended this turn, before anything tears it down.
+
+        ONE place for the three deliberate rungs of this handle (``stop``,
+        ``abort``, ``cancel``), because the verdict has to be written while the
+        act is still knowable: ``Session.dispose()`` notes ``disposed``
+        unconditionally, and an un-noted dispose therefore publishes the user's
+        own cancel as ``kind=error`` / ``cause=disposed`` (review round 1,
+        BLOCKER-1). ``abort`` is the phone's stop button and ``cancel`` its
+        supervised sibling; both are a person or a supervisor saying "stop",
+        and each was one teardown away from being reported as a failure.
+
+        Refused while the EXIT is committed, matching ``request_stop``: the
+        runtime is already ending that turn for its own reason (a build flip)
+        and the cut-off verdict for it belongs to the retire path, which
+        recorded it when it latched. A runtime that is merely DRAINING is not
+        that case and must not suppress this: the drain waits for the live turn
+        to finish, which can be minutes, and a user's ``/stop`` arriving in that
+        window ends the turn by their own hand — labelling it a retirement would
+        report the operator's own cancel as housekeeping. Non-raising by
+        contract — it runs inside a stop, and a stop must not fail because a host
+        session has no say in its own taxonomy.
+        """
+        if self._exit_committed:
+            return
+        note = getattr(self._session, "note_deliberate_stop", None)
+        if callable(note):
+            note()
+
+    def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
 
         The clean-exit ordering mirror of OperatorApp.on_unmount (deny gates
         BEFORE dispose): dispose awaits teardown, and a turn parked on an
         unanswered card would never reach it. Resolving False/None here is
-        the same answer a timeout would eventually deliver, minus the wait."""
+        the same answer a timeout would eventually deliver, minus the wait.
+
+        Returns how many cards it settled, because that is a fact the abort
+        receipt has to be able to report: a stop whose ONLY effect was clearing
+        a card that outlived its turn would otherwise look like a stop that did
+        nothing, and the honesty rule this receipt lives under cuts both ways.
+        Callers that ignore the count (``request_stop``) are unaffected.
+        """
+        denied = 0
         for request_id, future in list(self._pending_futures.items()):
             if not future.done():
                 # None answers an ask ("user escaped"); False would be wrong
@@ -1178,7 +1637,9 @@ class ServingSessionHandle(SessionHandle):
                 # the deny answer their timeout would deliver.
                 value = None if request_id in self._pending_question_ids else False
                 self._loop.call_soon_threadsafe(_resolve_gate_future, future, value)
+                denied += 1
         self._pending_futures.clear()
+        return denied
 
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
@@ -1304,6 +1765,19 @@ class ServingSessionHandle(SessionHandle):
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
         self._reconcile_streaming()
+        # Seed the state (and with it the child roster) ONCE at attach. Until
+        # the next event arrives this push is all a freshly attached phone
+        # renders, and a settled turn never sends another: without this an
+        # already-finished child stays unroutable (``session_id=None``) for as
+        # long as the session is quiet. Seeding cannot clobber the identity
+        # fields the projection already carries, but not because of
+        # ``set_state``'s None-skipping — ``set_subagent_details`` assigns every
+        # roster field unconditionally, ``row.session_id`` included, and bumps
+        # the version. It is safe because both sides read the SAME registry: the
+        # fold's rows and the seed's nodes each describe one child from
+        # ``SubagentComms``, so the republish writes the values the row already
+        # held.
+        self._refresh_state()
         return unsubscribe
 
     async def prompt(
@@ -1386,6 +1860,12 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        if self._retiring_cause:
+            # Refused, not queued: a turn admitted here is aborted one await
+            # later by the dispose that is already on its way, after the
+            # provider has been paid for whatever it managed to stream.
+            self._command_reservations.reject(command_id)
+            raise self._retiring_refusal()
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
             self._command_reservations.reject(command_id)
             raise RuntimeError(
@@ -1589,8 +2069,9 @@ class ServingSessionHandle(SessionHandle):
     async def _name_conversation_worker(self, text: str) -> None:
         """Ask the model for a title once, cheaply, off the turn's lock.
 
-        ``session.complete_once`` is the same isolated, single-attempt, cheap
-        completion the TUI's naming worker uses — a 429 here is swallowed by
+        ``session.complete_once`` is the same isolated, cheap completion the
+        TUI's naming worker uses (one attempt, plus one auth re-resolve if the
+        bearer it drew is rejected outright) — a 429 here is swallowed by
         ``generate_title`` and cannot touch the turn. On success the title is
         stored on the session (which persists it), then the projection is
         refreshed and pushed so the phone's header and list update live.
@@ -1629,10 +2110,28 @@ class ServingSessionHandle(SessionHandle):
 
             def observe_end(event: AgentEvent) -> None:
                 nonlocal emitted_failure
-                from local_operator.harness.types import AgentEndEvent
+                from local_operator.harness.types import (
+                    AgentEndEvent,
+                    ToolExecutionEndEvent,
+                )
 
                 if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
                     emitted_failure = True
+                # The last COMPLETED tool boundary, recorded while the turn is
+                # still running: a turn that is killed never reaches its close,
+                # and "which boundary it last completed" is what keeps the
+                # successor's agent from acting on a step it only remembers
+                # starting. Same subscription as the failure probe above rather
+                # than a second one, so the two cannot disagree about the turn.
+                #
+                # COVERAGE, stated because it is partial: this subscription
+                # exists for the turns THIS queue runs (the user's prompt, peer
+                # deliveries, the goal loop, headless exec). A turn opened by a
+                # wake or a resume catch-up runs through the session's own
+                # pipeline and leaves the field empty, which reads honestly as
+                # "no boundary completed" rather than as a boundary that did.
+                elif isinstance(event, ToolExecutionEndEvent):
+                    self._note_turn_boundary(event.tool_name)
 
             # Session.prompt reports provider errors as events, not exceptions.
             # Queue completion must reflect that terminal result; otherwise a
@@ -1775,6 +2274,21 @@ class ServingSessionHandle(SessionHandle):
         # steer() does, so an attached phone paints the peer card immediately
         # rather than waiting for the next MessageStartEvent.
         self._check_loop_thread()
+        # A retiring runtime must not START a turn it will abort one await
+        # later. The QUIET record-only delivery (``mailbox``, no wake) is
+        # deliberately still admitted: it opens no turn, and refusing it would
+        # drop a durable note the sender was promised it had delivered.
+        #
+        # A DRAIN is the one case where the wake/steer shape is neither run nor
+        # refused: the runtime is still here (it has work to finish first), so
+        # the message can be deferred to the successor that is already owed.
+        # A COMMITTED exit has no such window and keeps the refusal.
+        if self._retiring_cause and (wake or mode != "mailbox"):
+            if self._draining and not self._exit_committed:
+                return await self._spool_for_successor(
+                    text, mode=mode, wake=wake, sender=sender or {}
+                )
+            raise self._retiring_refusal()
         detail = await self._session.receive_peer_message(
             text, mode=mode, wake=wake, sender=sender or {}
         )
@@ -1815,8 +2329,30 @@ class ServingSessionHandle(SessionHandle):
         named as still running. Backgrounded ``bash`` jobs deliberately outlive
         a stop (``background=true`` exists so a build survives the turn that
         started it), so they are named too rather than implied stopped.
+
+        AND THE CARD ON SCREEN IS DENIED HERE, not left to the cancellation
+        below. A gate parked in a LIVE turn is already cleared by it —
+        ``_session.abort`` fires the turn's AbortSignal, the batch's abort
+        watcher unwinds the parked await through the gate closure's ``finally``
+        — which is why this went unnoticed. What cancellation cannot reach is
+        the ORPHAN: a card that outlived its turn (the drain gave up on a tool
+        whose cleanup outran ``ABORT_DRAIN_TIMEOUT_S``, or no turn was live at
+        all) is parked on a future nothing will ever resolve, so the user's own
+        stop left the question on screen while the receipt said a turn had been
+        stopped. Denying FIRST and cutting second is the order that closes the
+        window between the two: with the gate already settled, no answer can
+        start a tool on a fresh verdict while the turn is being torn down.
         """
         self._check_loop_thread()
+        # The phone's stop button is the user's own act, so the verdict is
+        # recorded before the turn is cut (see `_note_deliberate_stop`): the
+        # turn ends aborted either way, and what this decides is whether that
+        # abort reads as the user's stop or as a failure.
+        self._note_deliberate_stop()
+        # Sampled BEFORE the turn is cut, because that is the only moment the
+        # question has an answer.
+        turn_live = self._turn_is_live()
+        denied = self._deny_pending_gates()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
@@ -1827,7 +2363,12 @@ class ServingSessionHandle(SessionHandle):
         before = self._running_children()
         self._cancel_children("stopped from mobile")
         remaining = await self._settled_children(before)
-        return self._abort_receipt(stopped=max(before - remaining, 0), still_running=remaining)
+        return self._abort_receipt(
+            stopped=max(before - remaining, 0),
+            still_running=remaining,
+            turn_live=turn_live,
+            denied=denied,
+        )
 
     def _cancel_children(self, reason: str) -> int:
         """Cancel this session's subagents, tolerating a host that has none.
@@ -1893,13 +2434,50 @@ class ServingSessionHandle(SessionHandle):
             remaining = self._running_children()
         return remaining
 
-    def _abort_receipt(self, *, stopped: int, still_running: int) -> str:
+    def _turn_is_live(self) -> bool:
+        """Whether a TURN is live right now, for the abort receipt's first clause.
+
+        Deliberately narrower than :meth:`is_busy`, and the difference is the
+        whole point: a parked gate or a live background job makes a session busy
+        without a turn being under way, and those are exactly the states this
+        receipt must not describe as a stopped turn — the orphan card that
+        outlived its turn, and the spared ``bash`` job the receipt already names
+        separately. Reads the same private turn flag :meth:`is_busy` does, plus
+        the goal loop, which drives turns of its own and is cancelled by this
+        same rung.
+        """
+        if getattr(self._session, "is_streaming", False):
+            return True
+        turn_lock = getattr(self._session, "_turn_lock", None)
+        if turn_lock is not None and turn_lock.locked():
+            return True
+        return self._goal_loop is not None and self._goal_loop.running
+
+    def _abort_receipt(
+        self, *, stopped: int, still_running: int, turn_live: bool, denied: int = 0
+    ) -> str:
         """What the abort actually did, including what it deliberately left.
 
         Survivors are named only when there ARE any: unconditional, it is noise
         on the overwhelmingly common stop that had nothing else running.
+
+        ``turn_live`` is the same rule one clause up: a receipt that opens
+        "stopping this turn" on a press where no turn was running is the kind of
+        overstatement this method's docstring exists to forbid — and it is the
+        sentence a user reads when their stop landed on a screen showing only an
+        orphaned card. The children and job clauses are reported identically
+        either way, because those facts do not depend on it.
+
+        ``denied`` names the cards this press settled. It is the ORPHAN case's
+        only evidence: with no turn live, refusing a question that outlived its
+        turn is the whole of what the abort did, and a receipt that stayed
+        silent about it would report a stop that found nothing when it in fact
+        cleared the screen. Reported on the same rule as the survivors — a
+        number that is there when it is non-zero, absent when it is not.
         """
-        parts = ["stopping this turn"]
+        parts = ["stopping this turn" if turn_live else "no turn was running"]
+        if denied:
+            parts.append(f"refused {denied} waiting prompt{'s' if denied != 1 else ''}")
         if stopped:
             parts.append(f"stopped {stopped} subagent{'s' if stopped != 1 else ''}")
         if still_running:
@@ -1959,14 +2537,54 @@ class ServingSessionHandle(SessionHandle):
         request = getattr(self._session, "request_graceful_cancel", None)
         if not callable(request):
             raise ValueError("this session cannot cancel at a tool boundary")
+        # A supervisor's cancel is deliberate too, and it ends the turn the same
+        # way (`harness/loop.py` ends it aborted) — so it records the same
+        # verdict as the user's own stop rather than letting a later teardown
+        # publish it as a cut-off failure (review round 1, BLOCKER-1).
+        self._note_deliberate_stop()
         request(reason)
         return "cancelling at the next tool boundary"
 
     async def set_model(self, provider: str, model_id: str) -> str:
+        """Switch the owner onto ``provider``/``model_id`` at the model's own level.
+
+        The two-argument call every host and test double already makes; the
+        optional reasoning level travels through :meth:`set_model_effort`, which
+        the wire dispatch probes for (see ``server.py``'s ``set_model`` arm).
+        """
+        return await self.set_model_effort(provider, model_id, None)
+
+    async def set_model_effort(self, provider: str, model_id: str, effort: str | None) -> str:
+        """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
+
+        ``effort`` is the other half of a BIRTH selection: a viewer that chose a
+        model AND a reasoning level sends both here, because ``build_model_spec``
+        seeds the model's own default level and a pair-only switch would
+        therefore silently replace the chosen one — ``Session.set_model``
+        assigns the new spec before its same-pair early return, so nothing else
+        would restore it. ``None`` is byte-for-byte the old behaviour.
+
+        CLAMPED with ``resolve_effort_in`` against THIS spec's ladder rather than
+        refused: the level comes from a durable record the catalogue can move
+        under, and the owner's job with a stale level is to land on the nearest
+        rung it can express. The refusal belongs to the moment the user chooses
+        (the create/preview routes answer 422); by the time a level reaches here
+        it is a stored decision, and failing a send over it would turn a stale
+        record into a dead turn.
+        """
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec
+        from local_operator.model.effort import resolve_effort_in
 
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        if effort:
+            spec = spec.model_copy(
+                update={
+                    "reasoning_effort": resolve_effort_in(
+                        spec.reasoning_efforts, spec.reasoning_default_effort, effort
+                    )
+                }
+            )
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
@@ -2299,7 +2917,6 @@ class ServingSessionHandle(SessionHandle):
         try:
             from local_operator.tui.notify import (
                 APP_NAME,
-                BODIES,
                 CONTEXTS,
                 detached_notify,
                 sanitize_text,
@@ -2330,22 +2947,17 @@ class ServingSessionHandle(SessionHandle):
             # render as the bare word "question" with no hint it was a
             # question rather than an approval.
             #
-            # NOT `f"{title}: {detail}"`. A tool's `describe_approval` already
-            # leads with its own action word (`_describe_path_approval` emits
-            # "write: /path"), and the title IS the tool name, so prefixing
-            # rendered every approval toast as "write: write: /path" — on the
-            # release's headline surface, every time (round 4, Q3).
-            subject = (detail or "").strip()
-            if not subject:
-                # No description at all: the tool name alone ("write") says
-                # less than the shared vocabulary below, so leave it empty and
-                # let BODIES answer.
-                subject = ""
-            elif title and not subject.lower().startswith(title.lower()):
-                subject = f"{title}: {subject}".strip().rstrip(":").strip()
+            # Composed by `notifications.compose.gate_body` rather than inline,
+            # so this leg and every other gate surface cannot drift: the rule it
+            # carries (never `f"{title}: {detail}"`, because a tool's
+            # `describe_approval` already leads with its own action word and the
+            # title IS the tool name — round 4, Q3) is one that was fixed here
+            # once and would have to be re-fixed in each new surface otherwise.
+            from local_operator.notifications import gate_body
+
             detached_notify(
                 name,
-                subject or BODIES.get(kind, ""),
+                gate_body(kind, title, detail),
                 session_id=self._session_id_for_resume(),
                 subtitle=CONTEXTS.get(kind, ""),
             )
@@ -2365,6 +2977,304 @@ class ServingSessionHandle(SessionHandle):
             setter(None)
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
+
+    # -- the completion ladder's last rung ---------------------------------
+
+    def attach_turn_journal(self, writer: Any | None) -> None:
+        """Wire the runtime's turn journal onto this handle's turn boundaries.
+
+        Called once by ``process.amain``, before the control socket listens and
+        before the boot inbox drain — both of which can start a turn, so a
+        journal attached later would miss exactly the turns a boot-time kill
+        lands in.
+
+        TWO BOUNDARIES, AND EACH RIDES THE CHOKE POINT THAT ACTUALLY COVERS
+        EVERY TURN:
+
+        * the OPEN rides ``Session.note_turn_open``, called from
+          ``_run_turn_pipeline`` — the one place the session's own comment calls
+          the single choke point every spawn path funnels through. A queue-only
+          hook would leave a peer wake, a scheduled wake and a resume catch-up
+          with no row, and those are precisely the turns nobody is watching.
+        * the CLOSE rides ``_on_turn_settled``, which already owns the single
+          turn-boundary slot on ``Session`` (see its docstring).
+
+        Best-effort by construction: the journal itself never raises (see
+        ``TurnJournal``), and a session that never grew the start hook simply
+        gets a journal that only closes — never a handle that fails to build.
+        """
+        self._turn_journal = writer
+        if writer is None:
+            return
+        if hasattr(self._session, "note_turn_open"):
+            self._session.note_turn_open = self._note_turn_open
+
+    def _note_turn_open(self, command_id: str = "") -> None:
+        """Open the journal row for a turn that is starting.
+
+        Non-raising, because its caller is the head of a turn: evidence ABOUT
+        work may never be a precondition for doing it.
+        """
+        writer = self._turn_journal
+        if writer is None:
+            return
+        try:
+            writer.open_turn(command_id=command_id or "")
+        except Exception:  # noqa: BLE001 — an instrument is never a turn failure
+            logger.debug("turn journal open failed", exc_info=True)
+
+    def _note_turn_boundary(self, tool_name: str) -> None:
+        """Record the last completed tool boundary of the turn in flight."""
+        writer = self._turn_journal
+        if writer is None or not tool_name:
+            return
+        try:
+            writer.note_boundary(tool_name)
+        except Exception:  # noqa: BLE001 — see ``_note_turn_open``
+            logger.debug("turn journal boundary failed", exc_info=True)
+
+    def _journal_end_cause(self) -> str:
+        """How the turn that just settled ended, in the journal's vocabulary.
+
+        Read from the session's OWN state rather than from this handle's
+        bookkeeping, because this hook fires for openers this handle never
+        queued: a wake or a resume catch-up has no ``_last_prompt_failure`` to
+        read. Ordered by specificity — a latched cut-off cause is the runtime's
+        own statement about why it is leaving, which is exactly what a successor
+        wants out of a row, and the deliberate token is recorded the same way
+        (it is what keeps a user's own stop from reading as an error).
+        """
+        session = self._session
+        if getattr(session, "_deliberate_stop_noted", False):
+            return "user-stop"
+        cause = getattr(session, "_cut_off_cause", "") or ""
+        if cause:
+            return str(cause)
+        if self._last_prompt_failure:
+            return "error"
+        return "completed"
+
+    def _on_turn_settled(self) -> None:
+        """The session's turn-boundary hook, with all consumers on one slot.
+
+        Chained rather than replaced: ``Session.on_turn_settled`` is a single
+        attribute and the record's ``busy`` settle already owns it. Every call
+        is non-raising by contract, so the order is free and the only thing that
+        matters is that none is dropped.
+
+        The journal's CLOSE is the third consumer, and it is the one that makes
+        "the row is still open" mean "this turn never ended": every terminal
+        path of a turn reaches this hook, so a row that is still open afterwards
+        can only have been left by a process that stopped without getting here.
+        """
+        writer = self._turn_journal
+        if writer is not None:
+            try:
+                writer.close_turn(self._journal_end_cause())
+            except Exception:  # noqa: BLE001 — an instrument is never a turn failure
+                logger.debug("turn journal close failed", exc_info=True)
+        self._publish_busy_soon()
+        self._schedule_completion_announce()
+
+    def _schedule_completion_announce(self, *, attempt: int = 0) -> None:
+        """Run :meth:`_announce_completion` off the event loop, and retry it.
+
+        The hook fires inside the turn pipeline's ``finally``, still under
+        ``_turn_lock``. The arm takes a SQLite delivery claim and may spawn a
+        notification helper, so running it inline would make the next turn's
+        admission wait on a decorative banner — the same reason the TUI's own
+        background announcer runs in a worker. The task is held by reference: a
+        `create_task` whose result nobody keeps can be collected before it ever
+        runs, which would show up as an intermittently missing toast.
+
+        ``attempt`` is the retry ladder's position (R7). Retries are scheduled
+        BACK ONTO THIS SAME SLOT so there is exactly one announcement chain per
+        handle, and so the ``dispose`` that cancels ``_completion_task`` ends the
+        whole ladder rather than the first link of it.
+        """
+        if self._disposing:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            self._completion_task = loop.create_task(self._run_completion_announce(attempt))
+        except Exception:  # noqa: BLE001 — scheduling is chrome, never the turn
+            logger.debug("could not schedule the completion announcement", exc_info=True)
+
+    async def _run_completion_announce(self, attempt: int, delay_s: float = 0.0) -> None:
+        """One attempt, then the next rung of the ladder if the completion is still owed.
+
+        BOUNDED BY CONSTRUCTION (R7): the ladder is finite, every delay is finite,
+        and :meth:`dispose` cancels the chain. No attempt acquires a bridge or
+        spawns a runtime — the work is one SQLite read, one presence read and at
+        most one short-lived helper process — so retrying cannot extend this
+        process's residency beyond the ladder's own schedule.
+        """
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        outcome = await asyncio.to_thread(self._announce_completion)
+        if outcome in (_ANNOUNCE_DELIVERED, _ANNOUNCE_SETTLED) or self._disposing:
+            return
+        if attempt >= len(_COMPLETION_RETRY_DELAYS_S):
+            # OUT OF ATTEMPTS, and the end of the ladder is deliberate. The
+            # durable unseen mark is untouched, so the completion still shows as
+            # unread everywhere; what is given up is the OS banner.
+            logger.debug("completion announcement gave up after %d retries", attempt)
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            self._completion_task = loop.create_task(
+                self._run_completion_announce(attempt + 1, _COMPLETION_RETRY_DELAYS_S[attempt])
+            )
+        except Exception:  # noqa: BLE001 — scheduling is chrome, never the turn
+            logger.debug("could not schedule the completion retry", exc_info=True)
+
+    def _announce_completion(self) -> str:
+        """RUNG 4: raise a completion's banner when nobody else can.
+
+        Returns one of the ``_ANNOUNCE_*`` outcomes, because the caller has to
+        tell "this surface delivered" and "a richer surface is about to" from
+        "the event is still owed and nothing is coming" — only the last two are
+        worth retrying (R7).
+
+        THE LAST RUNG, AND A GATE RATHER THAN A RACE. This runs at turn settle,
+        which is EARLIER than every other surface learns about the completion —
+        the desktop feed polls at 100 ms and the TUI at 1 s. Announcing
+        unconditionally would therefore win the claim for the runtime every
+        time and make both richer paths dead: the desktop's composed banner and
+        a running TUI's. So ELIGIBILITY IS DECIDED BEFORE THE CLAIM, which is
+        also the ordering the TUI's own announcer uses when it checks
+        ``live_state`` before claiming.
+
+        The rungs, first match wins, exactly as the design's ladder states them:
+
+        1. **A surface is WATCHING this session** — a TUI attached to it, a
+           phone, or a desktop window actually displaying it. The card is in
+           band there; an OS banner on top would be pure interruption. Note the
+           predicate is the VISIBILITY one, never ``notification_surfaces()``:
+           "a banner could reach somebody somewhere" is not "a person is
+           reading this", and using reachability here suppressed the banner for
+           a session nobody was looking at.
+        2. **A desktop app on this machine can attempt a COMPLETION banner**
+           (:mod:`local_operator.session.runtime.presence`) — the machine-wide
+           feed composes it, so the runtime stays silent. Narrowed by KIND: the
+           feed carries completions only, so this arm is the only place that
+           asks, and a parked ``ask``/``approval`` keeps its per-session lease
+           and its per-session toast untouched.
+        3. **A TUI is running anywhere on this machine** — its 1 s background
+           announcer raises it, and two announcers would be one too many.
+        4. **Nothing** — this arm.
+
+        A claim that then fails to deliver is handed straight back, because a
+        watermark asserting a banner nobody received is the silent hole
+        ``release_delivery`` exists to close. That release is also guaranteed
+        when the RAISE ITSELF raises (R7): the previous arrangement let an
+        exception escape past the release branch, which left exactly that
+        watermark behind for a banner that was never raised — the worst of both
+        outcomes, since the completion was neither announced nor left claimable.
+        """
+        try:
+            if self._watching_surfaces():
+                # Rung 1. Cheap and first: no store read, no filesystem probe.
+                return _ANNOUNCE_DEFERRED
+            from local_operator.paths import config_dir
+            from local_operator.server.utils.desktop_sessions import (
+                BRIDGE_NOTIFIABLE_KINDS,
+            )
+            from local_operator.session.attention import AttentionStore
+            from local_operator.session.runtime.presence import desktop_delivery_present
+
+            root = config_dir()
+            session_id = self._session_id_for_resume()
+            identity = f"session/{session_id}"
+            store = AttentionStore(root / "attention.db")
+            state = store.state(identity)
+            token = state.get("completion_token")
+            kind = state.get("kind")
+            # The store is the authority for "this turn produced a notifiable
+            # outcome", for the same reason the bridge reads it and asks no
+            # questions about jobs: re-deciding here would mean deciding again
+            # in a process with less information.
+            #
+            # ``unseen`` also makes the retry self-terminating: whatever surface
+            # delivers, delivers by claiming, and the next attempt reads this
+            # same field and finds nothing owed.
+            if not token or kind not in BRIDGE_NOTIFIABLE_KINDS or not state.get("unseen"):
+                return _ANNOUNCE_SETTLED
+            if desktop_delivery_present(root, kind):
+                # Rung 2. DEFERRED rather than settled (R7): this answer is a
+                # CACHED lease with a 2 s TTL, and the app behind it may be
+                # disconnecting right now. Returning "settled" here is what
+                # lost the banner for an app that had just gone away.
+                return _ANNOUNCE_DEFERRED
+            if _tui_viewer_running(root):
+                # Rung 3.
+                return _ANNOUNCE_DEFERRED
+            if not store.claim_delivery(identity, token, "runtime"):
+                # Another surface reached the watermark first. It is delivering.
+                return _ANNOUNCE_SETTLED
+            try:
+                delivered = self._raise_completion_banner(str(kind), session_id)
+            except BaseException:
+                # THE CLAIM MUST NOT SURVIVE A RAISE (R7). Release on the way
+                # out, so a failing banner cannot leave the watermark asserting
+                # a toast nobody received — the worst of both outcomes, since
+                # the completion would then be neither announced nor claimable.
+                #
+                # WHICH EXCEPTIONS ACTUALLY LEAVE, and why the breadth is right
+                # anyway: an ordinary `Exception` is caught by the enclosing
+                # handler below and handed back as `_ANNOUNCE_FAILED` (so the
+                # release still precedes the value the caller reads), while a
+                # non-`Exception` `BaseException` — a `CancelledError` from
+                # `dispose` during the spawn, a `KeyboardInterrupt` — really
+                # propagates out of this arm. The release is needed in BOTH, so
+                # it sits ahead of a bare `raise` rather than in either branch.
+                with contextlib.suppress(Exception):
+                    store.release_delivery(identity, token)
+                raise
+            if not delivered:
+                store.release_delivery(identity, token)
+                return _ANNOUNCE_FAILED
+            return _ANNOUNCE_DELIVERED
+        except Exception:  # noqa: BLE001 — chrome must never affect a turn
+            logger.debug("completion announcement failed", exc_info=True)
+            return _ANNOUNCE_FAILED
+
+    def _raise_completion_banner(self, kind: str, session_id: str) -> bool:
+        """Raise the rung-4 OS banner. Reports whether a child was STARTED.
+
+        THE SAME VOCABULARY AS EVERY OTHER SURFACE — ``notifications.compose``
+        — so the banner a user sees when nothing is running reads like the one
+        they see when the app is: same title rules, same privacy flag, same
+        failure sentence. Composition happens here rather than in ``notify``
+        because the privacy flag is a backend fact, and delivery still goes
+        through ``tui.notify.detached_notify``, which keeps the module rule
+        "nothing outside ``tui/`` builds an OS notification" intact — this arm
+        reaches the OS exactly as ``_announce_pending`` does.
+
+        ``argv_safe`` on both strings, matching the TUI's background path: the
+        macOS bundle takes them as positional argv slots, and model-written text
+        can begin with a dash.
+        """
+        from local_operator.notifications import compose
+        from local_operator.tui.notify import argv_safe, detached_notify
+
+        session_dir = getattr(getattr(self._session, "transcript", None), "directory", None)
+        composed = compose(
+            kind,  # type: ignore[arg-type]
+            session_dir=session_dir,
+            session_name=self._notifiable_session_name(),
+        )
+        return bool(
+            detached_notify(
+                argv_safe(composed.title),
+                argv_safe(composed.body),
+                session_id=session_id,
+                subtitle=composed.status,
+            )
+        )
 
     def _publish_pending_gate(self) -> None:
         """Mirror the fold's FRONT card into the canonical full-TUI contract.
@@ -2393,9 +3303,45 @@ class ServingSessionHandle(SessionHandle):
             # into the queue, so both surfaces can never disagree about which
             # card is current.
             front = self._projection.pending
-            store.mutate(pending_gate=front.to_json() if front is not None else None)
+            payload = front.to_json() if front is not None else None
+            if payload is not None:
+                # The card gains the session's name so a DESKTOP banner for it
+                # can be triaged: "Waiting for approval" with three sessions
+                # open names none of them (design round 1, D3). Stamped here
+                # rather than inside `PendingRequest` because the name is a
+                # property of the SESSION, not of the question, and because the
+                # privacy gate belongs on the publication boundary where every
+                # other notification fact is decided.
+                payload["session_name"] = self._notifiable_session_name()
+            store.mutate(pending_gate=payload)
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
+
+    def _notifiable_session_name(self) -> str:
+        """This conversation's name, or ``""`` when banners may not carry it.
+
+        One helper for both gate-publication sites, because the privacy rule
+        must not be able to hold on one and not the other — that asymmetry is
+        exactly the defect ``notify.py``'s own flag documentation records
+        (review round 1, M2: a flag that governed only some banners made its
+        settings copy false).
+
+        Sanitised on the way out for the same reason every other name-bearing
+        path sanitises: it is model-written and reaches argv and an AppleScript
+        literal on the surfaces that render it.
+        """
+        try:
+            from local_operator.tui.notify import (
+                sanitize_text,
+                session_names_in_notifications,
+            )
+
+            if not session_names_in_notifications():
+                return ""
+            return sanitize_text(getattr(self._session, "conversation_name", "") or "")
+        except Exception:  # noqa: BLE001 — a name is chrome; the gate is not
+            logger.debug("could not resolve the gate's session name", exc_info=True)
+            return ""
 
     async def fork_snapshot(self, message: str) -> dict[str, Any]:
         """Snapshot THIS authenticated owner, never a client-supplied path/id."""
@@ -2524,6 +3470,46 @@ class ServingSessionHandle(SessionHandle):
             journal(key, action=action, replaced=replaced)
         except Exception:  # noqa: BLE001 — the credential is already stored
             logger.warning("could not announce credential change", exc_info=True)
+
+    async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.mcp.credentials import MCPCredentials, store_credentials
+
+        return await store_credentials(self._session, MCPCredentials.model_validate(body))
+
+    async def variables_op(
+        self, action: str, key: str = "", value: str = "", value_type: str = ""
+    ) -> dict[str, Any]:
+        """Run one code-memory verb against this runtime's session eval kernel.
+
+        The runtime's half of a capability the base protocol declares for every
+        session. The eval kernel is spawned by the session's own tool loop, so it
+        lives in THIS process: a front end holding its own copy would render
+        variables no cell here ever wrote, and its writes would be invisible to
+        the next cell.
+
+        The verb table itself is shared with the in-process shape
+        (:func:`local_operator.session.variable_ops.run_variable_verb`) so a verb
+        added for one shape is a verb added for both, and the session id is taken
+        from the session rather than from any frame field — a viewer must not be
+        able to address another session's namespace by naming it.
+
+        The assembled values pass the session's ``VariableStore.redact`` (session
+        credentials plus registered redactions) before the answer leaves this
+        process. The eval worker already scrubbed what its own ``secrets`` alias
+        disclosed; this second pass is what covers credentials that never entered
+        the kernel at all.
+        """
+        from local_operator.session.variable_ops import run_variable_verb
+
+        store = getattr(self._session, "variables", None)
+        return await run_variable_verb(
+            self._session.session_id,
+            action,
+            key,
+            value,
+            value_type,
+            redact=getattr(store, "redact", None),
+        )
 
     def cancel_subagents_count(self) -> int:
         """Cancel every running subagent and return the REAL count.
@@ -2916,7 +3902,7 @@ class ServingSessionHandle(SessionHandle):
         if not name:
             current = getattr(session, "conversation_name", "") or ""
             text = (
-                f"name: {current} — /title <words>, or /title refresh"
+                f"name: {current} — /title <words>, or /title --refresh"
                 if current
                 else "no name set — /title <words> to set one"
             )
@@ -3023,6 +4009,7 @@ class ServingSessionHandle(SessionHandle):
         cannot drift into two different answers.
         """
         from local_operator.session.frontend_state import (
+            context_block_numbers,
             format_context_tokens,
             format_window,
         )
@@ -3056,7 +4043,12 @@ class ServingSessionHandle(SessionHandle):
             rows.append(("Last cache read (exact)", format_context_tokens(int(data["cache_read"]))))
         return SlashResult(
             kind="block",
-            data={"type": "context", "items": rows, "title": "Estimated next request"},
+            data={
+                "type": "context",
+                "items": rows,
+                "title": "Estimated next request",
+                "numbers": context_block_numbers(data, total),
+            },
         )
 
     def _team_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
@@ -3367,11 +4359,53 @@ class ServingSessionHandle(SessionHandle):
         # reaches here — the viewer pulls it back to local because its own
         # facade holds the identical rows — so this answers the explicit
         # `list` and the empty case from the session's own manager.
+        #
+        # The emptiness test asks the MANAGER for its configured server NAMES
+        # (``get_all_server_names``), which is the question the status band's
+        # ``tui.app._mcp_status`` asks it. It used to read ``manager.servers``,
+        # an attribute no manager has ever had, so the test answered falsy
+        # forever and an explicit ``/mcp list`` said "no MCP servers configured."
+        # on EVERY session whose slash command routes here — every fresh viewer,
+        # and the phone projection, which shares this handler — while the very
+        # same session's transcript listed those servers failing to start by
+        # name.
+        names: list[str] = []
         manager = getattr(session, "mcp_manager", None)
-        servers = getattr(manager, "servers", None) if manager is not None else None
-        if not servers:
-            return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
-        return SlashResult(kind="block", data={"type": "mcp"})
+        if manager is not None:
+            try:
+                names = list(manager.get_all_server_names())
+            except Exception:  # noqa: BLE001 — a listing must never raise
+                logger.debug("MCP listing: the manager could not name its servers", exc_info=True)
+                # A roster we could not READ is not an empty roster either.
+                # Saying "none configured" for it is the same lie in a quieter
+                # place, so the guard reports itself rather than borrowing the
+                # empty state's sentence.
+                return SlashResult(
+                    kind="notice",
+                    text="could not read this session's MCP server list.",
+                    style="warning",
+                )
+        if names:
+            return SlashResult(kind="block", data={"type": "mcp"})
+        # AN EMPTY ROSTER IS THE QUESTION — not an absent manager (QA round 1,
+        # Q2). ``discover_and_load_mcp_tools`` does NOT raise for a discovery
+        # failure: it catches, logs, and returns the manager alongside a
+        # synthetic error entry, which ``session_factory`` keys as ``discovery``
+        # (``mcp/__init__.py:145-149``). So the state a user actually reaches
+        # has a MANAGER whose roster came back empty and a boot record that says
+        # why. Keying this on ``manager is None`` missed exactly that state and
+        # answered "no MCP servers configured." there too — the sentence this
+        # listing exists to stop saying. The boot record is the only thing that
+        # can tell an empty roster from an unread one, and it is what
+        # ``tui.app._mcp_status`` reads for the same reason.
+        failure = _mcp_boot_discovery_failure(session)
+        if failure is not None:
+            return SlashResult(kind="notice", text=failure, style="warning")
+        # Genuinely empty, and honestly said: either no boot record at all (the
+        # wiring has not run yet) or an outcome the wiring records as EMPTY on
+        # purpose because the MCP package would not import — a host that never
+        # used MCP must not be told MCP is broken.
+        return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
 
     def _grant_notice(self, text: str, kind: str) -> None:
         """Report a settled MCP grant to every front end watching this session.
@@ -4093,6 +5127,21 @@ class ServingSessionHandle(SessionHandle):
             # lifecycle events are authoritative; ``_reconcile_streaming``
             # covers attach and command boundaries.
         )
+        # Publish the child roster beside the session state, the way the TUI
+        # host does (``mobile/tui_handle.py::_refresh_state``). The folded
+        # projection's per-child ``session_id`` is the ONLY route to
+        # ``/api/sessions/{sid}/agents/{job}/history``: the event path cannot
+        # learn a child's session directory (``SubagentStartEvent`` carries no
+        # session id, so those rows are born with ``session_id=None``), and the
+        # registry in ``SubagentComms`` is the only place that knows it. Both
+        # hosts must therefore agree about the same row, or a runtime-hosted
+        # session 404s every child transcript while a TUI-hosted one serves it.
+        # The cost is the one the TUI already pays per folded event (one
+        # registry walk plus a bounded copy); no child transcript ever leaves
+        # with it.
+        comms = getattr(self._session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command
@@ -4123,6 +5172,43 @@ class ServingSessionHandle(SessionHandle):
             self._fold.set_todos(list(TODO_STORE.get(self._session.session_id, [])))
         except Exception:  # noqa: BLE001 — todos are a panel, never a failure
             logger.debug("todo refresh failed", exc_info=True)
+
+
+def _tui_viewer_running(root: Path) -> bool:
+    """Whether any live TUI window on this machine can raise a completion.
+
+    RUNG 3'S QUESTION. A running TUI polls the attention store once a second and
+    announces every background completion it finds, so the runtime must stay
+    silent while one is up or the two compose the same banner.
+
+    The viewer registry is the right authority rather than the session registry:
+    it is the machine-wide answer to "which window can put a session on screen",
+    it is published once per TUI process (surviving every ``/resume``), and
+    ``scan_viewers`` already reaps a dead pid and a stale heartbeat — so a TUI
+    that crashed does not keep the runtime silent forever.
+
+    Deliberately keyed on the SURFACE rather than on which session it shows:
+    a TUI displaying a different conversation still owns its own background
+    announcer (design matrix row 8), and a TUI displaying THIS one is rung 1.
+
+    KNOWN LIMIT, stated rather than hidden: a TUI whose process has
+    notifications disabled (``LOCAL_OPERATOR_NO_NOTIFICATIONS`` exported into
+    that one process) advertises no such fact, so this reports a running
+    announcer that will stay quiet. The window is narrow — the config flag and
+    the runtime's own env are shared, so only a per-process export reaches it —
+    and the durable unseen mark means nothing is lost, only un-bannered.
+    """
+    try:
+        # The surface name comes from the module that defines the record, not
+        # from a literal here: `viewers.py`'s comment promises neither half
+        # spells it on its own, and a literal in this probe is what made that
+        # promise false (review round 3, N5).
+        from local_operator.session.runtime.viewers import TUI_SURFACE, scan_viewers
+
+        return any(record.surface == TUI_SURFACE for record in scan_viewers(root))
+    except Exception:  # noqa: BLE001 — a routing read must not block a notify
+        logger.debug("could not scan for a running TUI", exc_info=True)
+        return False
 
 
 def _effective_label(session: Any) -> str:
@@ -4164,6 +5250,7 @@ async def spawn_owned_session(
     cwd: str,
     provider: str | None = None,
     model_id: str | None = None,
+    birth_effort: str | None = None,
     resume: str | None = None,
     model_selection_override: bool = True,
 ) -> ServingSessionHandle:
@@ -4173,6 +5260,13 @@ async def spawn_owned_session(
     ``args.resume`` exactly as the CLI's ``--resume`` does, so the factory
     reuses that transcript directory and the session replays its history —
     the phone's "open this past conversation" button.
+
+    ``birth_effort`` is the reasoning level the caller's viewer chose, used in
+    place of the configured default when this session is CONSTRUCTED. It rides
+    ``args.birth_effort`` rather than ``args.effort`` on purpose: the CLI's
+    ``--effort`` is applied by ``exec_session`` AFTER construction and RAISES on
+    a level the model cannot express, where a stored birth choice must clamp.
+    Two different contracts, so two different names.
     """
     # These imports MUST stay function-local, and ``create_session`` most of
     # all. Do not "tidy" them to the top of the file.
@@ -4198,12 +5292,23 @@ async def spawn_owned_session(
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
+    from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session_factory import create_session
 
     config_directory = config_dir()
     config_manager = ConfigManager(config_dir=config_directory)
     credential_manager = CredentialManager(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
+
+    # The publication latch the deferred MCP wiring parks on. Created HERE, on
+    # the loop that will also wait on it (this process's one asyncio loop), so
+    # the waiting end and the opening end agree without anyone having to check.
+    # It travels two ways: into ``create_session`` (where the wiring task waits
+    # on it) and onto the handle (where ``RuntimeServer._serve`` finds it via
+    # ``_open_mcp_wiring_gate``). The latch itself owns the cross-thread hop, so
+    # a runtime that opens it from another thread still wakes the task —
+    # see :mod:`local_operator.session.runtime.publication`.
+    mcp_publication_gate = PublicationGate()
 
     # The owner's saved tool-approval default. The TUI reads the SAME key at
     # boot (OperatorApp._load_approvals_default) and adopts ``auto`` as
@@ -4230,6 +5335,7 @@ async def spawn_owned_session(
         yolo=False,
         train=False,
         resume=resume,
+        birth_effort=birth_effort,
         model_selection_override=model_selection_override,
     )
     session = await create_session(
@@ -4239,6 +5345,50 @@ async def spawn_owned_session(
         agent_registry,
         has_ui=False,
         cwd=cwd,
+        # MCP WIRING RIDES THE RECORD, NOT THE BOOT PATH. Everything this
+        # session does before ``RecordPublisher`` runs (``process.amain``:
+        # spawn_owned_session -> _drain_inbox_into -> async_init ->
+        # start_in_process) is invisible to the viewer, which is sitting on
+        # the status band's `starting…` with nothing to bind to. Eager wiring
+        # put MCP discovery, every configured server's connect and the 250 ms
+        # startup gate — plus whatever a hanging or 401-answering server costs
+        # before the gate defers it — inside that window, for a capability MCP
+        # deliberately does not gate the session on (``wire_mcp_into_session``
+        # exposes schemas only after an explicit ``read mcp://``). Deferring it
+        # means no integration configuration can sit between the user and a
+        # bound session.
+        #
+        # The deferral is the mechanism the TUI already opted into when it
+        # built its own in-process Session; after the viewer/runtime split the
+        # process whose boot the first frame waits on is THIS one, and it was
+        # the only caller left not opting in — which made the deferred branch
+        # dead code in production.
+        #
+        # AND THE DEFERRAL ALONE WAS NOT ENOUGH (measured): dispatching the
+        # wiring as a task moved it to the first await the loop reached, which
+        # in ``process.amain`` is the inbox drain BEFORE this record exists —
+        # so a declared server's SDK import still ran to completion inside the
+        # pre-publication window (+2.3 s with one server on a closed port, in
+        # 14 of 14 runs). ``mcp_publication_gate`` is that same record, as a
+        # latch: the task parks on it and ``RuntimeServer._serve`` sets it the
+        # moment the publisher exists. The runtime is the only caller that
+        # passes one, because it is the only caller that publishes.
+        #
+        # Two properties this deliberately keeps. (1) The failure REPORT still
+        # reaches the screen: the deferred path fires ``_fire_mcp_sink`` at the
+        # gate snapshot and keeps the ``has_ui=False`` stderr prints, so the
+        # capture is unchanged — and the record exists by the time the wiring
+        # runs, so the frontend-state push that carries ``mcp_startup`` has a
+        # viewer to receive it. Before this, a failed mount left the child
+        # recording MCP failures that no transport could deliver. (2) The first
+        # seconds of a session carry the non-MCP surface plus the deferred-cache
+        # catalogue; a late merge arrives through ``manager.on_tools_changed`` ->
+        # ``refresh_frontend_state`` exactly as a late ``list_changed`` does
+        # today, and a turn started before wiring settles reaches MCP tools
+        # through the same deferred-cache path (cached schemas advertised, the
+        # deferred execute awaiting the connect future).
+        defer_mcp_wiring=True,
+        mcp_publication_gate=mcp_publication_gate,
     )
     # NOT pinned: this value came from config, so it must keep following
     # config. ``create_session`` has already started the process watcher for
@@ -4255,6 +5405,11 @@ async def spawn_owned_session(
         # registration itself share the config root this session was built
         # from (MINOR-3).
         config_dir=config_directory,
+        # The other end of the latch above. Only a runtime that publishes a
+        # record may be handed one, which is why this is passed at the spawn
+        # site rather than defaulted: a handle without it leaves the deferred
+        # wiring ungated (see ``create_session``).
+        mcp_publication_gate=mcp_publication_gate,
     )
     attach_gate_config_watch(handle, config_directory)
     return handle
