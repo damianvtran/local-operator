@@ -73,6 +73,14 @@ class FakeSession:
         #: double. Declared here rather than attached per-test so the shape is
         #: part of the double's contract.
         self.mcp_manager: Any = None
+        #: The boot record the listing consults when there is NO manager, since
+        #: discovery that raised never assigns one and records itself here
+        #: instead. ``None`` is the not-yet-wired state; a test wanting the
+        #: failure state sets a real :class:`McpStartupOutcome` with failures.
+        #: Declared for the same reason as ``mcp_manager``: the shape is part
+        #: of the double's contract, and an undeclared attribute is invisible
+        #: to the type checker every gate runs.
+        self.mcp_startup: Any = None
         #: The session's event-emission seam. The runtime reports a settled
         #: MCP grant through it, since the grant outlives the request that
         #: started it. Tests replace it to capture what viewers would see.
@@ -2218,7 +2226,15 @@ async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
 
 @pytest.mark.asyncio
 async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer() -> None:
-    """A session whose MCP discovery failed carries no manager at all."""
+    """The one state that MAY say this: no manager and no boot failure named.
+
+    Two states reach here — a session whose wiring has not run yet (no boot
+    record at all) and a host whose MCP package would not import (an outcome
+    the wiring records as EMPTY on purpose, because a machine that never used
+    MCP must not be told MCP is broken). A session whose discovery RAISED is a
+    third state with the same absent manager and a very different answer; it is
+    the next test down.
+    """
     from local_operator.session.frontend_state import SlashResult
 
     handle, session = make_handle()
@@ -2231,12 +2247,44 @@ async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_routed_mcp_listing_names_a_discovery_failure_instead_of_denying_it() -> None:
+    """`manager is None` is not an empty roster (review round 1, MAJOR-1).
+
+    ``wire_mcp_into_session`` never assigns ``mcp_manager`` when discovery
+    RAISES; it records the exception on the boot record instead, and that
+    session is a machine which HAS an MCP setup that could not be read. The old
+    guard answered "no MCP servers configured." there — the operator's reported
+    sentence in the state where it is least true. The band refuses to say it
+    (``_mcp_status`` reads ``startup.failed`` for exactly this reason), so the
+    slash answer must not either.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+
+    handle, session = make_handle()
+    assert session.mcp_manager is None
+    session.mcp_startup = McpStartupOutcome(
+        failures={MCP_DISCOVERY_KEY: "no such file or directory: mcp.json"}
+    )
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert "no MCP servers configured." not in result.text
+    assert "no such file or directory: mcp.json" in result.text
+    # A failure is not an empty state, and it is not styled as one either.
+    assert result.style == "warning"
+
+
+@pytest.mark.asyncio
 async def test_a_manager_that_cannot_name_its_servers_does_not_kill_the_command() -> None:
     """A slash surface has no error page to render an exception on.
 
     Reading one attribute too far takes the whole app down with it, so a
-    manager that cannot answer — a facade older than the accessor, a discovery
-    that half-failed — has to degrade to the empty answer instead of raising.
+    manager that cannot answer has to degrade. It must NOT degrade to "none
+    configured" though: a roster we could not READ is not an empty roster, and
+    borrowing the empty state's sentence is the same lie in a quieter place
+    (review round 1, MAJOR-1, second half).
     """
     from local_operator.session.frontend_state import SlashResult
 
@@ -2251,4 +2299,6 @@ async def test_a_manager_that_cannot_name_its_servers_does_not_kill_the_command(
     result = await handle._slash_result("mcp", "list", SlashResult)
 
     assert result.kind == "notice"
-    assert result.text == "no MCP servers configured."
+    assert result.text != "no MCP servers configured."
+    assert "could not read" in result.text
+    assert result.style == "warning"

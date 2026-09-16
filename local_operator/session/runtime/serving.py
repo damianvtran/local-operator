@@ -88,6 +88,35 @@ _ABORT_SETTLE_BUDGET_S = 1.0
 _ABORT_SETTLE_POLL_S = 0.02
 
 
+def _mcp_boot_failure(session: Any) -> str | None:
+    """The boot record's MCP failure as one honest line, or ``None``.
+
+    The question ``session.mcp_manager is None`` cannot answer on its own: it is
+    also the state of a session whose MCP discovery RAISED, which
+    ``wire_mcp_into_session`` records on the session instead of assigning a
+    manager. The boot record is the only thing that knows, which is why
+    ``tui.app._mcp_status`` reads it for the same reason.
+
+    ``McpStartupOutcome.failures`` keys on the bare server name, with the
+    synthetic :data:`~local_operator.session.mcp_status.MCP_DISCOVERY_KEY` for
+    the layer failing rather than a server (see ``session_factory``). The
+    discovery entry is the one a missing manager produces, so it leads; any
+    other entry is named as the server it is. The subject words mirror the boot
+    notice's — "MCP discovery" versus "MCP server <name>" — so one failure
+    reads the same wherever the user meets it.
+    """
+    from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
+
+    outcome = getattr(session, "mcp_startup", None)
+    failures = getattr(outcome, "failures", None) or {}
+    if not failures:
+        return None
+    if MCP_DISCOVERY_KEY in failures:
+        return f"MCP discovery failed: {failures[MCP_DISCOVERY_KEY]}"
+    name, message = next(iter(failures.items()))
+    return f"MCP server {name} failed: {message}"
+
+
 def _log_detached_admission(task: "asyncio.Task[str]") -> None:
     """Never let a dispatched admission become an unretrieved exception.
 
@@ -4205,26 +4234,45 @@ class ServingSessionHandle(SessionHandle):
         #
         # The emptiness test asks the MANAGER for its configured server NAMES
         # (``get_all_server_names``), which is the question the status band's
-        # ``tui.app._mcp_status`` asks it — with the same ``manager is None``
-        # guard this now uses. It used to read ``manager.servers``, an attribute
-        # no manager has ever had, so the test answered falsy forever and an
-        # explicit ``/mcp list`` said "no MCP servers configured." on EVERY
-        # session whose slash command routes here — every fresh viewer, and the
-        # phone projection, which shares this handler — while the very same
-        # session's transcript listed those servers failing to start by name.
-        #
-        # A manager that cannot answer must never take a slash command down with
-        # it, so the accessor is guarded: a session whose MCP discovery failed
-        # carries no manager at all (``mcp_manager is None``), which is the
-        # genuinely-empty case this notice is for. A facade too old to expose
-        # the accessor degrades to the same answer rather than raising.
+        # ``tui.app._mcp_status`` asks it. It used to read ``manager.servers``,
+        # an attribute no manager has ever had, so the test answered falsy
+        # forever and an explicit ``/mcp list`` said "no MCP servers configured."
+        # on EVERY session whose slash command routes here — every fresh viewer,
+        # and the phone projection, which shares this handler — while the very
+        # same session's transcript listed those servers failing to start by
+        # name.
         names: list[str] = []
         manager = getattr(session, "mcp_manager", None)
-        if manager is not None:
+        if manager is None:
+            # NO MANAGER IS NOT AN EMPTY ROSTER, and only the boot record can
+            # tell the states apart — the read ``_mcp_status`` makes for the
+            # same reason, whose docstring this one follows. Discovery that
+            # RAISED never assigns ``mcp_manager``; it records the exception on
+            # ``mcp_startup`` instead, and that session is a machine which HAS
+            # an MCP setup that could not be read. That is where "no MCP
+            # servers configured." is least true and most damaging, so answer
+            # with the failure instead of denying the setup. The other states
+            # keep the old answer: a not-yet-wired session carries no boot
+            # record yet, and an unimportable MCP package deliberately records
+            # an EMPTY outcome, because a host that never used MCP must not be
+            # told MCP is broken.
+            failure = _mcp_boot_failure(session)
+            if failure is not None:
+                return SlashResult(kind="notice", text=failure, style="warning")
+        else:
             try:
                 names = list(manager.get_all_server_names())
             except Exception:  # noqa: BLE001 — a listing must never raise
                 logger.debug("MCP listing: the manager could not name its servers", exc_info=True)
+                # A roster we could not READ is not an empty roster either.
+                # Saying "none configured" for it is the same lie in a quieter
+                # place, so the guard reports itself rather than borrowing the
+                # empty state's sentence.
+                return SlashResult(
+                    kind="notice",
+                    text="could not read this session's MCP server list.",
+                    style="warning",
+                )
         if not names:
             return SlashResult(kind="notice", text="no MCP servers configured.", style="info")
         return SlashResult(kind="block", data={"type": "mcp"})
