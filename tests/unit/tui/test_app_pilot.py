@@ -6907,6 +6907,83 @@ async def test_mcp_logout_picker_says_why_its_list_is_empty() -> None:
             assert "choose a credential to forget" not in editor.picker._notice
 
 
+@pytest.mark.asyncio
+async def test_mcp_logout_empty_state_distinguishes_no_oauth_server_from_none_stored() -> None:
+    """Two ways to an empty logout list, and they need different sentences.
+
+    `oauth_server_names` returns OAuth-CAPABLE servers, so a host whose servers
+    are all stdio reaches the empty list too — and there, "no stored credential
+    — /mcp login <name> authorizes a server" misframes the state: there is no
+    OAuth server to log in to, so the suggested command cannot apply. That
+    state's sentence names `/mcp add` instead, while the designer-signed
+    sentence stays for OAuth servers that simply hold no grant (review round 2,
+    R2-MINOR-2).
+    """
+    from local_operator.mcp.config import MCPStdioServerConfig
+
+    configs = {"filesystem": MCPStdioServerConfig(command="npx")}
+    manager = FakeMcpManager(["filesystem"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                return_value=(configs, {}),
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "/mcp add" in editor.picker._notice, editor.picker._notice
+            assert "no stored credential" not in editor.picker._notice
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_picker_says_when_the_config_layer_is_unreadable() -> None:
+    """The third empty reason, and it must not borrow either of the other two.
+
+    `_mcp_configured_urls` returning `None` means the layer could not be READ,
+    not that no server has a URL — the distinction the `dict | None` return
+    exists for. A bare empty list there would report a machine's setup as empty
+    when it was merely unreadable (review round 2, R2-NIT-2).
+
+    The loader is called twice on this path — once by `oauth_server_names` and
+    once by the URL mapping — so the failure is staged on the SECOND call, which
+    is the only shape that reaches the branch at all (a first-call failure is
+    answered by the names guard above it).
+    """
+    from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+    configs = {
+        "notion": MCPHttpServerConfig(
+            url="https://mcp.notion.com/mcp", auth=MCPAuthConfig(type="oauth")
+        )
+    }
+    manager = FakeMcpManager(["notion"], [])
+    manager._configs = configs
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        editor = app.query_one(Editor)
+        with (
+            patch(
+                "local_operator.mcp.config.load_all_mcp_configs",
+                side_effect=[(configs, {}), RuntimeError("config layer raised")],
+            ),
+            patch("local_operator.mcp.auth.mcp_logged_out_servers", return_value=set()),
+        ):
+            await _type_into_editor(pilot, app, "/mcp logout ")
+            assert editor.picker.suggestions() == []
+            assert "unreadable" in editor.picker._notice, editor.picker._notice
+
+
 async def _type_into_editor(pilot, app, text: str) -> None:
     """Type ``text`` one REAL keystroke at a time, leaving it in the buffer.
 

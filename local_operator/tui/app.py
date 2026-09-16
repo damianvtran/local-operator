@@ -37912,21 +37912,30 @@ class OperatorApp(App[None]):
             if urls is None:
                 editor.picker.set_notice("MCP config unreadable — cannot list logouts")
                 return []
-            names = [name for name in names if urls.get(name) in stored]
+            # ``names`` here is the OAuth-capable set, so an empty list after the
+            # filter has TWO reasons and they need different sentences (review
+            # round 2, R2-MINOR-2): OAuth servers exist and none holds a stored
+            # grant, versus nothing on this machine can hold one at all, where
+            # the first sentence's suggested command could not apply.
+            candidates = names
+            names = [name for name in candidates if urls.get(name) in stored]
             if not names:
+                if candidates:
+                    editor.picker.set_notice(
+                        "no stored credential — /mcp login <name> authorizes a server"
+                    )
+                else:
+                    editor.picker.set_notice(
+                        "no OAuth server configured — /mcp add <name> <url> configures one"
+                    )
                 # An empty list must say WHY, in the list's own place — the rule
-                # `/logout`'s picker follows (its `reason`), and the store
-                # branch above already follows. Without this the verb-context
-                # line below ("choose a credential to forget") invites a choice
-                # from a list holding nothing and never says nothing is stored,
-                # which reads as a broken picker rather than an answer (design
-                # review D1). The reason names the next step too, because
-                # "nothing here" is only half an answer, and it covers the
-                # silently-dropped row as well: a row is filtered out exactly
-                # when its URL holds no stored grant.
-                editor.picker.set_notice(
-                    "no stored credential — /mcp login <name> authorizes a server"
-                )
+                # `/logout`'s picker follows (its `reason`), and the store branch
+                # above already follows. Without it the verb-context line below
+                # ("choose a credential to forget") invites a choice from a list
+                # holding nothing and never says nothing is stored, which reads
+                # as a broken picker rather than an answer (design review D1).
+                # Both sentences name the next step, because "nothing here" is
+                # only half an answer.
                 return []
         # The verb→server swap is otherwise only inferable from the row
         # shapes; a one-line notice names what this list is FOR while the

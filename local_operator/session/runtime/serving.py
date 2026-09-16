@@ -88,33 +88,36 @@ _ABORT_SETTLE_BUDGET_S = 1.0
 _ABORT_SETTLE_POLL_S = 0.02
 
 
-def _mcp_boot_failure(session: Any) -> str | None:
-    """The boot record's MCP failure as one honest line, or ``None``.
+def _mcp_boot_discovery_failure(session: Any) -> str | None:
+    """The boot record's DISCOVERY failure as one honest line, or ``None``.
 
-    The question ``session.mcp_manager is None`` cannot answer on its own: it is
-    also the state of a session whose MCP discovery RAISED, which
-    ``wire_mcp_into_session`` records on the session instead of assigning a
-    manager. The boot record is the only thing that knows, which is why
-    ``tui.app._mcp_status`` reads it for the same reason.
+    Only the synthetic :data:`~local_operator.session.mcp_status.MCP_DISCOVERY_KEY`
+    entry is read, because this is asked when the roster came back EMPTY, and a
+    PER-SERVER entry cannot describe that state honestly. A fresh boot cannot
+    produce the pair: ``_connect_round`` assigns ``_configs`` BEFORE validating
+    (``mcp/manager.py:2032``), so a server that fails keeps its name and the
+    roster is not empty. A STALE record can: ``/mcp remove`` reloads the manager
+    into an empty roster without rewriting ``session.mcp_startup`` — only the
+    boot wiring and its settle sink write that, and the sink fires only when a
+    round deferred something. Reporting "MCP server github failed" there would
+    name a server the session no longer configures, where the empty sentence is
+    the true one (review round 2, R2-MINOR-1).
 
-    ``McpStartupOutcome.failures`` keys on the bare server name, with the
-    synthetic :data:`~local_operator.session.mcp_status.MCP_DISCOVERY_KEY` for
-    the layer failing rather than a server (see ``session_factory``). The
-    discovery entry is the one a missing manager produces, so it leads; any
-    other entry is named as the server it is. The subject words mirror the boot
-    notice's — "MCP discovery" versus "MCP server <name>" — so one failure
-    reads the same wherever the user meets it.
+    The predicate this matches is the startup TOAST's, not the band's:
+    ``discovery_failed=not outcome.configured and outcome.failed``
+    (``tui/widgets/toast.py:417``). ``tui.app._mcp_status`` reads the boot record
+    only when there is no manager, so in this shape the band paints no segment
+    while this names the failure — a gap in the band itself, unchanged code and
+    out of scope here (review round 2, R2-NIT-1).
     """
     from local_operator.session.mcp_status import MCP_DISCOVERY_KEY
 
     outcome = getattr(session, "mcp_startup", None)
     failures = getattr(outcome, "failures", None) or {}
-    if not failures:
+    message = failures.get(MCP_DISCOVERY_KEY)
+    if not message:
         return None
-    if MCP_DISCOVERY_KEY in failures:
-        return f"MCP discovery failed: {failures[MCP_DISCOVERY_KEY]}"
-    name, message = next(iter(failures.items()))
-    return f"MCP server {name} failed: {message}"
+    return f"MCP discovery failed: {message}"
 
 
 def _log_detached_admission(task: "asyncio.Task[str]") -> None:
@@ -4270,7 +4273,7 @@ class ServingSessionHandle(SessionHandle):
         # listing exists to stop saying. The boot record is the only thing that
         # can tell an empty roster from an unread one, and it is what
         # ``tui.app._mcp_status`` reads for the same reason.
-        failure = _mcp_boot_failure(session)
+        failure = _mcp_boot_discovery_failure(session)
         if failure is not None:
             return SlashResult(kind="notice", text=failure, style="warning")
         # Genuinely empty, and honestly said: either no boot record at all (the

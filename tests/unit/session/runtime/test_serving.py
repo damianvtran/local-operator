@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.session.frontend_state import SlashResult as _SlashResult
+from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
@@ -2225,31 +2226,70 @@ async def test_a_routed_mcp_listing_asks_the_manager_for_its_servers() -> None:
 
 
 @pytest.mark.parametrize(
-    "manager",
-    [None, _NameManager([])],
-    ids=["no-manager", "zero-name-manager"],
+    ("manager", "startup"),
+    [
+        (None, None),
+        (_NameManager([]), None),
+        # The wiring's deliberate EMPTY outcome (the MCP package would not
+        # import) is recorded and still not a failure: a host that never used
+        # MCP must not be told MCP is broken. Pinned here so the arm the code
+        # comment names cannot be dropped by a later predicate change
+        # (review round 2, R2-NIT-2).
+        (_NameManager([]), McpStartupOutcome()),
+    ],
+    ids=["no-manager", "zero-name-manager", "deliberate-empty-outcome"],
 )
 @pytest.mark.asyncio
-async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(manager: Any) -> None:
-    """The states that MAY say this, both with NO boot failure recorded.
+async def test_a_routed_mcp_listing_keeps_the_honest_empty_answer(
+    manager: Any, startup: Any
+) -> None:
+    """The states that MAY say this, none of them with a failure recorded.
 
-    Two shapes reach here and both are genuinely empty: a session whose wiring
-    has not run yet (no boot record at all) and a host that really asked for
-    nothing — including the zero-name manager, which is the same answer the
-    real one gives when no config file names a server (QA round 1, row 3). A
-    third shape — an empty roster with a failure on the boot record — is a
-    different answer entirely and is the test below.
+    Three shapes reach here and all are genuinely empty: a session whose wiring
+    has not run yet (no boot record at all), a host that really asked for
+    nothing — including the zero-name manager, which is the same answer the real
+    one gives when no config file names a server (QA round 1, row 3) — and the
+    recorded-but-empty outcome the MCP import gap produces. An empty roster with
+    a failure on the boot record is a different answer entirely; see the two
+    tests below.
     """
     from local_operator.session.frontend_state import SlashResult
 
     handle, session = make_handle()
     session.mcp_manager = manager
+    session.mcp_startup = startup
 
     result = await handle._slash_result("mcp", "list", SlashResult)
 
     assert result.kind == "notice"
     assert result.text == "no MCP servers configured."
     assert result.style == "info"
+
+
+@pytest.mark.asyncio
+async def test_a_routed_mcp_listing_does_not_blame_a_server_the_roster_lost() -> None:
+    """A STALE per-server entry must not be spoken for an EMPTY roster.
+
+    The boot record is written at boot and by its settle sink only, and that
+    sink fires only when a round DEFERRED something — so `/mcp remove` reloads
+    the manager into an empty roster while the record still names the server it
+    just removed (``mcp/manager.py:2032`` assigns ``_configs`` before
+    validating, so a fresh boot cannot produce this pair, but a config change
+    can). Speaking that entry would have `/mcp list` announce "MCP server
+    github failed: …" on a session that configures nothing, where the empty
+    sentence is the true answer (review round 2, R2-MINOR-1).
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, session = make_handle()
+    session.mcp_manager = _NameManager([])
+    session.mcp_startup = McpStartupOutcome(failures={"github": "command not found: gh"})
+
+    result = await handle._slash_result("mcp", "list", SlashResult)
+
+    assert result.kind == "notice"
+    assert result.text == "no MCP servers configured."
+    assert "github" not in result.text
 
 
 @pytest.mark.asyncio
