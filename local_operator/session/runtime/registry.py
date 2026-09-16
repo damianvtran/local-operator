@@ -334,6 +334,7 @@ def classify(
     *,
     now: float | None = None,
     check_zombie: bool | None = None,
+    zombie: bool | None = None,
 ) -> Liveness:
     """The single owner of the ``live`` / ``wedged`` / ``stale`` vocabulary.
 
@@ -365,16 +366,29 @@ def classify(
     caller restate it (a ``ps`` fork on macOS, so it is spent only where the
     answer changes what a user is told): probe when the heartbeat has already
     gone quiet, which is either an owner that stopped reporting or a process
-    that died without being reaped. Pass a bool to force it — which is also what
-    :func:`scan` does when it has already asked :func:`zombie_probe_due` and
-    answered for the whole set at once.
+    that died without being reaped. Pass a bool to force it.
+
+    ``zombie`` is the ANSWER to that same question, for a caller that has already
+    asked it: :func:`scan` asks ONCE for a whole quiet population, and a caller
+    holding the answer must not be sent back for it one pid at a time. That is
+    not a nicety — QA round 2 (Q5) measured the batch's ``True`` ("this pid is a
+    zombie") arriving here as the POLICY ``check_zombie=True``, so every corpse in
+    the population was re-probed with its own ``ps``: 201 forks per probe at 200
+    zombie records and a 0.5 Hz doorbell, i.e. round 1's Q1 symptom on the
+    sub-population whose owner is already gone. Pass the answer INSTEAD of the
+    policy, never both. The signal-0 read below stays this function's own, so
+    existence is always freshly checked; only the ``ps`` question the caller has
+    already answered is skipped.
     """
     moment = time.time() if now is None else now
     # Clamped: a stamp dated in the future is clock skew, never evidence
     # against the process, so it can only make this register quieter.
     age = max(0.0, moment - record.heartbeat_at)
-    zombie_probe = zombie_probe_due(record, moment) if check_zombie is None else check_zombie
-    alive = pid_alive(record.pid, check_zombie=zombie_probe)
+    if zombie is not None:
+        alive = pid_alive(record.pid, check_zombie=False) and not zombie
+    else:
+        zombie_probe = zombie_probe_due(record, moment) if check_zombie is None else check_zombie
+        alive = pid_alive(record.pid, check_zombie=zombie_probe)
     if not alive:
         state: Literal["live", "wedged", "stale"] = "stale"
     elif age > HEARTBEAT_TIMEOUT_S:
@@ -487,11 +501,14 @@ def scan(
     # session, every `lop` invocation) fork-free. The reaping stays HERE, because
     # it is this function's contract with its callers rather than a fact about
     # the record.
-    verdicts: dict[int, bool] = {}
+    #
+    # ``answers`` holds the VERDICT per pid, not a policy flag: a pid the batch
+    # does not name is answered per record below.
+    answers: dict[int, bool] = {}
     if check_zombie is None:
         # Signal-0 first: a pid that is not there is `stale` whatever `ps` would
         # have said, so it is not worth a place in the batch.
-        verdicts = zombie_states(
+        answers = zombie_states(
             [
                 record.pid
                 for _path, record in parsed
@@ -499,17 +516,24 @@ def scan(
             ]
         )
     for path, record in parsed:
-        verdict = classify(
-            record,
-            now=now,
-            # A pid the batch does not name is either not due (a healthy beat —
-            # the policy's answer is `False`, no probe) or unprobeable (the pid
-            # exited between the two calls, which signal-0 already answers), so
-            # the default is the policy's own answer either way.
-            check_zombie=(
-                check_zombie if check_zombie is not None else verdicts.get(record.pid, False)
-            ),
-        )
+        if check_zombie is not None:
+            verdict = classify(record, now=now, check_zombie=check_zombie)
+        elif record.pid in answers:
+            # The batch's ANSWER. Handing it on as the policy flag would send a
+            # proven zombie back for its own `ps` fork — one per corpse per
+            # probe, which is what QA round 2 measured as Q5 (201 forks and a
+            # 0.5 Hz doorbell at 200 zombie records).
+            verdict = classify(record, now=now, zombie=answers[record.pid])
+        else:
+            # NO ANSWER FROM THE BATCH — it failed, or `ps` did not report this
+            # pid — so the derived policy asks per record. COST OVER WRONGNESS
+            # (QA round 2, Q6): the batch's failure mode is population-wide, and
+            # reading a missing answer as "not a zombie" would paint "process
+            # alive" over a corpse right across the quiet set. The per-record
+            # probe is the pre-batch cost for the records the batch could not
+            # answer, and it is affordable because a failure is rare (the batch
+            # answers 200 pids in ~13 ms against its own 1.0 s timeout).
+            verdict = classify(record, now=now)
         if not verdict.pid_alive and reap:
             _reap_dead_record(directory, path, record.pid)
         out.append((record, verdict.state))

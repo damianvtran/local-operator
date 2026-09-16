@@ -61,7 +61,14 @@ tick once a second on its own.
 AND IT IS A READER, INCLUDING WHEN NOTHING HAS EVER RUN. The run directory is
 resolved as a plain path and neither status read calls ``registry.run_dir`` — the
 probe and the connection baseline decline to scan when the directory is absent —
-so a backend that has never served a session creates nothing under ``run/``.
+so THE FEED creates nothing under ``run/``. Stated that narrowly on purpose
+(review round 2, MINOR 1): it is not true of the backend, because the sibling
+LIST read reaches the same helper — ``load_catalog`` → ``decorate_rows`` →
+``registry.scan`` → ``run_dir()`` — so the desktop app's first ``GET
+/v1/desktop/sessions`` creates ``run/mobile`` 0700 on a machine that has never
+run a session. That is pre-existing at the base commit and unchanged here; the
+point of saying so is that an operator must not read this paragraph as "an absent
+run directory means no runtime has ever published".
 """
 
 from __future__ import annotations
@@ -607,7 +614,11 @@ class DesktopFeed:
         try:
             await asyncio.to_thread(self._take_baseline)
             failures = 0
-            warned_at = 0.0
+            # ``-inf`` rather than 0.0: the comment below says the FIRST failure
+            # is reported immediately, and with 0.0 that was only true on a host
+            # whose monotonic clock had already passed the interval (review round
+            # 2, NIT 1).
+            warned_at = float("-inf")
             while True:
                 await asyncio.sleep(DOORBELL_INTERVAL_S)
                 if not self.subscribers:
@@ -1501,7 +1512,7 @@ class DesktopFeed:
                     self._attention[session_id] = state
         pending: list[tuple[str, tuple[str, str], int]] = []
         published_keys: dict[str, tuple[str, str]] = {}
-        refile: bool = False
+        moved_sections: dict[str, bool] = {}
         revisions = dict(self._status_revision)
         for session_id in ids:
             row = self._row_for(session_id)
@@ -1524,20 +1535,32 @@ class DesktopFeed:
             # session that finishes would sit in "Previous chats" for as long as
             # the next one (measured at 7.5-8.9 s), which is the gap finding 8
             # exists to close.
+            #
+            # RECORDED, NOT COMMITTED, until the frames are out — see below.
             active = catalog.active_of(row, attention)
             if self._activity_seen.get(session_id) != active:
-                self._activity_seen[session_id] = active
-                refile = True
+                moved_sections[session_id] = active
         for session_id, pair, revision in pending:
             self._publish(
                 "session_status",
                 {"code": pair[0], "label": pair[1], "revision": revision},
                 session_id=session_id,
             )
+        # COMMIT LAST (see the docstring), and it applies to the ACTIVITY map too
+        # (review round 2, MINOR 2): advancing ``_activity_seen`` up in the build
+        # loop meant a raising ``_publish`` lost the section-move for good — the
+        # next tick re-derives the same pair, finds the activity already recorded,
+        # leaves the invalidation unset, and the row sits in the wrong section
+        # until the 30 s poll, which is the symptom this mechanism exists to
+        # remove. Committing it beside ``_status_seen`` gives the retry the status
+        # side already had: a failure costs the whole set a retry rather than a
+        # half-committed edge.
         for session_id, key in published_keys.items():
             self._status_seen[session_id] = key
+        for session_id, active in moved_sections.items():
+            self._activity_seen[session_id] = active
         self._status_revision = revisions
-        if refile:
+        if moved_sections:
             self._catalogue_invalidated = True
 
     # -- identity helpers --------------------------------------------------

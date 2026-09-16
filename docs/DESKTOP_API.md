@@ -891,12 +891,20 @@ as defects first. It **forks at most once**, whatever the record population: the
 zombie probe is per pid but `ps` answers for a pid LIST, and the derived policy
 asks it for the whole quiet set in one call, so a population of quiet-but-alive
 records costs one fork a probe rather than one fork per record per second (88
-forks on every probe, a 1.7 s probe and a 0.5 Hz doorbell, before). And it
-**creates nothing**: `registry.scan` opens with `run_dir()`, which mkdirs and
-chmods, so both the probe and the connection baseline decline to scan while
-`run/mobile` is absent — a backend that has never served a session leaves the run
-directory exactly as absent as it found it, and the directory is created by the
-runtime that publishes the first record, through `registry.publish`.
+forks on every probe, a 1.7 s probe and a 0.5 Hz doorbell, before). A zombie
+population costs one fork too: the batch's verdict travels as the ANSWER into the
+classification rather than as a policy flag that would re-probe each corpse (200
+zombie records cost 201 forks a probe and a 0.5 Hz doorbell while it did not),
+and a batch that answers nothing falls back to the per-record probe — cost over
+wrongness, since one failed `ps` covers the whole set. And it **creates
+nothing**: `registry.scan` opens with `run_dir()`, which mkdirs and chmods, so
+both the probe and the connection baseline decline to scan while `run/mobile` is
+absent. Scope that claim precisely: **the FEED** creates nothing. A LIST read
+does — `load_catalog` → `decorate_rows` → `registry.scan` → `run_dir()` — so the
+app's first `GET /v1/desktop/sessions` creates `run/mobile` 0700 on a machine that
+has never run a session. That is pre-existing at the base commit and unchanged
+here, and it is why an absent run directory is not a statement that no runtime has
+ever published.
 
 ### The burst ceiling
 

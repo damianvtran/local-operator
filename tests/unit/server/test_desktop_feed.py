@@ -1677,11 +1677,19 @@ def test_the_status_probe_forks_once_whatever_the_record_population(tmp_path, mo
     asks: list[list[str]] = []
 
     class _NoFork:
-        """The real ``subprocess``, minus the fork: answers "no zombies"."""
+        """``subprocess`` minus the fork, answering the way ``ps`` would.
+
+        It must ANSWER rather than return nothing: a batch that answers nothing is
+        the FAILURE path, which falls back to probing per record by design (QA
+        round 2, Q6), so a silent shim would measure the fallback instead of the
+        batching this test is about. ``S`` is an ordinary sleeping process — the
+        answer a live pid gets.
+        """
 
         def run(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             asks.append([str(item) for item in argv])
-            return subprocess.CompletedProcess(argv, 0, stdout="")
+            answered = "".join(f"{pid} S\n" for pid in str(argv[-1]).split(","))
+            return subprocess.CompletedProcess(argv, 0, stdout=answered)
 
     monkeypatch.setattr(procstate, "subprocess", _NoFork())
     root = tmp_path
@@ -1995,4 +2003,52 @@ def test_a_failing_tick_is_visible_rather_than_a_quiet_machine(tmp_path, monkeyp
     # RATE-LIMITED, not per-tick noise: several ticks failed inside 0.35 s and
     # this is the only line they produced.
     assert len(warnings) == 1, [record.getMessage() for record in warnings]
+    asyncio.run(feed.close())
+
+
+def test_a_failed_publish_does_not_lose_the_section_move(tmp_path, monkeypatch):
+    """Review round 2 MINOR 2: the section-move flag commits LAST too.
+
+    ``_publish_status_changes`` states the COMMIT-LAST rule and follows it for
+    ``_status_seen`` and the revisions. The activity map was advancing inside the
+    build loop instead, three lines above the rule — so a raising ``_publish``
+    (a payload that will not serialize, a ``_frame`` bug, MemoryError) lost the
+    invalidation for good: the next tick re-derived the same pair, found the
+    activity already recorded, left the flag unset, and the row stayed in the
+    wrong section until the 30 s safety poll — the exact symptom this mechanism
+    exists to remove. Committing it beside ``_status_seen`` gives it the retry the
+    status side already had.
+
+    The retry is the assertion: the first tick's fan-out raises, and the second
+    (with a working ``_publish``) must publish the status frame AND the
+    invalidation it owes.
+    """
+    root = tmp_path
+    session_id = "ab" * 6
+    _listable_session(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    # A background session with nothing owed: `recent`, i.e. "Previous chats".
+    _publish(root, session_id, kind="complete")  # now it belongs in "Active chats"
+    real_publish = feed._publish
+
+    def explode(frame_type: str, payload: dict[str, Any], **kwargs: Any) -> None:
+        if frame_type == "session_status":
+            raise RuntimeError("the fan-out failed")
+        real_publish(frame_type, payload, **kwargs)
+
+    monkeypatch.setattr(feed, "_publish", explode)
+    with pytest.raises(RuntimeError):
+        _tick(feed)
+
+    monkeypatch.setattr(feed, "_publish", real_publish)
+    _tick(feed)
+    kinds = [frame["type"] for frame in _queued(subscription)]
+    assert kinds.count("session_status") == 1, kinds
+    assert (
+        kinds.count("catalogue") == 1
+    ), "the section move was lost by the failed fan-out instead of being retried"
     asyncio.run(feed.close())
