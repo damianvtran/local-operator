@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import errno
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     SubagentChildUnavailable,
 )
+from local_operator.session.errors import SessionStoreUnavailable
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
@@ -5959,3 +5961,243 @@ async def test_a_bound_move_publishes_the_moved_directory_at_once(move_api) -> N
         )
         assert bridge.remote.frontend_state.cwd == str(after)
         assert bridge.remote.frontend_state.conversation_title == "Final owner update"
+
+
+# --- the catalogue read: unavailability versus an empty answer -------------------
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_refuses_rather_than_answering_an_empty_catalogue(
+    draft_api, monkeypatch
+) -> None:
+    """A store that cannot be walked is a 503, not "you have no conversations".
+
+    This is the operator-visible half of the defect: the sidebar adopts this
+    answer as MEMBERSHIP and replaces the rows it is showing, so an empty listing
+    did not merely hide the catalogue — it wiped it, for as long as the failure
+    lasted, with a 200 that said everything was fine.
+
+    503 rather than 500 because the condition is transient by construction
+    (descriptor exhaustion, an I/O error, a permissions blip) and the correct
+    client behaviour — keep the rows you have, retry the poll — is the one a
+    retryable code asks for.
+    """
+    from tests.unit.session.test_catalog_read_failures import _failing_open, _store
+
+    client, root = draft_api
+    store = _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    _failing_open(monkeypatch, store, OSError(errno.EMFILE, "Too many open files"))
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 503, answer.text
+    # The body is the ladder's NAMED-CONDITION shape, not a bare sentence: the
+    # code is what lets a client tell this apart from "your credential was
+    # refused", which is the distinction the app's identity probe needs.
+    assert answer.json()["detail"] == {
+        "code": "session_store_unavailable",
+        "message": (
+            "Conversations could not be read right now. "
+            "This recovers on its own; retry in a moment."
+        ),
+    }
+    # Nothing about the store's own contents leaked into the sentence.
+    assert str(root) not in answer.text
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_carries_a_code_no_status_could_express(draft_api, monkeypatch) -> None:
+    """The probe cannot be answered by the status alone, so the code rides along.
+
+    ``GET /v1/desktop/sessions?limit=1`` is the desktop app's identity probe,
+    and the app's attach path treats any non-2xx as "this daemon refused my
+    credential" — a capability 403 about a credential that was never in
+    question, answered by declining a live daemon and spawning a second one
+    over it. Nothing in the status can separate the two, so the body has to.
+
+    Pinned as the CONTRACT rather than as the current spelling: the code is a
+    stable token a client keys on, so renaming it is a wire break and this test
+    is where that shows up. Its usefulness is not testable from here — it is
+    inert until the app reads it.
+    """
+    from tests.unit.session.test_catalog_read_failures import _failing_open, _store
+
+    client, root = draft_api
+    store = _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    for error in (
+        OSError(errno.EMFILE, "Too many open files"),
+        OSError(errno.EACCES, "Permission denied"),
+        OSError(errno.EIO, "Input/output error"),
+    ):
+        _failing_open(monkeypatch, store, error)
+        answer = await client.get("/v1/desktop/sessions?limit=1")
+        assert answer.status_code == 503, (error.errno, answer.text)
+        detail = answer.json()["detail"]
+        assert detail["code"] == "session_store_unavailable"
+        assert detail["code"] == SessionStoreUnavailable.code
+        assert isinstance(detail["message"], str) and detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_names_what_it_could_not_read(draft_api, monkeypatch) -> None:
+    """The degraded sources reach the wire once, and on every row of the page.
+
+    The listing-level field is what a renderer checks before it says "nothing is
+    running"; the per-row field is what lets it qualify an individual row. Both
+    are additive, so an older client ignores them and renders as it always did.
+    """
+    from local_operator.session.runtime import registry
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    client, root = draft_api
+    _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+
+    def explode(_directory):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(registry, "scan", explode)
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    assert result["degraded"] == ["liveness"]
+    assert [row["degraded"] for row in result["sessions"]] == [["liveness"], ["liveness"]]
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_listing_declares_nothing_degraded(draft_api) -> None:
+    """Always present, empty when everything was read.
+
+    Present rather than omitted so a client can tell "nothing to report" from
+    "this server is too old to know", which is the difference between drawing an
+    ordinary catalogue and drawing one it must not trust.
+    """
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    client, root = draft_api
+    _store(root, "aaaaaaaaaaaa")
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    assert result["degraded"] == []
+    assert [row["degraded"] for row in result["sessions"]] == [[]]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_second_attention_read_is_named_not_published_as_a_verdict(
+    draft_api, monkeypatch
+) -> None:
+    """The route's OWN attention read is a decoration too, and it failed silently.
+
+    ``load_catalog`` reads this store for each row's ``unseen`` mark and this
+    route reads it again to build the wire's per-row ``attention`` object, so
+    the two can fail independently — a transient ``SQLITE_BUSY`` on the second
+    is the realistic shape, and it is the one reproduced here.
+
+    What the route did with it was the defect: ``contextlib.suppress`` left the
+    key off the row and the listing said ``degraded: []``, i.e. "everything
+    about this page was read", while a client renders an absent ``attention``
+    as "nothing unread". Same confidently-wrong negative as the swallowed reads
+    this change exists to stop, one read further out.
+    """
+    import sqlite3
+
+    from local_operator.session.attention import AttentionStore
+    from tests.unit.session.test_catalog_read_failures import _store
+
+    client, root = draft_api
+    _store(root, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+
+    real = AttentionStore.state_many
+    calls = {"n": 0}
+
+    def flaky(self, identities):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, identities)
+
+    monkeypatch.setattr(AttentionStore, "state_many", flaky)
+
+    answer = await client.get("/v1/desktop/sessions?limit=500")
+
+    assert answer.status_code == 200, answer.text
+    # The catalogue's own read is first and the route's is second; if that order
+    # ever changes this test injects the failure somewhere else, and it should
+    # fail loudly rather than pass for the wrong reason.
+    assert calls["n"] == 2, "the route reads attention once, after the catalogue's read"
+    result = answer.json()["result"]
+    assert result["degraded"] == ["attention"]
+    assert [row["degraded"] for row in result["sessions"]] == [["attention"], ["attention"]]
+    assert "attention" not in result["sessions"][0]
+
+
+def test_a_stamped_page_still_names_a_failed_attention_read(tmp_path, monkeypatch) -> None:
+    """Two independent facts about one row, and the ONE response that carries both.
+
+    ``DesktopSessions.list`` grew two unrelated things on two branches: this
+    branch made a row carry ``degraded`` (and the listing derive its own marker
+    from the rows), and the sidebar-latency work made it carry the feed's
+    ``status_epoch``/``status_revision`` stamps. Rebasing the first onto the
+    second merged them in one method, and the failure mode of that kind of
+    resolution is silent: a merge that keeps the stamps and drops the marker (or
+    the reverse) leaves every OTHER test green, because each fact has its own
+    test that only ever exercises its own fact.
+
+    So this is deliberately the only test in the tree that asserts both at once:
+    a page computed with the feed's real stamps AND with the second attention
+    read failing returns rows that are stamped and still name the read that
+    failed. A listing can be fully stamped and be degraded; neither fact may
+    displace the other.
+    """
+    import asyncio
+    import sqlite3
+
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+    from local_operator.session.attention import AttentionStore
+
+    # The feed helpers live with the feed's own tests; imported rather than
+    # copied so this file cannot drift into a second opinion about how a
+    # stamped revision is produced.
+    from tests.unit.server.test_desktop_feed import (
+        _feed,
+        _listable_session,
+        _record_publish,
+        _tick,
+    )
+
+    sid = "e3" * 6
+    _listable_session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    feed.subscribe()
+    _record_publish(tmp_path, sid, pending="approval")
+    _tick(feed)
+    stamps = feed.status_stamps()
+    assert stamps[1].get(sid), "the feed has a revision for this session to stamp"
+
+    real = AttentionStore.state_many
+    calls = {"n": 0}
+
+    def flaky(self, identities):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, identities)
+
+    monkeypatch.setattr(AttentionStore, "state_many", flaky)
+
+    try:
+        rows = asyncio.run(DesktopSessions(tmp_path).list(50, status_stamps=stamps))
+    finally:
+        asyncio.run(feed.close())
+
+    row = next(entry for entry in rows if entry["id"] == sid)
+    assert row["status_epoch"] == feed.epoch, "the stamp survives the composition"
+    assert row["status_revision"] == stamps[1][sid]
+    assert row["degraded"] == ["attention"], "and so does the marker beside it"
+    assert "attention" not in row
+    assert calls["n"] == 2, "the catalogue's read succeeded; the second one is the failure"

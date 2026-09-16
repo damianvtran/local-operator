@@ -359,6 +359,7 @@ def search_store(
     rows: Sequence[SessionRow] | None = None,
     soft: SoftSearchIndex | None = None,
     limit: int | None = None,
+    strict: bool = False,
 ) -> list[SessionMatch]:
     """One-shot store search: scan the rows, build the index, answer ``query``.
 
@@ -377,15 +378,25 @@ def search_store(
 
     **An empty answer is not proof of an empty store.** The scan underneath
     (``resume._scan_sessions``) catches the ``OSError`` from an unreadable
-    ``sessions/`` directory and returns no candidates, deliberately: every
-    listing surface would otherwise fail on a store it cannot read, and a
-    listing that fails is worse than one that is empty. So a store that cannot
-    be walked reports zero matches rather than raising, and this function does
-    not pretend otherwise — a caller that must distinguish the two has to ask
-    the filesystem itself.
+    ``sessions/`` directory and returns no candidates, deliberately: the
+    surfaces that answer a DISPLAY-ONLY question — this search, the ``/resume``
+    picker, the CLI's recovery listing — would otherwise fail on a store they
+    cannot read, and for them a listing that fails is worse than one that is
+    empty. So by default a store that cannot be walked reports zero matches
+    rather than raising, and this function does not pretend otherwise.
+
+    ``strict=True`` is for the caller whose answer is NOT display-only. Not
+    every listing surface is tolerant any more, and the one that stopped is the
+    phone's history sheet: it publishes ``payload.sessions`` as MEMBERSHIP, so
+    zero matches for a store it could not read is the same lie
+    ``recent_session_rows(strict=True)`` exists to stop, and it has to tell a
+    genuine no-match from an unreadable store. The flag forwards to the scan, so
+    a store that is simply NOT THERE is still an empty answer and only an
+    unreadable one raises
+    :class:`~local_operator.session.errors.SessionStoreUnavailable`.
     """
     if rows is None:
-        rows = recent_session_rows(config_dir, limit=None)
+        rows = recent_session_rows(config_dir, limit=None, strict=strict)
     rows = list(rows)
     middle = query.strip()
     if not middle:

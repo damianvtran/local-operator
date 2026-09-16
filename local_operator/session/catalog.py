@@ -513,6 +513,24 @@ def session_directory_name(session_id: str) -> bool:
     )
 
 
+#: The live-decoration reads whose failure leaves a row's defaults UNKNOWN
+#: rather than FALSE, and the one spelling each of them rides the wire under.
+#:
+#: Gathered here, and sent as data rather than as three booleans, because three
+#: readers have to agree on the words: ``SessionRow.degraded`` carries them, the
+#: desktop list lifts them onto its response, and a renderer checks them to
+#: decide whether it may say "nothing is running". A renderer that spelled its
+#: own constants would silently never match, and the failure mode of that is the
+#: one this change exists to remove.
+#:
+#: Adding a fourth source is one word here plus the ``degraded += (...)`` at the
+#: read that can fail; nothing else changes shape.
+DECORATION_LIVENESS = "liveness"
+DECORATION_WAKES = "wakes"
+DECORATION_ATTENTION = "attention"
+DECORATION_SOURCES = (DECORATION_LIVENESS, DECORATION_WAKES, DECORATION_ATTENTION)
+
+
 def decorate_rows(
     directory: Path, rows: list[SessionRow], *, include_live: bool = False
 ) -> list[SessionRow]:
@@ -523,6 +541,24 @@ def decorate_rows(
     which have reminders armed. Best-effort — a picker that cannot read either
     one still lists every session exactly as it did before, because the
     fields are defaulted and the markers simply do not appear.
+
+    BEST-EFFORT IS NOT SILENT, and this is the correction. The fields above are
+    DEFAULTS, and a defaulted ``live_state=""`` is indistinguishable from a
+    measured "this session is cold" — so when ``registry.scan`` was swallowed,
+    ``CatalogEntry.active`` came out ``False`` for every row and the wire said
+    ``active: false`` about a store with a running turn in it. The sidebar
+    renders exactly that as the expanded "Active chats" section reading
+    "Nothing running right now" while the collapsed section holds the rest: a
+    swallowed read failure presented to the operator as "all my active chats
+    disappeared".
+
+    So a failed read now says so: the affected source is named on every row's
+    :attr:`SessionRow.degraded`, the incident is logged at WARNING (``debug`` is
+    invisible at the default level, which is why an incident could not be
+    reconstructed from the logs afterwards), and the defaults keep their old
+    values so nothing that renders today changes shape. A client that ignores
+    the new field renders exactly as before; a client that reads it can say
+    "I could not tell" instead of asserting a negative it does not know.
 
     THE STATE IS TAKEN, NOT DERIVED. ``registry.scan`` owns the vocabulary
     (its ``classify`` is the one place ``live``/``wedged``/``stale`` is
@@ -535,18 +571,23 @@ def decorate_rows(
     """
     from local_operator.session.runtime import registry
 
+    #: This poll's failed sources, as a tuple so each row can carry the verdict
+    #: by reference rather than being rebuilt per row.
+    degraded: tuple[str, ...] = ()
     try:
         scanned = registry.scan(directory)
     except Exception:  # noqa: BLE001 — markers are an enhancement, never a gate
-        logger.debug("picker could not scan session records", exc_info=True)
+        logger.warning("session catalogue could not read the live records", exc_info=True)
         scanned = []
+        degraded += (DECORATION_LIVENESS,)
     try:
         from local_operator.wakes.store import read_index
 
         wake_index = read_index(directory)
     except Exception:  # noqa: BLE001
-        logger.debug("picker could not read the wake index", exc_info=True)
+        logger.warning("session catalogue could not read the wake index", exc_info=True)
         wake_index = {}
+        degraded += (DECORATION_WAKES,)
 
     live: dict[str, tuple[Any, str]] = {}
     for record, state in scanned:
@@ -583,6 +624,7 @@ def decorate_rows(
                         float(getattr(record, "started_at", 0.0) or 0.0),
                         str(getattr(record, "conversation_name", "") or "Untitled conversation"),
                         created_at=session_created_at(session_dir),
+                        degraded=degraded,
                     )
                 )
     updated: list[SessionRow] = []
@@ -637,6 +679,10 @@ def decorate_rows(
                 wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
                 kind=kind,
                 heartbeat_age_s=age,
+                # THIS poll's verdict, not an accumulation: a value inherited
+                # from an earlier decoration of the same row would outlive the
+                # failure it described.
+                degraded=degraded,
             )
         )
     return sorted(updated, key=lambda row: 0 if row.pending else 1)
@@ -755,11 +801,26 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     attention lost old unread work; reading names for the entire store would
     undo the sidebar's bounded I/O. Rank cheap rows first, then hydrate only the
     requested prefix through the existing transcript-stat cache.
+
+    STRICT ABOUT THE STORE, TOLERANT ABOUT THE DECORATION, and the difference is
+    deliberate. This is the listing a UI ADOPTS AS MEMBERSHIP — the desktop
+    sidebar replaces the rows it is showing with this answer, and the TUI's sets
+    its entries from it — so a store that exists but cannot be walked raises
+    (:class:`SessionStoreUnavailable`, which the desktop route answers as a
+    retryable 503) rather than being reported as "you have no conversations".
+    Decorations are the opposite case: they never change WHICH rows are
+    returned, only what is claimed about them, so a read that fails here is
+    named on each row's ``degraded`` and the listing still stands.
     """
     from dataclasses import replace
 
-    from local_operator.resume import _scan_sessions
+    from local_operator.resume import (
+        _scan_sessions,
+        _scanned_entries,
+        _store_error_detail,
+    )
     from local_operator.session.attention import AttentionStore, conversation_identity
+    from local_operator.session.errors import SessionStoreUnavailable
     from local_operator.session.retention import (
         DESKTOP_MARKER_NAME,
         TRANSCRIPT_FILENAME,
@@ -769,7 +830,12 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     # the user's own session. Taken here rather than recomputed because it is
     # what removes this function's own O(store) stat; see the desktop-probe loop
     # below for why a hidden directory cannot carry a desktop marker.
-    candidates, hidden = _scan_sessions(directory)
+    #
+    # ``strict=True`` is this function's own declaration, not a global policy:
+    # see the docstring above, and ``_scan_sessions`` for the boundary it draws
+    # between a store that is not there (an empty listing, still) and a store
+    # that cannot be read (an unavailable one).
+    candidates, hidden = _scan_sessions(directory, strict=True)
     source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
     # Creation time is the immutable ordering key (#800), so every construction
     # site must stamp it. Rows left at the 0.0 default all tie and fall through
@@ -797,11 +863,27 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     # every session that is already listed costs nothing here at all.
     try:
         entries = os.scandir(directory / "sessions")
-    except OSError:
+    except FileNotFoundError:
+        # No store to probe, which the scan above has already answered as an
+        # empty listing. NOT a failure, for the same reason a failed OPEN is
+        # not: a fresh install must list its (zero) conversations, not 503.
         entries = None
+    except OSError as error:
+        # Same boundary as the scan's own open, and a sharper reason to surface
+        # it than "the store is unreadable": the rows this loop contributes are
+        # the desktop-created sessions that have no transcript YET — the newest
+        # thing in the store, and the row a person is most likely to be looking
+        # for. Answering "those rows do not exist" for a directory that could
+        # not be read is the defect this whole change is about, one layer down.
+        #
+        # The per-entry ``except OSError`` INSIDE the loop is a different
+        # question and keeps its answer: "no desktop.json here" is the common
+        # expected reply to that stat, not a broken read.
+        logger.warning("session catalogue could not probe for desktop records", exc_info=True)
+        raise SessionStoreUnavailable(_store_error_detail(error)) from error
     if entries is not None:
         with entries:
-            for entry in entries:
+            for entry in _scanned_entries(entries):
                 if entry.name in source:
                     continue
                 # A directory the scan established is a subagent/hidden session
@@ -856,7 +938,21 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     try:
         attention = AttentionStore(directory / "attention.db").state_many(identities.values())
     except (sqlite3.Error, OSError):
-        logger.debug("catalog attention unavailable", exc_info=True)
+        # The third read whose failure used to be published as a confident
+        # negative: the defaults this leaves behind are ``unseen=False`` and an
+        # empty completion kind, so an unread completion would render as an
+        # ordinary read one — and ``unseen`` is part of ``CatalogEntry.active``,
+        # so the row would leave the Active section on the strength of a read
+        # that did not happen.
+        #
+        # Named ON THE ROWS rather than carried alongside them because the
+        # catalogue's return type is a list of entries and every consumer walks
+        # it: a sibling value would be a second channel every caller has to know
+        # about, and a caller that forgot it would be back to the silent
+        # negative. Stamped here rather than in ``decorate_rows`` because this
+        # is the only read of that store, and it happens after the decoration.
+        logger.warning("session catalogue could not read attention state", exc_info=True)
+        rows = [row._replace(degraded=row.degraded + (DECORATION_ATTENTION,)) for row in rows]
     entries = list(
         rank_entries([entry_for(row, attention.get(identities[row.id])) for row in rows])
     )[:limit]
