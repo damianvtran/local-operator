@@ -149,6 +149,22 @@ _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a
 #: silently not matching, which is the same defect with no symptom.
 UNIDENTIFIED_STEER_ID = "remote-steer"
 
+#: The action receipts an ``AttachedSession`` client DECLARES in its attach auth
+#: frame — the whole vocabulary, because every viewer on this facade renders the
+#: receipt and submits its ``request`` itself (see the dial site below).
+#:
+#: A NAMED declaration rather than ``list(SLASH_ACTION_RECEIPTS)`` inlined at the
+#: dial site, because the declaration is read in TWO directions and only one of
+#: them is this file. The runtime reads it to decide whether to stand down
+#: (``runtime_must_complete``), and the desktop route reads it to decide whether
+#: the submit is ITS to make (``routes/desktop_sessions.py::
+#: desktop_viewer_must_submit``). Inlining the same expression in one place left
+#: the other reading the VOCABULARY instead, which made "did this client declare
+#: it" a question with no possible answer but yes — the inert clause review round
+#: 2 (NIT-1) measured. Read from here, a client kind that ever declares a SUBSET
+#: narrows both sides together instead of double-submitting.
+ATTACHED_SLASH_CONSUMERS: tuple[str, ...] = SLASH_ACTION_RECEIPTS
+
 #: How long a VIEWER chases a vanished runtime before unbinding and going cold.
 #: A runtime exits by design when it has nothing left to do, so owner loss is
 #: usually not a crash at all — but a restart after a `kill -9` publishes a new
@@ -3360,7 +3376,9 @@ class AttachedSession:
             # runtime NOT to admit the request itself, which would run the
             # command twice. A viewer that omitted this (every build before
             # the field) is exactly the case the runtime completes for.
-            slash_consumers=list(SLASH_ACTION_RECEIPTS),
+            # THE declaration, read from the one constant both sides use — see
+            # ``ATTACHED_SLASH_CONSUMERS`` for why it is not inlined here.
+            slash_consumers=list(ATTACHED_SLASH_CONSUMERS),
             on_frontend_sync=lambda data: (
                 self._on_frontend_sync(data) if self._client is client else None
             ),

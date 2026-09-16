@@ -528,10 +528,62 @@ The command endpoint now accepts every shared canonical command and alias.
 Runtime controls return actual SlashResult data; native/interactive controls return
 typed destination, arguments and form/source/submit metadata, never fake execution
 success. See [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for all 35 rows and explicit
-frontend responsibilities. On a `team_attached` or `agent_attached` result, the
-runtime's `data.request` plus images is admitted **once by the bridge**
-under the original request UUID; an added `result.admission` records that fact.
-The renderer must not independently re-submit that consumed request.
+frontend responsibilities.
+
+**Every action receipt the desktop viewer declares is admitted here, once.** The
+runtime defers that submit to the client whose auth frame declared the receipt
+type (`SLASH_ACTION_RECEIPTS`), and the desktop viewer declares all of them, so
+the bridge admits the request — for `team_attached`, `agent_attached` **and
+`goal_set`** — under the original request UUID, with the body's images, and
+records it in `result.admission`. The renderer must not independently re-submit
+that consumed request. A receipt whose `data.request` is empty carries no action
+(a detach, a listing, a status), and staged images do not turn one into a turn.
+
+`admission.status` is a ONE-WORD answer to "did the owner take this text", and it
+is the field a renderer branches on:
+
+| `status` | means | `detail` | caller action |
+|---|---|---|---|
+| `admitted` | the owner acknowledged the admission | the owner's own sentence (`prompt admitted`, `steering queued`) | treat the text as delivered; what becomes of the turn comes from the events and the durable history, never from this field |
+| `pending` | the acknowledgement had not arrived when the receipt was sent; the request was written to the owner's connection, unacknowledged | `pending; the owner has not acknowledged it`, or `pending; the steer into the turn already running is not acknowledged yet` when the text went to the steer path | **wait — do NOT re-issue.** The text is with the owner and may already have been delivered, so a second submit under a new id duplicates the turn. The user row through the event relay is the confirmation, and `admission.failed` reports a late failure |
+| `failed` | the owner, or the transport, answered with an error — the request was **not** admitted | a vetted sentence naming the reason (`failed; the owner did not answer in time`, `failed; the session owner could not be reached`, an enumerated admission refusal) | the text was NOT delivered: re-issue it under a NEW request id |
+
+The wait before `pending` is bounded (2 s, well inside the client's 15 s ack
+deadline) and returns the instant the owner answers, so a receipt is never
+withheld for a running turn's duration and the ack deadline is never reached.
+`admitted` and `pending` are therefore both prompt answers to the same question;
+they differ in whether the owner had answered yet, and neither implies the turn
+completed — the canonical events and durable history remain the authority for
+that. Retrying under the SAME id replays this receipt rather than re-delivering
+the text, in every disposition: `pending` and `failed` are honest answers for
+THIS id, and a re-issue therefore takes a NEW one.
+
+**A `pending` admission that fails LATER is announced, not logged.** The receipt
+has been sent by then, so the failure has no caller left to reach; the host
+publishes an `admission.failed` frame on the SESSION's stream
+(`{request_id,command,status,detail}`, the same vetted `detail`) where the
+mounted viewer reads it.
+
+The frame is LIVE AND RETAINED **for the life of the attachment**, and that
+qualifier is the whole of what it promises. A viewer already connected reads it,
+and so does one that connects while something else still holds the session (a
+mounted viewer is itself a holder, and the frame is replayed to a second
+connection on the same facade). A viewer that arrives AFTER the session went cold
+does not: in the case this frame exists for — a `pending` receipt with nothing
+else holding the session — the failing admission IS the session's last holder, so
+its release detaches the bridge, and the next attach rebuilds the facade with a
+NEW epoch and an EMPTY replay — the one act that discards the retained frame is
+the reconnect that came to read it, and the `after_seq` a reconnecting client
+holds belongs to the dead epoch anyway. **This frame is an in-session notice, never a
+durable record of the failure.** A client that must know whether the text was
+delivered reconciles against the transcript — the user row such a text produces —
+and against the receipt, which still reads `pending`. A `pending` admission that
+SUCCEEDS announces nothing: the user row appearing through the event relay is the
+confirmation, exactly as for any other admitted prompt.
+
+Set `/goal <text>` while a turn is running therefore behaves as it does on one
+Enter in the terminal: the text is steered into the turn in flight rather than
+parked, and the reply is never withheld for the running turn's duration.
 
 ### Admission and retry semantics
 
@@ -594,6 +646,18 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    `title_is_session_name,dedupe_key,completion_token,session_name,`
    `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
    transcript; a renderer that does not know the type ignores it and still
+   advances its receipt cursor.
+6. `admission.failed` carries `{request_id,command,status,detail}` for a
+   `/commands` admission whose receipt answered `pending` and which then failed
+   (see "Every action receipt..." above). It is published LIVE AND RETAINED for
+   the life of the ATTACHMENT: a viewer already connected reads it, but a cold
+   session — the case where nothing else holds it — is detached by that same
+   admission's release, so the next attach starts a new epoch with an empty
+   replay — a notice about this attachment, not a durable record of the failure
+   (see "A `pending` admission that fails LATER" above for what a client
+   reconciles against instead). Like `notification` it is NOT an `AgentEvent`
+   and must not be painted into the transcript — it is a notice about a request,
+   not a turn — and a renderer that does not know the type ignores it and still
    advances its receipt cursor.
 
 ### The `notification` frame
