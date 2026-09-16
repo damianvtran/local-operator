@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from local_operator import procstate
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 
@@ -118,8 +121,13 @@ def test_scan_passes_the_zombie_policy_through(
     """
     import json
 
-    probes: list[int] = []
-    monkeypatch.setattr(registry, "is_zombie", lambda pid: probes.append(pid) or False)
+    probes: list[list[int]] = []
+
+    def spy(pids: list[int]) -> dict[int, bool]:
+        probes.append(list(pids))
+        return {}
+
+    monkeypatch.setattr(registry, "zombie_states", spy)
     record = make_record()  # this process: alive, so the zombie branch is reachable
     record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
     directory = registry.run_dir(tmp_path)
@@ -131,9 +139,83 @@ def test_scan_passes_the_zombie_policy_through(
     assert probes == [], "check_zombie=False still probed for a zombie"
     # The derived policy (the default) is the one that spends the probe, because
     # this record's heartbeat has gone quiet — which is what makes the assertion
-    # above a decision rather than a spy that never fires.
+    # above a decision rather than a spy that never fires. It asks for the SET
+    # (see the batch test below), which is what makes the spy's argument a list.
     assert [state for _record, state in registry.scan(root=tmp_path)] == ["wedged"]
-    assert probes == [record.pid]
+    assert probes == [[record.pid]]
+
+
+def test_a_scan_probes_for_the_whole_quiet_population_in_one_fork(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe's cost must not grow with the QUIET record population (Q1).
+
+    ``classify``'s derived policy spends a ``ps`` fork on every record whose
+    heartbeat has gone quiet, and the desktop feed re-runs this scan on a
+    one-second clock — so a population of quiet-but-ALIVE records (the wedged
+    sessions this channel most cares about) used to cost one fork PER RECORD PER
+    SECOND: measured at 88 forks on every probe with 200 records, a 1.7 s probe,
+    and the feed's 10 Hz doorbell down to 0.5 Hz (QA round 1, Q1). The policy is
+    per record; the QUESTION is per pid and ``ps`` answers for a pid list, so the
+    whole set is asked once.
+
+    Counted as FORKS rather than as a duration, for the reason the timing section
+    gives: the property is which process was created, and a fork count is the
+    same number on an idle host and a loaded one. The bound asserted is "at most
+    one", not "exactly one", because on Linux the same answers come out of
+    ``/proc`` with no fork at all — the batch is what must hold, and it is
+    asserted platform-neutrally above.
+    """
+    import json
+
+    asks: list[list[str]] = []
+
+    class _NoFork:
+        """The real ``subprocess``, minus the fork: answers "no zombies"."""
+
+        def run(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            asks.append([str(item) for item in argv])
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+    monkeypatch.setattr(procstate, "subprocess", _NoFork())
+    # Three pids that are alive and not ours: this process, launchd/init (which
+    # answers EPERM, i.e. "alive, not mine"), and a child we spawn so the set has
+    # a pid whose liveness is not an assumption.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+    directory = registry.run_dir(tmp_path)
+    try:
+        pids = [os.getpid(), 1, child.pid]
+        for index, pid in enumerate(pids):
+            record = make_record(pid=pid)
+            record.session_id = f"s{index}"
+            # Aged past the derived gate, and ALIVE: the only state that spends
+            # the probe at all.
+            record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
+            (directory / f"{pid}.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
+        # Every record is wedged, and not one of them forked: the batch asks
+        # before classifying, and the answer it carries is "not a zombie".
+        assert [state for _record, state in registry.scan(root=tmp_path)] == [
+            "wedged",
+            "wedged",
+            "wedged",
+        ]
+        assert len(asks) <= 1, f"one probe per scan, whatever the population: {asks}"
+        if asks:
+            # ONE argv naming every pid: this is the whole of the fix, and a
+            # per-record probe would put three invocations here instead.
+            assert sorted(asks[0][-1].split(",")) == sorted(str(pid) for pid in pids)
+        # A population with FRESH beats spends nothing at all — the policy is
+        # still spent only where it changes what a user is told.
+        for pid in pids:
+            record = make_record(pid=pid)
+            record.session_id = f"s{pid}"
+            (directory / f"{pid}.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
+        asks.clear()
+        registry.scan(root=tmp_path)
+        assert asks == [], "a healthy population forked"
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_scan_tolerates_torn_records(tmp_path: Path) -> None:

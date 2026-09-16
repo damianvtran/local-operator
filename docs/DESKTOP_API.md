@@ -795,6 +795,18 @@ had one to attribute a catalogue event to.
   connection is not announced; the `open` snapshot's list read is what the client
   sees it on.
 
+  **ORDERING: the mark precedes the code.** For a completed turn the `attention`
+  frame carrying the unseen mark is published in the SAME tick and BEFORE this
+  frame, so a row never paints the label while its ring is still resting —
+  `_emit_delta` publishes the tick's attention frames first and only then hands
+  the same read to `_publish_status_changes`, which derives the pair from it. The
+  order is structural rather than incidental, and
+  `test_the_completion_mark_reaches_the_wire_before_the_status_that_names_it`
+  asserts it on the wire. This matters because `complete`/`Unseen completion`
+  cannot exist as a pair until the mark does: the pair is derived from the
+  attention state, so a client that paints the code without the mark shows a
+  resting ring labelled as unread for however long the gap lasts.
+
   **The guard for the other writer.** `GET /v1/desktop/sessions` rows carry
   `status_epoch` and `status_revision` when this backend's feed has published for
   that session, and NEITHER key when it has not (no feed has ever been opened on
@@ -812,12 +824,40 @@ had one to attribute a catalogue event to.
 - **The snapshot excludes the catalogue's rows.** Those carry a preview read per
   row; the client already has them, and putting that scan on the feed would move
   the sidebar's cost rather than remove it.
-- **`catalogue`** is a cheap invalidation token over the sessions directory (its
-  `(inode, mtime_ns)` plus the directory-name set, on a 1 s cadence), so the
+- **A `wedged` label carries a LIVE AGE, and the age is not an edge.**
+  `CatalogEntry.status`'s wedged arm embeds `format_duration(heartbeat_age_s)`, so
+  a wedged row's pair changes with the clock alone — about once a second for the
+  45-59 s window after the beat crosses `HEARTBEAT_TIMEOUT_S`, then once a minute,
+  per wedged session, with no write and no event behind it. The channel therefore
+  dedupes on `catalog.status_dedupe_key` (the same derivation with its clock term
+  removed, which is a no-op for every other arm) and still PUBLISHES the pair, age
+  and all. The consequence a client can see: a wedged row keeps the sentence it
+  was published with, and its age stops advancing until the row's next real edge
+  or the 30 s safety poll refreshes it.
+- **`catalogue`** is a cheap invalidation over the sessions directory — its
+  `(inode, mtime_ns)` plus the directory-name set, on a 1 s cadence — so the
   sidebar stops polling `sessions.list` on a 5 s clock. The 30 s safety poll and
   a refetch on window focus remain as drift insurance. An in-place transcript
   append does not move the token — deliberately, since noticing that would mean
   walking the store on every tick, which is the cost the poll was retired for.
+
+  **`revision` is a MONOTONE COUNTER, not that token.** Two causes invalidate the
+  rows, and both bump it: the row SET moving (a session created or removed) and a
+  row's derived ACTIVITY changing (`local_operator.session.catalog.active_of`,
+  i.e. which SECTION it is filed in — a background session that finishes leaves
+  "Previous chats" for "Active chats"). The client's refetch effect re-runs on a
+  dependency VALUE, so the revision it is given must be one it has never seen: a
+  token that can repeat, or a number that only expresses one of the two causes,
+  would leave a row in the wrong section until the 30 s poll — measured at
+  7.5-8.9 s on the paired UI PR before this, and with "Previous chats" collapsed
+  by default the row was not visible at all for that time. The `open` snapshot's
+  `catalogue_revision` is that same counter, so a connecting client's view is
+  expressed in the currency the frames use.
+
+  **At most ONE invalidation per tick.** A burst of simultaneous transitions — a
+  fleet starting, a batch finishing — costs one refetch, not N: the causes
+  collapse into a single bump per tick and anything arriving later in the same
+  tick is carried by the next one (~100 ms).
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
@@ -845,6 +885,18 @@ the transitions NO file write announces: `live -> wedged` is an age crossing, an
 sweep, because a reaper running once a second on the feed's own poller would move
 another runtime's evidence aside behind its back. Its cost is O(live records) and
 never O(store): the sessions directory is not walked by this path.
+
+Two cost properties of that probe are worth stating, because both were measured
+as defects first. It **forks at most once**, whatever the record population: the
+zombie probe is per pid but `ps` answers for a pid LIST, and the derived policy
+asks it for the whole quiet set in one call, so a population of quiet-but-alive
+records costs one fork a probe rather than one fork per record per second (88
+forks on every probe, a 1.7 s probe and a 0.5 Hz doorbell, before). And it
+**creates nothing**: `registry.scan` opens with `run_dir()`, which mkdirs and
+chmods, so both the probe and the connection baseline decline to scan while
+`run/mobile` is absent — a backend that has never served a session leaves the run
+directory exactly as absent as it found it, and the directory is created by the
+runtime that publishes the first record, through `registry.publish`.
 
 ### The burst ceiling
 
