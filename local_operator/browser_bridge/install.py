@@ -144,7 +144,9 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     old bare ``sys.executable`` is what made installing the bridge notify that
     'python3 is running in the background'. The trade-off that shape accepts is
     recorded in ``procname.launchd_job``; with no link to plant, this is
-    byte-for-byte the plist this function wrote before.
+    byte-for-byte the plist this function wrote before. On a machine with the
+    generation layout ``Program`` is the stable shim instead (see
+    ``procname.supervised_image``) and the role label is unchanged.
     """
     return {
         # Per-config-root label (this PR) over #752's branded interpreter
@@ -267,7 +269,12 @@ def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = 
     Reproduced on real systemd 255: ``tail`` of that path reported
     ``No such file or directory`` while the output sat in the journal.
     """
-    command = f"{sys.executable} -m local_operator.browser_bridge.daemon --port {port}"
+    # A unit is re-executed on every restart, so its image must be a path that
+    # survives a generation flip and a prune: ``procname.supervised_image``
+    # answers with the stable shim when this machine has the layout, and ``None``
+    # (either branded image or bare interpreter) when it does not.
+    image = procname.supervised_image() or Path(sys.executable)
+    command = f"{image} -m local_operator.browser_bridge.daemon --port {port}"
     # ``_DETECT`` and not ``None`` as the default: ``None`` is a MEANINGFUL
     # version value here ("systemd is present but its version could not be
     # read"), so overloading it to also mean "caller did not pass one" would

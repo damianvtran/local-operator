@@ -13119,12 +13119,14 @@ class OperatorApp(App[None]):
     def _run_update(self) -> None:
         from local_operator.update import (
             InstallKind,
+            PrunePlan,
             UpdateError,
             check_latest,
             git_snapshot_notice,
             install_kind,
             is_git_snapshot,
             perform_upgrade,
+            prune_notice_lines,
             refresh_mobile_after_upgrade,
             refresh_service_daemons_after_upgrade,
             tui_editable_refusal,
@@ -13158,8 +13160,20 @@ class OperatorApp(App[None]):
             # used to replace the snapshot silently.
             self.call_from_thread(self._system_notice, git_snapshot_notice())
         self.call_from_thread(self._system_notice, f"updating to v{result.latest}…")
+
+        def _report_prune(plan: PrunePlan) -> None:
+            """Say what a prune removed, in the CLI's own sentence.
+
+            The TUI wraps this run in ``file_logging``, so a log record is not
+            something the person watching the upgrade ever sees — the removal
+            has to be a notice (design review D4), and it uses the same renderer
+            the CLI does so the two front ends cannot drift apart.
+            """
+            for line in prune_notice_lines(plan):
+                self.call_from_thread(self._system_notice, line)
+
         try:
-            installed = perform_upgrade(target=result.latest, kind=kind)
+            installed = perform_upgrade(target=result.latest, kind=kind, on_prune=_report_prune)
         except UpdateError as exc:
             if "repo .venv" in str(exc) or kind is InstallKind.EDITABLE:
                 message = tui_editable_refusal()
@@ -27594,21 +27608,28 @@ class OperatorApp(App[None]):
         """Warn when this terminal and the code around it are different builds.
 
         Two long-lived populations coexist on a developer host: viewer TUIs
-        and the runtime processes they spawn. ``lop-update`` replaces the
-        on-disk install under both, often several times a day, and neither
-        side could see it. The concrete cost was a silent one: a TUI running
+        and the runtime processes they spawn. ``lop-update`` moves the install
+        under both, often several times a day, and neither side could see it —
+        and since the generation layout it no longer even rewrites the tree a
+        process holds (``local_operator.update`` documents the layout), so the
+        thing that moves is which generation the POINTER names. The concrete
+        cost was a silent one: a TUI running
         pre-#624 code spawned a runtime from the NEW install (the spawn
-        resolves ``sys.executable`` fresh), routed ``/team <name> <request>``
+        resolves the current generation's interpreter fresh), routed
+        ``/team <name> <request>``
         to it, printed the receipt, and dropped the request because that
         build of the renderer had no consumer for it.
 
         Two comparisons, both cheap and both advisory \u2014 nothing here blocks a
         command or refuses an attach:
 
-        * **disk drift** \u2014 the install on disk is no longer the one this
+        * **disk drift** \u2014 the install a fresh ``lop`` would load (the
+          pointer's generation, ``update.disk_build``) is no longer the one this
           process loaded, so any runtime started from here will be NEWER than
-          this window. ``/reload`` is the remedy because it restarts the
-          window on the current install and picks the session back up.
+          this window. ``/reload`` is the remedy because it restarts the window
+          on the current install and picks the session back up. Asked of the
+          pointer rather than of this process's own tree, which under the
+          generation layout is never rewritten and so could never report a move.
         * **owner skew** \u2014 the runtime this session is bound to reports a
           different build than this window, or reports none at all (which
           means it predates the field, and is therefore older by
@@ -27685,13 +27706,40 @@ class OperatorApp(App[None]):
             self._system_notice(body, notice_kind)
 
         # --- A: has the install on disk moved under this process? ----------
+        # ``disk_build`` and not ``installed_build``: under the generation layout
+        # this window's own tree is written once and never touched, so a
+        # re-read of IT can never report a move — the install that moves is the
+        # one the POINTER names, which is what a fresh `lop` would load. The
+        # two agree on a process whose install is not a generation (a checkout,
+        # a pip/pipx tree), where ``disk_build`` answers from this same tree; and
+        # it answers ``None`` for a source checkout, whose "install on disk" is
+        # its own working tree and whose reload target is not a
+        # ``~/.local/bin`` generation at all.
         try:
+            from local_operator import buildwatch
             from local_operator import update as update_mod
 
-            on_disk = update_mod.installed_build()
+            on_disk = update_mod.disk_build()
+            # NOT when the pointer names an OLDER build than this window loaded
+            # (by version; a same-version different-commit pointer IS announced —
+            # see ``buildwatch.is_older``).
+            # The notice below says "was updated after this window opened" and
+            # offers ``/reload``, and a lagging pointer — a migrated host whose
+            # legacy uv-tool tree is still advanced in place — would be announced
+            # with the two labels reversed while there is nothing for the user to
+            # fix (review round 1, R-3). The order is the shared rule's, so this
+            # branch and the runtime's own refresh cannot disagree about which way
+            # a move goes.
+            announcing = (
+                on_disk is not None
+                and loaded is not None
+                and on_disk != loaded
+                and not buildwatch.is_older(on_disk, loaded)
+            )
         except Exception:  # noqa: BLE001 — diagnostics never break a seam
             on_disk = None
-        if on_disk is not None and on_disk != loaded:
+            announcing = False
+        if on_disk is not None and loaded is not None and announcing:
             announce(
                 "disk",
                 loaded.label(),

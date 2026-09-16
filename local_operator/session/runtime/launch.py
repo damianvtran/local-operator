@@ -60,6 +60,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -255,6 +256,36 @@ def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = Tru
     return pid if _pid_state(pid, check_zombie=check_zombie) == "live" else None
 
 
+def _spawn_interpreter() -> str:
+    """The interpreter a newly engaged runtime should run.
+
+    THE CURRENT GENERATION'S, and this is what makes a mixed-generation fleet
+    converge without anyone waiting for anything: a runtime that goes idle
+    retires on its own (design-runtime-autorefresh §3.2), and the engage that
+    replaces it constructs on the build the pointer names — so the fleet walks
+    onto the new build one session at a time instead of a fence or a drain.
+
+    CONCRETE, never through the pointer: ``update.current_interpreter`` resolves
+    ``current`` once and hands back the generation's own path. Spawning
+    ``<pointer>/bin/python3`` instead would leave the child importing through
+    the mutable symlink, so a second install could redirect its ``sys.path``
+    mid-run — the failure the generation layout exists to remove.
+
+    Falls back to ``sys.executable`` whenever the pointer cannot be resolved
+    (a source checkout, a pip/pipx machine, an interrupted flip). That is not a
+    degraded mode: for those processes ``sys.executable`` IS the only correct
+    answer, and it is the pre-generation behaviour exactly.
+    """
+    from local_operator import update
+
+    try:
+        candidate = update.current_interpreter()
+    except Exception:  # noqa: BLE001 — an unresolvable install must not fail a spawn
+        logger.debug("current install interpreter unreadable", exc_info=True)
+        return sys.executable
+    return str(candidate) if candidate is not None else sys.executable
+
+
 def _spawn_runtime(
     session_id: str,
     cwd: str,
@@ -350,6 +381,19 @@ def _spawn_runtime(
     from local_operator import procname
 
     argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])
+    # WHICH BUILD THE CHILD RUNS is the interpreter, so the engage decides it
+    # here rather than inheriting this process's. ``spawn_identity``'s image
+    # belongs to THIS process's venv (it is a hardlink planted beside our own
+    # ``python``), so passing it through would put a freshly engaged runtime
+    # back on the build this engage is leaving — the opposite of converging.
+    interpreter = _spawn_interpreter()
+    if interpreter != sys.executable:
+        executable = interpreter
+        if argv0 == sys.executable:
+            # Rung 2 had no label to carry (see ``procname.spawn_identity``), so
+            # its argv[0] was a path; keep the pair consistent rather than
+            # naming one interpreter and executing another.
+            argv0 = interpreter
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
@@ -364,6 +408,8 @@ def _spawn_runtime(
             # :mod:`local_operator.procname`). They are orthogonal: the label
             # replaces argv[0] only, and the flag must stay at index 1, because
             # interpreter options are recognised only before ``-m``.
+            # ``executable`` may name the CURRENT generation's interpreter
+            # rather than this process's; see :func:`_spawn_interpreter`.
             [argv0, SAFE_PATH_FLAG, "-m", "local_operator.session.runtime.process"],
             executable=executable,
             env=env,

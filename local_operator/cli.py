@@ -911,6 +911,78 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    # Install a build that is already on this machine into its own generation:
+    # a source directory, or a git ref of the repository this command runs in.
+    # Named separately from the PyPI path because it answers a different
+    # question ("install THIS tree") and asks nothing of the network.
+    update_parser.add_argument(
+        "--from-snapshot",
+        dest="from_snapshot",
+        metavar="DIR_OR_REF",
+        default=None,
+        help=(
+            "Install a local source tree (a directory, or a git ref of the current "
+            "repository) into its own install generation, instead of upgrading from PyPI"
+        ),
+    )
+
+    # The install LAYOUT's own commands. One verb group rather than flags on
+    # ``update`` because neither of these installs anything from a network: they
+    # manage the trees this machine already has.
+    #
+    # ``--keep``'s default is the REAL one rather than ``None``: argparse renders
+    # ``%(default)s`` from what is declared here, so a ``None`` the dispatcher
+    # later converted meant the help text stated a default that was not the
+    # default, and quoted a Python symbol an operator cannot act on (design
+    # review D5).
+    from local_operator.update import DEFAULT_KEEP_GENERATIONS
+
+    def _generation_count(value: str) -> int:
+        """``--keep``'s value: a non-negative count, or a clean argparse refusal.
+
+        REFUSING A NEGATIVE IS THE POINT (design review round 2, D15): ``-1`` is a
+        plausible typo for ``1``, and the old code silently read it as "keep
+        nothing" — the reading that deletes the most whole venvs, on the one
+        command whose entire job is deleting them. argparse renders this as exit 2
+        with a usage line, the same shape as any other bad option.
+        """
+        count = int(value)
+        if count < 0:
+            raise argparse.ArgumentTypeError(f"expected 0 or more, got {count}")
+        return count
+
+    install_parser = subparsers.add_parser(
+        "install",
+        help="Manage the local install generations (layout for the stable `lop` runtime)",
+        parents=[parent_parser],
+    )
+    install_subparsers = install_parser.add_subparsers(dest="install_command")
+    prune_parser = install_subparsers.add_parser(
+        "prune",
+        help="Delete install generations nothing is running from",
+        parents=[parent_parser],
+    )
+    prune_parser.add_argument(
+        "--keep",
+        type=_generation_count,
+        default=DEFAULT_KEEP_GENERATIONS,
+        metavar="N",
+        help=(
+            "How many unreferenced generations to keep (default: %(default)s; 0 or "
+            "more). A generation named by a live or saved session, and the one "
+            "`current` points at, are never removed"
+        ),
+    )
+    install_subparsers.add_parser(
+        "migrate",
+        help="Copy this install into the generation layout and point `current` at it",
+        parents=[parent_parser],
+    )
+    install_subparsers.add_parser(
+        "status",
+        help="Show the install layout: pointer, generations and what a new `lop` would load",
+        parents=[parent_parser],
+    )
 
     exec_parser = subparsers.add_parser(
         "exec",
@@ -6930,7 +7002,32 @@ def main() -> int:
             return update_command(
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
+                from_snapshot=getattr(args, "from_snapshot", None),
             )
+        elif args.subcommand == "install":
+            # Same lazy import, same reason. The generation layout's own verbs:
+            # they install nothing from a network, so they never consult PyPI.
+            from local_operator.update import (
+                DEFAULT_KEEP_GENERATIONS,
+                install_migrate_command,
+                install_prune_command,
+                install_status_command,
+            )
+
+            action = getattr(args, "install_command", None)
+            if action == "prune":
+                # The parser's default IS the policy default and its type check
+                # refuses a negative, so this is only ever a non-negative int
+                # (design review D5/D15; review round 6 R6-4: the ``None`` arm this
+                # used to carry became unreachable when D5 landed).
+                keep = int(getattr(args, "keep", DEFAULT_KEEP_GENERATIONS))
+                return install_prune_command(keep=keep)
+            if action == "migrate":
+                return install_migrate_command()
+            if action == "status":
+                return install_status_command()
+            print("usage: lop install {status, prune, migrate}", file=sys.stderr)
+            return 1
         elif args.subcommand == "exec":
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory

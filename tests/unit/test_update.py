@@ -535,7 +535,7 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check"])
     with patch("local_operator.update.update_command", return_value=2) as cmd:
         assert main() == 2
-        cmd.assert_called_once_with(check=True, refresh_daemons=False)
+        cmd.assert_called_once_with(check=True, refresh_daemons=False, from_snapshot=None)
 
 
 def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,7 +544,87 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update"])
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
-        cmd.assert_called_once_with(check=False, refresh_daemons=False)
+        cmd.assert_called_once_with(check=False, refresh_daemons=False, from_snapshot=None)
+
+
+def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--from-snapshot`` reaches the installer, and ``--check`` refuses it."""
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "update", "--from-snapshot", "main"])
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(check=False, refresh_daemons=False, from_snapshot="main")
+
+    monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
+    with patch("local_operator.update.update_command", return_value=1) as refused:
+        assert main() == 1
+        refused.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "argv,name",
+    [
+        (["lop", "install", "status"], "status"),
+        (["lop", "install", "prune"], "prune"),
+        (["lop", "install", "migrate"], "migrate"),
+    ],
+)
+def test_main_dispatches_install_verbs(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], name: str
+) -> None:
+    """``lop install`` is wired to the layout's own commands.
+
+    The verbs live in ``update`` and the dispatch lives in ``cli``, so a rename
+    on either side leaves a subcommand that parses and then quietly does
+    nothing — which for ``migrate`` means a machine that never adopts the layout.
+    """
+    from local_operator.cli import main
+
+    seen: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        "local_operator.update.install_status_command", lambda: seen.append(("status", None)) or 0
+    )
+    monkeypatch.setattr(
+        "local_operator.update.install_prune_command",
+        lambda **kwargs: seen.append(("prune", kwargs)) or 0,
+    )
+    monkeypatch.setattr(
+        "local_operator.update.install_migrate_command",
+        lambda: seen.append(("migrate", None)) or 0,
+    )
+    monkeypatch.setattr("sys.argv", argv)
+    assert main() == 0
+    assert [entry[0] for entry in seen] == [name]
+    if name == "prune":
+        # The retention policy is the DEFAULT, not a number repeated here: the
+        # two must not be able to disagree about how many trees survive.
+        assert seen[0][1] == {"keep": update_mod.DEFAULT_KEEP_GENERATIONS}
+
+
+def test_main_dispatches_install_prune_keep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.cli import main
+
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "local_operator.update.install_prune_command",
+        lambda **kwargs: seen.append(kwargs) or 0,
+    )
+    monkeypatch.setattr("sys.argv", ["lop", "install", "prune", "--keep", "3"])
+    assert main() == 0
+    assert seen == [{"keep": 3}]
+
+
+def test_main_refuses_an_install_verb_it_does_not_have(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "install"])
+    assert main() == 1
+    assert "usage: lop install" in capsys.readouterr().err
 
 
 class _FakePlist:

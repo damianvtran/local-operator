@@ -96,6 +96,7 @@ def disk(monkeypatch):
     """Control what ``installed_build``/``build_marker_age_s`` report."""
     state = {"build": NEW, "age": 999.0}
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: state["build"])
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: state["build"])
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: state["age"])
     monkeypatch.delenv("LOP_BUILD_SETTLE_S", raising=False)
     monkeypatch.delenv("LOP_BUILD_STAGGER_S", raising=False)
@@ -185,6 +186,7 @@ def test_unreadable_stamp_is_no_change(disk, monkeypatch) -> None:
         raise OSError("dist-info gone")
 
     monkeypatch.setattr(update_mod, "installed_build", boom)
+    monkeypatch.setattr(update_mod, "disk_build", boom)
     assert _build_changed(OLD) is None
 
 

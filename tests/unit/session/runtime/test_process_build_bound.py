@@ -129,6 +129,7 @@ def disk(monkeypatch):
     """Control what the build stamp on disk reports, as ``test_process_refresh`` does."""
     state: dict[str, Any] = {"build": NEW, "age": 999.0}
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: state["build"])
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: state["build"])
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: state["age"])
     for name in (
         "LOP_BUILD_SETTLE_S",
@@ -227,6 +228,7 @@ async def test_the_age_bound_catches_a_stamp_that_keeps_moving(disk, monkeypatch
         return BuildStamp(version=f"0.54.{40 + counter['n']}", source_ref=f"deadbee{counter['n']}")
 
     monkeypatch.setattr(update_mod, "installed_build", moving)
+    monkeypatch.setattr(update_mod, "disk_build", moving)
     reg = FakeRegistrant(boot=OLD)
     handle = FakeHandle(busy=True)
     stop = asyncio.Event()
@@ -277,6 +279,7 @@ async def test_the_age_bound_survives_the_settle_windows_of_its_own_installs(
         return 999.0 if counter["n"] % 2 else child_mod.BUILD_SETTLE_S / 2
 
     monkeypatch.setattr(update_mod, "installed_build", moving)
+    monkeypatch.setattr(update_mod, "disk_build", moving)
     monkeypatch.setattr(update_mod, "build_marker_age_s", settling)
     reg = FakeRegistrant(boot=OLD)
     handle = FakeHandle(busy=True)

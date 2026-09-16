@@ -71,6 +71,11 @@ _AMBIENT_VARS = (
     # directory the test owns rather than its real install, and could
     # retire (or refuse to) on a stranger's marker.
     "LOP_BUILD_PREFIX",
+    # The generation layout's pointer override: it stands in for the install a
+    # fresh `lop` would load, so an inherited value would make a spawned child
+    # run out of a test's temporary generation instead of this machine's
+    # install — or, worse, make `lop update` build into it.
+    "LOP_INSTALL_ROOT",
     # A runtime child spawned by the mobile daemon (or by the desktop plane
     # birthing a draft) carries its session id, provider, model, reasoning level
     # and cwd here. A test suite run from inside such a session (agents do this)
