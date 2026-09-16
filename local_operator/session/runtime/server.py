@@ -1458,7 +1458,11 @@ class RuntimeServer:
         Awaited (unlike ``announce_stop``) because its one caller is the
         reaper on the runtime's own loop, which has time to drain: the exit
         follows this frame, and a viewer that receives it late merely goes
-        cold the slow way.
+        cold the slow way. ON that loop, not from anywhere: the send path below
+        owns the loop's ``send_lock`` and the connections' writers, and
+        ``_send_to`` refuses a foreign-loop caller outright rather than parking
+        it forever — so any new caller (a test included) hops to the owner's
+        loop.
         """
         if self._closed.is_set():
             return
@@ -4285,7 +4289,45 @@ class RuntimeServer:
         dumping the frame twice on the ~30/s repaint path. What replaces an
         oversized frame depends on what the frame IS — see
         :meth:`_readable_frame`.
+
+        ON THE RUNTIME'S OWN LOOP, and that is enforced rather than assumed: the
+        writer and the lock below are loop-owned objects, so a foreign loop
+        cannot finish this coroutine once the lock is contended. The why, and the
+        CI failure it is there to prevent, are at the guard.
         """
+        if not self._on_runtime_loop():
+            # CROSS-LOOP PRECONDITION, checked rather than trusted. Both objects
+            # the send touches belong to the runtime's loop: ``conn.writer`` is a
+            # StreamWriter whose transport and drain waiter were created on it,
+            # and ``conn.send_lock`` is an asyncio.Lock, which binds itself to the
+            # FIRST loop that contends it (``_get_loop``) and is then unusable
+            # from any other.
+            #
+            # Why this is a hard error and not merely slow: when the lock is
+            # contended, the foreign loop parks a waiter future of ITS OWN, and
+            # the owner's ``Lock.release()`` completes it with ``set_result`` from
+            # the wrong thread — which schedules the callback with plain
+            # ``call_soon``, i.e. an append to the other loop's ready deque with
+            # no self-pipe write. A loop already parked in ``select()`` is never
+            # woken, so the await NEVER returns: the awaiting task, and the
+            # process running it, are wedged for good. Measured, not inferred —
+            # with the lock genuinely held on the runtime loop, a foreign-loop
+            # await of this path was still parked 3.5 s after the lock was
+            # released (see the PR's reproduction). That is the shape behind ten
+            # cancelled CI shard jobs: the stall watchdog fired on one xdist
+            # worker while its siblings armed and never fired.
+            #
+            # And when the lock is UNCONTESTED the failure is quieter but still
+            # real: the fast path never creates a waiter, so the send appears to
+            # work while silently binding ``send_lock`` to the foreign loop, after
+            # which the runtime's own next contention raises inside the runtime.
+            # Either way the honest answer is to fail at the call site, where the
+            # mistake is, instead of parking a loop that owns a live session.
+            # Mirrors the same precondition on ``aclose``.
+            raise RuntimeError(
+                "RuntimeServer._send_to() must run on its owning event loop "
+                "(conn.send_lock and conn.writer belong to it)"
+            )
         timeout = (
             _TUI_SEND_TIMEOUT_S if conn.wants_events and conn.wants_frontend else _SEND_TIMEOUT_S
         )

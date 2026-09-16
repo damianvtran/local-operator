@@ -15,7 +15,7 @@ import json
 import statistics
 import threading
 import time
-from typing import Any, cast
+from typing import Any, Coroutine, cast
 
 import pytest
 
@@ -259,6 +259,26 @@ async def _wait_record() -> registry.SessionRecord:
     raise AssertionError("runtime never published a live record")
 
 
+async def _on_runtime_loop(runtime: RuntimeServer, coro: Coroutine[Any, Any, Any]) -> Any:
+    """Drive a runtime-owned coroutine from the runtime's OWN event loop.
+
+    ``RuntimeServer.start()`` hosts the runtime on a dedicated thread with its own
+    loop, and the send path owns objects that belong to that loop (``conn.send_lock``
+    and the connection's ``StreamWriter``). Awaiting such a coroutine from the test's
+    loop is the cross-loop misuse ``_send_to`` now refuses, and its failure mode was
+    not an error: with the lock contended, the test loop parks a waiter future of its
+    OWN, the owner's ``Lock.release()`` completes it with ``set_result`` from the wrong
+    thread, and that callback is scheduled with plain ``call_soon`` — no self-pipe
+    write — so a loop already in ``select()`` is never woken and the await never
+    returns. Ten CI shard jobs were cancelled on exactly that park. Every production
+    caller of a control op or a repaint is already on the owner's loop; this is how a
+    test gets there. ``start_in_process`` hosts are unaffected and need no hop.
+    """
+    loop = runtime._loop
+    assert loop is not None, "start() publishes the runtime's loop"
+    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
+
+
 async def _dial(
     record: registry.SessionRecord,
     *,
@@ -441,7 +461,7 @@ async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> No
         )
         update = await _until(attach_reader, "frontend_update")
         assert update["data"]["changes"]["pending_gate"]["request_id"] == "approval-1"
-        await runtime._push()
+        await _on_runtime_loop(runtime, runtime._push())
         daemon = json.loads(await daemon_reader.readline())
         assert daemon["data"]["pending"] is None
     finally:
@@ -1958,8 +1978,9 @@ async def test_a_watch_frame_buffered_behind_a_parked_op_cannot_move_the_count()
 
         # Now the dead connection's buffered frame is finally processed. This
         # is the delivery the reader loop performs; it must not be able to
-        # reach the live count.
-        await runtime._on_request({"op": "unwatch", "req": "late"}, conn)
+        # reach the live count. (On the owner's loop, as the reader loop's own call
+        # is — the guard in ``_send_to`` refuses it anywhere else.)
+        await _on_runtime_loop(runtime, runtime._on_request({"op": "unwatch", "req": "late"}, conn))
 
         assert runtime.watching_surfaces() == frozenset({"viewer"}), (
             "a frame buffered behind a parked op moved the counter after its "
@@ -2552,7 +2573,7 @@ async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> Non
         seed = json.loads(await tui_reader.readline())
         assert seed["op"] == "frontend_sync"
 
-        await runtime._push()
+        await _on_runtime_loop(runtime, runtime._push())
         daemon_repaint = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=2))
         assert daemon_repaint["op"] == "projection"
         events_repaint = json.loads(await asyncio.wait_for(events_reader.readline(), timeout=2))
@@ -2732,9 +2753,74 @@ async def test_tui_send_timeout_is_five_seconds(monkeypatch: pytest.MonkeyPatch)
         assert conns, "full-TUI client never registered"
         seen.clear()
         monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
-        await runtime._send_to(conns[0], {"op": "ping"})
+        # ON THE RUNTIME'S OWN LOOP. ``_send_to`` owns ``conn.send_lock`` and the
+        # connection's writer, and both belong to the loop ``start()`` hosts — so it
+        # is driven from there, the way its only production callers are. Awaiting it
+        # from this loop is the cross-loop misuse ``_send_to`` now refuses (see
+        # ``test_send_to_refuses_a_foreign_loop_instead_of_parking``); it looked like
+        # it worked here only because an UNCONTESTED lock takes the fast path.
+        runtime_loop = runtime._loop
+        assert runtime_loop is not None, "start() publishes the runtime's loop"
+        await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(
+                runtime._send_to(conns[0], {"op": "ping"}), runtime_loop
+            )
+        )
         assert 5.0 in seen, f"TUI send bound was not 5.0 s; saw {seen}"
         assert 1.0 not in seen, f"full-TUI client still used the 1 s bound; saw {seen}"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_send_to_refuses_a_foreign_loop_instead_of_parking() -> None:
+    """A loop-owned send is REFUSED off its loop, not waited on until forever.
+
+    ``_send_to`` is the single write path for every frame the runtime emits, and
+    both things it touches are owned by the runtime's loop: ``conn.writer`` (a
+    StreamWriter whose transport and drain waiter were built on that loop) and
+    ``conn.send_lock`` (an ``asyncio.Lock``, which binds itself to the first loop
+    that CONTENDS it and is then unusable from any other).
+
+    WHY THE GUARD, AND WHY THIS IS NOT A TIMING ASSERTION: the pre-fix failure mode
+    was not an exception at all. Awaiting that path from a foreign loop leaves a
+    waiter future on the FOREIGN loop, and the owner's ``Lock.release()`` completes
+    it from the wrong thread with ``set_result`` — whose callback is scheduled with
+    plain ``call_soon``, an append to the other loop's ready deque with no self-pipe
+    write. A loop parked in ``select()`` is never woken, so the await never returns
+    and the xdist worker running it is wedged until CI's cap cancels the shard job:
+    ten such cancels, several on ``main``, are what this guard exists to make
+    impossible to reintroduce silently. An uncontended lock is enough to show it —
+    the fast path makes the cross-loop call LOOK fine while binding the lock to the
+    wrong loop for every later contention — so this needs no timing, no contention
+    and no sleeping: it fails on the pre-fix tree as "DID NOT RAISE".
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        _reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "attach"}).encode() + b"\n")
+        await writer.drain()
+        deadline = asyncio.get_running_loop().time() + 5
+        conns: list[Any] = []
+        while asyncio.get_running_loop().time() < deadline and not conns:
+            conns = list(runtime._clients.values())
+            if not conns:
+                await asyncio.sleep(0.02)
+        assert conns, "the client never registered"
+        assert (
+            runtime._loop is not asyncio.get_running_loop()
+        ), "this test only means anything while the runtime is thread-hosted"
+
+        with pytest.raises(RuntimeError, match="owning event loop"):
+            await runtime._send_to(conns[0], {"op": "ping"})
     finally:
         if writer is not None:
             writer.close()
