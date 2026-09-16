@@ -281,6 +281,11 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         # activity (its canonical name lives in the registry module, which owns
         # the writer and the reader).
         registry.STOP_MARKER_NAME,
+        # The runtime's turn journal, written into the same directory and
+        # registered for the same reason: bookkeeping rather than content, so it
+        # must not be billed against the cleanup size budget. Its canonical name
+        # also lives in the registry module.
+        registry.TURN_JOURNAL_NAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 

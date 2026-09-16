@@ -74,6 +74,7 @@ from local_operator.session.runtime.types import (
 )
 
 if TYPE_CHECKING:
+    from local_operator.session.runtime import journal
     from local_operator.update import BuildStamp
 
 logger = logging.getLogger(__name__)
@@ -614,6 +615,11 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
     not tell a refresh retirement from a SIGTERM from a torn install, because an
     exiting runtime logged nothing about itself and no exit record survived
     (design §1.6/§5.3).
+
+    The turn journal is told the same fact before the boot record is withdrawn,
+    and in that order: a row left OPEN by a runtime that leaves anyway is the
+    evidence a successor reads, and withdrawing the boot record first would
+    strip the half that says which build the row's pid was running.
     """
     boot = getattr(runtime, "_boot_build", None)
     logger.info(
@@ -622,6 +628,7 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
         os.getpid(),
         boot.label() if boot is not None else "<unknown>",
     )
+    _note_journal_exit(handle, reason)
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -630,6 +637,114 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
         await runtime.aclose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         logger.debug("child runtime aclose failed", exc_info=True)
+    _clear_boot_record()
+
+
+#: The pid whose boot record THIS process published, or ``None``.
+#:
+#: Process-level rather than per-handle because the artifact is: one boot record
+#: per process, written once at boot. It exists so the exit path can answer "do I
+#: have a record to withdraw?" with a comparison instead of a filesystem call
+#: (see :func:`_clear_boot_record` for why that matters).
+_boot_record_pid: int | None = None
+
+
+def _bind_boot_instrumentation(
+    handle: object, *, session_id: str = "", cwd: str = ""
+) -> "journal.TurnJournal | None":
+    """Write this runtime's boot record and attach its turn journal.
+
+    Both halves are INSTRUMENTS (design-session-survival §5) and both are
+    therefore best-effort: a runtime that cannot write its own account must
+    still run its turns, so every failure degrades to "no evidence" and is
+    logged. The failure that would be worse than the incident they exist to
+    diagnose is a session that cannot boot because an observability write
+    failed.
+
+    The build is read with ``LOP_BUILD_PREFIX`` exactly as ``server.py`` reads
+    it for the session record — the same seam, read the same way, so the two
+    artifacts cannot disagree about the build a comparison between them rests
+    on.
+    """
+    global _boot_record_pid
+    try:
+        from local_operator import update as update_mod
+        from local_operator.session.runtime import journal
+
+        session = getattr(handle, "_session", None)
+        identity = str(getattr(session, "session_id", "") or session_id)
+        directory = getattr(getattr(session, "_transcript", None), "directory", None)
+        build = update_mod.installed_build(os.environ.get("LOP_BUILD_PREFIX") or None)
+    except Exception:  # noqa: BLE001 — no identity, no artifacts; the turn still runs
+        logger.warning("session runtime: boot instrumentation unavailable", exc_info=True)
+        return None
+
+    try:
+        journal.write_boot_record(identity, build, cwd=cwd)
+        _boot_record_pid = os.getpid()
+        # THIS BOOT IS THE ONE MOMENT A NEW WRITER JOINS THE NAMESPACE, so it is
+        # where the namespace is bounded: nothing else reaps ``run/host`` (see
+        # ``journal.prune_boot_records``), and a directory that only ever grows
+        # is what makes a recycled pid's stale record reachable.
+        journal.prune_boot_records()
+    except OSError:
+        logger.warning("session runtime: could not write its boot record", exc_info=True)
+
+    if directory is None:
+        # A session with no transcript directory has nothing to attach a ROW to
+        # (the record above still stands). Reachable only through a reduced
+        # handle in a test, never through ``spawn_owned_session``.
+        return None
+    try:
+        writer = journal.TurnJournal(directory, identity, build)
+        attach = getattr(handle, "attach_turn_journal", None)
+        if callable(attach):
+            attach(writer)
+        return writer
+    except Exception:  # noqa: BLE001
+        logger.warning("session runtime: could not attach its turn journal", exc_info=True)
+        return None
+
+
+def _note_journal_exit(handle: object, cause: str) -> None:
+    """Tell the turn journal why this runtime is leaving. Best-effort.
+
+    Only a turn still OPEN when this runs is affected — a quiescent exit says
+    nothing, which is correct: there is no unfinished turn to attribute.
+    """
+    writer = getattr(handle, "_turn_journal", None)
+    note = getattr(writer, "note_exit", None)
+    if callable(note):
+        note(cause)
+
+
+def _clear_boot_record() -> None:
+    """Withdraw this pid's boot record on a CLEAN exit. Best-effort.
+
+    The asymmetry is the evidence: a record that survives its process says the
+    process stopped without running its own exit ordering, which is the fact
+    the 2026-09-15 fleet could not establish about itself. Withdrawing here is
+    also what keeps ``run/host`` bounded — one record per unaccounted death,
+    not one per runtime ever spawned.
+
+    THE GUARD IS NOT AN OPTIMISATION. Nothing is attempted when this process
+    never published a record, and that is load-bearing twice over. The exit path
+    is TIMED by the reaper's own tests (``test_process_reaper`` measures the
+    spread of ``_clean_exit`` elapsed times to 40 ms), so an instrument must not
+    add work to it for a host that has no record to withdraw — an in-process
+    session, a reduced handle, every test that never binds instrumentation.
+    And the withdrawal is not free even when it does nothing: it resolves
+    ``run_dir()``, which MKDIRS the namespace, so an unconditional call would
+    make every clean exit create a directory it has nothing to put in.
+    """
+    if _boot_record_pid != os.getpid():
+        return
+    try:
+        from local_operator.session.runtime import journal
+
+        journal.clear_boot_record()
+    except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
+        logger.debug("session runtime: could not withdraw its boot record", exc_info=True)
 
 
 async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
@@ -1530,6 +1645,15 @@ async def amain() -> int:
         )
         return 2
 
+    # THE INSTRUMENTS, BEFORE ANYTHING HERE CAN START A TURN. Both the inbox
+    # drain below and the wake scheduler after it can open a turn, so a journal
+    # attached later would miss exactly the turns a boot-time kill lands in —
+    # and a boot record published later would be absent for a spawn that dies
+    # at load. The record also precedes the control socket by construction, so
+    # "this pid listened" and "this pid only existed" are distinguishable
+    # (design-session-survival §5, §8).
+    _bind_boot_instrumentation(handle, session_id=resume or "", cwd=cwd)
+
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
     # session was cold are delivered here, BEFORE the control socket begins
     # listening, so they cannot be interleaved with an errand a client sends
@@ -1702,6 +1826,11 @@ async def amain() -> int:
             os.getpid(),
             boot.label() if boot is not None else "<unknown>",
         )
+        # BEFORE the dispose, and that is the whole ordering: a turn still open
+        # here is about to be aborted, and the exit cause this runtime knows
+        # about itself (a signal name, the socket stop, "unknown") is the one
+        # fact a successor cannot reconstruct from a corpse.
+        _note_journal_exit(handle, trigger.get("why") or "unknown")
         try:
             handle._deny_pending_gates()
         except Exception:  # noqa: BLE001 — shutdown must proceed
@@ -1711,6 +1840,10 @@ async def amain() -> int:
         except Exception:  # noqa: BLE001
             logger.warning("child session dispose failed", exc_info=True)
     await runtime.aclose()
+    # Clean exit, so the boot record goes with it (see ``_clear_boot_record``):
+    # a record that outlives its process is the statement "this pid stopped
+    # without running its own exit ordering", and this path ran it.
+    _clear_boot_record()
 
     # Under `LOP_RUNTIME_DEFER_MATERIALISE` the transcript and roster sidecar
     # never create the session directory, but the LEASE cannot be deferred —

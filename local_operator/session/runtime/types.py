@@ -259,6 +259,26 @@ RUN_DIRNAME = "run/mobile"
 #: ``kill -9`` leaves exactly one file behind for the next scan to reap.
 SERVE_RUN_DIRNAME = "run/serve"
 
+#: Directory (under the config root) holding the BOOT RECORDS of processes that
+#: spawn session runtimes — today the runtime itself, later the supervised
+#: session host (design-session-survival §4).
+#:
+#: A THIRD namespace for the same reason ``run/serve`` is a second one: what a
+#: reader of a directory assumes about every file in it decides whether a new
+#: kind of file may live there, and ``run/mobile`` is read by everything that
+#: lists SESSIONS. A boot record is not a session: it says "this pid existed, on
+#: this build, under this parent" for a process that may already be gone, which
+#: is the one fact a successor cannot reconstruct from a corpse. Dropped beside
+#: session records it would surface as a phantom session with an empty
+#: ``session_id``; dropped in ``run/serve`` it would be read as a daemon by
+#: every discovery reader that globs that directory.
+#:
+#: A boot record is NOT a liveness signal and nothing may treat it as one: a
+#: record whose process died without exiting cleanly is precisely the evidence
+#: the namespace exists to preserve (see ``registry.REAPED_DIRNAME`` for the
+#: same rule applied to a session record).
+HOST_RUN_DIRNAME = "run/host"
+
 # SESSIONS_DIRNAME (imported above) is the name of the directory holding one
 # directory per conversation, and session_dir() names the join once for the
 # stop marker's writer and reader, so neither re-derives the layout.

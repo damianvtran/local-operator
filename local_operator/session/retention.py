@@ -103,6 +103,14 @@ _SIDECAR_NAMES = frozenset(
         # Its mtime is a genuine interaction time and can never exceed the
         # transcript's latest write, so the clock is not moved by it.
         "runtime-stop.json",
+        # The runtime's own turn journal (``registry.TURN_JOURNAL_NAME``),
+        # rewritten at every turn boundary in the session's directory. It lands
+        # here for the same reason the stop marker does — this list exists so
+        # ``cleanup._dir_bytes`` can tell bookkeeping from user content, and an
+        # unlisted file in a session directory is the failure this list
+        # remembers. It is NOT an activity file: its writes ride a turn the
+        # transcript has already stamped.
+        "turn-journal.json",
     }
 )
 

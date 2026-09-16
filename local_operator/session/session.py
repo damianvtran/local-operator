@@ -291,6 +291,41 @@ def _process_boot_build() -> Any:
     return _PROCESS_BOOT_BUILD
 
 
+def _restored_journal_interruption(directory: Any) -> tuple[str, str, str, str] | None:
+    """The interruption a successor boot owes its own context, or ``None``.
+
+    A thin, never-fatal wrapper: the evidence read lives in
+    ``session/runtime/journal.py`` and the narration in
+    :meth:`Session._journal_restored_cut_off`, both of which have their own
+    contracts. What belongs HERE is the boot guarantee — a session must open
+    even when the artifact that describes the previous one cannot be read, so
+    every failure degrades to "no notice" and is logged.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        return journal.restored_interruption(directory)
+    except Exception:  # noqa: BLE001 — an unreadable instrument is not a boot failure
+        logger.debug("turn journal restore failed", exc_info=True)
+        return None
+
+
+def _recorded_boot_build() -> Any:
+    """The build THIS pid recorded in its boot record, or ``None``.
+
+    Read fresh rather than memoised, unlike :func:`_process_boot_build`: its one
+    caller is already an error path, and the record is the file a clean exit
+    WITHDRAWS — a cached value would outlive the evidence it stands for, which
+    is the opposite of what a durable second opinion is for.
+    """
+    try:
+        from local_operator.session.runtime.journal import recorded_boot_build
+
+        return recorded_boot_build(os.getpid())
+    except Exception:  # noqa: BLE001 — no evidence is an answer, not a failure
+        return None
+
+
 #: Transcript custom-entry type holding the session's todo list. The todo tool
 #: keeps the live list in a module-level table keyed by session id (see
 #: ``local_operator.tools.builtin.TODO_STORE``), which the process loses on
@@ -1679,6 +1714,20 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # THE JOURNAL IS THE FALLBACK EVIDENCE SOURCE, consulted only when the
+        # attention import repaired nothing. Both describe the same kind of
+        # event — a run whose owner went away mid-turn — so they must feed ONE
+        # narration path, and the shape below is exactly what
+        # ``_journal_restored_cut_off`` consumes. Two writers would double-
+        # announce one death; two readers of one claim is the fix.
+        #
+        # It stays a fallback rather than the primary because the attention path
+        # carries MORE: it publishes the durable outcome every surface reads
+        # (the sidebar's unseen-error row, the phone frame), while this one
+        # speaks only to the agent. A boot where both would speak takes the one
+        # that also moves the surfaces.
+        if self._restored_cut_off is None:
+            self._restored_cut_off = _restored_journal_interruption(transcript.directory)
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later ``_note_import_failure`` compares against
         # this value (see ``_process_boot_build``).
@@ -2123,6 +2172,22 @@ class Session:
         #: result deliveries, resume catch-ups (design-runtime-autorefresh §1.2).
         #: Sync, non-raising by contract (the pipeline guards it anyway).
         self.on_turn_settled: Callable[[], None] | None = None
+        #: Reports a turn that is STARTING, with the producer's command id (""
+        #: for the openers that have none — a scheduled wake, a resume
+        #: catch-up). Wired by the runtime handle
+        #: (``ServingSessionHandle._note_turn_open``) and called from the top of
+        #: ``_run_turn_pipeline``, the one choke point every turn funnels
+        #: through.
+        #:
+        #: It is the durable half of the turn-boundary pair
+        #: (``on_turn_settled`` is the other): the runtime's turn journal opens a
+        #: row here and closes it from the settled hook, and the GAP between the
+        #: two is what a successor reads as "a turn was in flight when this
+        #: process stopped" (design-session-survival §5). Sync, non-raising by
+        #: contract — the pipeline guards it, and the handle's own
+        #: implementation swallows everything anyway: evidence ABOUT work may
+        #: never be a precondition for doing it.
+        self.note_turn_open: Callable[[str], None] | None = None
         #: Flips the discovery record's ``started`` bit; wired by the runtime
         #: handle (``ServingSessionHandle._publish_session_started``) and probed
         #: so a reduced host without it is a no-op.
@@ -6523,7 +6588,16 @@ class Session:
         """
         from local_operator.update import classify_import_failure
 
-        reason = classify_import_failure(exc, module, boot=_process_boot_build())
+        reason = classify_import_failure(
+            exc,
+            module,
+            boot=_process_boot_build(),
+            # The durable second opinion (see the classifier's docstring): a tree
+            # torn badly enough to break this import is also a tree whose live
+            # stamp may be unreadable, and the boot record this process wrote
+            # before it listened is what still knows what it loaded.
+            recorded_boot=_recorded_boot_build(),
+        )
         if reason is None:
             return False
         logger.error("turn aborted by a mid-install import failure: %s", reason, exc_info=exc)
@@ -7240,6 +7314,19 @@ class Session:
                 mark_started()
             except Exception:  # noqa: BLE001 — a stale flag is not a turn failure
                 logger.debug("could not publish the started state", exc_info=True)
+        # THE TURN'S OPEN EDGE, for the runtime's journal. Here for the same
+        # reason the flip above is here — this is the single choke point every
+        # spawn path funnels through — and guarded the same way, because a
+        # record that could fail a turn would be a worse defect than the
+        # unattributable death it exists to fix. Called AFTER the inbox drain
+        # above on purpose: a drain that aborts before the turn starts should
+        # not leave a row claiming a turn that never ran.
+        note_open = getattr(self, "note_turn_open", None)
+        if callable(note_open):
+            try:
+                note_open(producer_command_id or "")
+            except Exception:  # noqa: BLE001 — an instrument never fails a turn
+                logger.debug("could not open the turn journal row", exc_info=True)
         # Re-arm the todo guardrail: a fresh user message may well be the answer
         # a stalled list was waiting for, so the latch must not carry over. It is
         # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs

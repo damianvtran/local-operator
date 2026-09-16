@@ -513,6 +513,13 @@ class ServingSessionHandle(SessionHandle):
         #: Why the most recent admitted turn failed, for a headless caller that
         #: has no front end reading the projection. See the drain's handler.
         self._last_prompt_failure = ""
+        #: The runtime's turn journal (``session/runtime/journal.py``), attached
+        #: by ``process.amain`` at boot. ``None`` for every in-process host (the
+        #: TUI, the tests, a reduced handle): only a DETACHED runtime owns a
+        #: death that a successor has to be able to read from disk, and a row
+        #: written by a host that cannot die that way would be noise on every
+        #: boot rather than evidence.
+        self._turn_journal: Any | None = None
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
@@ -2056,10 +2063,28 @@ class ServingSessionHandle(SessionHandle):
 
             def observe_end(event: AgentEvent) -> None:
                 nonlocal emitted_failure
-                from local_operator.harness.types import AgentEndEvent
+                from local_operator.harness.types import (
+                    AgentEndEvent,
+                    ToolExecutionEndEvent,
+                )
 
                 if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
                     emitted_failure = True
+                # The last COMPLETED tool boundary, recorded while the turn is
+                # still running: a turn that is killed never reaches its close,
+                # and "which boundary it last completed" is what keeps the
+                # successor's agent from acting on a step it only remembers
+                # starting. Same subscription as the failure probe above rather
+                # than a second one, so the two cannot disagree about the turn.
+                #
+                # COVERAGE, stated because it is partial: this subscription
+                # exists for the turns THIS queue runs (the user's prompt, peer
+                # deliveries, the goal loop, headless exec). A turn opened by a
+                # wake or a resume catch-up runs through the session's own
+                # pipeline and leaves the field empty, which reads honestly as
+                # "no boundary completed" rather than as a boundary that did.
+                elif isinstance(event, ToolExecutionEndEvent):
+                    self._note_turn_boundary(event.tool_name)
 
             # Session.prompt reports provider errors as events, not exceptions.
             # Queue completion must reflect that terminal result; otherwise a
@@ -2908,14 +2933,99 @@ class ServingSessionHandle(SessionHandle):
 
     # -- the completion ladder's last rung ---------------------------------
 
+    def attach_turn_journal(self, writer: Any | None) -> None:
+        """Wire the runtime's turn journal onto this handle's turn boundaries.
+
+        Called once by ``process.amain``, before the control socket listens and
+        before the boot inbox drain — both of which can start a turn, so a
+        journal attached later would miss exactly the turns a boot-time kill
+        lands in.
+
+        TWO BOUNDARIES, AND EACH RIDES THE CHOKE POINT THAT ACTUALLY COVERS
+        EVERY TURN:
+
+        * the OPEN rides ``Session.note_turn_open``, called from
+          ``_run_turn_pipeline`` — the one place the session's own comment calls
+          the single choke point every spawn path funnels through. A queue-only
+          hook would leave a peer wake, a scheduled wake and a resume catch-up
+          with no row, and those are precisely the turns nobody is watching.
+        * the CLOSE rides ``_on_turn_settled``, which already owns the single
+          turn-boundary slot on ``Session`` (see its docstring).
+
+        Best-effort by construction: the journal itself never raises (see
+        ``TurnJournal``), and a session that never grew the start hook simply
+        gets a journal that only closes — never a handle that fails to build.
+        """
+        self._turn_journal = writer
+        if writer is None:
+            return
+        if hasattr(self._session, "note_turn_open"):
+            self._session.note_turn_open = self._note_turn_open
+
+    def _note_turn_open(self, command_id: str = "") -> None:
+        """Open the journal row for a turn that is starting.
+
+        Non-raising, because its caller is the head of a turn: evidence ABOUT
+        work may never be a precondition for doing it.
+        """
+        writer = self._turn_journal
+        if writer is None:
+            return
+        try:
+            writer.open_turn(command_id=command_id or "")
+        except Exception:  # noqa: BLE001 — an instrument is never a turn failure
+            logger.debug("turn journal open failed", exc_info=True)
+
+    def _note_turn_boundary(self, tool_name: str) -> None:
+        """Record the last completed tool boundary of the turn in flight."""
+        writer = self._turn_journal
+        if writer is None or not tool_name:
+            return
+        try:
+            writer.note_boundary(tool_name)
+        except Exception:  # noqa: BLE001 — see ``_note_turn_open``
+            logger.debug("turn journal boundary failed", exc_info=True)
+
+    def _journal_end_cause(self) -> str:
+        """How the turn that just settled ended, in the journal's vocabulary.
+
+        Read from the session's OWN state rather than from this handle's
+        bookkeeping, because this hook fires for openers this handle never
+        queued: a wake or a resume catch-up has no ``_last_prompt_failure`` to
+        read. Ordered by specificity — a latched cut-off cause is the runtime's
+        own statement about why it is leaving, which is exactly what a successor
+        wants out of a row, and the deliberate token is recorded the same way
+        (it is what keeps a user's own stop from reading as an error).
+        """
+        session = self._session
+        if getattr(session, "_deliberate_stop_noted", False):
+            return "user-stop"
+        cause = getattr(session, "_cut_off_cause", "") or ""
+        if cause:
+            return str(cause)
+        if self._last_prompt_failure:
+            return "error"
+        return "completed"
+
     def _on_turn_settled(self) -> None:
-        """The session's turn-boundary hook, with both consumers on one slot.
+        """The session's turn-boundary hook, with all consumers on one slot.
 
         Chained rather than replaced: ``Session.on_turn_settled`` is a single
-        attribute and the record's ``busy`` settle already owns it. Both calls
-        are non-raising by contract, so the order is free and the only thing
-        that matters is that neither is dropped.
+        attribute and the record's ``busy`` settle already owns it. Every call
+        is non-raising by contract, so the order is free and the only thing that
+        matters is that none is dropped.
+
+        The journal's CLOSE is the third consumer, and it is the one that makes
+        "the row is still open" mean "this turn never ended": every terminal
+        path of a turn reaches this hook, so a row that is still open afterwards
+        can only have been left by a process that stopped without getting here.
         """
+        writer = self._turn_journal
+        if writer is not None:
+            try:
+                writer.close_turn(self._journal_end_cause())
+            except Exception:  # noqa: BLE001 — an instrument is never a turn failure
+                logger.debug("turn journal close failed", exc_info=True)
         self._publish_busy_soon()
         self._schedule_completion_announce()
 

@@ -51,7 +51,15 @@ PARK_S = 30
 #: rebuilds a child's environment, and ``_strip_child_env`` removes them from
 #: THIS process so a runtime the code under test spawns itself (with
 #: ``dict(os.environ)``) also gets a clean one.
-CHILD_ENV_FAMILIES = ("CMUX_", "LOP_MOBILE_CHILD_", "LOP_RUNTIME_")
+#:
+#: ``LOP_BUILD_PREFIX`` is the fourth entry and it is a single name rather than a
+#: family, deliberately: it points the install stamp at a FAKE tree, so a
+#: developer who has it exported gives a child whose turn journal records one
+#: root and compares it against another — every death then reads as an
+#: install-window tear (reviewer round 1, R2). A cell that means to exercise the
+#: seam sets it explicitly on the child, which is the only legitimate use for it
+#: outside ``tests/e2e`` (see ``buildwatch.build_prefix``).
+CHILD_ENV_FAMILIES = ("CMUX_", "LOP_MOBILE_CHILD_", "LOP_RUNTIME_", "LOP_BUILD_PREFIX")
 
 
 def _seed(config_dir: Path, session_id: str) -> Path:
@@ -76,12 +84,15 @@ def _seed(config_dir: Path, session_id: str) -> Path:
 
 
 def _child_env(config_dir: Path, session_id: str) -> dict[str, str]:
-    # THREE FAMILIES, not just the cmux one. ``LOP_RUNTIME_ADOPT_SESSION`` and
-    # the ``LOP_MOBILE_CHILD_*`` pair pin a spawned runtime's session and
+    # FAMILIES, NOT JUST THE CMUX ONE, PLUS ONE SINGLE NAME. ``LOP_RUNTIME_ADOPT_SESSION``
+    # and the ``LOP_MOBILE_CHILD_*`` pair pin a spawned runtime's session and
     # provider, so a suite run from inside a harness that exports them would
     # spawn a child that ADOPTS the operator's own session — the same class of
-    # hazard the ``CMUX_*`` strip exists for (#648). The values this cell needs
-    # are set explicitly below, so nothing legitimate is lost.
+    # hazard the ``CMUX_*`` strip exists for (#648). The fourth entry,
+    # ``LOP_BUILD_PREFIX``, is a bare name rather than a prefix and behaves as
+    # one here: both consumers test it with ``startswith``, which matches it
+    # exactly and every longer name under it. The values this cell needs are set
+    # explicitly below, so nothing legitimate is lost.
     env = {k: v for k, v in os.environ.items() if not k.startswith(CHILD_ENV_FAMILIES)}
     env.update(
         {

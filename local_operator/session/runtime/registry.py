@@ -257,6 +257,69 @@ def read_stop_marker(conversation_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+#: The TURN JOURNAL: the conversation-scoped row a runtime opens when a turn
+#: starts and closes when it ends.
+#:
+#: WHY THE RUNTIME HAS TO SAY SOMETHING ABOUT ITS OWN TURN. The attention
+#: taxonomy (``session/attention.py``) can classify a death from what a process
+#: LEFT BEHIND — a stop marker, a dead record — and every one of those signals
+#: is authored by somebody OTHER than the process that died. A SIGKILLed
+#: runtime's own turn therefore left no statement at all, so the answer was
+#: always an inference: "the runtime disappeared without exiting cleanly" was
+#: the best available, and once a sweep had reaped the record it degraded to
+#: "the cause could not be determined". An OPEN row is the missing statement:
+#: *turn N was in flight and never ended*, written by the runtime before it did
+#: any of that turn's work.
+#:
+#: A CONVERSATION-SCOPED FILE, in the conversation directory, for exactly the
+#: reason the stop marker is: it must outlive the record that describes the
+#: same run, because a clean stop unpublishes the record and a sweep moves a
+#: dead one into ``reaped/``, while the transcript directory survives both.
+#:
+#: It is ONE row, not a log: the file is the runtime's current turn, overwritten
+#: in place (staged, so a reader sees the old row or the new one). A row left
+#: open by the LAST turn a process ran is the whole artifact, and a successor
+#: reading it asks one question — is the pid that wrote this gone?
+TURN_JOURNAL_NAME = "turn-journal.json"
+
+
+def turn_journal_path(conversation_dir: Path) -> Path:
+    """Where one conversation's turn journal lives."""
+    return conversation_dir / TURN_JOURNAL_NAME
+
+
+def write_turn_journal(conversation_dir: Path, payload: dict[str, Any]) -> Path:
+    """Stage-write the turn journal row (0600, :func:`publish`'s shape).
+
+    Raises only when the write itself fails. The CALLER is what makes this
+    best-effort: a journal write is evidence ABOUT a turn and must never be a
+    gate in front of one, so the runtime's writers swallow a failure and log
+    it (see ``session/runtime/journal.py``).
+
+    Deliberately does NOT create the conversation directory — same rule as
+    :func:`write_stop_marker`, and for the same reason: an instrument that can
+    conjure a session directory would make a process that never ran a turn
+    appear in every listing.
+    """
+    target = turn_journal_path(conversation_dir)
+    _staged_write(target, payload, prefix=f".{TURN_JOURNAL_NAME}.")
+    return target
+
+
+def read_turn_journal(conversation_dir: Path) -> dict[str, Any] | None:
+    """The turn journal row as a dict, or ``None`` when there is none.
+
+    Tolerant by design, like :func:`read_stop_marker`: an unreadable or
+    malformed row means "no usable evidence", never an exception on a
+    classification path that runs at session boot.
+    """
+    try:
+        data = json.loads(turn_journal_path(conversation_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     """Signal-0 liveness, the cheapest check that answers "is there a process
     with this pid" without disturbing it. EPERM means alive-but-not-ours,

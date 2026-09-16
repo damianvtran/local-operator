@@ -461,6 +461,84 @@ def test_classify_import_failure_ignores_an_unrelated_error(monkeypatch) -> None
     assert update.classify_import_failure(ImportError("x"), "local_operator.x", boot=None) is None
 
 
+def test_classify_import_failure_uses_the_recorded_boot_when_the_live_stamp_is_gone(
+    monkeypatch,
+) -> None:
+    """The durable boot record is the second opinion for a TORN install.
+
+    The live stamp reads the very tree that is being replaced, so the case this
+    classifier exists to name is also the case where it may be unreadable — and
+    before the boot record it then fell through to "a genuine packaging bug" and
+    the tear was reported as ours.
+    """
+    from local_operator import update
+
+    recorded = update.BuildStamp(version="1.0.0", source_ref="aaa")
+    monkeypatch.setattr(
+        update, "installed_build", lambda *_a, **_k: update.BuildStamp("1.1.0", "bbb")
+    )
+    exc = ImportError(
+        "cannot import name '_journal_injection_ids' from 'local_operator.session.transcript'"
+    )
+    reason = update.classify_import_failure(
+        exc, "local_operator.mobile.durable", boot=None, recorded_boot=recorded
+    )
+    assert reason is not None
+    assert "being replaced on disk" in reason
+    assert "1.0.0@aaa" in reason and "1.1.0@bbb" in reason
+
+
+def test_classify_import_failure_prefers_the_live_stamp_over_the_record(monkeypatch) -> None:
+    """The live reading wins whenever it is readable.
+
+    Not a matter of taste: it is this process's own reading at this instant,
+    while the record is a boot-time snapshot — consulting the record first would
+    make a process legitimately re-pointed at a new install compare against a
+    stale baseline.
+    """
+    from local_operator import update
+
+    live = update.BuildStamp(version="2.0.0", source_ref="ccc")
+    recorded = update.BuildStamp(version="1.0.0", source_ref="aaa")
+    monkeypatch.setattr(update, "installed_build", lambda *_a, **_k: live)
+
+    # Live equals the disk → nothing moved, so the miss stays an ordinary
+    # traceback even though the RECORD disagrees with the disk.
+    assert (
+        update.classify_import_failure(
+            ImportError("cannot import name 'nope' from 'local_operator.session.transcript'"),
+            "local_operator.session.transcript",
+            boot=live,
+            recorded_boot=recorded,
+        )
+        is None
+    )
+
+
+def test_recorded_boot_build_is_none_without_a_record(monkeypatch, tmp_path) -> None:
+    """No record is no evidence — never a guess against an empty stamp."""
+    from local_operator.session.runtime import journal
+
+    assert journal.recorded_boot_build(999_999, root=tmp_path) is None
+
+
+def test_a_tear_reported_from_a_record_names_the_pair(monkeypatch) -> None:
+    """The tear's detail names both builds, which is what makes it actioned."""
+    from local_operator import update
+
+    monkeypatch.setattr(
+        update, "installed_build", lambda *_a, **_k: update.BuildStamp("0.56.0", "cafe9999")
+    )
+    reason = update.classify_import_failure(
+        ImportError("cannot import name 'x' from 'local_operator.session.transcript'"),
+        "local_operator.session.transcript",
+        boot=None,
+        recorded_boot=update.BuildStamp("0.55.9", "beef1234"),
+    )
+    assert reason is not None
+    assert "0.55.9@beef123" in reason and "0.56.0@cafe999" in reason
+
+
 # -- the dispose route (review round 1, BLOCKER-1) ---------------------------
 #
 # A bare `/stop` on a TUI-OWNED session does not travel through the `stop`
