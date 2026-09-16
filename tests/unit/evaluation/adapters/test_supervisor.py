@@ -7,6 +7,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -401,6 +402,29 @@ def test_diagnostic_tail_is_bounded() -> None:
     tail = _Tail()
     tail.append(b"x" * (MAX_DIAGNOSTIC_TAIL + 10))
     assert tail.bytes() == b"x" * MAX_DIAGNOSTIC_TAIL
+
+
+def test_the_tail_settle_includes_a_late_append() -> None:
+    """``settled`` waits for the DRAINER's append, not for a fixed budget.
+
+    A failure path can be reached milliseconds after the worker wrote its last
+    line -- a scripted episode is over in milliseconds -- while the thread that
+    drains the stream has not been scheduled yet. A bare snapshot then misses
+    the only lines that explain the failure, which is what this replaces: the
+    append notification restarts the idle window, so a late append is included
+    and a quiet buffer returns after exactly one window.
+    """
+
+    tail = _Tail()
+    writer = threading.Timer(0.02, tail.append, args=(b"late line\n",))
+    writer.start()
+    try:
+        assert tail.settled(quiet=1.0, timeout=5.0) == b"late line\n"
+    finally:
+        writer.join()
+
+    # An idle tail returns what it has rather than inventing anything.
+    assert _Tail().settled(quiet=0.01, timeout=0.5) == b""
 
 
 def test_persist_and_load_rescue_is_atomic_mode_0600(tmp_path: Path) -> None:

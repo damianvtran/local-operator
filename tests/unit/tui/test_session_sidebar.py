@@ -507,13 +507,42 @@ async def test_list_window_current_cursor_and_footer_are_independent():
         sidebar.set_entries(entries)
         await pilot.pause()
         sidebar.focus()
+        await pilot.pause()  # ``Widget.focus()`` lands a cycle later
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
         sidebar.action_edge(False)
         assert sidebar.cursor_id != "current"
         assert sidebar.current_id == "current"
         assert len(sidebar.visible_entries) <= sidebar.page_size
         lines = sidebar.render().plain.splitlines()
         assert len(lines) <= sidebar.size.height
-        assert lines[-1] == f"1–{sidebar.page_size}/101 · ctrl+b hide"
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
+        # Focused AND paginated: the footer keeps the exit hint (design round
+        # D4). This assertion used to read `1–{page}/101 · ctrl+b hide` and
+        # passed only because the pagination branch REPLACED the hint — the
+        # counter displaced `esc return` exactly when the list is long enough to
+        # need it, which is the state a user is most likely to be lost in. The
+        # page counter may never be the reason the exit hint disappears, so the
+        # rule is asserted as "both, or the exit alone": which of the two forms
+        # is painted depends on the panel's width.
+        assert lines[-1].startswith(f"1–{sidebar.page_size}/101"), lines[-1]
+        assert (
+            "esc return" in lines[-1]
+        ), "the page counter displaced the only named exit (design round D4)"
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
+        # Unfocused and paginated: the position plus the way INTO the keyboard
+        # mode (U1). The counter used to leave a full list naming the entry
+        # nowhere — a whole-frame search for `f9`/`focus` found nothing at
+        # 120x40 or 70x24, so the only route in was advertised solely by the
+        # copy the counter had displaced. `ctrl+b hide` is what gives way when
+        # both do not fit, so the assertion is the rule rather than one string.
+        sidebar.blur()
+        await pilot.pause()
+        assert not sidebar.has_focus, "premise: the list no longer holds the keyboard"
+        unfocused_footer = sidebar.render().plain.splitlines()[-1]
+        assert unfocused_footer.startswith(f"1–{sidebar.page_size}/101"), unfocused_footer
+        assert (
+            "f9 focus" in unfocused_footer
+        ), "a full list names no way into the list's keyboard mode (U1)"
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         sidebar.show_error("read failed")
         assert sidebar.entries
@@ -565,7 +594,13 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         await pilot.pause()
         settings_focus = app.focused
         assert settings_focus is not None and settings_focus is not app._editor()
-        await pilot.click("#session-sidebar", offset=(2, 0))
+        # Entered the list the way its own footer names (f9), not by clicking it:
+        # a pointer press on the list no longer moves the keyboard (design round
+        # D1, `SessionSidebar.FOCUS_ON_CLICK = False`), so a click could not put
+        # the sidebar in the state this test is about any more.
+        app.action_focus_sidebar()
+        await pilot.pause()
+        assert app._session_sidebar.has_focus, "premise: f9 focused the list"
         await pilot.press("escape")
         assert app.focused is settings_focus
         app._close_settings_view()
@@ -1334,6 +1369,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     describes. Enumerating it here would assert a pairing no surface renders;
     the companion test drives the real render path instead.
     """
+    from local_operator.session.catalog import WEDGED_STATUS
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
         ATTACHED_MARKER,
@@ -1348,7 +1384,7 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     #: glyph a row drew is a contradiction the user would have to resolve.
     ALLOWED = {
         NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
-        WEDGED_MARKER: {"Not responding"},
+        WEDGED_MARKER: {WEDGED_STATUS},
         ATTACHED_MARKER: {"Open"},
         IDLE_MARKER: {"Ready"},
         WAKE_MARKER: {"Scheduled", "Stopped"},
@@ -1563,12 +1599,13 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
     """
     from textual.geometry import Region
 
+    from local_operator.session.catalog import WEDGED_STATUS
     from local_operator.tui.terminal_title import SPINNER_FRAMES
 
     #: Which words may accompany each glyph on an unseen row.
     ALLOWED = {
         "✓": {"Unseen completion"},
-        "✗": {"Unseen error", "Not responding"},
+        "✗": {"Unseen error", WEDGED_STATUS},
         "⊘": {"Unseen interruption"},
         "!": {"Approval needed", "Answer needed"},
     }
@@ -2488,3 +2525,146 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
         assert source.controller is not None
         assert source.controller.parked, "a speculative lease must not paint deltas"
         assert handlers, "a parked source must stay subscribed or its owner's stream buffers"
+
+
+@pytest.mark.asyncio
+async def test_a_sidebar_row_names_the_rung_when_the_ladder_had_to_escalate():
+    """Design round 1, D1 on the sidebar: the tooltip is where the budget is.
+
+    The row's own description cell carries the deliberate WORD (``⊘`` and
+    ``Unseen interruption``), and the sentence lives in the tooltip — which WRAPS,
+    measured: error rows already render 36×5 and 36×6. So a rung-3 kill and a
+    rung-1 request were byte-identical here for no reason of space, and the
+    operator could not tell "my /stop worked" from "my /stop needed a SIGKILL"
+    anywhere they look. Only the escalated rung appends, and a plain request
+    keeps the exact words it had before this change.
+
+    Read from the RENDERED row as well as from ``status``, following the pair
+    above: the glyph and the words are one surface, and the point of the fix is
+    what a user sees, not what the property returns.
+    """
+    from textual.geometry import Region
+
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    def stop(rung: str, command: str) -> str:
+        return render_cut_off_reason(
+            DELIBERATE_CUT_OFF_CAUSE,
+            detail=render_stop_attribution(rung=rung, command=command, killer_pid=40609),
+        )
+
+    now = time.time()
+    cases = [
+        ("sigkill", "/stop --all", "Unseen interruption — killed by /stop --all"),
+        ("sigterm", "/stop", "Unseen interruption — stopped with a signal by /stop"),
+        # Rung 1 is the plain request: the word already says it, so nothing is
+        # appended and the row is byte-identical to before this change.
+        ("socket", "/stop", "Unseen interruption"),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        _quiesce_sidebar_refresh(app)
+        sidebar = app._session_sidebar
+        for rung, command, words in cases:
+            entry = CatalogEntry(
+                SessionRow("r" * 12, now, f"stopped {rung}", live_state="idle"),
+                unseen=True,
+                completion_kind="interrupted",
+                completion_reason=stop(rung, command),
+            )
+            sidebar.set_entries([entry])
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            painted = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            row = next(line for line in painted if f"stopped {rung}" in line)
+            assert "⊘" in row, (rung, row)
+            assert "✗" not in row, (rung, row)
+            assert entry.status == words, (rung, entry.status)
+
+
+def test_a_quiet_owner_reads_as_not_answering_with_its_measured_age() -> None:
+    """The sidebar's words for a stale beat: what was measured, and no more.
+
+    A stale beat is real evidence that the owner is not answering, so the row
+    must stay degraded — the reported fault was never that this state was
+    visible. What the beat cannot support is a verdict on the PROCESS: it is
+    written by the runtime's own event loop, so a long turn produces it on a
+    session that is demonstrably working (105.8 s and 205.8 s measured against
+    the 45 s timeout). "Not responding" asserted one anyway. This string is
+    also the desktop catalogue's ``status.label``, so it travels to the app
+    unchanged; the age is printed beside the state so the reader is given the
+    measurement the sentence is made of rather than a bare adjective.
+    """
+    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.tui.widgets.session_picker import WEDGED_MARKER, row_state_mark
+
+    row = SessionRow(
+        "q" * 12,
+        time.time(),
+        "quiet owner",
+        live_state="wedged",
+        heartbeat_age_s=243.0,
+    )
+    status = CatalogEntry(row).status
+    assert status == f"{WEDGED_STATUS} (last heartbeat 4m ago)"
+    assert "responding" not in status
+
+    # No measurement (a cold render, a hand-built row): the state survives and
+    # the number is absent rather than invented.
+    bare = SessionRow("q" * 12, time.time(), "quiet owner", live_state="wedged")
+    assert CatalogEntry(bare).status == WEDGED_STATUS
+
+    # And the words still pair with the glyph the row draws: the whole point of
+    # the wording change is that this state stays distinguishable from ordinary
+    # progress, not that it is softened out of sight.
+    assert row_state_mark(row, 0)[0] == WEDGED_MARKER
+
+
+def test_decorate_rows_carries_the_age_the_registry_measured(tmp_path) -> None:
+    """The tooltip's number comes from ``registry.classify``, not a second
+    subtraction in the catalog.
+
+    Two implementations of one quantity are free to disagree about a clock step
+    or a future-dated stamp, and the surface that would be believed is the one
+    in front of the user. The classifier is therefore the only place the age is
+    computed, and this asserts the value reaches the row the sidebar paints.
+    """
+    import json
+
+    from local_operator.session.catalog import decorate_rows
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    record = SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id="quiet0000001",
+        conversation_name="quiet owner",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+    )
+    record.heartbeat_at = time.time() - 243
+    directory = registry.run_dir(tmp_path)
+    # Written directly: ``publish`` stamps a fresh heartbeat by design, and a
+    # quiet owner is exactly one whose beat stopped arriving.
+    (directory / f"{record.pid}.json").write_text(json.dumps(record.to_json()))
+
+    rows = decorate_rows(tmp_path, [SessionRow("quiet0000001", time.time(), "quiet owner")])
+    assert [row.live_state for row in rows] == ["wedged"]
+    age = rows[0].heartbeat_age_s
+    assert age is not None and 242 <= age <= 246, age

@@ -31,7 +31,11 @@ from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-from local_operator.harness.comms import HUB_MESSAGE_TYPE, extract_parent_message
+from local_operator.harness.comms import extract_parent_message
+from local_operator.harness.message_types import (
+    HUB_MESSAGE_TYPE,
+    PEER_MESSAGE_MESSAGE_TYPE,
+)
 
 # The row DECISIONS both this fold and the TUI's must make identically. They
 # live outside both hosts precisely so neither can own them: every divergence
@@ -43,6 +47,9 @@ from local_operator.harness.rows import (
     compaction_refused_notice,
     gate_timeout_notice,
     is_harness_chrome,
+    is_harness_notice_row,
+    output_limit_call_receipt,
+    turn_cut_tool_call,
     user_row_text,
     wake_receipt_headline,
 )
@@ -83,7 +90,6 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
-from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +187,22 @@ FRAME_CAP_TODO_TEXT_CHARS = 120
 #: enough to answer the question and bounded enough to fit.
 FRAME_CAP_PENDING_TITLE_CHARS = 2_000
 FRAME_CAP_PENDING_DETAIL_CHARS = 2_000
+
+#: The roster fields that survive everything except the LAST shed tier: each is
+#: a pure derivation of ``parent_job_id``, which is why they can be dropped at
+#: all. ``peer_ids`` is the one that actually grows the frame — it is every
+#: sibling's job id, so a wide fan-out (256 children under one parent) makes
+#: every row list the other 255 and the field becomes O(n^2) in roster WIDTH:
+#: measured at 1,044,480 B of a 1,254,249-byte frame, 83% of it.
+FRAME_CAP_DERIVED_ROSTER_FIELDS = ("peer_ids", "child_ids", "ancestor_ids", "ancestors")
+
+#: What a roster row keeps in the LAST tier, when even the derived graph is not
+#: enough. Only identity and the parent edge stay: a viewer can still render one
+#: row per child, its label, its lifecycle state, and the hierarchy it belongs
+#: to, and the list is its own count. Per-child detail is fetched on demand —
+#: except ``error_text``, which exists nowhere else and is lost here (see the
+#: tier's own comment in ``cap_projection_frame``).
+FRAME_CAP_ROSTER_IDENTITY_FIELDS = ("job_id", "label", "parent_job_id", "status")
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -482,11 +504,26 @@ def cap_projection_frame(
        file can exceed the whole cap by itself, and tiers 1-3 cannot touch it,
        so without this the function returned a frame the socket then dropped
        whole. The full text stays one /history fetch away.
+    5. The DERIVED roster graph is shed (``peer_ids``, ``child_ids``,
+       ``ancestor_ids``, ``ancestors``). Tiers 1-4 shrink TEXT, so none of them
+       can touch the one field that scales with roster WIDTH: ``peer_ids`` is
+       O(n^2) across a flat sibling group (see
+       ``FRAME_CAP_DERIVED_ROSTER_FIELDS``). ``parent_job_id`` stays on every
+       row, so the same graph is rebuildable by the reader.
+    6. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
+       A viewer renders one row per child with its label, lifecycle state and
+       parent; per-child detail is fetched on demand, the same trade the
+       transcript already makes.
 
     A frame still over ``cap_bytes`` after every tier is logged at WARNING
     rather than returned silently: the caller cannot fix it, but a dropped
     repaint that nobody can see is exactly the failure mode this cap exists to
-    make impossible, so it must at least be visible in the log.
+    make impossible, so it must at least be visible in the log. That is now a
+    genuine last resort rather than the shape of an ordinary wide-fan-out
+    session: tiers 5-6 are what make a 256-sibling roster fit, and a frame that
+    survives them carries something else that is not bounded at all (see the
+    ``_send_to`` ceiling in ``session/runtime/server.py``, which refuses to put
+    what is left on the wire).
 
     The projection itself is never mutated (the fold owns it and republishes
     it; the daemon retains it): degradation happens on the serialized dict.
@@ -590,6 +627,43 @@ def cap_projection_frame(
             break
         text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
 
+    # Tier 5: shed the DERIVED roster graph. Nothing is lost that the reader
+    # cannot rebuild: all four fields are derivations of ``parent_job_id``,
+    # which every tier keeps — the canonical side already reasons this way
+    # (``frontend_state`` rebuilds its parent/peer/child edges from its job
+    # rows, and its ``peers()`` derives what this field precomputes), and the
+    # phone's store treats a missing list as empty rather than unmounting the
+    # session. Empty lists rather than deleted keys: the wire shape stays
+    # uniform, and an absent list and an empty one normalise identically.
+    for row in data.get("subagents") or []:
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+            row[field] = []
+    if _frame_bytes(data) <= cap_bytes:
+        return data, True
+
+    # Tier 6: identity rows. What stays is what a reader can neither derive nor
+    # fetch per child: the job id, the label, the parent edge and the lifecycle
+    # state. What goes is recoverable through the per-child fetch the transcript
+    # already relies on — with ONE exception, named rather than glossed:
+    # ``error_text`` is ``str(exc)`` from the parent runner and is never written
+    # to the child's transcript, so the lazy /history fetch cannot bring it back
+    # (see ``test_live_fold_keeps_failed_child_error_text_generous``). Losing it
+    # is the price of a frame this size; the alternative is a frame no viewer can
+    # read at all.
+    #
+    # The rows themselves are the count, so no ``subagent_count`` key is added:
+    # the client rebuild filters to ``SessionProjection``'s own fields and would
+    # drop an unknown key on the floor, which would make it a number nobody
+    # reads.
+    rows = data.get("subagents")
+    if rows:
+        data["subagents"] = [
+            {key: row[key] for key in FRAME_CAP_ROSTER_IDENTITY_FIELDS if key in row}
+            for row in rows
+        ]
+    if _frame_bytes(data) <= cap_bytes:
+        return data, True
+
     # Every tier is spent. The frame is as small as this function can make it;
     # say so loudly rather than handing the socket a line it will drop whole.
     final_size = _frame_bytes(data)
@@ -633,6 +707,19 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
     # tool_call_id -> its row, local to this fold (a fresh fold re-pairs).
     tool_rows: dict[str, TranscriptEntry] = {}
     tool_args: dict[str, dict[str, Any]] = {}
+    # tool_call_id -> the result that settled it, indexed UP FRONT. The
+    # turn-level notice is decided on the ASSISTANT message, which this linear
+    # fold reaches before the results that answer it, and the notice needs the
+    # limit's arm to avoid naming a cause the call's own row contradicts
+    # (design round 1, D1). One extra pass over the history, no extra state.
+    # ``isinstance(Message)``, not a bare attribute read: a history holds
+    # ``CustomMessage`` rows too (hub steers, gate timeouts), and those carry no
+    # ``role`` or ``tool_call_id`` at all.
+    settled: dict[str, AgentMessage] = {
+        message.tool_call_id: message
+        for message in history
+        if isinstance(message, Message) and message.role == "tool" and message.tool_call_id
+    }
     # Message ids whose assistant turn opened a bang-mode (`! cmd`) command,
     # so the call it issues opens expanded exactly as the TUI's does.
     bang_pending = False
@@ -760,6 +847,17 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # prompt while rendering the goal-loop and auto-continuation
                 # prompts as the user's own words.
                 continue
+            if is_harness_notice_row(message):
+                # A row the harness wrote — a stamped render of a
+                # ``CustomMessage`` (model-switch notice, incident, wake
+                # delivery) or a notice a compaction block carried forward from
+                # before the stamp existed — and the operator never typed it.
+                # The live fold has its own receipt for the moments these
+                # announce, so dropping the rendered copy is live/replay
+                # parity, and it also hides the rows an older build left in
+                # existing transcripts. One decision, in ``harness/rows.py``,
+                # for the same reason the chrome list lives there.
+                continue
             # A `$skill` invocation persists as its EXPANDED payload, because
             # that is what the model was sent. Rendering it verbatim showed the
             # whole SKILL.md body as the user's bubble and titled the session
@@ -826,6 +924,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 has_tool_calls=bool(message.tool_calls),
                 stop_reason=getattr(message, "stop_reason", None),
                 provider_payload=message.provider_payload,
+                # The arm, from this turn's OWN results (design round 1, D1):
+                # the notice may say the limit cut a call only when a call in
+                # this turn says so, or it names a cause the call's own card
+                # contradicts — the card is folded BEFORE this notice
+                # (``[user, tool row, notice]``, measured on this fold), so the
+                # claim and the row that refutes it are read as one turn rather
+                # than as two facts about it.
+                cut_tool_call=turn_cut_tool_call(message.tool_calls, settled),
             )
             if notice is not None:
                 # A refused, failed or interrupted turn. The phone had no
@@ -845,10 +951,21 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
             entry = tool_rows.get(message.tool_call_id or "")
             if entry is not None:
                 entry.tool_state = "failed" if message.is_error else "done"
-                if message.is_error:
-                    entry.error = _compact(message.text, 200)
                 payload = message.provider_payload or {}
                 result_details = payload.get("details")
+                # A call the OUTPUT LIMIT kept from running persists a SYNTHETIC
+                # result whose text is addressed to the MODEL, so the failed row
+                # used to carry an imperative meant for the agent ("Reply with
+                # the call itself…") as the operator's own receipt, and carried
+                # it twice: as the row's error line and, clipped, in the
+                # expand-on-tap output (review round 1, F2). Both take the
+                # harness's vocabulary for this condition instead, from the arm
+                # marker on the result. EVERY other tool message keeps its text
+                # untouched — this is keyed on the marker, never on the wording.
+                receipt = output_limit_call_receipt(result_details) if message.is_error else None
+                result_text = receipt or message.text
+                if message.is_error:
+                    entry.error = _compact(result_text, 200)
                 duration = payload.get("duration_s")
                 if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                     entry.elapsed_s = float(duration)
@@ -857,7 +974,15 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
                 details = _tool_row_details(
                     tool_args.get(message.tool_call_id or "", {}),
-                    message.text,
+                    # The receipt belongs to the row's error line and NOWHERE
+                    # else on this surface: passing it here as well put the
+                    # identical sentence in the red paragraph above the args and
+                    # in the sunken output block below them, so one tap showed
+                    # one sentence twice (design round 1, D5). Nothing ran for
+                    # this call, so it has no output to expand — the arguments
+                    # still do, and that is what an operator opening the row is
+                    # reading for.
+                    "" if receipt else result_text,
                     result_details if isinstance(result_details, dict) else None,
                 )
                 # The expansion flag is set on the CALL and must survive the
@@ -1001,7 +1126,27 @@ class ProjectionFold:
             p.streaming = False
             self._streaming_ended = True
             p.queued_count = 0
-            p.stop_reason = "aborted" if event.aborted else "completed"
+            # A CUT-OFF TURN IS AN ABORT, not a completion. The taxonomy flips an
+            # involuntary end to `aborted=False, error=<notice>` so every
+            # existing surface paints it as a failure, and this fold naively read
+            # that as "the turn finished" — which silently removed the phone's
+            # only recovery affordance for exactly the sessions the operator
+            # reports losing (`composer.tsx` gates `interrupted — tap to resume`
+            # on `stop_reason === "aborted"`, review round 1 MAJOR-1). The field
+            # means "why streaming last stopped", and a turn that was cut off
+            # stopped without finishing; `cut_off`/`cut_off_cause` is how the
+            # session states that, so it is read here rather than inferred from
+            # `aborted` alone.
+            cut_off = bool(event.cut_off or event.cut_off_cause)
+            p.stop_reason = "aborted" if (event.aborted or cut_off) else "completed"
+            # ...and the phone's BUTTON needs to know which of the two it was:
+            # "aborted" is both a deliberate stop and a cut-off, and pairing a
+            # `Stopped with an error — ...` notice with a button reading
+            # `interrupted — tap to resume` names one act two ways (design round
+            # 2, D7). Deliberately a separate flag rather than a third
+            # `stop_reason` value: the affordance is gated on `=== "aborted"`,
+            # so a new token would strip it from every bundle not yet updated.
+            p.cut_off = cut_off
             self._close_open_message()
             if event.error:
                 self._append(
@@ -1076,13 +1221,65 @@ class ProjectionFold:
                     if promoted is not None:
                         promoted.tool_call_id = event.tool_call_id
             row = self._tool_row(event.tool_call_id, event.tool_name)
-            row.tool_state = "composing"
-            row.summary = event.intent or f"dictating {event.tool_name}"
+            # Three endings to one dictation, in the frames the producer sends:
+            #
+            # * an ordinary frame — the model is still writing the call;
+            # * `dictation_complete` — it has stopped, and the call may still be
+            #   waiting behind a sibling's execution group (or for a group the
+            #   turn never reached), so the row says `queued` rather than going
+            #   on claiming the model is dictating something it finished
+            #   writing. The TUI landed the same state in the same commit; the
+            #   phone was the surface that used to keep the lie after the row
+            #   above it had stopped;
+            # * `not_run_reason` — it will never run (planning failure,
+            #   duplicate id, steering skip), and the reason is the harness's
+            #   own. Settled here rather than left to the client, because a
+            #   phone has no retirement pass to fall back on.
+            #
+            # Both new fields are read off the model rather than with
+            # `getattr`, unlike the TUI: this branch is behind an
+            # ``isinstance`` check, so an older runtime's frame carries the
+            # defaults (`False`/`None`) and takes the composing path below —
+            # today's behaviour, unchanged.
+            #
+            # A row that has already STARTED outgrows the whole announcement,
+            # and the TUI returns from its handler for exactly this case (its
+            # running registry). The phone needs the guard too: a replayed
+            # terminal frame for a call whose twin's start already landed would
+            # otherwise relabel a running row `failed` — or, because the
+            # terminal frame also carries `dictation_complete`, walk it BACK to
+            # `queued`. Note the arms are exclusive on purpose: falling through
+            # to them is the bug, not the fallback.
+            started = row.tool_state in ("running", "done", "failed")
+            if event.not_run_reason:
+                if not started:
+                    row.tool_state = "failed"
+                    row.error = _compact(event.not_run_reason, 200)
+                    # The reason in the one-line summary too: the row is all a
+                    # phone shows by default, and "this call never ran, here is
+                    # why" is the whole content of that fact.
+                    row.summary = row.error
+            elif started:
+                pass
+            elif event.dictation_complete:
+                row.tool_state = "queued"
+                row.summary = event.intent or f"waiting to run {event.tool_name}"
+            else:
+                row.tool_state = "composing"
+                row.summary = event.intent or f"dictating {event.tool_name}"
             row.intent = event.intent or ""
             row.details["argument_bytes"] = event.argument_bytes
         elif isinstance(event, ToolExecutionStartEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
             row.tool_state = "running"
+            # The failure TEXT goes with the failure STATE. This row may have
+            # been settled by a never-run verdict before its call started — two
+            # calls sharing an id, the loser settling the row and the winner
+            # running it — and the renderer draws `error` as a red danger line
+            # inside the expansion for ANY state, so the phone would otherwise
+            # keep `Duplicate call id '…' skipped.` over a row that succeeded,
+            # and `hasDetails` true because of it.
+            row.error = ""
             row.summary = _summarize_args(event.tool_name, event.args)
             row.intent = event.intent or row.intent
             self._tool_started_at[event.tool_call_id] = time.monotonic()
@@ -1117,9 +1314,23 @@ class ProjectionFold:
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )
         elif isinstance(event, NoticeEvent):
+            # ``kind`` rides into ``details`` as the phone's ``severity``. This
+            # fold is the phone's ONLY view of a LIVE notice, `NoticeRow` reads
+            # the glyph and the ink from that field alone, and dropping it drew
+            # every live warning as the quiet ``·`` in ``text-ink-dim`` -- the
+            # tier this surface's own test file calls "a receipt nobody has to
+            # read" -- while the SAME event, replayed after a reconnect, took
+            # the branch below and rendered amber ``!``. One event, two inks,
+            # decided by whether the client attached before or after it
+            # (design round 1, D1; measured, replay ``{'severity': 'warning'}``
+            # against live ``{}``). The three kinds map 1:1 onto the phone's
+            # ``info|warning|error``.
             self._append(
                 TranscriptEntry(
-                    id=f"nt-{time.time_ns()}", kind="notice", text=_compact(event.text, 400)
+                    id=f"nt-{time.time_ns()}",
+                    kind="notice",
+                    text=_compact(event.text, 400),
+                    details={"severity": event.kind},
                 )
             )
         elif isinstance(event, SteeringDeliveredEvent):
@@ -1381,7 +1592,17 @@ class ProjectionFold:
         if not p.streaming:
             return
         if isinstance(event, ToolCallComposeEvent):
-            self._set_activity(event.intent or f"dictating {event.tool_name}")
+            # The same three endings as the row above, because the activity line
+            # is the other place that can go on saying "dictating" for a call
+            # the model finished writing: the terminal frame means the wait is
+            # now on the harness (the call is queued), and a never-run verdict
+            # means the wait is over and the call is not coming.
+            if event.not_run_reason:
+                self._set_activity(event.not_run_reason)
+            elif event.dictation_complete:
+                self._set_activity(f"waiting to run {event.tool_name}")
+            else:
+                self._set_activity(event.intent or f"dictating {event.tool_name}")
         elif isinstance(event, ToolExecutionStartEvent):
             self._set_activity(event.intent or f"running {event.tool_name}")
         elif isinstance(event, ToolExecutionEndEvent):

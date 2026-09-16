@@ -4,6 +4,7 @@ streaming rows that update in place, subagent roster aggregation."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -43,6 +44,7 @@ from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     PendingRequest,
     SessionProjection,
+    SubagentRow,
     _projection_from_json,
 )
 from local_operator.session.runtime.registry import SessionRecord
@@ -439,6 +441,174 @@ def test_live_fold_bounds_subagent_prompt_and_outcome_on_the_wire() -> None:
     assert wire_row["error_text"] == ""
 
 
+#: Production-shaped job ids: 12 hex chars, as ``uuid4().hex[:12]`` builds them.
+#: The LENGTH is load-bearing — ``peer_ids`` costs ~16 bytes per sibling id on
+#: the wire, so a 256-wide group of this shape crosses the 1 MiB line limit
+#: while the same group with ``child-0``-style ids stays ~100 KB under it.
+_SIBLING_ID_HEX = 12
+
+
+def _flat_roster_fold(width: int) -> ProjectionFold:
+    """A flat sibling group folded by the REAL roster path.
+
+    Every child sits under one parent (``parent_job_id: None``), which is the
+    production shape — 256 parallel eval children — and the one that makes
+    ``peer_ids`` O(n^2): each row lists every sibling but itself.
+    """
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(width):
+        comms.record_launch(
+            f"{index:0{_SIBLING_ID_HEX}x}",
+            f"osworld-eval-{index}",
+            prompt="Analyse the episode and click the correct element " * 4,
+        )
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+    for row in fold.projection.subagents:
+        row.result_text = "observed the agent fail to click the correct element " * 4
+    return fold
+
+
+def _projection_line(data: dict[str, Any]) -> int:
+    """Exactly what the socket writes for a projection frame."""
+    return len(json.dumps({"op": "projection", "data": data}).encode()) + 1
+
+
+@pytest.mark.parametrize("width", [1, 50, 250, 1000])
+def test_a_wide_sibling_group_cannot_make_the_projection_unreadable(width: int) -> None:
+    """The cap's CONTRACT, at every roster width that matters.
+
+    ``cap_projection_frame`` is a soft cap: it degrades optional tiers and may
+    still return an over-limit payload, which the socket then writes raw. The
+    welcome projection is therefore the one frame family that could make a
+    session unopenable by ANY viewer — the client's ``readline`` raises over the
+    same 1 MiB, its pump dies, and every retry dies the same way. This pins the
+    contract structurally (the frame the send path would report as oversize is
+    None) rather than with a byte ceiling, so it stays true whatever the row
+    payload happens to weigh.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_DERIVED_ROSTER_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.session.frontend_state import oversized_frame_report
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    fold = _flat_roster_fold(width)
+    data, _degraded = cap_projection_frame(fold.projection)
+
+    assert oversized_frame_report({"op": "projection", "data": data}, _MAX_LINE_BYTES) is None
+
+    rows = data["subagents"]
+    assert rows
+    # ``parent_job_id`` is what every shed field can be REBUILT from, so it must
+    # survive on every row no matter which tier fired (the canonical side
+    # reasons the same way, and the phone normalises an absent list as empty).
+    assert all("parent_job_id" in row for row in rows)
+    # The derived graph is shed ALL OR NOTHING per frame: a half-shed roster
+    # would leave a reader unable to tell "no peers" from "not carried".
+    for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+        carried = {bool(row.get(field)) for row in rows}
+        assert len(carried) == 1, f"{field} was shed for only some rows"
+
+
+def test_the_derived_roster_graph_is_what_fits_a_cliff_width_roster() -> None:
+    """256 flat siblings: the frame production could not send, and what fixed it.
+
+    The tiers that existed before this shed only TEXT, and none of them can
+    touch the field that actually grows this frame: ``peer_ids`` is every
+    sibling's job id, so a flat group of width n costs O(n^2). At production
+    width the derived graph alone is ~1 MB against a 1 MiB line limit, which is
+    why the cap's own "the control socket will drop it" warning (30,839 lines
+    across five sessions) was followed by an unreadable write.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    fold = _flat_roster_fold(256)
+    naive = _projection_line(fold.projection.to_json())
+    derived = sum(len(str(list(row.peer_ids)).encode()) for row in fold.projection.subagents)
+    assert naive > _MAX_LINE_BYTES, (
+        f"the fixture no longer reproduces the unreadable welcome: {naive:,} B is "
+        f"inside the {_MAX_LINE_BYTES:,} B limit"
+    )
+    assert derived > 1_000_000, (
+        "the fixture no longer reproduces WHY it was fatal: without an O(n^2) "
+        f"derived graph ({derived:,} B here) the text tiers could have fitted it"
+    )
+
+    data, degraded = cap_projection_frame(fold.projection)
+    rows = data["subagents"]
+    assert degraded is True
+    assert len(rows) == 256, "the shed tier must shed fields, not children"
+    assert all(row.get("peer_ids") == [] for row in rows)
+    assert all(row.get("child_ids") == [] for row in rows)
+    assert all(row.get("ancestor_ids") == [] for row in rows)
+    assert all(row.get("ancestors") == [] for row in rows)
+    assert all("parent_job_id" in row for row in rows)
+    assert _projection_line(data) <= _MAX_LINE_BYTES
+    # Nothing else was spent to get there: the row TEXT is still the reader's.
+    assert all(row["label"] for row in rows)
+
+
+def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
+    """The last tier before the honest warning: identity rows only.
+
+    A roster wide enough that even identity rows cannot fit is genuinely
+    unbounded, so the frame degrades to one row per child carrying only what a
+    reader can neither derive nor fetch: job id, label, parent edge and
+    lifecycle. The rows ARE the count (no ``subagent_count`` key: the client's
+    rebuild filters to ``SessionProjection``'s fields and would drop an unknown
+    key on the floor). Everything else is fetchable per child — except
+    ``error_text``, which exists nowhere else and is the real price of this
+    tier.
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_ROSTER_IDENTITY_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.session.frontend_state import oversized_frame_report
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    rows = [
+        SubagentRow(
+            job_id=f"child-{index}",
+            label=f"child {index}",
+            parent_job_id=None,
+            progress="working",
+            prompt="P" * 120,
+        )
+        for index in range(4_000)
+    ]
+    projection = SessionProjection(session_id="s1", pid=1, subagents=rows)
+    data, degraded = cap_projection_frame(projection)
+
+    assert degraded is True
+    assert len(data["subagents"]) == 4_000
+    assert all(set(row) <= set(FRAME_CAP_ROSTER_IDENTITY_FIELDS) for row in data["subagents"])
+    assert all("parent_job_id" in row for row in data["subagents"])
+    assert "subagent_count" not in data
+    assert oversized_frame_report({"op": "projection", "data": data}, _MAX_LINE_BYTES) is None
+    # The frame must still rebuild into a projection on the client, or the
+    # degradation would trade an unreadable frame for an unusable one.
+    record = SessionRecord(
+        pid=7,
+        kind="tui",
+        session_id="s1",
+        conversation_name="c",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+        protocol=1,
+    )
+    rebuilt = _projection_from_json(data, record)
+    assert rebuilt.session_id == "s1"
+    assert len(rebuilt.subagents) == 4_000
+    assert rebuilt.subagents[0].label == "child 0"
+
+
 def test_live_fold_keeps_failed_child_error_text_generous() -> None:
     """A failed child's ``error_text`` must survive on the wire, unlike result.
 
@@ -551,7 +721,7 @@ def test_history_fold_pairs_tool_calls_with_results() -> None:
 
 
 def test_history_fold_maps_peer_message_to_its_own_kind() -> None:
-    from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
     fold = make_fold()
     sender = {"pid": 42, "conversation_name": "peer", "model_label": "test/model"}
@@ -937,6 +1107,47 @@ def test_diff_counts_only_from_reported_details() -> None:
     assert _diff_counts({"added": "junk"}) == (0, 0)
 
 
+def test_a_live_notice_carries_its_severity_to_the_phone() -> None:
+    """Design round 1, D1: a LIVE notice must arrive with its tier.
+
+    ``NoticeRow`` reads the glyph and the ink from ``details.severity`` alone,
+    so a fold that drops it draws a ``warning`` truncation as the quiet ``·``
+    in ``text-ink-dim`` -- and then flips the SAME event to amber ``!`` on the
+    next refresh, when it arrives through the replay fold, which carries the
+    field. The two produces must agree, so this asserts the live entry against
+    the replayed one rather than against a literal.
+    """
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    fold = make_fold()
+    live = NoticeEvent(text="the model hit the output limit", kind="warning")
+    fold.fold_event(live)
+    live_entry = fold.projection.transcript[-1]
+    assert live_entry.kind == "notice"
+    assert live_entry.details["severity"] == "warning"
+
+    # The same event as a REPLAYED row (the message the harness journals), read
+    # through the fold that has always carried the tier.
+    replayed = fold_messages_to_entries(
+        [
+            Message(
+                role="assistant",
+                content=[TextContent(text="partial answer")],
+                id="a1",
+                stop_reason="length",
+            )
+        ]
+    )
+    replayed_notices = [e for e in replayed if e.kind == "notice"]
+    assert replayed_notices, "the replay fold must also emit the notice row"
+    assert live_entry.details["severity"] == replayed_notices[-1].details["severity"]
+
+    # All three kinds map across, not just the one this PR made visible.
+    for kind in ("info", "warning", "error"):
+        fold.fold_event(NoticeEvent(text=f"note {kind}", kind=kind))
+        assert fold.projection.transcript[-1].details["severity"] == kind
+
+
 def test_projection_version_bumps_on_every_fold() -> None:
     fold = make_fold()
     v0 = fold.projection.version
@@ -1233,3 +1444,195 @@ def test_a_repeated_supersession_does_not_disturb_an_already_rekeyed_row() -> No
     assert len(tool_rows) == 1
     assert tool_rows[0].tool_call_id == "real_0"
     assert tool_rows[0].details["argument_bytes"] == 30
+
+
+def test_a_cut_off_turn_still_offers_the_phones_resume_affordance() -> None:
+    """MAJOR-1: a cut-off must not read as "completed" on the phone.
+
+    ``stop_reason`` is the wire fact ``composer.tsx`` gates
+    ``interrupted — tap to resume`` on, and the taxonomy flip reports a cut-off
+    as ``aborted=False, error=<notice>`` — so folding ``aborted`` alone told the
+    phone the turn had FINISHED and silently removed the only recovery
+    affordance for exactly the sessions the operator reports losing. A cut-off
+    did not complete; it was cut off, which is what ``cut_off``/``cut_off_cause``
+    states.
+    """
+    from local_operator.incidents import format_cut_off_notice, render_cut_off_reason
+
+    fold = ProjectionFold(SessionProjection(session_id="cutoff-phone", pid=1))
+    fold.fold_event(
+        AgentEndEvent(
+            generation=1,
+            aborted=False,
+            error=format_cut_off_notice("owner-lost"),
+            cut_off=render_cut_off_reason("owner-lost"),
+            cut_off_cause="owner-lost",
+        )
+    )
+    assert fold.projection.streaming is False
+    assert fold.projection.stop_reason == "aborted"
+
+    # The control: a clean end still reads as a completion, or every finished
+    # turn would offer a pointless resume.
+    clean = ProjectionFold(SessionProjection(session_id="clean-phone", pid=1))
+    clean.fold_event(AgentEndEvent(generation=1))
+    assert clean.projection.stop_reason == "completed"
+
+
+def test_a_terminal_dictation_frame_queues_the_phone_row_and_the_activity_line() -> None:
+    """The phone is a consumer of the same frames, and it kept the same lie.
+
+    A call queued behind a long sibling was rendered ``dictating <tool>`` on the
+    phone for the sibling's whole run — the row AND the activity line above it —
+    because the compose frame was the last thing that surface heard about the
+    call. The producer now sends one more frame saying the dictation is over,
+    and the phone has to read it as the TUI does: the row is ``queued`` (live,
+    waiting, executing nothing) and the line says what the harness is waiting
+    for rather than what the model finished writing.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_wake", tool_name="wake", argument_bytes=14)
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "composing"
+    assert fold.projection.activity == "dictating wake"
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_wake",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "queued"
+    assert len([entry for entry in fold.projection.transcript if entry.kind == "tool"]) == 1
+    assert "waiting to run wake" in fold.projection.activity
+
+    # ...and the call still becomes a running row, then a finished one. `queued`
+    # is a state on the way, not a verdict.
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_wake", tool_name="wake", args={"text": "30m"})
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running"
+
+
+def test_a_never_run_verdict_fails_the_phone_row_with_the_reason() -> None:
+    """The phone has no retirement pass, so the verdict has to settle it there.
+
+    A planning failure, a duplicate id or a steering skip leaves the row
+    announcing the call with nothing else coming: no start, no end. The reason
+    rides the terminal compose frame, and it is what the row must show — a row
+    that merely stopped saying ``dictating`` would leave the phone unable to tell
+    "queued" from "dead".
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Tool not found: wake",
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "failed"
+    assert row.error == "Tool not found: wake"
+    assert row.summary == "Tool not found: wake"
+
+
+def test_a_verdict_for_a_call_that_already_started_is_not_applied() -> None:
+    """The phone's own guard, matching the TUI's running registry.
+
+    A relayed or replayed terminal frame can reach a surface after its call's
+    start — a seed folded out of order, an attach re-reading the relay — and the
+    verdict describes a row that has outgrown it. Without the guard the row of a
+    call the user is watching execute was relabelled ``failed`` on the phone,
+    and because the terminal frame also carries ``dictation_complete``, the next
+    arm would have walked it back to ``queued``: two lies instead of one.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_x", tool_name="wake", args={"text": "30m"})
+    )
+    running = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert running.tool_state == "running"
+    was_summary = running.summary
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'call_x' skipped",
+        )
+    )
+
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running", "a started call is not relabelled never-run"
+    assert row.summary == was_summary
+    assert row.error == ""
+
+
+def test_a_duplicate_id_winner_clears_the_losers_failure_text() -> None:
+    """The revive path drops the failure TEXT with the failure STATE.
+
+    Two calls can share an id: the loser settles the row with the harness's
+    reason and the winner then executes it through this same row. The renderer
+    draws ``error`` as a red danger line inside the expansion for ANY state, so
+    the phone kept ``Duplicate call id … skipped.`` over a call that had just
+    succeeded — and ``hasDetails`` true because of it.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_dup",
+            tool_name="wait",
+            argument_bytes=20,
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'call_dup' skipped",
+        )
+    )
+    failed = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert failed.tool_state == "failed" and failed.error
+
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_dup", tool_name="wait", args={"text": "1"})
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running"
+    assert row.error == "", "the reason goes with the state it described"
+    assert len([entry for entry in fold.projection.transcript if entry.kind == "tool"]) == 1
+
+
+def test_the_new_compose_fields_absent_on_the_wire_change_nothing() -> None:
+    """BACKWARD COMPATIBILITY: an older runtime omits both new fields.
+
+    The phone's fold reads them off the model, so the older frame arrives with
+    today's defaults and must take exactly today's path: a composing row whose
+    activity line says the model is dictating. This is the control that says the
+    new states are additive rather than a change of meaning.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_old", tool_name="bash", argument_bytes=8)
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "composing"
+    assert fold.projection.activity == "dictating bash"

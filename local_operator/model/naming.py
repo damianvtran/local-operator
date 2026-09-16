@@ -174,6 +174,32 @@ def model_label(provider: str, model_id: str, name: str = "") -> ModelLabel:
     return _model_label(provider, model_id, name.strip())
 
 
+def _selector(provider: str, model_id: str) -> str:
+    """The spelling both forms fall back to: ``provider/model_id``, or the provider.
+
+    Extracted so that the two callers which have to RECOGNISE that fallback —
+    ``_model_label``, which composes it, and :func:`resolved_a_name`, which
+    compares against it — cannot drift apart. A second copy of this string is
+    how a comparison like that turns silently always-true or always-false.
+    """
+    return f"{provider}/{model_id}" if model_id else provider
+
+
+def resolved_a_name(provider: str, model_id: str, name: str = "") -> bool:
+    """Whether the render of this model is a NAME, not its own selector.
+
+    ``model_label``'s ``full`` form IS the selector exactly when it refused every
+    candidate it had: a name that merely echoes the id, a reseller's listing name
+    (which cannot say which route is answering), and a name two models answer to.
+    So this asks naming's own question rather than re-deriving one of its three
+    refusals, which is how a caller comes to disagree with the band about a model
+    whose name was refused for one of the OTHER two reasons — a disagreement with
+    no runtime symptom: that model keeps painting its bare id while naming would
+    have accepted the name the conversation's own record carries.
+    """
+    return model_label(provider, model_id, name).full != _selector(provider, model_id)
+
+
 @functools.lru_cache(maxsize=256)
 def _model_label(provider: str, model_id: str, name: str) -> ModelLabel:
     """Memoized body. Keyed on the pre-stripped name so equal inputs share an
@@ -181,17 +207,17 @@ def _model_label(provider: str, model_id: str, name: str) -> ModelLabel:
     ``/model`` attempt must not grow the map without limit. Pure: the index it
     reads is the shipped registry, so nothing here can go stale.
     """
-    selector = f"{provider}/{model_id}" if model_id else provider
+    ident = _selector(provider, model_id)
     # What the band's ``shorten-model`` rung showed before this module existed,
     # and still the floor it may never do much worse than — see _ID_MARGIN.
-    bare_id = selector.rpartition("/")[2] or selector
-    chosen = _unambiguous_name(provider, model_id, selector, name)
+    bare_id = ident.rpartition("/")[2] or ident
+    chosen = _unambiguous_name(provider, model_id, ident, name)
     if not chosen:
         # No name anyone can vouch for: exactly the behaviour this segment had
         # before, selector and all.
-        return ModelLabel(full=selector, compact=bare_id)
+        return ModelLabel(full=ident, compact=bare_id)
     compact = _drop_qualifier(chosen)
-    if compact != chosen and not _names_one(_compact_index(), compact, selector):
+    if compact != chosen and not _names_one(_compact_index(), compact, ident):
         # Two snapshots of one model share everything but the qualifier, so
         # dropping it is exactly what makes them indistinguishable.
         compact = chosen
@@ -326,4 +352,4 @@ def _index(key: Callable[[str], str]) -> Mapping[str, frozenset[str]]:
     return {name: frozenset(owners) for name, owners in buckets.items()}
 
 
-__all__ = ["ModelLabel", "model_label"]
+__all__ = ["ModelLabel", "model_label", "resolved_a_name"]

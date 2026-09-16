@@ -19,6 +19,7 @@ to find unread work would be cleared by the toast telling them about it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -134,10 +135,55 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     return calls
 
 
+#: The worker group `OperatorApp._notify_background_completions` runs its scan
+#: under (``run_worker(run(), group="background-notify")``). Named once here so
+#: the wait in `_await_completion_scan` cannot drift onto another group's workers.
+_SCAN_WORKER_GROUP = "background-notify"
+
+
+async def _await_completion_scan(app: OperatorApp) -> None:
+    """Block until the app's background-completion scan has RAN TO ITS END.
+
+    `_notify_background_completions` does its work on a worker thread
+    (`asyncio.to_thread(collect)`), so every effect this file asserts — the row
+    banners, the digest, the claims — lands after the poll that dispatched it has
+    already returned. A fixed number of `pilot.pause()` rounds is not the same
+    wait, because the two are not measured in the same unit: the budget is spent
+    in LOOP TURNS, while the scan costs WALL TIME (a catalogue scan plus eleven
+    SQLite transactions), and a contended runner stretches only the second.
+
+    That is exactly what happened in run 34764919312 (shard `3.12, 0`, gw2): the
+    digest test saw three row banners — precisely
+    `_BACKGROUND_NOTIFY_MAX_PER_TICK` — and an EMPTY `digests`, because the digest
+    is the last thing `collect` does and so the first thing a closed window loses.
+    Nothing about that run was a wrong answer: the scan had the correct ten
+    sessions in hand and was still claiming the seven the cap held back. The test
+    read `spawned` while the scan was mid-flight.
+
+    Waiting on the worker is waiting on the app's own completion signal, so the
+    wait lasts exactly as long as the scan does — and it is the pattern the rest
+    of the TUI suite already uses (`tests/unit/tui/test_info_panel.py` and its
+    neighbours call `app.workers.wait_for_complete()`). It is scoped to the scan's
+    group rather than taking that whole-manager form because an unrelated
+    long-lived worker would turn this wait into a hang, and this suite carries no
+    `pytest-timeout` to reclaim one.
+    """
+    scans = [worker for worker in app.workers if worker.group == _SCAN_WORKER_GROUP]
+    if scans:
+        await asyncio.gather(*(worker.wait() for worker in scans))
+
+
 async def _settle(app: OperatorApp, pilot: Any, rounds: int = 6) -> None:
-    """Run the app's own attention poll to completion, several times."""
+    """Run the app's own attention poll to completion, several times.
+
+    Each round WAITS for the scan that round dispatches before the next round
+    begins, so a round means "one attention poll and the work it started", not
+    "one poll and however much of the work this machine happened to reach" —
+    see `_await_completion_scan` for the CI failure that distinction cost.
+    """
     for _ in range(rounds):
         await app._poll_completion_attention()
+        await _await_completion_scan(app)
         for _ in range(4):
             await pilot.pause()
 
@@ -1725,3 +1771,197 @@ async def test_the_privacy_opt_out_covers_every_completion_kind(
         assert bodies["Complete"] == BODY_BACKGROUND
         assert all(call[0] == APP_NAME for call in spawned), spawned
         assert "migration" not in " ".join(" ".join(call) for call in spawned).lower()
+
+
+def _desktop_presence(root: Path, *, kinds: list[str] | None = None):
+    """A live desktop delivery lease in ``root``, through the production writer.
+
+    Real rather than doubled, because the thing under test is that the TUI's
+    announcer reads the SAME machine-wide artifact every other surface does —
+    a monkeypatched predicate would pass with the read wired to nothing.
+    """
+    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
+    from local_operator.session.runtime.presence import reset_cache
+
+    publisher = DesktopDeliveryPublisher(root)
+    publisher.update(
+        "sub-1",
+        can_notify=True,
+        can_notify_kinds=["complete", "error"] if kinds is None else kinds,
+        window={"exists": True, "focused": True, "visible": True, "minimized": False},
+    )
+    reset_cache()
+    return publisher
+
+
+def _established(store_root: Path, session_id: str, name: str) -> Any:
+    """A background session with a prior, already-read completion.
+
+    The baseline matters: an upgrading store announces nothing on its first
+    tick, so a test that skipped this would prove nothing about the rung.
+    """
+    directory = _make_session(store_root, session_id, name)
+    store = AttentionStore(store_root / "attention.db")
+    identity = conversation_identity(directory)
+    first = str(uuid.uuid4())
+    store.publish(identity, first, "old", "complete")
+    store.acknowledge(identity, first)
+    return store, identity
+
+
+@pytest.mark.asyncio
+async def test_a_notify_capable_desktop_defers_the_tui_announcer(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """RUNG 2 ABOVE RUNG 3.
+
+    The desktop composes this completion from the machine-wide feed, so the TUI
+    announcing it as well is the duplicate one rung down — and on a machine with
+    both apps the winner would otherwise be whichever polls faster.
+    """
+    _make_session(store_root, "current", "Current conversation")
+    store, identity = _established(store_root, "bg0000000002", "Background review")
+
+    from local_operator.session.runtime.presence import reset_cache
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    publisher = _desktop_presence(store_root)
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _booted(app, pilot)
+            await _settle(app, pilot)
+            spawned.clear()
+
+            store.publish(identity, str(uuid.uuid4()), "fresh", "complete")
+            await _settle(app, pilot)
+
+            assert spawned == [], spawned
+    finally:
+        publisher.close()
+        reset_cache()
+
+
+@pytest.mark.asyncio
+async def test_a_kind_the_desktop_cannot_deliver_is_still_announced_here(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The presence is narrowed by KIND, and this is why.
+
+    The machine-wide feed carries completions only, so a lease claiming
+    ``complete``/``error`` must not silence an ``interrupted`` row — the desktop
+    would never banner it, and the completion would reach nobody.
+    """
+    _make_session(store_root, "current", "Current conversation")
+    store, identity = _established(store_root, "bg0000000003", "Interrupted review")
+
+    from local_operator.session.runtime.presence import reset_cache
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    publisher = _desktop_presence(store_root, kinds=["complete", "error"])
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _booted(app, pilot)
+            await _settle(app, pilot)
+            spawned.clear()
+
+            store.publish(identity, str(uuid.uuid4()), "fresh", "interrupted")
+            await _settle(app, pilot)
+
+            assert len(spawned) == 1, spawned
+    finally:
+        publisher.close()
+        reset_cache()
+
+
+def test_the_tui_cap_and_the_feed_cap_are_the_same_promise() -> None:
+    """Two transports, one ceiling — asserted rather than asserted-in-prose.
+
+    The TUI caps per tick and digests the remainder locally; the feed does the
+    same for the frames the desktop renders. Two hand-maintained 3s are one edit
+    away from disagreeing about the promise the user actually experiences, so
+    the agreement is a test rather than a convention.
+    """
+    from local_operator.server.utils.desktop_feed import BURST_LIMIT
+    from local_operator.tui import app as app_module
+
+    assert app_module._BACKGROUND_NOTIFY_MAX_PER_TICK == BURST_LIMIT
+
+
+def _stop_reason(rung: str, *, command: str) -> str:
+    """The durable sentence a deliberate stop of ``rung`` carries, from the code."""
+    from local_operator.incidents import (
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+        render_stop_attribution,
+    )
+
+    return render_cut_off_reason(
+        DELIBERATE_CUT_OFF_CAUSE,
+        detail=render_stop_attribution(rung=rung, command=command, killer_pid=40609),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_escalated_stop_names_its_rung_on_the_banner(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """Design round 1, D1 on the lock screen: the banner said only "stopped early".
+
+    The fixed body was kind-gated, so the banner for a rung-3 kill and the banner
+    for a rung-1 request were the same ten words — on the surface the operator
+    reads while looking at something else entirely. Only the ESCALATED rung
+    appends the attributed phrase, because ``Interrupted`` already means the user
+    stopped it and the interesting fact is that the ladder had to signal.
+    """
+    from local_operator.tui.notify import BODY_INTERRUPTED
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Halted midway")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(
+        conversation_identity(background),
+        str(uuid.uuid4()),
+        "fresh",
+        "interrupted",
+        reason=_stop_reason("sigkill", command="/stop --all"),
+        cause="user-stop",
+    )
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        assert spawned[0][1] == f"{BODY_INTERRUPTED} — killed by /stop --all", spawned[0]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_request_keeps_the_banners_established_sentence(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The other half of D1's fix: rung 1 must render byte-identically to today.
+
+    A stop that exited on request is what the sentence already describes, so
+    appending its own attribution would spend the banner's one content line
+    saying ``Stopped before finishing — stopped on request by /stop``.
+    """
+    from local_operator.tui.notify import BODY_INTERRUPTED
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Halted midway")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(
+        conversation_identity(background),
+        str(uuid.uuid4()),
+        "fresh",
+        "interrupted",
+        reason=_stop_reason("socket", command="/stop"),
+        cause="user-stop",
+    )
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        assert spawned[0][1] == BODY_INTERRUPTED, spawned[0]

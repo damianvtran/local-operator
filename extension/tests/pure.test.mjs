@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { build } from "esbuild";
 import { pathToFileURL } from "node:url";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,7 +15,7 @@ async function load(entry) {
 }
 
 test("origin policy preserves exact grants and scopes loopback all-port grants", async () => {
-  const module = await load("src/origin-policy.ts");
+  const module = await load("src/driver/origin-policy.ts");
   try {
     const exact = module.loaded.safeHttpUrl("https://example.com/path");
     assert.equal(module.loaded.storedOriginAllowed({ "https://example.com": "allow" }, exact), true);
@@ -55,7 +55,7 @@ test("origin policy preserves exact grants and scopes loopback all-port grants",
 });
 
 test("registrable domain follows the bundled Public Suffix List and refuses unbounded keys", async () => {
-  const module = await load("src/origin-policy.ts");
+  const module = await load("src/driver/origin-policy.ts");
   try {
     const { registrableDomain, broadGrantFor } = module.loaded;
     const domain = (href) => registrableDomain(new URL(href));
@@ -93,7 +93,7 @@ test("registrable domain follows the bundled Public Suffix List and refuses unbo
     assert.deepEqual(broadGrantFor(new URL("https://qa-app.qa.gominerva.com")), { scope: "domain", key: "gominerva.com" });
     assert.equal(broadGrantFor(new URL("http://10.0.0.5")), null);
   } finally { await module.close(); }
-  const psl = await load("src/psl.gen.ts");
+  const psl = await load("src/driver/psl.gen.ts");
   try {
     assert.ok(psl.loaded.PSL_RULE_COUNT > 9000, `bundled list looks truncated: ${psl.loaded.PSL_RULE_COUNT}`);
     assert.equal(psl.loaded.PSL_RULES.split("\n").length, psl.loaded.PSL_RULE_COUNT);
@@ -102,7 +102,7 @@ test("registrable domain follows the bundled Public Suffix List and refuses unbo
 });
 
 test("site grants admit by domain or loopback host, in lookup order, and fail closed", async () => {
-  const module = await load("src/origin-policy.ts");
+  const module = await load("src/driver/origin-policy.ts");
   try {
     const { matchingGrantScope, storedOriginAllowed } = module.loaded;
     const siteGrants = {
@@ -148,7 +148,7 @@ test("site grants admit by domain or loopback host, in lookup order, and fail cl
 });
 
 test("policyCovers reconciles by domain and loopback host regardless of scheme", async () => {
-  const module = await load("src/access-queue.ts");
+  const module = await load("src/driver/access-queue.ts");
   try {
     const { policyCovers } = module.loaded;
     assert.equal(policyCovers("https://qa-app.qa.gominerva.com", "http://app.gominerva.com:8080", "domain"), true);
@@ -513,7 +513,7 @@ test("settings mutation helper reports negative acknowledgements and transport f
 });
 
 test("AX compaction assigns epoch-scoped click refs", async () => {
-  const module = await load("src/ax-compact.ts");
+  const module = await load("src/driver/ax-compact.ts");
   try {
     const rendered = module.loaded.compactAX([
       { nodeId: "1", role: { value: "main" }, name: { value: "Content" }, childIds: ["2"] },
@@ -525,7 +525,7 @@ test("AX compaction assigns epoch-scoped click refs", async () => {
 });
 
 test("AX compaction walks through ignored wrapper nodes", async () => {
-  const module = await load("src/ax-compact.ts");
+  const module = await load("src/driver/ax-compact.ts");
   try {
     // Real headful Chrome wraps every page's content in ignored generic
     // containers (html/body render as role "none", ignored: true) directly
@@ -550,7 +550,7 @@ test("AX compaction walks through ignored wrapper nodes", async () => {
 });
 
 test("AX compaction terminates on cyclic and duplicated childIds", async () => {
-  const module = await load("src/ax-compact.ts");
+  const module = await load("src/driver/ax-compact.ts");
   try {
     // The walk trusts protocol data; a malformed payload with a cycle
     // (2 -> 3 -> 2) or the same child listed twice must neither hang the
@@ -569,7 +569,7 @@ test("AX compaction terminates on cyclic and duplicated childIds", async () => {
 });
 
 test("scroll expressions force instant behavior in every mode", async () => {
-  const module = await load("src/scroll-expressions.ts");
+  const module = await load("src/driver/scroll-expressions.ts");
   try {
     const { scrollExpressionFor, defaultScrollExpression, deltaScrollExpression, SCROLL_INTO_VIEW_FN } = module.loaded;
     // Pages can opt into CSS scroll-behavior:smooth, and Chrome throttles rAF
@@ -677,7 +677,7 @@ test("origin decision acks render per decision, deny staying neutral", async () 
 });
 
 test("access request verdicts: idempotent repeat, replace on new origin, deny cool-down", async () => {
-  const module = await load("src/access-flow.ts");
+  const module = await load("src/driver/access-flow.ts");
   try {
     const { requestVerdict, newRequest, ACCESS_REQUEST_TTL_MS } = module.loaded;
     const now = 1_000_000;
@@ -707,7 +707,7 @@ test("access request verdicts: idempotent repeat, replace on new origin, deny co
 });
 
 test("access state machine: pending, resolve paths, TTL expiry, grants, supersession", async () => {
-  const module = await load("src/access-flow.ts");
+  const module = await load("src/driver/access-flow.ts");
   try {
     const {
       accessState, activeRequest, newRequest, consumableGrant, tombstoneFor, receiptKey,
@@ -762,7 +762,7 @@ test("access state machine: pending, resolve paths, TTL expiry, grants, superses
 });
 
 test("approval queue selection, generation, expiry, and result bounds", async () => {
-  const module = await load("src/access-queue.ts");
+  const module = await load("src/driver/access-queue.ts");
   try {
     const {
       ACCESS_RESULT_CAP, adjacentEntryId, cleanResults, liveQueue, newEntry,
@@ -960,4 +960,131 @@ test("every wire method has a worker handler", async () => {
 
   const missing = methods.filter((method) => !handlers.has(method));
   assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
+});
+
+// The daemon accepts a WINDOW of protocol versions (MIN_SUPPORTED_PROTO..
+// PROTO_VERSION), which is only worth anything if the extension can MOVE inside
+// that window. A build whose hello pins the literal 1 keeps working, so nothing
+// fails loudly — but the window becomes decorative: a daemon bump is invisible
+// until somebody edits the three literals by hand, and the release that would
+// have exercised it ships a hello that still says 1. Hence a source scan rather
+// than a behavioural test: the defect is the ABSENCE of an import.
+test("no hello send site carries a numeric proto literal", async () => {
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  assert.match(
+    generated,
+    /export const PROTO_VERSION = \d+ as const;/,
+    "protocol.gen.ts must export the numeric PROTO_VERSION the senders import",
+  );
+  // Every file that sends a `hello`. Named individually, not globbed: a new
+  // sender added in a new file must be added here deliberately, and a rename of
+  // one of these must fail this test rather than silently dropping its coverage.
+  const senders = ["../src/worker.ts", "../src/popup/popup.ts", "../src/options/options.ts"];
+  for (const file of senders) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    const hellos = [...source.matchAll(/event:\s*"hello"[\s\S]{0,400}?\}/g)].map((m) => m[0]);
+    assert.ok(hellos.length > 0, `${file} must send a hello`);
+    for (const hello of hellos) {
+      assert.doesNotMatch(
+        hello,
+        /proto:\s*\d/,
+        `${file}: a hello must send PROTO_VERSION, never a literal proto`,
+      );
+      assert.match(hello, /proto:\s*PROTO_VERSION/, `${file}: a hello must send PROTO_VERSION`);
+    }
+    assert.match(
+      source,
+      /import\s*\{[\s\S]*?PROTO_VERSION[\s\S]*?\}\s*from\s*"(\.\.?\/protocol\.gen)"/,
+      `${file} must import PROTO_VERSION from protocol.gen`,
+    );
+  }
+});
+
+test("no FOURTH hello sender can appear without failing this suite", async () => {
+  // The named list above is only as good as its completeness: a sender added in
+  // a NEW file would be scanned by nobody, and the window/proto story would go
+  // decorative again in exactly the way that list exists to prevent. #1038
+  // rewrote the popup, the worker and the pairing flow, so a fourth sender is a
+  // live risk rather than a theoretical one — assert the SET of files that send
+  // a hello equals the set asserted above.
+  //
+  // SCOPE: every `.ts` AND `.js` under `src/`, because both can reach a bundle
+  // (review R2-1). `build.mjs` bundles three `.ts` entry points with esbuild and
+  // `bundle: true`, and esbuild's default resolution imports `.js` as readily as
+  // `.ts` — so a `.js` module any of the three entries imports is compiled into
+  // `dist/` like any other. `src/popup/first-paint.js` is the live precedent
+  // rather than a hypothetical: it is copied into `dist/popup/` and loaded by
+  // `popup.html` (`<script src="first-paint.js">`). Filtering to `*.ts` alone
+  // therefore left a real hole, which is what this widening closes. Generated
+  // files (`*.gen.ts`) stay excluded: they are emitted from Python and contain
+  // no senders.
+  const src = new URL("../src/", import.meta.url);
+  const walk = async (dir, prefix = "") => {
+    const found = [];
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const rel = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        found.push(...(await walk(new URL(`${entry.name}/`, dir), `${rel}/`)));
+      } else if (
+        (entry.name.endsWith(".ts") || entry.name.endsWith(".js")) &&
+        !entry.name.endsWith(".gen.ts")
+      ) {
+        found.push(rel);
+      }
+    }
+    return found;
+  };
+  const senders = [];
+  for (const rel of await walk(src)) {
+    const source = await readFile(new URL(rel, src), "utf8");
+    if (/event:\s*"hello"/.test(source)) senders.push(rel);
+  }
+  assert.deepEqual(
+    senders.sort(),
+    ["options/options.ts", "popup/popup.ts", "worker.ts"],
+    "every file that sends a hello must be listed in the source scan above",
+  );
+});
+
+// The popup's copy of the sentence is the GENERATED template, so the two cannot
+// drift; this pins that it is imported rather than re-spelled.
+test("the popup renders the shared advisory template", async () => {
+  const popup = await readFile(new URL("../src/popup/popup.ts", import.meta.url), "utf8");
+  assert.match(popup, /EXTENSION_UPDATE_NOTE/);
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  const note = generated.match(/export const EXTENSION_UPDATE_NOTE = '([^']*)'/);
+  assert.ok(note, "protocol.gen.ts must export EXTENSION_UPDATE_NOTE");
+  assert.match(note[1], /\{have\}/, "the template must take the reported version");
+  assert.match(note[1], /\{want\}/, "the template must take the expected version");
+  assert.match(note[1], /nothing is blocked\./, "the copy must say nothing is blocked");
+  assert.doesNotMatch(note[1], /requir|must /i, "the copy must not demand anything");
+});
+
+// The reserved slot is load-bearing (it is what stops the popup window resizing
+// when the advisory appears), so it needs a reserve AND the invisible-not-hidden
+// treatment: `display: none` would collapse the space this exists to hold.
+//
+// SCOPE, stated because an earlier revision of popup.css overclaimed it (R1-5):
+// this asserts the RESERVE only — that the declared min-height is three
+// line-boxes at the declared line-height. It cannot see the rendered wrap (there
+// is no layout engine here), so it passes unchanged if the sentence grows to a
+// fourth line. The wrap itself, and the "the card does not resize" invariant,
+// are asserted by `scripts/popup-states-shot.mjs`, which measures both.
+test("the advisory slot is reserved, not collapsed", async () => {
+  const css = await readFile(new URL("../src/popup/popup.css", import.meta.url), "utf8");
+  const reserve = css.match(/#connected-advisory\s*\{[^}]*min-height:\s*(\d+)px/);
+  assert.ok(reserve, "#connected-advisory must reserve a min-height");
+  const lines = Number(reserve[1]) / 18; // 12px at line-height 1.5
+  assert.equal(lines, 3, "the reserve must be three line-boxes at the advisory's own metrics");
+  assert.match(
+    css,
+    /#connected-advisory\.hidden\s*\{[^}]*display:\s*block\s*!important[^}]*visibility:\s*hidden/,
+    "the empty slot must keep its space (visibility, never display:none)",
+  );
+  const html = await readFile(new URL("../src/popup/popup.html", import.meta.url), "utf8");
+  assert.match(
+    html,
+    /<p class="advisory hidden" id="connected-advisory"><\/p>/,
+    "the slot ships empty and hidden inside the Connected card",
+  );
 });

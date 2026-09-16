@@ -351,3 +351,22 @@ html :focus-visible {
 	scrollbar-width: thin;
 	scrollbar-color: var(--color-control) transparent;
 }
+
+/* "There is more below" for a capped scroller, applied only while content is
+   actually below the fold. A phone needs this because `scrollbar-width: thin`
+   resolves to an OVERLAY scrollbar here: zero layout width, painted only while
+   a scroll is in flight, so a capped region at rest advertises nothing. The
+   measured cost of the ask card's cap was first-glance options dropping 6→3 at
+   390x844 and 5→2 at 360x780, with no cue that the rest existed.
+
+   A mask rather than a gradient overlay element, and a mask rather than a
+   pinned "more" row: it steals no vertical space (a row would give back what
+   the cap just bought), needs no stacking context inside a scroller, and fades
+   the real content instead of painting a band over it, so it cannot be mistaken
+   for a UI element to tap. 24px is about one line of body text — enough to read
+   as a cut edge at arm's length, small enough that the partially visible row
+   underneath stays legible. */
+.lo-fade-b {
+	-webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+	mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+}

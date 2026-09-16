@@ -1,5 +1,6 @@
 import { requireSurface } from "../cdp";
 import { readLogs } from "../log-capture";
+import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
 
 // Levels the tool filters on. "all" (the default) keeps everything; anything
 // else must match one of these normalized levels, so a typo'd filter returns an
@@ -21,6 +22,10 @@ export async function logs(params: Record<string, unknown>): Promise<Record<stri
   // limit 0/absent means "no cap"; a positive value keeps the most recent n.
   const limit = typeof params.limit === "number" && params.limit > 0 ? Math.floor(params.limit) : 0;
   const entries = readLogs(surface.tabId, level, limit);
-  const tab = await chrome.tabs.get(surface.tabId);
+  const tab = await deadline(
+    chrome.tabs.get(surface.tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${surface.tabId})`,
+  );
   return { entries, level, url: tab.url ?? "", title: tab.title ?? "" };
 }

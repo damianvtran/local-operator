@@ -85,7 +85,7 @@ async def test_storing_a_credential_announces_it_to_the_session_journal() -> Non
     only the system-prompt tail, which the model has no reason to re-read.
     A real session journals a ``session_credential`` record naming the KEY
     (never the value) so the next turn — and a resume — see it."""
-    from local_operator.incidents import SESSION_CREDENTIAL_MESSAGE_TYPE
+    from local_operator.harness.message_types import SESSION_CREDENTIAL_MESSAGE_TYPE
     from tests.unit.session.test_session import ScriptedStream
     from tests.unit.session.test_session import make_session as make_real_session
 

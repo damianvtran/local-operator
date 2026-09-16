@@ -151,6 +151,15 @@ async function loadWorker() {
       return { reconnectScheduled: socketsOpened > before };
     },
     connState: () => session.get("connState"),
+    /** The sticky "this browser was UNPAIRED" flag (round 3, UX U5). Read
+     * through the same session map the popup reads, because that is what makes
+     * it observable to the surface rather than only to this test. */
+    revoked: () => session.get("revoked"),
+    /** Hand the worker a successful `hello_ack`, the way the daemon does. */
+    ack: async (paired) => {
+      socket.onmessage?.({ data: JSON.stringify({ event: "hello_ack", proto: 1, paired, role: "standby" }) });
+      await tick(20);
+    },
     close: () => rm(dir, { recursive: true, force: true }),
   };
 }
@@ -210,5 +219,93 @@ test("protocol and unpair close codes keep their own states (J4 regression guard
     } finally {
       await worker.close();
     }
+  }
+});
+
+/** Load one source module on its own, for the pure helpers. */
+async function loadModule(relative) {
+  const dir = await mkdtemp(join(tmpdir(), "lop-worker-evict-mod-"));
+  const outfile = join(dir, "module.mjs");
+  await build({
+    entryPoints: [join(HERE, "..", relative)],
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    outfile,
+  });
+  return import(pathToFileURL(outfile) + `?${Date.now()}`);
+}
+
+test("a post-onopen 4000 close re-dials on the attempt-0 fast path, not the alarm floor", async () => {
+  // The design's §4.2 claim — "the replacement registered in ~1 s" — pinned as
+  // a STRUCTURAL fact about the delay the worker ASKS for, not as a measurement
+  // of how long anything took (AGENTS.md: wait on the event, never on the
+  // clock). `onopen` resets `attempt` to 0, so a close that arrives after a
+  // successful open must arm `backoffDelayMs(0)`. If the reset were dropped,
+  // the requested delay would be 2000 and this fails.
+  const reconnect = await loadModule("src/reconnect.ts");
+  assert.equal(reconnect.backoffDelayMs(0), 1_000, "attempt 0 is the ~1 s fast path");
+  assert.equal(reconnect.backoffDelayMs(1), 2_000, "and attempt 1 doubles it");
+
+  const worker = await loadWorker();
+  const realSetTimeout = globalThis.setTimeout;
+  const requested = [];
+  globalThis.setTimeout = (fn, delay, ...rest) => {
+    requested.push(delay);
+    return realSetTimeout(fn, delay, ...rest);
+  };
+  try {
+    const first = await worker.evict(4000);
+    assert.equal(first.reconnectScheduled, true, "the worker must still re-dial after a 4000 eviction");
+    assert.ok(
+      requested.includes(1_000),
+      `expected the attempt-0 fast path, got delays ${JSON.stringify(requested)}`,
+    );
+    assert.ok(!requested.includes(2_000), "a post-onopen close must not be armed as attempt 1");
+
+    // Round 2 is what makes the RESET observable. The first close cannot
+    // distinguish "onopen reset attempt" from "attempt was never incremented",
+    // because it starts at 0 — so close a SECOND time, after a successful
+    // re-dial whose onopen should have reset the backoff. Without that reset
+    // the second close is armed as backoffDelayMs(1) = 2000.
+    requested.length = 0;
+    const second = await worker.evict(4000);
+    assert.equal(second.reconnectScheduled, true, "the re-dial must be repeatable");
+    assert.ok(
+      requested.includes(1_000),
+      `expected attempt-0 again after a successful re-dial, got ${JSON.stringify(requested)}`,
+    );
+    assert.ok(
+      !requested.includes(2_000),
+      "the backoff was not reset by the successful re-dial",
+    );
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    await worker.close();
+  }
+});
+
+test("a revoke leaves a sticky notice that only a real pairing clears (U5)", async () => {
+  // UX round 3, U5: a revoke was silent in the revoked install's own popup, so
+  // the destructive-feeling transition of this flow looked exactly like a fresh
+  // install. The worker records the 4003 close as a separate sticky fact, because
+  // `connState` is rewritten "pairing" by every re-dial's ack — a flag derived
+  // from it would vanish within a second, which is the silence again.
+  const worker = await loadWorker();
+  try {
+    await worker.evict(4003);
+    assert.equal(worker.connState(), "pairing");
+    assert.equal(worker.revoked(), true, "the revoke must be recorded, not inferred");
+
+    // An unpaired ack does NOT clear it: the install is still unpaired, and the
+    // notice is what distinguishes that from a first run.
+    await worker.ack(false);
+    assert.equal(worker.revoked(), true);
+
+    // A paired ack does: from here the popup's own state is the truth.
+    await worker.ack(true);
+    assert.equal(worker.revoked(), false, "a working install must not keep the notice");
+  } finally {
+    await worker.close();
   }
 });

@@ -36,7 +36,7 @@ def test_invalid_estimates_cannot_enter_durable_usage(bad):
 
 def test_recorded_estimate_is_not_a_receipt_and_does_not_reprice(monkeypatch):
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("repriced")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("repriced")
     )
     usage = Usage(provider="test", model_id="dynamic", estimated_usd_cost=0.125)
     assert usage.usd_cost is None
@@ -49,7 +49,7 @@ def test_relay_prices_leaf_calls_before_aggregation(monkeypatch):
     from local_operator.model.registry import ModelInfo
 
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint",
+        "local_operator.model.costs._resolve_for_paint",
         lambda *_: ModelInfo(id="dynamic", name="Dynamic", description="test", input_price=2),
     )
     job = AsyncJob(
@@ -66,7 +66,7 @@ def test_relay_prices_leaf_calls_before_aggregation(monkeypatch):
 
 def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint",
+        "local_operator.model.costs._resolve_for_paint",
         lambda *_: SimpleNamespace(input_price=0, output_price=0),
     )
     components = [
@@ -116,8 +116,17 @@ def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):
+    # Patch the name the CALLER resolves, not the one the function is defined in.
+    # ``job_stats`` looks ``job_cost`` up in its own module globals, so a patch on
+    # ``tui.costs.job_cost`` — or on ``model.costs.job_cost``, where the function
+    # lives after the import move — binds a name nothing calls and the trap
+    # silently never fires. It had been pointed at ``tui.costs`` since before that
+    # move and was dead in both places (review round 1, R1), which is why the
+    # positive control below exists: a guard that cannot fire is
+    # indistinguishable from a pass.
     monkeypatch.setattr(
-        "local_operator.tui.costs.job_cost", lambda *_args, **_kwargs: pytest.fail("viewer priced")
+        "local_operator.tui.widgets.subagent_panel.job_cost",
+        lambda *_args, **_kwargs: pytest.fail("viewer priced"),
     )
     row = JobState(
         id="child",
@@ -129,6 +138,14 @@ async def test_canonical_rows_never_discover_in_viewer_thread(monkeypatch):
     stats = await asyncio.to_thread(job_stats, row)
     assert stats.cost == 0.412
     assert stats.context_tokens == 113735
+
+    # POSITIVE CONTROL: a row the panel must PRICE (no resolved knowledge on it)
+    # reaches the trapped call, so the assertion above is a statement about the
+    # pricing path rather than about a disconnected patch. In-process, because the
+    # expectation is about the trap firing and not about thread plumbing.
+    unpriced = JobState(id="unpriced", type="task", usage=Usage(context_tokens=10))
+    with pytest.raises(pytest.fail.Exception):
+        job_stats(unpriced)
     unknown = row.model_copy(
         update={"direct_cost": None, "direct_cost_knowledge": CostKnowledge.UNKNOWN}
     )
@@ -256,7 +273,7 @@ async def test_cold_facade_restores_sidecar_ledger_without_parent_checkpoint(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("cold discovery")
     )
     directory = tmp_path / "sessions" / "coldledger01"
     directory.mkdir(parents=True)
@@ -359,7 +376,7 @@ def test_both_table_priced_models_preserve_cache_semantics_offline(
         cache_reads_price=0.2,
         cache_writes_price=2.5,
     )
-    monkeypatch.setattr("local_operator.tui.costs._resolve_for_paint", lambda *_: info)
+    monkeypatch.setattr("local_operator.model.costs._resolve_for_paint", lambda *_: info)
     usage = Usage(provider=provider, model_id=model_id, **counts)
     expected = cost_for_usage(provider, info, usage)
     plain_input = (
@@ -384,7 +401,7 @@ def test_both_table_priced_models_preserve_cache_semantics_offline(
     persisted = Usage.model_validate_json(job.usage.model_dump_json())
     assert persisted.cost_components[0].usd_cost is None
     monkeypatch.setattr(
-        "local_operator.tui.costs._resolve_for_paint", lambda *_: pytest.fail("offline discovery")
+        "local_operator.model.costs._resolve_for_paint", lambda *_: pytest.fail("offline discovery")
     )
     assert cost_summary(persisted.cost_components, recorded_only=True) == (expected, False)
     _accumulate_usage(job, Usage(provider=provider, model_id=model_id, usd_cost=0.125))

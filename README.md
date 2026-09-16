@@ -271,8 +271,13 @@ Work keeps moving after you walk away.
   phone or `/resume`; `/approvals auto` or `--yolo` opts into unattended
   execution. A session that was asleep past a due time fires the wake late
   and reports how many occurrences it skipped, rather than replaying six
-  hourly checks at once. `lop wake status` and `lop wake list` show what is
-  installed and what fires next. Human-readable wake times use the machine's
+  hourly checks at once. `lop wake status` reports whether the supervisor is
+  actually *running* (not merely installed), the soonest wake that will fire,
+  and how many are overdue, dormant, too stale for the supervisor to keep
+  retrying, or blocked by a wedged runtime holding the session lease; `lop
+  wake list` shows every schedule with that state per row. When the supervisor
+  has stopped or gone missing, `lop wake install` puts it back.
+  Human-readable wake times use the machine's
   local timezone, labelled explicitly, with a 12-hour AM/PM clock by default.
   Other dates include the month/day (and year when different). Choose **Wake
   time format** in `/settings` → Appearance, or run
@@ -429,7 +434,7 @@ with its title and age:
 | Command | What it does |
 | --- | --- |
 | `/model` | Switch model for this session; `/model default` saves the current one for new ones, `/model saved` reverts to it (`/settings` edits the boot default too) |
-| `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
+| `/effort` | Show or set reasoning effort (`shift+tab` cycles; save a level for new conversations with `/model default`) |
 | `/fast` | Toggle fast mode where the provider sells one: the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
 | `/resume` | Pick a past conversation and continue it |
@@ -669,7 +674,7 @@ retrieve). If you would rather do it by hand:
 lop mobile install      # generate/keep the portal password, install the daemon, verify health
 lop mobile status       # install state, health probe, and registered sessions
 lop mobile password     # show or rotate the portal password
-lop mobile logs -f      # follow the daemon log
+lop mobile logs -f      # follow the daemon's and the runtimes' logs
 ```
 
 Once the daemon is up, every interactive `lop` you start publishes itself and
@@ -768,7 +773,9 @@ lop config open        # open it in your editor
 lop config instructions  # which instruction files a session assembles, in order
 ```
 
-Commonly set values: `hosting` and `model_name` (skip the CLI flags),
+Commonly set values: `hosting`, `model_name` and `model_effort` (skip the CLI
+flags; `model_effort` sets the reasoning level new conversations start at, and a
+rung the chosen model lacks clamps to its nearest),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), `tui.theme` (any registered theme name, easier to set with
 `/theme`, which previews live), and `retry.fallbackChains` (the model
@@ -858,6 +865,11 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   for the trust model.
 - **Credential hygiene.** Keys live in a local credential store, are entered
   through hidden prompts, and are kept out of transcripts.
+- **Endpoint protection.** A full install registers per-user services, which
+  behaviour-based EDR can read as persistence. See
+  [docs/ENDPOINT_PROTECTION.md](./docs/ENDPOINT_PROTECTION.md) for the inventory
+  of what is installed and persisted, how the artefacts are signed, and how to
+  allow-list by path.
 
 ## 📝 Examples
 

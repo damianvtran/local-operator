@@ -74,6 +74,22 @@ The daemon scans this directory every 2 s and validates each record by pid
 liveness — a SIGKILLed session leaves its record behind, and the heartbeat
 catches a live pid whose runtime wedged. Publication is staged-write + rename.
 
+A record whose owner is proven dead is **moved**, not deleted: `scan` renames
+it into `run/mobile/reaped/<pid>.json`, and the attention classifier reads both
+directories when it works out why a run ended. That is what makes a runtime's
+death attributable even after a sweep has run — a deleted record left the
+operator reading "the cause could not be determined" for a death that had a
+recorded cause. The sidecar is bounded (newest 200 entries, 24 h) and is
+invisible to discovery: nothing there is ever listed as a session.
+
+A runtime that is **stopped** also leaves positive evidence, written by the
+killer before the step it attests to: `<config>/sessions/<session_id>/runtime-stop.json`
+carries the rung the stop ladder actually used (`socket` | `sigterm` | `sigkill`),
+`deliberate`, the killer's pid/argv0/command, and the target's build. At the
+SIGKILL rung the target is not executing and cannot record anything, so this
+file is the only artifact that can say a stop was asked for rather than
+narrated as a crash.
+
 ### The control socket
 
 Each session runtime hosts a length-delimited JSON-lines socket on a random
@@ -120,7 +136,7 @@ session is shown as ended (its history stays resumable).
 | `lop mobile install` | Write the LaunchAgent, generate/keep the Keychain password, load, verify health |
 | `lop mobile status` | Install state, health probe, registered sessions, log paths |
 | `lop mobile start` / `stop` / `restart` | launchd control |
-| `lop mobile logs` | Tail the daemon log (`--lines`, `--follow`) |
+| `lop mobile logs` | Tail the daemon's and the session runtimes' logs (`--lines` applies to each file; `--follow` follows by name, so a log created or rotated mid-session is picked up) |
 | `lop mobile password` | Set or rotate the password (interactive prompt; restarts the daemon) |
 | `lop mobile uninstall` | Unload and delete the LaunchAgent (`--purge` also deletes the password) |
 | `lop mobile serve` | Run the daemon in the foreground (what the LaunchAgent runs) |

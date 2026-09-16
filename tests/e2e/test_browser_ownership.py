@@ -35,6 +35,15 @@ from tests.e2e.watchdog import bounded
 
 EXTENSION = Path(__file__).resolve().parents[2] / "extension"
 
+#: The version the disposable peer reports. Below the floor named by
+#: `OWNERSHIP_MIN_EXTENSION_VERSION` on purpose (`0.1.9` as of review R1-1):
+#: `oldExtension=true` makes every `owner_*` method throw a bare `internal`,
+#: which for a PRE-OWNERSHIP build is literally true (it has no such methods),
+#: so the two halves of the fixture agree about what peer it is. Kept as a
+#: literal rather than imported so the fixture keeps pinning a version that is
+#: genuinely below any floor the runtime may move to.
+EXTENSION_VERSION = "0.1.8"
+
 
 @pytest.fixture(autouse=True)
 def bound_protocol_run() -> Iterator[None]:
@@ -77,6 +86,15 @@ def protocol_peer(
                 proto=PROTO_VERSION,
                 extension_connected=True,
                 paired=True,
+                # The peer's OWN reported identity, exactly as a real `hello`
+                # stamps it. Load-bearing since the version-skew change: the
+                # runtime decides whether a bare `internal` from `owner_*` means
+                # "this build predates ownership" (degrade and keep working) or
+                # "this worker has stopped answering" (the OFF/ON remedy) from
+                # these two fields, and it reads them from the DISCOVERY FILE
+                # because a session-side consumer may not open a socket.
+                extension_version=EXTENSION_VERSION,
+                extension_proto=PROTO_VERSION,
             ),
             headless_tui_env,
         )
@@ -320,9 +338,19 @@ async def test_child_finalizes_before_terminal_handoff(
 
 
 @pytest.mark.asyncio
-async def test_old_extension_is_actionable_before_any_allocation(
+async def test_old_extension_is_driven_in_legacy_mode(
     protocol_peer: tuple[int, str], headless_tui_env: Path
 ) -> None:
+    """An extension without the ownership lifecycle is DRIVEN, not refused.
+
+    This replaces `test_old_extension_is_actionable_before_any_allocation`,
+    which asserted the opposite: an error whose text said "Update the
+    extension" and no tab allocated. That WAS the defect — the live store build
+    was 0.1.10 while the store refused uploads, so the instruction could not be
+    acted on and the tool was simply dead. The session now degrades to the
+    capability-only legacy path, allocates the tab, and records the redacted
+    marker that says so.
+    """
     session = _session(headless_tui_env)
     try:
         _control(protocol_peer, oldExtension=True)
@@ -333,9 +361,13 @@ async def test_old_extension_is_actionable_before_any_allocation(
             None,
             session._build_tool_context(),
         )
-        assert result.is_error
-        assert "Update the extension" in result.text
-        assert _control(protocol_peer)["tabs"] == 0
+        assert not result.is_error, result.text
+        assert "Update the extension" not in result.text
+        assert _control(protocol_peer)["tabs"] == 1, "an older extension must still drive a tab"
+        # The record's own statement of the mode, which `lop browser tabs`
+        # renders as legacy mode. Named here because it is the difference a
+        # support conversation turns on: "it worked" versus "ownership proven".
+        assert session._browser.resource.record["ownership"] == "unavailable"
     finally:
         await session.dispose()
 

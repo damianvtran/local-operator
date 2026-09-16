@@ -28,6 +28,7 @@ number in this file was calibrated on a developer box.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 
@@ -35,7 +36,11 @@ import pytest
 
 from local_operator.mobile.attach_client import AttachClient
 from local_operator.session import attached as remote_module
-from local_operator.session.attached import FRONTEND_SYNC_SETTLE_TURNS, AttachedSession
+from local_operator.session.attached import (
+    FRONTEND_SYNC_FOREGROUND_S,
+    FRONTEND_SYNC_SETTLE_TURNS,
+    AttachedSession,
+)
 from local_operator.session.frontend_state import FrontendSync
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
@@ -314,7 +319,7 @@ async def test_a_dead_socket_reports_the_pumps_reason_not_the_backstop(
 
 @pytest.mark.asyncio
 async def test_an_unreadable_frame_over_a_real_socket_still_fails_fast(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     """The same guarantee end to end, against the REAL server and socket.
 
@@ -323,6 +328,14 @@ async def test_an_unreadable_frame_over_a_real_socket_still_fails_fast(
     kind of change that converts a fast, named failure into a long silence. A
     real ``RuntimeServer`` writes a genuinely oversized frame, and the viewer
     must still come back with the pump's reason.
+
+    REWRITTEN with ``_send_to``'s ceiling: the owner refuses the frame instead
+    of writing it (see ``_readable_frame``), so the reason is now the peer's own
+    disconnect rather than the client-side overrun — and the size/field
+    diagnosis is the server's ERROR log. The property this test guards is
+    UNCHANGED and is what the assertions below pin: a fast failure, never the
+    15 s "owner did not send its state" silence that the liveness work exists
+    to eliminate.
     """
     from local_operator.session.runtime.server import _MAX_LINE_BYTES
 
@@ -334,12 +347,63 @@ async def test_an_unreadable_frame_over_a_real_socket_still_fails_fast(
     server.start()
     try:
         record = await _record(tmp_path)
-        with pytest.raises(ConnectionError) as caught:
-            await AttachedSession.connect(
-                record, "s1", config_dir=tmp_path, takeover_factory=_never
-            )
-        assert "too large" in str(caught.value)
+        started = asyncio.get_running_loop().time()
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            with pytest.raises(ConnectionError) as caught:
+                await AttachedSession.connect(
+                    record, "s1", config_dir=tmp_path, takeover_factory=_never
+                )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < FRONTEND_SYNC_FOREGROUND_S, (
+            f"an unreadable sync took {elapsed:.1f}s; the owner refused it in "
+            "milliseconds and the wait must end with the connection"
+        )
+        assert str(caught.value) == "owner exited"
+        assert "frontend_sync does not fit" in caplog.text
     finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_roster_cliff_welcome_arrives_and_the_bind_succeeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The liveness stage's counterpart: the bind must SUCCEED, not just fail fast.
+
+    Everything above bounds how a FAILED bind is reported, which is half of the
+    contract. The other half is that a bind which can succeed does — and the
+    welcome projection of a wide sibling group is exactly the frame that used to
+    make every attempt die before the canonical sync was even sent, so the
+    viewer could only report an owner that never answered. A real
+    ``RuntimeServer`` with a cliff-width roster must therefore reach a bound,
+    non-cold viewer WITH its canonical state.
+
+    The count matters: this is the case where the two halves of the fix have to
+    work together — the projection must arrive at all (the shed tier), and the
+    canonical sync that follows it must be able to ride the same socket.
+    """
+    from tests.unit.session.test_attach_frame_size import _wide_roster_projection
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    handle._projection = _wide_roster_projection(256)
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    viewer = None
+    try:
+        record = await _record(tmp_path)
+        viewer = await AttachedSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        assert not viewer.is_cold
+        # Raising here would be the failure itself: ``frontend_state`` only
+        # answers once the canonical sync has been installed, which is the frame
+        # that follows the welcome on the same socket.
+        assert viewer.frontend_state.session_id == "s1"
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
         server.close()
 
 

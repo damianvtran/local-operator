@@ -56,7 +56,7 @@ There is no ``operator_typed=`` keyword and the protocol signature does not
 widen. Threading one correctly would mean setting it at ten call sites and
 deliberately leaving it unset at five more, where the DEFAULT is the safe
 answer and every operator-facing site is an opt-in somebody must remember; a
-missed site fails silently by just not working. ``serving.py:1403`` already
+missed site fails silently by just not working. ``serving.py:1883`` already
 inspects ``signature(...).parameters`` to cope with sessions predating a
 keyword, and a third such probe is a real maintenance cost. The strict resolver
 above buys what the flag would have bought.
@@ -141,7 +141,7 @@ REFERENCE_BLOCK_CLOSE = "</operator-references>"
 #: Kill switch, read PER CALL and never cached at import. Two precedents, and
 #: both are deliberate: ``LOCAL_OPERATOR_CONTEXT_FILES``
 #: (``context_files.py:344``) supplies the exact string vocabulary matched
-#: below, and ``_internal_read_limit`` (``builtin.py:2598-2614``) supplies the
+#: below, and ``_internal_read_limit`` (``builtin.py:2638-2654``) supplies the
 #: per-call discipline — its docstring says why, "so the override can be set
 #: after this module is imported". Env-only by design: neither precedent is in
 #: the ``/settings`` registry, and that rule governs config keys.
@@ -206,7 +206,7 @@ SENSITIVE_NAME_PREFIXES = frozenset({".env"})
 SENSITIVE_DIR_PARTS = frozenset({".ssh", ".gnupg", ".credentials", ".aws", ".kube"})
 
 #: Bytes sampled for the NUL probe, and the probe itself — the SAME detection
-#: ``read`` uses at ``builtin.py:3441``. One answer about what "binary" means,
+#: ``read`` uses at ``builtin.py:3804``. One answer about what "binary" means,
 #: not two that can drift.
 _BINARY_SNIFF_BYTES = 8000
 
@@ -314,7 +314,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
     # so the eager form would not go red — it would quietly establish a
     # session->TUI edge that the next ``autocomplete.py`` import turns into a
     # ``test_import_graph.py:163`` failure in a module nobody connected to it.
-    # Same pattern and same stated reason as ``harness/rows.py:103-108``.
+    # Same pattern and same stated reason as ``harness/rows.py:320-325``.
     from local_operator.tui.autocomplete import ArgumentChoice
 
     path, _inside, resolvable = _resolve_workspace_path(directory or ".", cwd)
@@ -338,7 +338,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
                     # ``DirEntry.is_dir(follow_symlinks=False)`` reads the
                     # ``d_type`` the kernel already returned with the listing,
                     # so classification costs ZERO extra syscalls — the
-                    # reasoning is written out at ``builtin.py:5086-5096``,
+                    # reasoning is written out at ``builtin.py:5415-5425``,
                     # where ``iterdir`` + per-entry ``Path`` predicates paid
                     # three stat(2) calls per entry.
                     is_dir = entry.is_dir(follow_symlinks=False)
@@ -380,7 +380,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
     return [
         ArgumentChoice(
             # Trailing ``/`` on a directory, matching ``_list_dir_entries``
-            # (``builtin.py:3232-3238``) so one listing convention serves
+            # (``builtin.py:3272-3278``) so one listing convention serves
             # both the picker and the expanded payload.
             name=name + ("/" if is_dir else ""),
             detail=_entry_detail(entry, is_dir),
@@ -522,7 +522,7 @@ def _already_expanded(text: str, spans: list[tuple[int, int]]) -> set[str]:
 
     Reading the ``typed=`` attributes back out is the same recovery
     ``rows.typed_line_of`` performs on a persisted ``$skill`` payload
-    (``harness/rows.py:103-108``), and it is why :func:`_render` writes the
+    (``harness/rows.py:320-325``), and it is why :func:`_render` writes the
     attribute at all. A token NEWLY added to already-expanded text still
     expands, which keeps a steered or edited draft working; after that pass it
     too is named in a block, so the property holds however many passes run.
@@ -689,7 +689,7 @@ def _file_payload(path: Path, size: int, limit: int, shown: str) -> tuple[str, d
         )
     data = path.read_bytes()
     if b"\x00" in data[:_BINARY_SNIFF_BYTES]:
-        # The SAME detection ``read`` uses at ``builtin.py:3441``. Metadata
+        # The SAME detection ``read`` uses at ``builtin.py:3804``. Metadata
         # only: bytes in a user message are tokens spent on noise, and under
         # compaction a user turn is long-lived.
         guessed = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -998,7 +998,7 @@ async def _approved(
 
     ``request_approval=None`` means auto-approved. That is the documented
     contract CLI ``--yolo`` and headless tests rely on (``_check_approval``,
-    ``builtin.py:1336-1351``), and routing through ``ask_approval`` is what
+    ``builtin.py:1352-1367``), and routing through ``ask_approval`` is what
     keeps this ask identical in shape to a tool's — a second approval
     convention would reach a host scoping its answers with half the picture.
     """
@@ -1140,7 +1140,7 @@ async def _expand(
         shown = _shown(path, cwd)
         try:
             # OFF THE EVENT LOOP, matching `execute_read`'s precedent
-            # (`builtin.py:3405`, `:3458`): every read here was inline, and
+            # (`builtin.py:3768`, `:3458`): every read here was inline, and
             # this sits on the submit path of every surface, so a slow disk
             # stalled the loop for the whole read. For ordinary files the
             # inline cost was minor (8 near-cap files measured 10.1 ms expand,

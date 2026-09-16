@@ -452,7 +452,7 @@ jobs:
           python -m tests.shard_stall_watchdog "${TMPDIR:-/tmp}/lo-shard-stall"
 
       - name: Upload shard coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-data-${{ matrix.python-version }}-${{ matrix.shard }}
           path: .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
@@ -497,7 +497,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report-${{ matrix.python-version }}
           path: htmlcov
@@ -686,10 +686,12 @@ jobs:
     # a secrets-gated job could not reach forks at all, and a Linux-only job
     # would reach them and report green.
     #
-    # Fully headless: Textual's own `run_test()` pilot paints into an in-memory
-    # compositor, so there is no window, no display server and no TTY beyond
-    # what the harness makes itself. It needs no `xvfb` and must never grow a
-    # real browser or terminal dependency.
+    # Headless in the sense this job depends on: no display server, no window
+    # and no `xvfb`. Most of the stage drives Textual's `run_test()` pilot into
+    # an in-memory compositor, and the rest (`test_terminal_close_survives_e2e`,
+    # `test_tui_boot_e2e`) allocates its own pty and drives the real console
+    # script — so the runner still supplies no terminal, and this must never
+    # grow a real browser or display dependency.
     #
     # lint + type-check only. This job is the freeze regression guard (#401);
     # it exists BECAUSE a green unit suite did not catch a total event-loop

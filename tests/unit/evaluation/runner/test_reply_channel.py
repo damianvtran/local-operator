@@ -23,6 +23,7 @@ import pytest
 from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.runner.model import DecisionRejected
 from local_operator.evaluation.runner.public_reply import (
+    decode_public_reply,
     public_reply_contract,
     public_reply_schema,
 )
@@ -45,7 +46,7 @@ from tests.unit.evaluation.runner.test_provider_client import (
     finish_payload,
     observation,
 )
-from tests.unit.evaluation.runner.test_public_reply import envelope
+from tests.unit.evaluation.runner.test_public_reply import _wrapped, envelope
 
 
 class ChannelStream:
@@ -184,6 +185,39 @@ async def test_both_channels_produce_the_identical_validated_envelope() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "variant", ["tool_name-parameters", "tool_call-input-string", "input-object"]
+)
+async def test_a_wrapped_call_on_the_channel_decodes_like_the_unwrapped_one(
+    variant: str,
+) -> None:
+    """The channel MOVED the refusals, so it has to carry the wrapped ones too.
+
+    65 of the canary arm's 104 refusals arrived on the tool channel, and the
+    class it recorded as ``batch-shape`` is exactly this: a complete envelope
+    serialized as one generic tool call, handed to a decoder that wanted the
+    envelope itself. The channel supplies the bytes and the same decoder judges
+    them, so a wrapped call must reach the batch the unwrapped call reaches.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+
+    plain = await _client(ChannelStream(body), model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+    wrapped = await _client(
+        ChannelStream(_wrapped(variant, body)), model_spec=_spec(supports_tools=True)
+    ).decide(current, _turns(current))
+
+    assert wrapped.action_batch.to_canonical_json() == plain.action_batch.to_canonical_json()
+    assert decode_public_reply(wrapped.public_reply or "")["public_observations"] == (
+        "Visible status: ready"
+    )
+    wrapped.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
 async def test_a_legacy_bare_batch_is_accepted_on_the_channel_too() -> None:
     """The channel carries whatever the prose path carries, envelope or not."""
 
@@ -241,10 +275,10 @@ def test_an_unused_channel_is_distinguishable_from_an_empty_one() -> None:
         # text) and is now reported as the silence it is, while on the channel
         # it means the model DID select the channel and sent empty arguments --
         # a malformed call, not an absent reply. Requiring one diagnostic to
-        # cover both would force the silent case back to "not valid JSON",
-        # which is the misdiagnosis that spends an episode's retry bound
-        # re-prompting a model to fix JSON it never wrote. The silent case is
-        # covered directly by ``test_a_silent_reply_is_a_correctable_rejection``
+        # cover both would force the silent case back to reporting a JSON
+        # complaint, which is the misdiagnosis that spends an episode's retry
+        # bound re-prompting a model to fix JSON it never wrote. The silent case
+        # is covered directly by ``test_a_silent_reply_is_a_correctable_rejection``
         # and the channel case by
         # ``test_an_empty_channel_call_is_rejected_like_an_empty_prose_body``.
     ],
@@ -536,7 +570,7 @@ def test_the_flattened_schema_admits_exactly_what_the_validator_admits() -> None
 
     import jsonschema
 
-    items = public_reply_schema()["properties"]["action_batch"]["properties"]["actions"]["items"]
+    items = public_reply_schema()["properties"]["actions"]["items"]
     base = {
         "protocol_version": "1.0",
         "task_id": "t",
@@ -672,4 +706,13 @@ async def test_an_empty_channel_call_is_rejected_like_an_empty_prose_body() -> N
 
     message = str(info.value)
     assert "no tool call and no text" not in message
-    assert "not valid JSON" in message
+    # The reply is reported as what it is: a reply that did not come through as
+    # one JSON object, bucketed as that class -- and specifically as the
+    # OFFSET-ZERO half of it, because an empty reply has no first byte to read.
+    # The wording moved when the model-facing text became a shape hint instead
+    # of the decoder's prose, and the key moved when the old ``malformed-json``
+    # class was split into the half that cannot start and the half that starts
+    # and breaks; the distinction this test draws -- not silent, but unreadable
+    # -- is unchanged.
+    assert "did not begin with the JSON object" in message
+    assert info.value.class_key == "leading-delimiter"

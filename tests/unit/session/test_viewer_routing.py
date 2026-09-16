@@ -17,6 +17,8 @@ import asyncio
 import json
 import logging
 import os
+import socket
+import statistics
 import threading
 import time
 from typing import Any
@@ -34,6 +36,8 @@ from local_operator.session.runtime.viewer_server import (
     ViewerServer,
 )
 from local_operator.session.runtime.viewers import (
+    DESKTOP_SURFACE,
+    TUI_SURFACE,
     VIEWER_HEARTBEAT_TIMEOUT_S,
     ViewerRecord,
     publish_viewer,
@@ -521,6 +525,138 @@ def test_starting_twice_binds_one_listener(viewer_root):
         server.close()
 
 
+def test_close_wakes_the_serve_loop_instead_of_waiting_out_its_poll(viewer_root):
+    """A close must not inherit the remainder of the serve loop's wait.
+
+    ``close()`` joins the endpoint thread, and that thread used to decide
+    whether it had been asked to stop by re-checking the latch on a 200 ms
+    ``sleep``. Measured on the poll (n=15, isolated, the close landing at an
+    arbitrary phase): median 214 ms, min 202 ms, max 236 ms — of which ~150 ms
+    remains when the close is aimed 50 ms into the wait, which is the shape
+    below. It is on the app's unmount path, so EVERY TUI boot in the unit
+    suite paid it — which is what this repository's 8,000-boot TUI suite was
+    buying.
+
+    WALL time, deliberately, and not ``time.thread_time()``: the old cost was
+    blocked in a sleep, which consumes no CPU at all, so a CPU-time instrument
+    reports ~0 ms for exactly the code this test exists to reject.
+
+    WHAT THIS GUARANTEES, AND WHAT IT DOES NOT. The 50 ms settle that aims each
+    close at the middle of the loop's wait is a phase GUESS, not a
+    synchronisation: a descheduled serve thread can still be short of its park
+    when the close lands, and then the latch is already set, the loop never
+    waits, and even the POLLED code returns in ~1 ms — a silent false negative,
+    not a flake.
+
+    That is why the bound is the MEDIAN of five closes, each against a fresh
+    server, and why the choice of aggregate is load-bearing rather than
+    cosmetic. Both arms have a tail, and it points in opposite directions. The
+    buggy arm's tail is a starved round (~1 ms). The fixed arm's tail is a
+    scheduling delay, and single rounds here do exceed the 100 ms ceiling on a
+    loaded host (measured up to 128 ms at load 176-216). A MINIMUM would invert
+    the guard: it passes as soon as ANY one of the five rounds is starved, so it
+    is strictly WEAKER than the single sample it replaced — P(false pass) =
+    1-(1-p)^N rises with N instead of falling. A MAXIMUM would false-fail on any
+    one slow round. The median absorbs one outlier in either direction: roughly
+    three of the five rounds must be starved for a false pass, and one slow
+    round no longer false-fails.
+
+    So do NOT read a per-round margin out of this — the per-round margin is
+    scheduling-dependent and a single round can exceed the ceiling while the
+    test is still correct. What carries the test is the aggregate: measured on a
+    loaded dev host the five-round median was 1-7 ms against the 100 ms ceiling.
+    CI's dedicated runner is the safer environment for that bound.
+    """
+    samples: list[float] = []
+    for _ in range(5):
+        # start()/ready.wait()/close() inline rather than through ``_started()``:
+        # a round whose bind fails must still close its OWN server, and the
+        # ready assertion inside ``_started`` raises before this loop's
+        # ``finally`` could reach the leaked object.
+        server = ViewerServer(_Host(), root=viewer_root)
+        try:
+            server.start()
+            assert server.ready.wait(timeout=5.0), "viewer endpoint never bound"
+            # ``ready`` is set on the FAILED-bind path too (``_run``'s except),
+            # so it cannot tell a live listener from a dead one — and a round on
+            # the dead path closes in ~1 ms and would pass while measuring
+            # nothing. Dial the port the round published: CONNECTED is exactly
+            # the invariant the record exists to advertise.
+            with socket.create_connection(("127.0.0.1", server.record.control_port), timeout=2):
+                pass
+            # Let the serve loop REACH its wait before timing the close, so the
+            # close lands MID-INTERVAL. Without this settle the assertion races
+            # the loop's phase: ``ready`` is set microseconds before the loop
+            # parks, so on a run where the thread is descheduled in between,
+            # ``close()`` sets the latch first, the loop's ``while not
+            # self._closed.is_set()`` is already false, it exits at once — and
+            # the POLLED code returns in ~1 ms too. Parked, the poll owes the
+            # rest of a 200 ms interval (~150 ms) and cannot meet the ceiling.
+            time.sleep(0.05)
+
+            started = time.monotonic()
+            server.close()
+            samples.append(time.monotonic() - started)
+        finally:
+            server.close()
+
+    aggregate = statistics.median(samples)
+    assert aggregate < 0.1, (
+        f"the median of {len(samples)} parked closes took {aggregate * 1000:.0f} ms "
+        "— close() is waiting out the serve loop's wait instead of waking it. "
+        "Samples (ms): "
+        f"{', '.join(f'{sample * 1000:.1f}' for sample in samples)}. Parked, the "
+        "pre-fix poll measured through this test's own 50 ms settle lands in "
+        "139.5-191.2 ms (median ~151 ms, n=50), so a median under the ceiling "
+        "needs three of these five rounds woken early — the loop is not waiting "
+        "(viewer_server.close -> _wake_close_wait -> ViewerServer._serve's park)."
+    )
+
+
+def test_close_on_the_endpoints_own_loop_does_not_join_itself(viewer_root):
+    """A close issued from the endpoint's OWN thread must not raise.
+
+    ``close()`` joins the serve thread, and ``Thread.join`` raises
+    ``RuntimeError: cannot join current thread`` when the caller IS that
+    thread. The guard is the only thing stopping that exception escaping a
+    method documented as safe from any thread, and nothing in-repo closes this
+    way — so without this test the guard can be dropped by a refactor with
+    nothing to notice it.
+    """
+    server = _started(_Host(), viewer_root)
+    port = server.record.control_port
+    path = viewer_record_path(os.getpid(), viewer_root)
+
+    thread = server._thread
+    loop = server._loop
+    assert thread is not None and loop is not None, "precondition: endpoint running"
+    raised: list[str] = []
+
+    def _capture(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        # Only handler calls that carry an exception are record failures; the
+        # loop also routes non-exception advisories through this hook.
+        if context.get("exception") is not None:
+            raised.append(repr(context["exception"]))
+
+    loop.set_exception_handler(_capture)
+
+    # The shape the guard exists for: the caller runs ON the endpoint's loop, so
+    # close() must skip the self-join instead of raising into that loop.
+    loop.call_soon_threadsafe(server.close)
+
+    deadline = time.time() + 5.0
+    while thread.is_alive() and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert raised == [], f"close() raised on the endpoint's own loop: {raised}"
+    assert not thread.is_alive(), "the serve thread must exit after a self-thread close"
+    assert not path.exists(), "the loop's own shutdown must remove the record"
+    # And the port must really be free again: the record is gone AND nothing
+    # answers on the port it advertised.
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+
+
 def test_close_removes_the_record(viewer_root):
     """A closed window must stop advertising a port nothing is listening on."""
     server = _started(_Host(), viewer_root)
@@ -530,9 +666,10 @@ def test_close_removes_the_record(viewer_root):
     server.close()
     server.close()  # idempotent
 
-    # Poll rather than assert once: the serve loop notices `_closed` on its own
-    # 200 ms tick and unpublishes from there, so a bare assertion races the
-    # teardown it is checking and would pass on the synchronous unlink alone.
+    # Poll rather than assert once: the assertion is about the loop's OWN
+    # teardown, which now runs promptly only because close() signalled it — a
+    # bare assertion would race it and would pass on the synchronous unlink
+    # alone, leaving the only assertion of the wake in the timing test above.
     deadline = time.time() + 5.0
     while path.exists() and time.time() < deadline:
         time.sleep(0.05)
@@ -589,3 +726,177 @@ def test_a_bad_key_is_refused_without_a_reply(viewer_root):
         assert asyncio.run(probe()) == b"", "an authenticated reply must never follow a bad key"
     finally:
         server.close()
+
+
+def test_a_reachable_desktop_takes_the_click_ahead_of_any_tui():
+    """REVIEW ROUND 1, R9: the operator asked for UI-FIRST, and it was replaced.
+
+    The previous order put an already-displaying viewer first, then recency, and
+    left the desktop preference as a TIE-BREAK between two viewers the user had
+    never focused — so a TUI focused once, ever, outranked it for good. Nothing
+    in the request authorized that: the requested destination is the desktop UI,
+    and a click that switches a terminal instead is decided by incidental focus
+    history. The tests below are the ones that used to pin the recency-first
+    order; they are changed WITH the behaviour rather than left to fail.
+    """
+    desktop = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="x",
+        focused_at=100.0,
+    )
+    focused_tui = ViewerRecord(
+        pid=2, surface="tui", control_port=2, control_key="b", current_session="y", focused_at=500.0
+    )
+    assert choose_viewer([desktop, focused_tui], "wanted") is desktop
+
+    # A TUI that is ALREADY displaying the target does not outrank the UI
+    # either: that is the same recency-first substitution, one rung lower, and
+    # the exact shape the reviewer reproduced as "the same user intent can
+    # switch a terminal instead of opening the preferred app".
+    showing_tui = ViewerRecord(
+        pid=3,
+        surface="tui",
+        control_port=3,
+        control_key="d",
+        current_session="wanted",
+        focused_at=900.0,
+    )
+    assert choose_viewer([desktop, showing_tui], "wanted") is desktop
+
+    # A WINDOWLESS desktop is still the UI, and its recreation path is what the
+    # operator's "app is alive, its window is closed" click needs — so it is a
+    # rung-1 candidate even though it cannot be "already displaying" anything.
+    windowless = ViewerRecord(
+        pid=4,
+        surface="desktop",
+        control_port=4,
+        control_key="e",
+        current_session="wanted",
+        has_window=False,
+    )
+    assert choose_viewer([windowless, focused_tui], "wanted") is windowless
+
+    # WITHIN the chosen surface the cheap orders are unchanged, which is what
+    # keeps a click on a desktop from being decided by pid: an already-displaying
+    # desktop is a no-op switch, then recency, then pid is a stable last tie.
+    other_desktop = ViewerRecord(
+        pid=5,
+        surface="desktop",
+        control_port=5,
+        control_key="f",
+        current_session="z",
+        focused_at=900.0,
+    )
+    displaying_desktop = ViewerRecord(
+        pid=6,
+        surface="desktop",
+        control_port=6,
+        control_key="g",
+        current_session="wanted",
+    )
+    assert choose_viewer([other_desktop, displaying_desktop], "wanted") is displaying_desktop
+    assert choose_viewer([desktop, other_desktop], "wanted") is other_desktop
+
+    # ...and pid still breaks a tie between two EQUALLY recent desktops (both
+    # never focused), so a repeated click is stable rather than alternating.
+    idle_desktop = ViewerRecord(
+        pid=9, surface="desktop", control_port=9, control_key="c", current_session="x"
+    )
+    second_desktop = ViewerRecord(
+        pid=7, surface="desktop", control_port=7, control_key="h", current_session="x"
+    )
+    assert choose_viewer([idle_desktop, second_desktop], "wanted") is second_desktop
+    assert choose_viewer([second_desktop, idle_desktop], "wanted") is second_desktop
+
+
+def test_a_desktop_that_cannot_switch_is_not_a_first_rung():
+    """Rung 1 requires ``can_switch``: a desktop that cannot be told to display
+    the session cannot take the click, and pretending otherwise would strand it
+    instead of falling through to the TUI that can."""
+    mute_desktop = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="x",
+        can_switch=False,
+    )
+    tui = ViewerRecord(pid=2, surface="tui", control_port=2, control_key="b", current_session="y")
+    assert choose_viewer([mute_desktop, tui], "wanted") is tui
+    # On its own it is not a candidate at all, which is the caller's signal to
+    # fall through to discovery rather than to wait on a dead window.
+    assert choose_viewer([mute_desktop], "wanted") is None
+
+
+def test_the_surface_narrowing_asks_about_one_surface_at_a_time():
+    """The click ladder tries the UI, then the installed app, then whatever is
+    left — so it has to be able to ask "is there a desktop?" and "is there a
+    TUI?" as separate questions rather than inferring one from the other."""
+    desktop = ViewerRecord(
+        pid=1, surface="desktop", control_port=1, control_key="a", current_session="x"
+    )
+    tui = ViewerRecord(pid=2, surface="tui", control_port=2, control_key="b", current_session="y")
+
+    assert choose_viewer([desktop, tui], "wanted", surface=DESKTOP_SURFACE) is desktop
+    assert choose_viewer([desktop, tui], "wanted", surface=TUI_SURFACE) is tui
+    # No mismatch ever comes back: a surface question with no viewer on that
+    # surface is an absent answer, not the other surface's.
+    assert choose_viewer([tui], "wanted", surface=DESKTOP_SURFACE) is None
+    assert choose_viewer([desktop], "wanted", surface=TUI_SURFACE) is None
+    # Narrowing is a FILTER, not a preference: it does not change what the
+    # unfiltered call answers.
+    assert choose_viewer([desktop, tui], "wanted") is desktop
+
+
+def test_a_windowless_viewer_that_names_the_session_is_not_already_displaying():
+    """DESIGN REVIEW m2, the routing half.
+
+    Closing the last window on macOS leaves the app alive in the dock, and its
+    record may still name the conversation it was showing. Reading that id as
+    "already displayed" would answer the click with a no-op — nothing on screen,
+    no window, no switch — which is the reported defect rather than its fix.
+    """
+    windowless = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="wanted",
+        has_window=False,
+    )
+    assert needs_switch(windowless, "wanted") is True
+    # It is still a CANDIDATE (its app can be told to recreate the window).
+    assert choose_viewer([windowless], "wanted") is windowless
+
+    windowed = ViewerRecord(
+        pid=1,
+        surface="desktop",
+        control_port=1,
+        control_key="a",
+        current_session="wanted",
+        has_window=True,
+    )
+    assert needs_switch(windowed, "wanted") is False
+
+
+def test_a_record_without_the_window_field_reads_as_having_one():
+    """Additive on the wire: an older build's record must keep working.
+
+    Every TUI is windowed, so the default has to be the permissive one — a
+    default of ``False`` would make every existing record's `current_session`
+    worthless and turn a click that used to be a no-op into a /resume.
+    """
+    record = ViewerRecord.from_json(
+        {
+            "pid": 1,
+            "surface": "tui",
+            "control_port": 1,
+            "control_key": "a",
+            "current_session": "s",
+        }
+    )
+    assert record.has_window is True
+    assert needs_switch(record, "s") is False
