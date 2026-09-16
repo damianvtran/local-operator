@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from local_operator.resume import SessionRow
 from local_operator.tui.widgets.session_picker import (
+    FILTER_ROWS,
+    LIST_FR_STACKED,
     LIST_MIN,
     NAME_MAX,
     NAME_P75,
+    OUTER_INSET_ROWS,
     PICKER_MIN_WIDTH,
-    PREVIEW_MAX,
+    PREVIEW_FR_STACKED,
     PREVIEW_MIN,
     STACK_BELOW_COLS,
     fit_rows,
@@ -188,13 +191,85 @@ def test_a_row_with_a_context_line_costs_two_lines_and_the_cursor_stays_drawn() 
     assert top <= 30 < top + drawn
 
 
-def test_a_stacked_preview_height_is_clamped_between_its_floor_and_ceiling() -> None:
-    """A fixed preview height starves the list at 24 rows or wastes half of 50."""
-    for height in (24, 30, 35, 40, 50, 60, 80):
+def test_a_stacked_preview_takes_the_majority_share_proportionally() -> None:
+    """T3: stacked, the preview takes 7/10 of the content rows, clamped.
+
+    The old third-plus-14-cap handed the LIST 41 of 55 content rows on a
+    60-row terminal — "kind of unusable". The pins are the measured sanity
+    table; the sweep is the cap being gone: the preview first exceeds the
+    old 14 at height 27 and keeps growing to 52 rows at height 80.
+    """
+    for height in (24, 30, 40, 50, 60, 80):
+        cols_h = height - FILTER_ROWS - 2 * OUTER_INSET_ROWS
         plan = plan_layout(120, height)
         assert plan.mode == "stacked"
-        assert PREVIEW_MIN <= plan.preview_rows <= PREVIEW_MAX, (height, plan.preview_rows)
+        share = cols_h * PREVIEW_FR_STACKED // (LIST_FR_STACKED + PREVIEW_FR_STACKED)
+        expected = min(max(share, PREVIEW_MIN), cols_h - LIST_MIN)
+        assert plan.preview_rows == expected, (height, plan.preview_rows)
+        assert abs(plan.preview_rows - 0.7 * cols_h) <= 1, (height, plan.preview_rows)
+        assert plan.list_rows == cols_h - plan.preview_rows >= LIST_MIN, (height, plan.list_rows)
+        assert plan.preview_rows >= PREVIEW_MIN, (height, plan.preview_rows)
+    # Pins as literals off the sanity table — the formula above mirrors the
+    # production arithmetic, these do not.
+    assert (plan_layout(120, 60).preview_rows, plan_layout(120, 60).list_rows) == (38, 17)
+    assert (plan_layout(120, 30).preview_rows, plan_layout(120, 30).list_rows) == (17, 8)
+    assert (plan_layout(120, 24).preview_rows, plan_layout(120, 24).list_rows) == (13, 6)
+    # The cap is gone: monotone growth, no plateau, 52 rows at height 80.
+    vals = [plan_layout(120, h).preview_rows for h in range(27, 81)]
+    assert vals == sorted(vals)
+    assert max(vals) == 52
+    assert len(set(vals)) == 38
+
+
+def test_the_stacked_split_is_monotonic_and_never_starves_either_pane() -> None:
+    """Every stacked height keeps the row budget whole and both floors held.
+
+    The clamps bind at the short end only: the list sits at ``LIST_MIN``
+    for heights 19-25, the preview at ``PREVIEW_MIN`` only at 19, and the
+    preview never shrinks as the terminal grows.
+    """
+    previous = 0
+    for height in range(19, 121):
+        plan = plan_layout(120, height)
+        cols_h = height - FILTER_ROWS - 2 * OUTER_INSET_ROWS
+        assert plan.preview_rows + plan.list_rows == cols_h, (height, plan)
+        assert plan.preview_rows >= PREVIEW_MIN, (height, plan.preview_rows)
         assert plan.list_rows >= LIST_MIN, (height, plan.list_rows)
+        assert plan.preview_rows >= previous, (height, plan.preview_rows)
+        previous = plan.preview_rows
+    for height in range(19, 26):
+        assert plan_layout(120, height).list_rows == LIST_MIN, height
+    for height in range(26, 121):
+        assert plan_layout(120, height).list_rows > LIST_MIN, height
+    at_floor = [h for h in range(19, 121) if plan_layout(120, h).preview_rows == PREVIEW_MIN]
+    assert at_floor == [19], at_floor
+
+
+def test_the_side_by_side_geometry_is_untouched_by_the_stacked_flip() -> None:
+    """T3 is stacked-only; this is the byte-identical guard for wide terminals.
+
+    Table captured at e368e69a, before the flip: GREEN before and after is
+    the whole point, alongside the untouched width sweeps in this file.
+    """
+    for width, list_width, preview_width in (
+        (165, 93, 61),
+        (166, 94, 61),
+        (180, 102, 67),
+        (200, 114, 75),
+        (240, 138, 91),
+    ):
+        for querying in (False, True):
+            plan = plan_layout(width, 40, querying=querying)
+            assert plan.mode == "side-by-side", (width, querying)
+            geometry = (
+                plan.list_width,
+                plan.preview_width,
+                plan.list_rows,
+                plan.preview_rows,
+                plan.name_width,
+                plan.show_id,
+            )
+            assert geometry == (list_width, preview_width, 35, 35, 64, True), (width, querying)
 
 
 def test_the_panes_never_ask_for_more_cells_than_the_terminal_has() -> None:
