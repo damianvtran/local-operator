@@ -139,8 +139,10 @@ def _reject_unsendable(ticket: str) -> None:
     (usage.py's console fetcher), and httpx validates header values locally:
     an embedded newline, CR or NUL raises ``LocalProtocolError`` and a
     non-latin-1 character raises ``UnicodeEncodeError``. The fetcher catches
-    ``httpx.HTTPError`` and returns None, so the panel renders "no windows
-    reported" with nothing linking it back to the paste. Storing such a value
+    ``httpx.HTTPError`` and returns None, so with no report object at all the
+    panel falls back to its generic empty-result row -- "no usage — no quota
+    endpoint, or no credential for one", quoted verbatim -- naming a MISSING
+    credential, with nothing linking it back to the paste. Storing such a value
     and reporting success is the failure controller.py:268-278 names: a bug
     dressed as a plausible degraded state.
 

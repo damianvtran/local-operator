@@ -2165,10 +2165,18 @@ async def fetch_qwencloud_console_usage(
     is deliberately the narrowest thing that works: one request, one cookie,
     and a parse that fails closed.
     """
-    # NOTE: `fetch_qwencloud_token_plan` has a latent dead end for exactly the
-    # account shape this fetcher serves -- IsGray true with an empty seat
-    # summary returns a report with no window rather than None. Out of scope
-    # here; the console route runs first, so it is not on this path.
+    # NOTE: for the account shape this fetcher serves -- IsGray true, an empty
+    # seat summary, TotalCount 0 on every commodity -- `fetch_qwencloud_token_plan`
+    # returns None rather than a window-less report: `_qwencloud_credits_limit`
+    # bails on `total == 0`, so `limits` stays empty and the fetcher's
+    # `... if limits else None` answers None. That is WHY this route runs first:
+    # `fetch_usage` returns on the first route it can attempt and has no
+    # fall-through between the OAuth and API-key pair, so BSS first would end the
+    # fetch at None and never reach here. A window-less BSS report is reachable
+    # only on the narrower shape that also holds add-on Credit Packs
+    # (`packs > 0`), and there running first is what keeps the 7-day window on
+    # the panel -- at the cost of the packs row `fetch_usage` documents as a
+    # KNOWN LIMITATION. Out of scope here.
     params = {
         "Api": QWENCLOUD_CONSOLE_API,
         "Data": {

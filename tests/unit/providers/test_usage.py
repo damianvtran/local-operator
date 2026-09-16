@@ -2246,10 +2246,16 @@ async def test_qwencloud_console_falls_through_to_bss_and_never_doubles_the_wind
 
 @pytest.mark.asyncio
 async def test_qwencloud_console_wins_over_bss_when_both_could_answer() -> None:
-    """Ordering is not arbitrary: for the account shape this exists to serve,
-    BSS returns a report with no window at all (IsGray true, empty seat
-    summary), which is a worse answer than the console's real one -- and a
-    non-None one, so it would win if it ran first."""
+    """Ordering is not arbitrary: `fetch_usage` returns on the first route it can
+    attempt, with no fall-through between the OAuth and API-key pair. For the
+    account shape this exists to serve -- IsGray true, empty seat summary,
+    TotalCount 0 on every commodity -- BSS answers None (`_qwencloud_credits_limit`
+    bails on total == 0, so `limits` stays empty and the fetcher's
+    `... if limits else None` fires), so BSS first would end the fetch there and
+    this route would never run. Console-first with a None fall-through is what
+    makes the personal 7-day window reachable at all, and the same fall-through
+    keeps a teams account -- where the personal endpoint is absent or zero -- on
+    BSS's monthly window."""
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
