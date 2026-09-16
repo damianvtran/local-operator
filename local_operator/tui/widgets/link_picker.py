@@ -203,9 +203,7 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         footer is the thing that would be clipped, and a card that cannot state
         how to leave it is the trap :meth:`is_drawable` exists to refuse.
         """
-        avail = min(
-            MAX_VISIBLE_ROWS, self._content_size()[1] - CARD_PADDING_ROWS - CHROME_ROWS
-        )
+        avail = min(MAX_VISIBLE_ROWS, self._content_size()[1] - CARD_PADDING_ROWS - CHROME_ROWS)
         if avail < 1:
             return 0
         if len(self._targets) <= avail:
