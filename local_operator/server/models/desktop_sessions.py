@@ -157,6 +157,17 @@ class SessionSnapshot(BaseModel):
     payload: SnapshotPayload
 
 
+#: The three dispositions an admission receipt can report, declared ONCE for
+#: both sides of the wire: the model below serialises them, and the route that
+#: builds the receipt types its own outcome (and its status constants) with this
+#: same alias, so a status the model would reject cannot be constructed in the
+#: first place — it is a pyright error at the constant rather than a pydantic
+#: failure at response time, on the caller's side of the wire (review round 3,
+#: NIT-2). ``MessageAdmission`` deliberately does NOT use it: that route awaits
+#: its acknowledgement and can only ever answer ``admitted``.
+AdmissionStatus = Literal["admitted", "pending", "failed"]
+
+
 class AdmissionDetail(BaseModel):
     """What a host reports about one request's admission to the owner.
 
@@ -180,7 +191,7 @@ class AdmissionDetail(BaseModel):
     in full.
     """
 
-    status: Literal["admitted", "pending", "failed"]
+    status: AdmissionStatus
     duplicate: bool
     detail: str
 

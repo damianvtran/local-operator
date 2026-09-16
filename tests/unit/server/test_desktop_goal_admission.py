@@ -45,6 +45,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import gc
 from pathlib import Path
 from typing import Any
 
@@ -197,6 +198,15 @@ class FakeBridge:
         self.remote = remote
         self.users = 0
         self.releases = 0
+        #: The real bridge detaches on its LAST release only (``users == 0``),
+        #: so this is the count the cancellation cell reads: a leaked reference
+        #: leaves it at 0 and a double release takes it to 2.
+        self.detaches = 0
+        #: A release that is still IN PROGRESS, for the second cancellation
+        #: window: the real one waits on the bridge's lock (a concurrent cold
+        #: ``acquire`` holds it across ``attach_existing``) and then, at
+        #: ``users == 0``, on its own tear-down.
+        self.release_park: asyncio.Event | None = None
         self.refreshes = 0
         self.published: list[tuple[str, dict[str, Any]]] = []
 
@@ -209,7 +219,11 @@ class FakeBridge:
 
     async def release(self) -> None:
         self.releases += 1
+        if self.release_park is not None:
+            await self.release_park.wait()
         self.users -= 1
+        if self.users == 0:
+            self.detaches += 1
 
     def publish(self, kind: str, payload: dict[str, Any], *, replay: bool = True) -> None:
         self.published.append((kind, payload))
@@ -546,6 +560,148 @@ async def test_the_admission_holds_the_bridge_until_it_settles(desktop) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_request_cancelled_inside_the_bound_still_gives_the_bridge_back(
+    desktop,
+) -> None:
+    """THE CANCELLATION CELL (review round 3, F1): no exit may leak the hold.
+
+    ``admit_receipt_request`` takes one reference and has exactly one releaser
+    per path — itself on the settled path, the detached continuation otherwise.
+    A CANCELLATION landing inside ``asyncio.wait`` made both unreachable, and the
+    leak is permanent rather than slow: ``release`` is the only thing that drops
+    ``users`` and the only trigger for ``_detach``, the pool's eviction path only
+    ever considers bridges at ``users == 0``, and so the facade, the owner
+    connection and its runtime stayed resident for the process's life. The
+    reviewer's double of the real refcount read ``users=2 → door released →
+    users=1, detach=0`` and, with a refusing ack, an unretrieved task exception.
+
+    Three things are asserted here, and each was broken before the fix: the
+    lease is given back exactly once, the admission is NOT released out from
+    under itself while it is still in flight (round 2's F2 — an immediate release
+    on this path would re-manufacture it), and the refusal that lands afterwards
+    reaches the UI as a frame instead of the loop's exception log.
+    """
+    _client, remote, bridge = desktop
+    remote.park = asyncio.Event()
+    # The parked ack REFUSES once this cell releases it: an error is the shape
+    # that escaped as an unretrieved task exception when nothing awaited it.
+    remote.fail_after_park = ConnectionError("owner socket unreachable")
+    entry_users = bridge.users
+
+    # Installed around the work so the loop's own path for an unretrieved task
+    # exception (``Task.__del__`` → ``call_exception_handler``) is read here
+    # rather than only in a CI log.
+    loop = asyncio.get_running_loop()
+    reported: list[dict[str, Any]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        request = asyncio.ensure_future(
+            desktop_sessions.admit_receipt_request(
+                bridge,
+                "Preserve one identity",
+                command="goal",
+                command_id=REQUEST_ID,
+                images=[],
+            )
+        )
+        await until(lambda: bridge.users == entry_users + 1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        # Cancelled mid-flight: the reference is neither dropped (that would
+        # dispose the facade this admission is still using — round 2's F2) nor
+        # leaked. The continuation that owns the call owns the release.
+        assert bridge.users == entry_users + 1
+        assert bridge.releases == 0
+
+        # Let the parked ack refuse. The frame can only be published by
+        # something that awaited the dispatched task, which is also what marks
+        # its exception retrieved.
+        remote.park.set()
+        try:
+            await until(lambda: bridge.releases)
+        except TimeoutError:
+            # Named, rather than left as a bare wait timeout: this is the leak
+            # the cell exists for — before the fix a cancellation here left no
+            # releaser at all, so nothing ever moved these numbers.
+            raise AssertionError(
+                "the cancelled request never gave its reference back: "
+                f"users={bridge.users}, releases={bridge.releases}, "
+                f"detaches={bridge.detaches}"
+            ) from None
+        await until(lambda: bridge.published)
+
+        assert bridge.users == entry_users, "the cancelled request leaked its reference"
+        assert bridge.releases == 1, "the reference must be given back exactly once"
+        assert bridge.detaches == 1, "the last release detaches exactly once"
+        kind, payload = bridge.published[0]
+        assert kind == desktop_sessions.ADMISSION_FAILED_FRAME
+        assert payload["request_id"] == REQUEST_ID
+        assert payload["detail"] == "failed; the session owner could not be reached"
+
+        # The cancelled request's own frame is what still references the
+        # dispatched task; dropping it is what makes the check below able to fail
+        # instead of passing on an object that is still alive.
+        del request
+        gc.collect()
+        assert reported == [], (
+            "a refusal that lands after the cancellation must be reported by the "
+            f"continuation, never left to the loop: {reported}"
+        )
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_a_request_cancelled_during_its_release_still_gives_the_reference_back(
+    desktop,
+) -> None:
+    """THE SECOND CANCELLATION WINDOW (review round 3, F1): the release itself.
+
+    The bound is not the only suspension point a cancellation can land in. A
+    release waits on the bridge's lock — contended by every other route on the
+    session, and held across a cold ``attach_existing`` by a concurrent
+    ``acquire`` — and then, at ``users == 0``, on its own tear-down. A
+    cancellation there propagates INTO the awaited release (a task's cancellation
+    reaches the future it waits on), so the count was never decremented and the
+    facade stayed resident: the same pin, reached by the other door. The release
+    is therefore run shielded — the AWAIT is cancelled, the release is not.
+    """
+    _client, remote, bridge = desktop
+    bridge.release_park = asyncio.Event()
+    entry_users = bridge.users
+
+    request = asyncio.ensure_future(
+        desktop_sessions.admit_receipt_request(
+            bridge,
+            "Preserve one identity",
+            command="goal",
+            command_id=REQUEST_ID,
+            images=[],
+        )
+    )
+    await until(lambda: bridge.releases == 1)  # the reference is being given back
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    # The request is gone; the release it owed is not. Let it finish.
+    bridge.release_park.set()
+    try:
+        await until(lambda: bridge.users == entry_users)
+    except TimeoutError:
+        raise AssertionError(
+            "cancelling the request took its release with it: "
+            f"users={bridge.users}, releases={bridge.releases}, "
+            f"detaches={bridge.detaches}"
+        ) from None
+    assert bridge.releases == 1, "the reference must be given back exactly once"
+    assert bridge.detaches == 1
+
+
+@pytest.mark.asyncio
 async def test_an_agent_clear_carries_no_request_and_starts_no_turn(desktop) -> None:
     """THE REAL empty-request case: ``agent_attached`` from ``/agent clear``.
 
@@ -752,6 +908,38 @@ def _loaded_names(node: ast.AST) -> set[str]:
     }
 
 
+def _assignment_value(source: str) -> ast.expr:
+    """The right-hand side of a one-line probe assignment in ``source``.
+
+    A probe rather than an inline ``ast.parse(...).body[0].value`` so the
+    expression has a home the type checker can read ``.value`` from: the parsed
+    body is a statement, and only an ``ast.Assign`` exposes one.
+    """
+    node = ast.parse(source).body[0]
+    assert isinstance(node, ast.Assign), "the probe source must be one assignment"
+    return node.value
+
+
+def _slashed_consumer_dials(source: str) -> list[ast.expr]:
+    """Every expression ``source`` passes as a ``slash_consumers=`` keyword."""
+    return [
+        keyword.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "slash_consumers"
+    ]
+
+
+#: The declaration the auth frame must dial with, as a PARSED SHAPE rather than
+#: as source text (review round 3, NIT-1): ``black`` re-wraps that call — it
+#: already sits at the argument-width boundary — without changing the fact it
+#: states, and a substring match failed on the re-wrap alone. ``ast.dump``
+#: compares the expression, so line breaks, trailing commas and comments under it
+#: are all free.
+_EXPECTED_DIAL = ast.dump(_assignment_value("_dialed = list(ATTACHED_SLASH_CONSUMERS)"))
+
+
 def test_the_command_handler_routes_its_decision_through_the_helper() -> None:
     """The static half: the handler decides through the helper, not by name.
 
@@ -852,7 +1040,14 @@ def test_the_client_declares_every_action_receipt_this_route_claims() -> None:
         "stands down for a type nothing else completes"
     )
     attached_source = Path(attached_module.__file__).read_text(encoding="utf-8")
-    assert "slash_consumers=list(ATTACHED_SLASH_CONSUMERS)" in attached_source, (
-        "the auth frame must declare the shared constant; a second literal here "
-        "is a declaration the route reads but the client does not send"
+    # STRUCTURAL, not a substring (review round 3, NIT-1): the fact is that this
+    # expression is what the auth frame dials with, and a re-wrap of the call
+    # changes the text without touching the fact. Exactly ONE such keyword is
+    # also the point — a second one is a declaration the route reads but the
+    # client does not send.
+    dials = _slashed_consumer_dials(attached_source)
+    assert [ast.dump(dial) for dial in dials] == [_EXPECTED_DIAL], (
+        "the auth frame must declare the shared constant exactly once — "
+        "``slash_consumers=list(ATTACHED_SLASH_CONSUMERS)``; a second literal "
+        "here is a declaration the route reads but the client does not send"
     )

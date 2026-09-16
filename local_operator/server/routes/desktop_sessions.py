@@ -28,6 +28,7 @@ from local_operator.harness.types import ModelSpec
 from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
+    AdmissionStatus,
     AnswerReceipt,
     AttentionState,
     ChildTranscriptPage,
@@ -105,9 +106,14 @@ _ADMISSION_ACK_BOUND_S = 2.0
 #:   FAILURE of that admission is published as :data:`ADMISSION_FAILED_FRAME`.
 #: * ``failed`` — the owner answered with an error, or the transport did. The
 #:   request was NOT admitted and the caller may issue a new one.
-ADMITTED_ADMISSION_STATUS = "admitted"
-PENDING_ADMISSION_STATUS = "pending"
-FAILED_ADMISSION_STATUS = "failed"
+#:
+#: Annotated with ``AdmissionStatus`` rather than left to widen to ``str``: the
+#: model's field is that ``Literal``, so a typo here is a pyright failure at the
+#: constant instead of a pydantic rejection at response time (a 500 at the
+#: caller, review round 3, NIT-2).
+ADMITTED_ADMISSION_STATUS: AdmissionStatus = "admitted"
+PENDING_ADMISSION_STATUS: AdmissionStatus = "pending"
+FAILED_ADMISSION_STATUS: AdmissionStatus = "failed"
 
 #: The phrases this host ADDS to ``admission.detail``, one per pending shape.
 #: Two rather than one because the caller must still be able to tell a text
@@ -124,13 +130,26 @@ PENDING_STEER_ADMISSION_DETAIL = (
 #: UI. Session-scoped because the failure concerns one session's text, and the
 #: stream is where a viewer is already listening (``DESKTOP_API.md``, "Stream
 #: ordering and lifecycle": a renderer that does not know the type ignores it).
+#: RETAINED ONLY FOR THE LIFE OF THE ATTACHMENT, and that bound is load-bearing
+#: rather than incidental: publishing is the settle path's last act before it
+#: releases, so a failure on the session's last held reference detaches the
+#: bridge, and the next attach rebuilds the facade with a new epoch and an empty
+#: replay — the reconnect that comes to read the frame is what discards it
+#: (review round 3, F2). A client that must know reconciles against the durable
+#: transcript and the receipt instead.
 ADMISSION_FAILED_FRAME = "admission.failed"
 
 
 class AdmissionOutcome(NamedTuple):
-    """What :func:`admit_receipt_request` reports: the receipt's own fields."""
+    """What :func:`admit_receipt_request` reports: the receipt's own fields.
 
-    status: str
+    ``status`` carries the MODEL's own ``Literal`` rather than a bare ``str``:
+    the route copies it straight into ``AdmissionDetail.status``, so a mistyped
+    status is caught here by the type checker instead of by pydantic at response
+    time, on the caller's side of the wire (review round 3, NIT-2).
+    """
+
+    status: AdmissionStatus
     detail: str
     duplicate: bool
 
@@ -162,6 +181,29 @@ def _admission_failure_detail(error: BaseException) -> str:
     if isinstance(error, ConnectionError):
         return "failed; the session owner could not be reached"
     return "failed; the owner did not admit the request"
+
+
+async def _give_the_bridge_back(bridge: DesktopSessionBridge) -> None:
+    """Release one reference taken by ``acquire()``, protected from cancellation.
+
+    The RELEASE has cancellation windows of its own, and both are real rather
+    than theoretical (review round 3, F1): ``release`` takes the bridge's
+    lock, which every other route on this session contends — a concurrent
+    ``acquire`` holds it across a cold ``attach_existing`` — and once ``users``
+    reaches 0 its ``_detach`` awaits the owner connection's tear-down. A
+    cancellation delivered inside either window propagated INTO the awaited
+    release (a task's cancellation reaches the future it is waiting on), leaving
+    the count undecremented — the same permanent pin, on a second path — and a
+    retry from there would take ``users`` below zero instead.
+
+    ``shield`` is what makes the reference's fate independent of the request's:
+    the AWAIT is cancelled and the request unwinds promptly, while the release
+    keeps running to completion, exactly once. When the request is already
+    unwinding there is no caller left to raise the release's own failure to, so
+    shield's own callback retrieves it rather than leaving the loop to log an
+    unretrieved task exception.
+    """
+    await asyncio.shield(bridge.release())
 
 
 async def _settle_detached_admission(
@@ -201,7 +243,7 @@ async def _settle_detached_admission(
             },
         )
     finally:
-        await bridge.release()
+        await _give_the_bridge_back(bridge)
 
 
 async def admit_receipt_request(
@@ -278,15 +320,58 @@ async def admit_receipt_request(
     :data:`ADMISSION_FAILED_FRAME`) rather than turned into an error for a goal
     that IS set. The same skew already governs the ``steer`` mode of
     ``/messages``, so this adds no new compatibility surface.
+
+    EVERY EXIT FROM THE DISPATCH GIVES THE REFERENCE BACK EXACTLY ONCE (review
+    round 3, F1). ``await asyncio.wait`` below is the one suspension point
+    between ``acquire()`` and the hand-off, and it had no ``try``/``finally``: a
+    cancellation landing in it (uvicorn cancels in-flight connection tasks once
+    its graceful-shutdown timeout is exceeded; a supersession does the same)
+    made BOTH release sites — the settled path and the detached continuation's
+    ``finally`` — unreachable. The leak is permanent, not slow: ``release`` is
+    the only thing that drops ``users`` and the only trigger for ``_detach``,
+    and the pool's cap-eviction path only ever considers bridges at
+    ``users == 0``, so the facade, the owner connection and its runtime stayed
+    resident for the life of the process. The cancellation path therefore hands
+    the task AND the reference to the SAME continuation the pending path uses.
+
+    NOT AN IMMEDIATE RELEASE, deliberately: releasing while the admission is
+    still in flight is the defect round 2's F2 is about — the pool would dispose
+    the facade this call is using, the request would fail of our own teardown,
+    and the ``admission.failed`` frame that followed would blame the owner for
+    it. Handing the reference to the settling continuation keeps the hold for
+    exactly as long as the admission lives, gives it back in one release, and
+    keeps the report: a refusal that lands after the cancellation is published
+    on the session's stream instead of becoming an unretrieved task exception.
+    Every release then goes through :func:`_give_the_bridge_back`, because the
+    release itself is the second place a cancellation can take the reference
+    with it.
     """
     remote = bridge.remote
     assert remote is not None, "the route binds the runtime before admitting"
     queued = bool(getattr(remote, "is_streaming", False))
     await bridge.acquire()
-    task = asyncio.ensure_future(
-        remote.admit_prompt(text, command_id=command_id, images=images, steer=queued)
-    )
-    done, _ = await asyncio.wait({task}, timeout=_ADMISSION_ACK_BOUND_S)
+    # Non-``None`` only once the dispatch exists: before that the reference is
+    # ours alone, with nothing to hand anywhere.
+    task: asyncio.Task[tuple[str, bool]] | None = None
+    try:
+        task = asyncio.ensure_future(
+            remote.admit_prompt(text, command_id=command_id, images=images, steer=queued)
+        )
+        done, _ = await asyncio.wait({task}, timeout=_ADMISSION_ACK_BOUND_S)
+    except BaseException:
+        if task is None:
+            # Cancelled before the admission was dispatched: no continuation is
+            # owed one, so this is the only releaser there is.
+            await _give_the_bridge_back(bridge)
+        else:
+            # The continuation owns the task AND the bridge reference from here,
+            # exactly as on the pending path below — it awaits the admission,
+            # reports a refusal on the session's stream, and releases in its
+            # ``finally``.
+            asyncio.ensure_future(
+                _settle_detached_admission(bridge, task, command=command, command_id=command_id)
+            )
+        raise
     if not done:
         # The continuation owns the task AND the bridge reference from here.
         # ``ensure_future`` rather than a done-callback so the release it owes is
@@ -300,7 +385,7 @@ async def admit_receipt_request(
             PENDING_STEER_ADMISSION_DETAIL if queued else PENDING_ADMISSION_DETAIL,
             False,
         )
-    await bridge.release()
+    await _give_the_bridge_back(bridge)
     if task.cancelled():
         # Not a refusal to report: the session is going away and the receipt is
         # the least of it. Reported as ``failed`` all the same, because the text
