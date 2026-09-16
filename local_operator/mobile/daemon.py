@@ -30,9 +30,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import gzip
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -99,6 +101,21 @@ MAX_RETAINED_SESSION_PROJECTIONS = 64
 #: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
 SUMMARIES_CACHE_TTL_S = 1.0
 
+#: The wire name for "the durable half of this listing could not be re-read".
+#:
+#: The phone's conversation list is MEMBERSHIP: the client replaces everything
+#: it is showing with this frame, so a read that failed may not be published as
+#: an empty list any more than it may be on the desktop sidebar. When the scan
+#: cannot be walked the daemon now serves the last listing it actually read and
+#: names the failure here, so a client can say "couldn't refresh" instead of
+#: rendering a confident negative.
+#:
+#: DELIBERATELY ITS OWN WORD, not one of ``session.catalog.DECORATION_SOURCES``:
+#: those name decorations whose failure costs a MARK while the rows stand, and
+#: this names a failure of the read the rows THEMSELVES came from. A renderer
+#: that treated the two as one vocabulary would under-report this one.
+DEGRADED_DURABLE_LISTING = "sessions"
+
 
 def _durable_fold_cache():
     """The daemon-wide cache of incremental durable folds (see
@@ -107,13 +124,67 @@ def _durable_fold_cache():
     use get a cache keyed by THEIR directories."""
     global _DURABLE_FOLD_CACHE
     if _DURABLE_FOLD_CACHE is None:
-        from local_operator.mobile.durable import DurableFoldCache
-
+        try:
+            from local_operator.mobile.durable import DurableFoldCache
+        except ImportError as exc:
+            # The daemon's own lazy import is a seam that sees a torn install
+            # directly (``durable`` pulls ``_journal_injection_ids`` at module
+            # scope). Log it NAMED, then re-raise: the fold cannot run without
+            # the module, and swallowing the import would turn a diagnosable
+            # install race into "no projection" with no cause anywhere.
+            _log_import_failure(exc, "local_operator.mobile.durable", where="durable fold cache")
+            raise
         _DURABLE_FOLD_CACHE = DurableFoldCache()
     return _DURABLE_FOLD_CACHE
 
 
 _DURABLE_FOLD_CACHE: Any = None
+
+#: The build this DAEMON PROCESS loaded, stamped once at construction. Compared
+#: against the install on disk by ``update.classify_import_failure``, which is
+#: the only way to tell a lazy import that lost a name to a HALF-REPLACED
+#: install from a genuine packaging bug (design §5.2). ``None`` means "not
+#: stamped yet", which classifies nothing rather than guessing.
+_BOOT_BUILD: Any = None
+_BOOT_BUILD_STAMPED = False
+
+
+def _boot_build() -> Any:
+    """This daemon's boot build, memoised on first read.
+
+    Called from ``MobileDaemon.__init__`` so the normal case stamps at process
+    start, before any install can replace the tree. A seam that somehow runs
+    first stamps there and then, which can only ever make the comparison MORE
+    conservative (a stamp taken after the swap equals the install, so the
+    failure stays an ordinary traceback).
+    """
+    global _BOOT_BUILD, _BOOT_BUILD_STAMPED
+    if not _BOOT_BUILD_STAMPED:
+        _BOOT_BUILD_STAMPED = True
+        try:
+            from local_operator.update import installed_build
+
+            _BOOT_BUILD = installed_build()
+        except Exception:  # noqa: BLE001 — an unreadable stamp classifies nothing
+            _BOOT_BUILD = None
+    return _BOOT_BUILD
+
+
+def _log_import_failure(exc: BaseException, module: str, *, where: str) -> None:
+    """Log a lazy-import failure, naming it when the install moved under us.
+
+    One logger call for the daemon's two lazy-import seams, so the 605-occurrence
+    ``durable fold failed for session X`` traceback becomes a sentence that says
+    WHAT happened and WHY, and the cause can be fed to the next turn's cut-off
+    vocabulary.
+    """
+    from local_operator.update import classify_import_failure
+
+    reason = classify_import_failure(exc, module, boot=_boot_build())
+    if reason is None:
+        logger.error("%s failed while importing %s", where, module, exc_info=exc)
+        return
+    logger.error("%s failed: %s (%s)", where, reason, module, exc_info=exc)
 
 
 def _custom_snapshot_cache():
@@ -229,6 +300,19 @@ class SessionTable:
         self._durable_rows_cache: dict[str, Any] | None = None
         self._durable_rows_at = 0.0
         self._durable_rows_task: asyncio.Task[dict[str, Any]] | None = None
+        # The last durable listing that was actually READ, kept SEPARATELY from
+        # the cache above because the two stop being the same question the
+        # moment a read fails: ``_durable_rows_cache`` is cleared on every
+        # structural change (that is what invalidation means), while this is
+        # the fallback a failed re-read is answered from -- a failed read must
+        # never be published as an empty conversation list, which is the defect
+        # this pair exists to stop. Only ever replaced by a read that succeeded.
+        self._durable_rows_last_good: dict[str, Any] | None = None
+        #: Whether the most recent durable re-read FAILED. Published beside the
+        #: rows (see ``listing_degraded``) so the marker and the rows cannot
+        #: disagree: it is set exactly on the failed path and cleared on the
+        #: next successful one.
+        self._durable_listing_degraded = False
         self._summaries_cache: list[dict[str, Any]] | None = None
         self._summaries_at = 0.0
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
@@ -246,10 +330,13 @@ class SessionTable:
         """
         self._durable_rows_cache = None
         self._durable_rows_at = 0.0
+        # ``_durable_rows_last_good`` is deliberately NOT cleared: this method
+        # is about the cache being STALE, and a re-read that then fails has to
+        # be answerable from the last true listing rather than from nothing.
         self._summaries_cache = None
         self._summaries_at = 0.0
 
-    async def _refresh_durable_rows(self) -> dict[str, Any]:
+    async def _refresh_durable_rows(self) -> dict[str, Any] | None:
         """Single-flight TTL refresh of the durable listing rows.
 
         Runs ``recent_session_rows`` OFF the event loop: it stats and reads a
@@ -257,9 +344,26 @@ class SessionTable:
         under contention — blocking work that froze every SSE stream on this
         loop while it ran. A concurrent caller joins the in-flight task
         instead of starting a second scan.
+
+        ``strict=True``, because this listing is MEMBERSHIP on the phone: the
+        client replaces its conversation list with this frame, so a store that
+        cannot be walked must not be published as "you have no conversations".
+        The scan raises instead, and the failure is answered with the last
+        listing that WAS read (``_durable_rows_last_good``) plus the marker
+        ``listing_degraded`` reports — never with an empty list. That is the
+        same contract the desktop route states for its own refusal: keep the
+        rows you have and retry; the difference is only that this side holds
+        the rows, so it can honour it itself.
+
+        Returns ``None`` when there is nothing to serve: the read failed and no
+        listing has ever been read on this daemon (a cold start against a store
+        that cannot be opened). The caller falls back to an empty listing, which
+        is the only answer left -- and the marker says so, so a client can tell
+        it apart from a store with no conversations in it.
         """
         from local_operator.paths import config_dir
         from local_operator.resume import recent_session_rows
+        from local_operator.session.errors import SessionStoreUnavailable
 
         task = self._durable_rows_task
         if task is not None and not task.done():
@@ -272,11 +376,19 @@ class SessionTable:
 
         def load() -> tuple[dict[str, Any], dict[str, float]]:
             directory = config_dir()
-            # /resume intentionally pays no creation-metadata reads. Only the
-            # two stable-order surfaces enrich its cheap rows with birth dates.
+            # ``recent_session_rows`` itself pays no creation-metadata reads —
+            # it is on the CLI startup path. Each surface that needs birth
+            # dates pays for them itself, and the two surfaces differ in HOW
+            # because their row counts differ. These stable-order listings are
+            # bounded and need a date for EVERY row, so they enrich eagerly
+            # here. The /resume picker needs one only for the row under the
+            # cursor, over an unbounded list, so it resolves them lazily and
+            # caches per session id instead (``session/preview.py``,
+            # ``SessionPreviews.created_at``) — measured, an eager loop there
+            # cost 24.6% of the picker's open on a 151-session store.
             rows = {
                 row.id: row._replace(created_at=session_created_at(directory / "sessions" / row.id))
-                for row in recent_session_rows(directory, 100)
+                for row in recent_session_rows(directory, 100, strict=True)
             }
             dates = {}
             for session_id in live_ids - rows.keys():
@@ -292,15 +404,42 @@ class SessionTable:
         self._durable_rows_task = task
         try:
             rows = await task
+        except SessionStoreUnavailable:
+            # A store that exists but could not be walked. Logged (the operator
+            # could not otherwise reconstruct why a phone list went quiet) and
+            # answered from the last listing that was read -- never from an
+            # empty one.
+            logger.warning("phone listing could not read the session store", exc_info=True)
+            if self._durable_rows_task is task:
+                self._durable_rows_task = None
+            self._durable_listing_degraded = True
+            # Stamp the attempt: the TTL is a backoff here as much as a
+            # freshness bound, or a store that stays unreadable would be
+            # rescanned on every repaint of every phone screen.
+            self._durable_rows_at = time.monotonic()
+            return self._durable_rows_last_good
         except BaseException:
             # A failed scan must not poison the shared task: the next caller
             # retries instead of awaiting a raised future forever.
             if self._durable_rows_task is task:
                 self._durable_rows_task = None
             raise
+        self._durable_listing_degraded = False
         self._durable_rows_cache = rows
         self._durable_rows_at = time.monotonic()
+        self._durable_rows_last_good = rows
         return rows
+
+    def listing_degraded(self) -> list[str]:
+        """What could not be read for the listing being published.
+
+        Always a list, so a client reads it without a presence check, and empty
+        when the durable half was read on the most recent attempt. The values
+        are the phone's own (see ``DEGRADED_DURABLE_LISTING``) rather than the
+        desktop's decoration names, because this reports the read the ROWS came
+        from while those report decorations on rows that were read.
+        """
+        return [DEGRADED_DURABLE_LISTING] if self._durable_listing_degraded else []
 
     async def summaries(self) -> list[dict[str, Any]]:
         """Reconcile live generations with durable conversations by session id.
@@ -321,8 +460,18 @@ class SessionTable:
 
         async def _build() -> list[dict[str, Any]]:
             rows = self._durable_rows_cache
-            if rows is None or time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
+            # The timestamp alone decides freshness, and it is stamped by a
+            # FAILED attempt too: a store that cannot be walked must not be
+            # rescanned on every repaint of every phone screen, and the fallback
+            # below is what answers in the meantime.
+            if time.monotonic() - self._durable_rows_at >= SUMMARIES_CACHE_TTL_S:
                 rows = await self._refresh_durable_rows()
+            if rows is None:
+                # Nothing was ever read and the read is failing now, so there is
+                # no listing to serve — empty, with ``listing_degraded`` naming
+                # the read that failed so a client need not render that as "you
+                # have no conversations".
+                rows = self._durable_rows_last_good or {}
             from local_operator.session.attention import AttentionStore
 
             identities = {f"session/{session_id}" for session_id in rows}
@@ -378,6 +527,14 @@ class SessionTable:
                         p.model_label if p else (entry.record.model_label if entry else "")
                     ),
                     "streaming": bool(p and p.streaming),
+                    # A SIGNALLED RUNTIME STREAMS TOO, so this list's own spinner
+                    # said "working" about a session somebody had already asked
+                    # to leave. The record's phrase is carried here so the
+                    # phone's row ladder CAN say what it is instead of inferring
+                    # it from ``streaming``; the field is additive, so a client
+                    # that does not know it renders exactly as before (UX
+                    # round 2, U8).
+                    "leaving": (str(getattr(entry.record, "leaving", "") or "") if entry else ""),
                     "needs_attention": bool(p and p.pending),
                     "pending_kind": p.pending.kind if p and p.pending else "",
                     "subagents_running": sum(
@@ -459,6 +616,52 @@ class SessionTable:
         return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
 
+def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = None) -> None:
+    """Publish the durable outcome for a runtime the scan just found dead.
+
+    WHY THE DAEMON HAS TO DO THIS. Every other writer of a session's durable
+    outcome needs either a process that still exists or an open that happens
+    after the fact: the dying runtime writes its OWN marker (so a SIGTERM is
+    covered and a SIGKILL is not), a watching viewer journals what it witnessed,
+    and ``Session.__init__`` classifies on the next open. A daemon-OWNED session
+    killed while nobody watched therefore had NO record at all — no notice on the
+    phone, no ``completion_kind`` for the list, and no outcome for the frame's
+    ``stop_reason`` to be filled from (UX round 1, U1/U5).
+
+    The same import, on the same worker thread, as ``_bootstrap_mobile_attention``
+    already runs for up to 100 directories at boot — this is that sweep moved to
+    the moment the death is DISCOVERED, which is the only new thing about it.
+    The caller bounds it to one call per discovered death and to a daemon that
+    dials (an observer daemon's contract is to write nothing), and
+    ``bootstrap_transcript`` itself publishes nothing while a live owner holds
+    the record — which is what makes the successor race harmless: a runtime that
+    retired has already republished, so this classifies nothing and the
+    successor's own outcome stands.
+
+    ``reaped_owner`` is the dead record ``registry.scan`` reported, handed on to
+    the classification so a caller that classified after its own sweep still
+    carries the record — ``scan`` MOVES a dead record into the run namespace's
+    ``reaped/`` sidecar rather than deleting it (and the classifier reads that
+    sidecar too), so this is now belt-and-braces rather than the only road to
+    an answer. Without it a caller whose sweep was what proved the pid dead
+    has nothing left to hand over, and a future ``scan`` that moved a record
+    somewhere this reader does not look would erase the evidence for the very
+    death it just discovered (review round 2, MINOR-1).
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    directory = _durable_user_session_dir(session_id)
+    if directory is None:
+        return
+    try:
+        bootstrap_transcript(
+            Transcript(directory, defer_materialise=True), reaped_owner=reaped_owner
+        )
+    except Exception:  # noqa: BLE001 — a listing must survive an unparsable transcript
+        logger.debug("classifying a discovered death failed", exc_info=True)
+
+
 def _bootstrap_mobile_attention() -> None:
     """Migrate the retained list once on daemon startup, not on passive reads."""
     from local_operator.paths import config_dir
@@ -535,8 +738,10 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         state = _durable_fold_cache().load(directory)
     except FileNotFoundError:
         return None
-    except Exception:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
-        logger.exception("durable fold failed for session %s", session_id)
+    except Exception as exc:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
+        _log_import_failure(
+            exc, "local_operator.mobile.durable", where=f"durable fold for {session_id}"
+        )
         return None
     projection = SessionProjection(
         session_id=session_id,
@@ -648,6 +853,88 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
 # ---------------------------------------------------------------------------
 
 
+#: How long the daemon accumulates unreadable-control-frame reports before it
+#: emits one aggregated line.
+OVERSIZED_CONTROL_WINDOW_S = 30.0
+
+
+class _OversizedControlFrames:
+    """Report the RATE of unreadable control frames, not each frame.
+
+    Every one of these costs a session its live projection — a skipped frame
+    leaves ``entry.projection`` stale, so the phone falls back to the durable
+    disk fold and stops updating live — which makes the rate the signal worth an
+    operator's attention. One line per frame is not a stronger signal, it is a
+    buried one: measured on the operator's machine, 6,104,351 of these records
+    were 78% of a 420 MB log file, and the other records in that file (the
+    schedule, the MCP client, a stalled runtime) could not be read past them.
+
+    The first sighting is always reported on its own, so a one-off is never lost;
+    after that a run collapses into one line per window carrying the window count
+    and a monotonic total.
+
+    A flood that stops mid-window states neither figure by itself: the counts sit
+    in memory until that pid queues another frame. That is the trade this makes,
+    and it is worth naming rather than papering over — the stopped flood has
+    already been seen once (its first sighting is unconditional) and its
+    unreported residue is bounded by a single window, while the behaviour it
+    replaces buried the file 6,104,351 times over. Flushing a stopped window would
+    need a timer task inside the daemon, which is more machinery than the
+    diagnostic is worth.
+    """
+
+    #: Ceiling on tracked pids. A long-lived daemon sees one entry per session it
+    #: has ever dialled — ~32 MB at 100k pids — so the oldest is forgotten rather
+    #: than kept forever. It is dropped by insertion order: the pid that has been
+    #: known longest is the least likely to still be speaking, and a pid that
+    #: speaks again is re-counted from its next first sighting.
+    MAX_TRACKED_PIDS = 1024
+
+    def __init__(self) -> None:
+        self._windows: dict[int | None, tuple[float, int]] = {}
+        self._totals: dict[int | None, int] = {}
+
+    def note(self, pid: int | None) -> None:
+        now = time.monotonic()
+        started, count = self._windows.get(pid, (now, 0))
+        total = self._totals.get(pid, 0) + 1
+        self._totals[pid] = total
+        if total == 1:
+            self._windows[pid] = (now, 0)
+            logger.warning(
+                "mobile daemon: first oversized control frame from pid %s; each skipped "
+                "frame leaves that session's projection stale",
+                pid,
+            )
+            self._forget_oldest()
+            return
+        if now - started < OVERSIZED_CONTROL_WINDOW_S:
+            self._windows[pid] = (started, count + 1)
+            return
+        self._windows[pid] = (now, 0)
+        logger.warning(
+            "mobile daemon: %d oversized control frame%s from pid %s over %.0fs "
+            "(%d this process); each skipped frame leaves that session's projection stale",
+            count + 1,
+            "" if count + 1 == 1 else "s",
+            pid,
+            now - started,
+            total,
+        )
+
+    def _forget_oldest(self) -> None:
+        """Keep the tracked-pid map bounded when a daemon has seen many sessions."""
+        while len(self._totals) > self.MAX_TRACKED_PIDS:
+            oldest = next(iter(self._totals))
+            self._totals.pop(oldest, None)
+            self._windows.pop(oldest, None)
+
+
+#: One instance per daemon process; the reader loop is single-threaded on one
+#: event loop, so the counters need no lock.
+_OVERSIZED_CONTROL_FRAMES = _OversizedControlFrames()
+
+
 async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     """Open (or re-open) the control socket to one registrant and pump its
     frames until the connection dies. One task per session."""
@@ -702,7 +989,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                 # is pushing oversized frames again — every skipped frame leaves
                 # ``entry.projection`` stale, so the phone falls back to the
                 # durable disk fold and stops updating live.
-                logger.warning("mobile daemon: oversized control frame from pid %s", record.pid)
+                _OVERSIZED_CONTROL_FRAMES.note(record.pid)
                 continue
             if not line:
                 break
@@ -863,19 +1150,76 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     whole. Degradation is tiered and lossless for the collapsed view (see
     ``cap_projection_frame``); the retained projection object is untouched.
     """
+    from local_operator.harness.rows import completion_notice
     from local_operator.mobile.projection import cap_projection_frame
     from local_operator.mobile.types import TranscriptEntry
 
     data, degraded = cap_projection_frame(projection)
     attention = projection.attention
     data["attention"] = attention
+    # A CUT-OFF'S END REACHES THE PHONE HERE OR NOWHERE. ``ProjectionFold``
+    # learns ``stop_reason``/``cut_off`` from a folded ``AgentEndEvent``, and a
+    # runtime that dies mid-turn never emits one — the follower's socket simply
+    # closes, so the projection is left with the empty field that means "no turn
+    # has ended yet". Measured on three real phone paths (attached with and
+    # without another follower, and a daemon-OWNED session) × two signals
+    # (SIGKILL/SIGTERM): ``stop_reason='' cut_off=False`` at every sample to
+    # t+40 s, while a turn that COMPLETES does fold ``'completed'``. And
+    # ``composer.tsx`` gates its whole resume affordance on
+    # ``stop_reason === "aborted"``, so the notice and the list mark arrived and
+    # the button that D7 exists to word never did — for a cut-off AND for a
+    # deliberate stop issued from the phone (UX round 1, U1).
+    #
+    # The durable outcome this frame's notice is already built from carries the
+    # end for exactly those arms, so the frame fills the MISSING end from it:
+    # one record decides both the sentence and the button, which is what keeps
+    # the word and the affordance from naming one act two ways (D7).
+    # FILL, never override: the fold's own ABORT outranks a durable record. A
+    # record may describe an EARLIER turn than the one the fold last saw, and
+    # the fold is the only party that saw an end event for the current one — so
+    # when it says `aborted`, its word and its `cut_off` flag stand, including
+    # the deliberate stop it classified (`aborted` + `cut_off=False`).
+    #
+    # `"completed"` is NOT such an end for this purpose: a completion cannot be
+    # the end being filled for (a completed turn publishes `kind='complete'`, so
+    # the store would not be carrying an error), and a session that finished a
+    # turn and then had the NEXT one stopped from the phone leaves exactly this
+    # pair — `stop_reason='completed'` from the earlier fold plus an
+    # `interrupted` outcome from the turn the fold never saw end. Requiring an
+    # EMPTY field there silently withheld the button from a deliberate stop.
+    if not projection.streaming and projection.stop_reason != "aborted":
+        kind = str(attention.get("kind") or "")
+        if kind in {"error", "interrupted"}:
+            from local_operator.incidents import is_deliberate_cause
+
+            data["stop_reason"] = "aborted"
+            # WHICH word the button says. ``aborted`` covers both acts; only an
+            # ``error`` kind that is not a recorded deliberate act is the
+            # involuntary one. ``error`` with no cause at all is still a cut-off
+            # — that is the "cause could not be determined" row, whose notice
+            # above already says so.
+            data["cut_off"] = kind == "error" and not is_deliberate_cause(
+                str(attention.get("cause") or "")
+            )
     if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+        # The sentence AND its severity come from `harness/rows.py`, which owns
+        # row decisions for both surfaces: the phone's `NoticeRow` picks its
+        # glyph and ink from `details.severity`, so a frame that carried an empty
+        # `details` painted a cut-off as a routine `·` receipt — the same
+        # flattening the TUI's poller had, on the surface the operator reads from
+        # a phone (design review round 1, D4). The suppression above is unchanged
+        # and still correct: a LIVE mid-turn session banners nothing, regardless
+        # of the last outcome.
+        text, severity = completion_notice(
+            str(attention["kind"]), str(attention.get("reason") or "")
+        )
         data["transcript"] = [
             *data["transcript"],
             TranscriptEntry(
                 id=attention["anchor_id"],
                 kind="notice",
-                text="Stopped with an error" if attention["kind"] == "error" else "Interrupted",
+                text=text,
+                details={"severity": severity},
             ).to_json(),
         ]
     if degraded:
@@ -1025,6 +1369,10 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # Stamp the build THIS process loaded, before any lazy import can meet a
+        # replaced tree: every later comparison in ``_log_import_failure`` is
+        # against this value.
+        _boot_build()
         # False makes this daemon a READ-ONLY observer of the record directory:
         # it lists sessions and serves durable folds, but never dials a
         # registrant's control socket and never reaps a stale claim. A second
@@ -1347,8 +1695,31 @@ class MobileDaemon:
                 # session id) — the socket survives them by design.
                 entry.record = record
             if state == "stale":
+                # ONE classification per discovered death, gated on the TRANSITION
+                # (this branch re-runs every scan for as long as the stale record
+                # stays on disk, and a transcript import per 2 s pass is not a
+                # price a list may pay). Only a daemon that owns sockets writes:
+                # an observer daemon's whole contract is that it lists and serves
+                # and touches nothing durable.
+                first_sighting = not entry.ended
                 entry.ended = True
                 changed = True
+                if first_sighting and self.dial_registrants:
+                    # THE RECORD RIDES ALONG, because `registry.scan` has already
+                    # unlinked it: this branch runs on the tuple scan RETURNED,
+                    # and by the time we classify, the dead record the
+                    # classification depends on is gone from the run directory.
+                    # Re-reading (which is what `_run_record_evidence` does) then
+                    # finds nothing and every discovered death lands the
+                    # no-evidence arm — "the cause could not be determined" for
+                    # the one shape where the daemon just PROVED the pid dead
+                    # (review round 2, MINOR-1; the same sentence was measured on
+                    # the phone by the design round, D6). Passing the record in
+                    # is the evidence, and it is exactly as trustworthy as the
+                    # scan that produced it.
+                    await asyncio.to_thread(
+                        _classify_discovered_death, record.session_id, reaped_owner=record
+                    )
                 # SIGKILL cannot run owner cleanup. Discovery already proved the
                 # record pid dead; the lease helper revalidates generation and
                 # process identity under the recovery lock before removing only
@@ -1724,7 +2095,6 @@ class MobileDaemon:
             # An observer daemon cannot adopt what it spawns (it never dials),
             # so a spawned child would be orphaned from its own control plane.
             raise RuntimeError("observer daemon cannot start sessions")
-        from local_operator.interpreter import python_argv
         from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
 
@@ -1762,14 +2132,37 @@ class MobileDaemon:
         # A deliberate Start is not speculative prewarming inherited from an
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        # BOTH name axes, exactly as the viewer's own spawn in
+        # ``session/runtime/launch.py`` does — this is the PHONE-started runtime,
+        # and until now it was the one session start with no branding at all, so
+        # every session begun from the phone showed up as a bare ``python3.x``
+        # row in Activity Monitor for its whole life. The session id is truncated
+        # to 8 to match ``launch.py``, so `ps` correlates the same handle from
+        # either surface; `spawn_identity` applies the label only alongside a
+        # planted image, because a labelled `argv[0]` costs the child its
+        # `sys.executable` on Linux (see `procname.spawn_identity`).
+        from local_operator import procname
+        from local_operator.interpreter import SAFE_PATH_FLAG
+
+        argv0, executable = procname.spawn_identity(
+            procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
+        )
         process = await asyncio.create_subprocess_exec(
-            # ``python_argv``: this spawn passes no ``cwd=`` either, so without
-            # the isolation flag a daemon started from a checkout of this
-            # project would run that checkout instead of the install — the same
-            # defect as the viewer's spawn in ``session/runtime/launch.py``, and
-            # harder to notice here because nobody is watching a phone daemon's
-            # version. See :mod:`local_operator.interpreter`.
-            *python_argv("-m", "local_operator.session.runtime.process"),
+            # ``python_argv``'s shape with the label in element 0: the label
+            # replaces only argv[0], and ``SAFE_PATH_FLAG`` stays at index 1
+            # because interpreter options are recognised only before ``-m``.
+            # The flag is what this spawn gets from ``python_argv``: it passes
+            # no ``cwd=`` either, so without it a daemon started from a checkout
+            # of this project would run that checkout instead of the install —
+            # the same defect as the viewer's spawn in
+            # ``session/runtime/launch.py``, and harder to notice here because
+            # nobody is watching a phone daemon's version. See
+            # :mod:`local_operator.interpreter`.
+            argv0,
+            SAFE_PATH_FLAG,
+            "-m",
+            "local_operator.session.runtime.process",
+            executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;
             # a pipe back to the daemon would die with the daemon and take
@@ -2025,11 +2418,29 @@ def build_app(daemon: MobileDaemon):
         response.headers["Cache-Control"] = "no-store"  # the SPA shell; assets are hashed
         return response
 
+    async def _list_frame() -> dict[str, Any]:
+        """The session-list payload, in ONE place because it goes out two ways.
+
+        ``/api/sessions`` and the ``sessions`` event frame are the same answer
+        on two transports, and the phone's home screen reads the SECOND — so a
+        marker added to only one of them would be a marker the screen never
+        sees. The name is the thing a client keys on, so it is spelled once.
+
+        ``degraded`` is present on every frame, empty when the durable half was
+        read: the same additive shape the desktop listing uses, so a client can
+        tell "nothing to report" from "this server is too old to know" (see
+        ``DEGRADED_DURABLE_LISTING``).
+        """
+        return {
+            "sessions": await daemon.table.summaries(),
+            "degraded": daemon.table.listing_degraded(),
+        }
+
     async def api_sessions(request: Request) -> Response:
         denied = gate(request)
         if denied is not None:
             return denied
-        return JSONResponse({"sessions": await daemon.table.summaries()})
+        return JSONResponse(await _list_frame())
 
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
@@ -2107,11 +2518,11 @@ def build_app(daemon: MobileDaemon):
 
         async def stream():
             try:
-                yield _sse("sessions", {"sessions": await daemon.table.summaries()})
+                yield _sse("sessions", await _list_frame())
                 while True:
                     try:
                         await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
-                        yield _sse("sessions", {"sessions": await daemon.table.summaries()})
+                        yield _sse("sessions", await _list_frame())
                     except TimeoutError:
                         yield ": keepalive\n\n"
             finally:
@@ -2138,7 +2549,11 @@ def build_app(daemon: MobileDaemon):
         entry = _entry_for_session(daemon, session_id)
         if entry is None and _durable_user_session_dir(session_id) is None:
             return JSONResponse({"error": "unknown session"}, status_code=404)
-        from local_operator.session.attention import AttentionStore
+        from local_operator.session.attention import (
+            SUPERSEDED_TOKEN_CODE,
+            AttentionStore,
+            SupersededCompletionToken,
+        )
 
         try:
             body = await request.json()
@@ -2152,6 +2567,21 @@ def build_app(daemon: MobileDaemon):
         try:
             state = await asyncio.to_thread(
                 AttentionStore().acknowledge, f"session/{session_id}", token
+            )
+        except SupersededCompletionToken:
+            # A REAL token that a newer completion has replaced. Its own 409
+            # rather than the unknown-token sentence, because the phone's remedy
+            # differs: the completion it is looking at is no longer the one the
+            # conversation is asking about, so re-reading the projection and
+            # acknowledging the token it now names is what clears the mark. The
+            # body carries the machine code for exactly that branch (§ Read APIs
+            # and transports in docs/ATTENTION.md).
+            return JSONResponse(
+                {
+                    "error": "completion token superseded by a newer completion",
+                    "code": SUPERSEDED_TOKEN_CODE,
+                },
+                status_code=409,
             )
         except ValueError:
             return JSONResponse({"error": "unknown completion token"}, status_code=409)
@@ -2502,6 +2932,11 @@ def build_app(daemon: MobileDaemon):
         changes) plus a substring match over name/id (filter_rows semantics).
         A row that matched only on its conversation body is marked so the
         phone can say why it surfaced.
+
+        The same ``degraded`` marker the two listing routes carry, for the same
+        reason: this is the route the shipped ``#/past`` screen renders, and its
+        empty branch is what a failed read must not reach (see
+        ``_search_sessions``).
         """
         denied = gate(request)
         if denied is not None:
@@ -2511,8 +2946,8 @@ def build_app(daemon: MobileDaemon):
             limit = max(1, min(int(request.query_params.get("limit", "40")), 200))
         except ValueError:
             limit = 40
-        rows = await asyncio.to_thread(_search_sessions, query, limit)
-        return JSONResponse({"sessions": rows, "query": query})
+        rows, degraded = await asyncio.to_thread(_search_sessions, query, limit)
+        return JSONResponse({"sessions": rows, "query": query, "degraded": degraded})
 
     async def api_directories(request: Request) -> Response:
         """The new-session form's cwd picker: home plus the directories of
@@ -2531,8 +2966,11 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        rows = await asyncio.to_thread(_past_sessions)
-        return JSONResponse({"sessions": rows})
+        rows, degraded = await asyncio.to_thread(_past_sessions)
+        # The same marker the home listing carries, for the same reason: this is
+        # another list of the operator's conversations, and a read that failed
+        # must not reach it as "there are none".
+        return JSONResponse({"sessions": rows, "degraded": degraded})
 
     async def api_models(request: Request) -> Response:
         """The model sheet's catalogue: providers with stored credentials and
@@ -2545,7 +2983,7 @@ def build_app(daemon: MobileDaemon):
             models = await asyncio.to_thread(_list_models)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
-        return JSONResponse({"models": models})
+        return _maybe_gzip(request, JSONResponse({"models": models}))
 
     routes: list[BaseRoute] = [
         Route("/healthz", healthz),
@@ -2603,7 +3041,7 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
+def _past_sessions(limit: int = 20) -> tuple[list[dict[str, Any]], list[str]]:
     """Resumable past sessions for the phone's history list.
 
     ``forked`` rides along for the same reason the TUI picker draws it: a fork
@@ -2612,73 +3050,81 @@ def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
     12-hex id. The row builder already knows the fact (it is derived from the
     ``origin.json`` the scan parsed), and dropping it here is what would make
     the phone the one surface still showing the twin rows.
-    """
-    try:
-        from local_operator.paths import config_dir
-        from local_operator.resume import recent_session_rows
 
-        return [
-            {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked}
-            for row in recent_session_rows(config_dir(), limit=limit)
-        ]
-    except Exception:  # noqa: BLE001
-        return []
+    STRICT, and the marker comes back with the rows for the reason the home
+    listing is strict: this is a list of the operator's conversations, so a
+    store that cannot be walked may not be answered as "there are none" — and
+    the caller has to be able to tell the two apart, which is what the returned
+    marker is for.
 
-
-def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
-    """Past sessions matching ``query`` by name, id, or conversation body.
-
-    Mirrors the TUI picker's two channels: a name/id substring match, and a
-    body match through the cached search index (re-digested only for
-    transcripts that changed). A row that matched ONLY on its body is marked
-    ``body_match`` so the UI can say why it surfaced — otherwise it reads as a
-    result the filter had no reason to return.
+    The broad ``except Exception: return []`` this replaces is gone rather than
+    narrowed. Swallowing everything made every failure look like an empty
+    history, including the ones that are bugs — the same laundering the search
+    path next door refuses in its own docstring. The one failure this function
+    can actually answer for is the store read, and that is the one it catches;
+    anything else is a defect and must reach the log as one.
     """
     from local_operator.paths import config_dir
-    from local_operator.resume import fork_haystack, recent_session_rows
-    from local_operator.session.search_index import build_index, search_digests
+    from local_operator.resume import recent_session_rows
+    from local_operator.session.errors import SessionStoreUnavailable
 
-    cfg = config_dir()
-    rows = recent_session_rows(cfg, limit=200)
-    needle = query.strip().lower()
-    if not needle:
-        return [
-            {
-                "id": r.id,
-                "name": r.name,
-                "mtime": r.mtime,
-                "body_match": False,
-                "forked": r.forked,
-            }
-            for r in rows[:limit]
-        ]
     try:
-        digests = build_index(cfg, [r.id for r in rows])
-        body_hits = search_digests(digests, needle)
-    except Exception:  # noqa: BLE001 — a broken index degrades to name/id only
-        body_hits = set()
-    out = []
-    for r in rows:
-        # Through the picker's own composition, so typing `fork` on the phone
-        # finds the rows the phone visibly tags — the same what-is-shown-is-
-        # searchable invariant `resume.fork_haystack` documents.
-        name_hit = needle in fork_haystack(r).lower() or needle in r.id.lower()
-        body_hit = r.id in body_hits
-        if not (name_hit or body_hit):
-            continue
-        out.append(
-            {
-                "id": r.id,
-                "name": r.name,
-                "mtime": r.mtime,
-                # Marked only when the name/id did NOT explain the match.
-                "body_match": body_hit and not name_hit,
-                "forked": r.forked,
-            }
-        )
-        if len(out) >= limit:
-            break
-    return out
+        rows = recent_session_rows(config_dir(), limit=limit, strict=True)
+    except SessionStoreUnavailable:
+        logger.warning("phone history listing could not read the session store", exc_info=True)
+        return [], [DEGRADED_DURABLE_LISTING]
+    return [
+        {"id": row.id, "name": row.name, "mtime": row.mtime, "forked": row.forked} for row in rows
+    ], []
+
+
+def _search_sessions(query: str, limit: int = 40) -> tuple[list[dict[str, Any]], list[str]]:
+    """Past sessions matching ``query`` by name, id, or conversation body.
+
+    One call into ``session_search.search_store``, which is the SAME admission,
+    soft-matching and ranking the TUI's ``/resume`` picker and the desktop chat
+    search use. Before this it was a private second implementation: name/id and
+    an EXACT body substring only, no typo/prefix tier and no ranking, so a query
+    the picker resolved confidently found nothing on the phone. The phone's own
+    composition is only what it RENDERS from the answer — the dict shape below
+    is the wire format, not a second filter.
+
+    ``body_match`` marks a row the conversation surfaced (exact body, a past
+    name, or a soft match) rather than its visible name, so the phone can say
+    why it is on screen instead of showing a row with no visible reason.
+
+    STRICT, and the marker comes back with the rows for the same reason the
+    history route's does: this is the query the shipped ``#/past`` screen runs
+    on mount (``mobile/web/src/screens/past-sessions.tsx``, with an empty
+    ``q``), and it renders the answer as the WHOLE list. An unreadable store
+    delivered here as zero matches is the membership lie this change exists to
+    stop — "no past sessions yet" about a history that was never read.
+    ``search_store`` tolerates that ``OSError`` by design for the display-only
+    callers; the phone's history screen is not one of them any more, so it asks
+    for ``strict=True`` and answers with the marker instead.
+
+    What is NOT caught here is anything else — a bug in the search must not be
+    laundered into a confident "nothing matched".
+    """
+    from local_operator.paths import config_dir
+    from local_operator.session.errors import SessionStoreUnavailable
+    from local_operator.session.session_search import search_store
+
+    try:
+        matches = search_store(config_dir(), query, limit=limit, strict=True)
+    except SessionStoreUnavailable:
+        logger.warning("phone search could not read the session store", exc_info=True)
+        return [], [DEGRADED_DURABLE_LISTING]
+    return [
+        {
+            "id": match.row.id,
+            "name": match.row.name,
+            "mtime": match.row.mtime,
+            "body_match": match.body_match,
+            "forked": match.row.forked,
+        }
+        for match in matches
+    ], []
 
 
 def _tmp_dir() -> str:
@@ -2728,97 +3174,338 @@ def _recent_directories(limit: int = 8) -> list[str]:
         return []
 
 
-def _list_models() -> list[dict[str, Any]]:
-    """The model sheet's rows: every model of every provider the owner can
-    actually call — a provider with no stored credential is clutter in a
-    picker. Credential detection consults BOTH stores, because the two
-    sanctioned flows write different ones: ``lop credential update`` writes
-    the legacy CredentialManager file, and ``/login`` writes the providers
-    AuthStore (auth.db) — a picker reading only the first would hide every
-    OAuth-logged-in provider, which on a current install is most of them.
-    Runs in a thread: catalogue reads, OAuth refresh, and cold live discovery
-    must never block the relay's event loop or its session event streams.
+def _provider_display_name(provider_id: str) -> str:
+    """The registry's human name for ``provider_id`` (the id when it has none).
 
-    Aggregators deliberately have no bundled models. Use the same bounded,
-    cached discovery/parser as the desktop picker for those providers; reading
-    only the static registry makes a fresh Radient login appear to own none.
-    Only persisted credentials authorize discovery here: a service manager's
-    unrelated environment must not silently add accounts to a remote picker.
+    The unavailable-catalogue message names providers the way the owner met
+    them in ``/login``, which is the registry's ``name`` — the id is an
+    implementation spelling and reads as a typo in an error the phone shows.
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition(provider_id)
+    return definition.name if definition is not None else provider_id
+
+
+#: Below this, compression costs more than it saves: the gzip header and the CPU
+#: on both ends are not repaid by a few hundred bytes, and every small JSON
+#: response on this daemon is well under it.
+_GZIP_MIN_BYTES = 1024
+
+
+def _accepts_gzip(accept_encoding: str) -> bool:
+    """Whether ``Accept-Encoding`` asks for gzip, per RFC 9110 §12.5.3.
+
+    A substring test cannot tell ASKING FOR gzip from REFUSING it: ``gzip;q=0``
+    is the spec's way of saying "not acceptable", and reading it as consent
+    served a compressed body to a client that had explicitly declined one. That
+    is not only a spec violation — a client which does not auto-decode (``urllib``
+    does not) gets a ``UnicodeDecodeError`` on the gzip magic bytes rather than
+    JSON.
+
+    Deliberately requires gzip to be named EXPLICITLY: a lone ``*`` is left
+    un-compressed exactly as before. RFC 9110 would permit treating the wildcard
+    as consent, but that would newly compress for clients this daemon has always
+    answered in the clear, which is a behaviour change this fix has no reason to
+    make. ``identity``, ``deflate``, ``br`` and an absent header keep answering
+    uncompressed for the same reason.
+    """
+    for part in accept_encoding.split(","):
+        token, _, params = part.strip().partition(";")
+        token = token.strip().lower()
+        # ``x-gzip`` is the historical spelling of the same coding.
+        if token not in {"gzip", "x-gzip"}:
+            continue
+        quality = 1.0
+        for param in params.split(";"):
+            key, _, value = param.partition("=")
+            if key.strip().lower() != "q":
+                continue
+            try:
+                quality = float(value.strip())
+            except ValueError:
+                # An unparseable qvalue is not consent to ignore it; the entry
+                # is malformed, so fall back to "not acceptable" rather than
+                # compressing on a guess.
+                quality = 0.0
+        if quality > 0:
+            return True
+    return False
+
+
+def _maybe_gzip(request: Any, response: Any) -> Any:
+    """Gzip ``response`` in place when the client accepts it and it is worth it.
+
+    PER-ROUTE, not a middleware, and that is the whole design constraint.
+    ``GZipMiddleware`` wraps every response including
+    ``/api/sessions/{id}/events``, which is a Server-Sent Events stream: gzip
+    buffers, so the stream the phone relies on for live turn output would stop
+    arriving event-by-event and arrive in compressed blocks instead — trading a
+    transfer saving on one endpoint for a broken realtime surface on another.
+    Applying it at the one route whose body is large and one-shot keeps the
+    streaming routes byte-for-byte untouched.
+
+    ``/api/models`` is that route: the sheet's catalogue is ~234 KB of JSON that
+    compresses to ~20 KB, and the phone is typically on a mobile link through a
+    tunnel, where that difference is seconds of an empty sheet.
+    """
+    # BEFORE any early return: a cache keys on the headers of the representation
+    # it stored, so announcing this only on the compressed leg leaves the
+    # identity response — the variant an intermediary is most likely to keep —
+    # looking like the single valid answer for this URL, to be replayed to
+    # clients that did ask for gzip and to clients that did not alike.
+    response.headers["vary"] = "Accept-Encoding"
+    if not _accepts_gzip(request.headers.get("accept-encoding", "")):
+        return response
+    # Starlette strips a HEAD response's body after the handler returns, so
+    # compressing here would advertise the compressed LENGTH for a body the
+    # client never receives.
+    if getattr(request, "method", "GET").upper() == "HEAD":
+        return response
+    body = getattr(response, "body", b"")
+    if not body or len(body) < _GZIP_MIN_BYTES:
+        return response
+    packed = gzip.compress(body, compresslevel=6)
+    if len(packed) >= len(body):
+        # Already-compressed or incompressible payloads grow by the gzip header.
+        # JSON never reaches this, but the guard keeps the helper honest for any
+        # future route: spending CPU to make a response BIGGER is never right.
+        return response
+    response.body = packed
+    response.headers["content-encoding"] = "gzip"
+    response.headers["content-length"] = str(len(packed))
+    return response
+
+
+class _UnreadableAuthStore:
+    """A store that answers "I hold no rows" to the one question asked of it.
+
+    Used ONLY when ``AuthStore()`` itself could not open the database, to build
+    the cached catalogue that degradation serves. It exists so that path reaches
+    ``usable_providers``'s own documented degradation instead of restating the
+    rule: with no rows, no provider is claimed connected, and
+    ``picker_rows(usable=None)`` lists everything rather than asserting the owner
+    owns nothing.
+
+    Every member but the listing raises, which is deliberate rather than lazy.
+    This stand-in must never be mistaken for a working store: the only
+    legitimate use is the read-only catalogue build below, and a caller that
+    tries to log in or persist a credential through it has a bug that should be
+    loud rather than silently written to nowhere. The members are spelled out
+    (not a ``__getattr__`` catch-all) so it structurally satisfies
+    ``ControllerAuthStore`` and a future addition to that protocol fails the
+    type check here instead of at runtime on a degraded phone.
+    """
+
+    def _unavailable(self, operation: str) -> RuntimeError:
+        return RuntimeError(
+            f"the credential store is unreadable; {operation} is not available on "
+            "the catalogue-only fallback"
+        )
+
+    def list_credentials(self, provider: str | None = None) -> list[Any]:
+        return []
+
+    def upsert_credential(self, provider: str, credential: dict[str, Any]) -> Any:
+        raise self._unavailable("upsert_credential")
+
+    def delete_credentials_for_provider(self, provider: str, disabled_cause: str = "") -> int:
+        raise self._unavailable("delete_credentials_for_provider")
+
+    def disable_credential(self, credential_id: int, cause: str) -> None:
+        raise self._unavailable("disable_credential")
+
+    def active_local_credential(self, provider: str, endpoint: str) -> Any:
+        raise self._unavailable("active_local_credential")
+
+    async def get_oauth_access(self, provider: str) -> Any:
+        raise self._unavailable("get_oauth_access")
+
+    async def list_oauth_accesses(self, provider: str) -> list[Any]:
+        raise self._unavailable("list_oauth_accesses")
+
+    def list_oauth_identities(self, provider: str) -> list[Any]:
+        raise self._unavailable("list_oauth_identities")
+
+    async def get_api_key(self, provider: str) -> str | None:
+        raise self._unavailable("get_api_key")
+
+
+def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
+    """Serialize ranked picker rows into the sheet's wire objects.
+
+    The field set is what the phone RENDERS, deliberately. Shipping the whole
+    row was 301 KB over a tunnel, 159 KB of which was
+    ``context_window``/``input_price``/``output_price``/``routed`` — fields no
+    ``.tsx`` in the bundle reads. A forward-looking payload is not free when the
+    consumer is a phone on a mobile link; re-add a field here when a surface
+    actually renders it.
+    """
+    return [
+        {
+            "selector": row.selector,
+            "provider": row.provider,
+            "model_id": row.model_id,
+            # ``name`` is pre-existing and keeps its meaning: a DISPLAY name for
+            # this model. It is sourced from ``listing_name`` — the listing's OWN
+            # human name — rather than from ``label``, because ``label`` is the
+            # picker's resolved form and ``naming._unambiguous_name`` refuses a
+            # RESELLER's name there (the two shipped aggregators share ~398 of
+            # ~400 names, so a name alone cannot say which route answers, and the
+            # route is what differs in price and quota). That refusal is right on
+            # the TUI, whose row paints a separate selector column; here the row
+            # has two slots and the provider slot ALREADY carries the route, so
+            # the same rule left 916 of 996 rows rendering ``anthropic/claude-
+            # opus-5`` where the desktop renders ``Claude Opus 5``. Falling back
+            # through ``label`` and then the id keeps a row that named nothing
+            # rendering exactly as it did.
+            "name": (
+                row.listing_name
+                or (row.label if row.label and row.label != row.selector else "")
+                or row.model_id
+            ),
+            # ``label`` stays EXACTLY as the TUI spells it, unresolved names and
+            # all — it is the parity contract, not a display fallback, and a
+            # surface comparing the two must see the same string the desktop got.
+            "label": row.label,
+            "connected": row.connected,
+            "aggregated": row.aggregated,
+        }
+        for row in rows
+    ]
+
+
+def _list_models() -> list[dict[str, Any]]:
+    """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
+
+    THE SAME CATALOGUE AND THE SAME ORDER AS THE DESKTOP, by construction rather
+    than by convention. This used to walk ``model/registry.SupportedHostingProviders``
+    and emit rows in registry order, which broke in three measurable ways:
+
+    * ORDER. 962 rows went out grouped radient(445) > openai(12) > anthropic(18)
+      > openrouter(445) > …, so ~445 aggregated Radient rows rendered before the
+      first direct provider — roughly 45 phone screens of scrolling to reach
+      ``anthropic/``. The sheet looked like it only knew Radient and OpenRouter.
+      :func:`picker_rows` is the TUI's own ranking (direct-connected first,
+      newest version first, aggregators last), so the two surfaces cannot drift.
+    * COVERAGE. ``SupportedHostingProviders`` is the stale enumeration; the live
+      one is ``providers.registry.PROVIDER_REGISTRY``. A phone therefore could
+      not see ``alibaba-token-plan``, ``openai-device``, ``radient-key``,
+      ``xai-oauth`` or ``zai-oauth`` at all, even fully logged in to them.
+    * FRESHNESS. Non-aggregators were served from the SHIPPED registry, which
+      offers ids the provider has since withdrawn (11 dead OpenAI ids the TUI's
+      live catalogue does not list) and misses anything released after the last
+      release of this package.
+
+    Only PERSISTED credentials authorize a listing here — see
+    :meth:`ProviderController.persisted_providers`. A service manager's ambient
+    environment must never add an account to a picker reachable over a tunnel,
+    which is exactly the rung that separates that method from ``usable_providers``.
+
+    ONE catalogue per request, chosen by whether the credential question could
+    be answered — NOT the picker's stale-then-update. The TUI paints
+    ``initial_catalogue()`` and repaints on the live result because it has two
+    frames to spend; this endpoint answers a single synchronous HTTP request, so
+    a first catalogue would never be rendered and building one on the normal path
+    is pure cost (measured: 1455 entries, 18 ms, discarded). The cached catalogue
+    is therefore built only where it is the ANSWER — when the store could not be
+    read and a live fetch would be unauthorized guessing.
+
+    The live pass asks for :data:`PICKER_TTL_S` rather than discovery's 24 h
+    default for the same reason the TUI does — opening the sheet is the one
+    moment a fresh list is worth a request — and the fetch runs off the relay's
+    event loop, which must never block on a provider round trip.
     """
     from contextlib import closing
 
+    from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
-    from local_operator.model.discovery import available_models
-    from local_operator.model.registry import SupportedHostingProviders, static_models
+    from local_operator.model.configure import _openai_use_max_context_window
     from local_operator.paths import config_dir
     from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.catalogue import picker_rows
+    from local_operator.providers.controller import PICKER_TTL_S, ProviderController
 
-    credential_manager = CredentialManager(config_dir=config_dir())
-    rows: list[dict[str, Any]] = []
-    unavailable: list[str] = []
-    persisted_keys = credential_manager.get_credentials()
-    with closing(AuthStore()) as store:
-        for provider in SupportedHostingProviders:
-            key = next(
-                (
-                    persisted_keys[name].get_secret_value()
-                    for name in provider.requiredCredentials
-                    if name in persisted_keys and persisted_keys[name].get_secret_value()
-                ),
-                None,
-            )
-            # AuthStore resolves the registry's exact storage aliases. Prefix
-            # guessing could lend an unrelated plan's credentials to a host.
-            logins = store.list_credentials(provider=provider.id)
-            if not key and not logins:
-                continue
-            models = static_models(provider.id)
-            names = [(model_id, getattr(info, "name", "")) for model_id, info in models.items()]
-            if not models:
-                is_oauth = False
-                account_id = None
-                if not key:
-                    # Refresh a specific stored row without the inference
-                    # cascade's rotation, quota blocks, or sticky-account writes.
-                    # asyncio.run is safe here because api_models offloads this
-                    # whole synchronous helper to its worker thread.
-                    for login in reversed(logins):
-                        is_oauth = login.credential_type == "oauth"
-                        data = (
-                            asyncio.run(store.ensure_oauth_fresh(login.id))
-                            if is_oauth
-                            else login.data
-                        )
-                        if data:
-                            key = data.get("access" if is_oauth else "key")
-                            account_id = data.get("account_id") or data.get("org_id")
-                        if key:
-                            break
-                if not key:
-                    unavailable.append(provider.name)
-                    continue
-                discovered, status = available_models(
-                    provider.id, api_key=key, is_oauth=is_oauth, account_id=account_id
-                )
-                names = [(model.id, model.name) for model in discovered]
-                if not names and status != "empty":
-                    unavailable.append(provider.name)
-            rows.extend(
-                {
-                    "selector": f"{provider.id}/{model_id}",
-                    "provider": provider.id,
-                    "model_id": model_id,
-                    "name": name or model_id,
-                }
-                for model_id, name in names
-            )
-    if not rows and unavailable:
-        # A failed cold fetch is not an authoritative empty inventory. Keep the
-        # message credential-free while making a retry/re-login actionable.
-        raise RuntimeError(
-            f"Model catalogue unavailable for {', '.join(unavailable)}; retry or log in again"
+    directory = config_dir()
+    try:
+        settings = dict(ConfigManager(directory).get_config().values)
+    except Exception:  # noqa: BLE001 — an unreadable config must not empty the sheet
+        settings = {}
+    use_max_context = _openai_use_max_context_window(settings)
+    try:
+        store = AuthStore()
+    except (sqlite3.Error, OSError) as exc:
+        # The store could not be OPENED. This is the same rung
+        # ``persisted_providers`` documents as ``None`` — "cannot tell" — and it
+        # has to be caught HERE because that is where the read happens:
+        # ``AuthStore.__init__`` connects eagerly, so an unreadable ``auth.db``
+        # raised out of the constructor before the method with the degradation
+        # was ever called, and the phone got a 502 carrying a raw SQLite string
+        # instead of the cached list. 502-ing claims less than the app knows —
+        # the disk cache still describes the catalogue — so the degradation
+        # runs the same way the documented one does: show the cached models,
+        # fetch nothing, because "which accounts may I speak for" is exactly the
+        # question that just failed.
+        logger.warning("credential store unreadable; serving the cached catalogue: %s", exc)
+        # ``_UnreadableAuthStore`` rather than a bespoke branch: it makes
+        # ``usable_providers()`` take its OWN documented degradation, so this
+        # path produces exactly the catalogue an unreadable store already
+        # produces one layer down — every model listed, none claimed
+        # unconnected — instead of a second, drifting statement of that rule.
+        controller = ProviderController(_UnreadableAuthStore())
+        cached_rows, _cached_hidden = picker_rows(
+            controller.initial_catalogue(),
+            usable=None,
+            use_max_context=use_max_context,
         )
-    return rows
+        return _model_rows(cached_rows)
+    with closing(store):
+        controller = ProviderController(store, CredentialManager(config_dir=directory))
+        admitted = controller.persisted_providers()
+        statuses: dict[str, str] = {}
+        if admitted is None:
+            # The credential store could not be READ. Serving the cached
+            # catalogue is right — an empty sheet would claim the owner owns no
+            # models — but a live fetch is not, because "which accounts may I
+            # speak for" is the question that just failed to resolve. This is
+            # the ONE path that wants the cached catalogue, which is why it is
+            # built here rather than unconditionally above: on every normal
+            # request the live pass replaces it wholesale, so building it there
+            # cost 1455 entries and ~18 ms per request for a value nothing read.
+            entries = controller.initial_catalogue()
+        else:
+            # ``asyncio.run`` is safe here: ``api_models`` offloads this whole
+            # synchronous helper to a worker thread, so there is no running loop
+            # on it to clash with.
+            entries, statuses = asyncio.run(
+                controller.live_catalogue(ttl_s=PICKER_TTL_S, providers=admitted)
+            )
+        rows, _hidden = picker_rows(
+            entries,
+            usable=admitted,
+            use_max_context=use_max_context,
+        )
+    if not rows:
+        # A failed cold fetch is not an authoritative empty inventory — the same
+        # rule this endpoint has always had, restated against the controller's
+        # per-provider statuses. A provider counts as unavailable when it
+        # contributed NO rows and did not say ``empty``: ``empty`` is the
+        # provider itself answering "I list no models", which is a real answer,
+        # while ``static``/``stale``/``unauthenticated`` on an aggregator (which
+        # bundles nothing) means the listing never landed. Keep the message
+        # credential-free while making a retry/re-login actionable.
+        listed_providers = {entry.provider for entry in entries}
+        unavailable = sorted(
+            _provider_display_name(provider)
+            for provider, status in statuses.items()
+            if status != "empty" and provider not in listed_providers
+        )
+        if unavailable:
+            raise RuntimeError(
+                f"Model catalogue unavailable for {', '.join(unavailable)}; "
+                "retry or log in again"
+            )
+    return _model_rows(rows)
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate

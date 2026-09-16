@@ -9,17 +9,27 @@ import { Button } from "../components/ui/button";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/cn";
 import { basename, shortenHome } from "../lib/format";
+import { filterModels } from "../lib/model-filter";
 import { navigate } from "../router";
 import type { Directories, ModelEntry } from "../types";
 
 export function NewSessionScreen() {
 	const [dirs, setDirs] = useState<Directories | null>(null);
-	const [models, setModels] = useState<ModelEntry[]>([]);
+	/* `null` means NOT RESOLVED YET — the same spelling `dirs` above and
+	   `past-sessions.tsx` already use for it, and the distinction the picker's
+	   render ladder turns on. */
+	const [models, setModels] = useState<ModelEntry[] | null>(null);
 	const [cwd, setCwd] = useState("");
 	const [model, setModel] = useState<ModelEntry | null>(null);
 	const [modelSheetOpen, setModelSheetOpen] = useState(false);
 	const [filter, setFilter] = useState("");
 	const [error, setError] = useState("");
+	/* SEPARATE from `error`, which belongs to the working-directory list and the
+	   start action and renders in the screen body. A catalogue failure has to
+	   speak inside the picker where the user is looking, and the two must not
+	   overwrite each other: a 502 from `/api/models` is not a reason to blank a
+	   real `startSession` failure. */
+	const [modelsError, setModelsError] = useState("");
 	const [starting, setStarting] = useState(false);
 
 	useEffect(() => {
@@ -31,18 +41,33 @@ export function NewSessionScreen() {
 			.catch((e) => setError(String(e.message ?? e)));
 		getModels()
 			.then((m) => setModels(m.models))
-			.catch(() => {
-				/* Models are optional here; the daemon's default applies. */
+			.catch((e) => {
+				/* The daemon's own message, matching the in-session sheet. Swallowing
+				   was defensible while this picker had no empty state — the daemon's
+				   default still applies, so the flow survives — but once the picker
+				   gained recovery copy, silence made it assert the WRONG cause: a
+				   user whose token expired was told to retype their query. The two
+				   pickers filter alike and must account for a failure alike. */
+				setModels([]);
+				setModelsError(String((e as Error).message ?? e));
 			});
 	}, []);
 
-	const filtered = useMemo(() => {
-		const q = filter.trim().toLowerCase();
-		if (!q) return models;
-		return models.filter((m) =>
-			`${m.provider} ${m.name} ${m.model_id}`.toLowerCase().includes(q),
-		);
-	}, [models, filter]);
+	/* A reopened picker starts from the full ranked list — same reason as the
+	   in-session sheet, which runs the identical reset in its own `[open]`
+	   effect. */
+	useEffect(() => {
+		if (modelSheetOpen) setFilter("");
+	}, [modelSheetOpen]);
+
+	/* Order-PRESERVING, over the same predicate the in-session sheet uses — the
+	   shared one in `lib/model-filter`. This list led with ~445 aggregated
+	   Radient rows for the same reason the sheet did, and `Array.filter` keeps
+	   the daemon's ranking intact so the direct route leads every query. */
+	const filtered = useMemo(
+		() => filterModels(models ?? [], filter),
+		[models, filter],
+	);
 
 	/* The tagged quick-pick rows: home first, then the temp dir (a common
 	   scratch root the daemon now admits), then recent working directories.
@@ -225,6 +250,16 @@ export function NewSessionScreen() {
 					>
 						default
 					</button>
+					{/* Below `default`, which stays selectable through both states:
+					    neither a failed catalogue nor one still in flight stops a user
+					    starting a session on the daemon's own default. */}
+					{modelsError ? (
+						<p className="px-3 py-1 text-body-sm text-danger">
+							{modelsError}
+						</p>
+					) : models === null ? (
+						<p className="px-3 py-2 text-body-sm text-ink-dim">loading…</p>
+					) : null}
 					{filtered.map((m) => (
 						<button
 							key={m.selector}
@@ -243,6 +278,22 @@ export function NewSessionScreen() {
 							</span>
 						</button>
 					))}
+					{!modelsError && models !== null && filtered.length === 0 ? (
+						/* Without this the picker answered a non-matching query with
+						   the bare `default` row and empty space, which does not tell
+						   "nothing matched" from "the list failed to load". Same copy
+						   as the in-session sheet: the two pickers filter alike and
+						   should account for themselves alike.
+
+						   Guarded by the same precedence the sheet uses — error, then
+						   unresolved, then genuinely-empty — so this sentence is
+						   reachable only when the filter really is what excluded
+						   everything. See the ladder comment in `model-sheet.tsx`. */
+						<p className="px-3 py-2 text-body-sm text-ink-dim">
+							no matching models — try a provider (anthropic, xai) or a
+							model name (opus, glm)
+						</p>
+					) : null}
 				</div>
 			</Sheet>
 		</div>

@@ -251,9 +251,9 @@ async def test_summaries_caches_durable_rows_within_ttl(tmp_path, monkeypatch) -
 
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None):
+    def counting_rows(config_dir, limit=None, *, strict=False):
         calls["n"] += 1
-        return real_rows(config_dir, limit)
+        return real_rows(config_dir, limit, strict=strict)
 
     monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
 
@@ -279,9 +279,9 @@ async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> No
 
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None):
+    def counting_rows(config_dir, limit=None, *, strict=False):
         calls["n"] += 1
-        return real_rows(config_dir, limit)
+        return real_rows(config_dir, limit, strict=strict)
 
     monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
 
@@ -372,9 +372,9 @@ async def test_projection_repaints_do_not_rescan_the_store(tmp_path, monkeypatch
 
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None):
+    def counting_rows(config_dir, limit=None, *, strict=False):
         calls["n"] += 1
-        return real_rows(config_dir, limit)
+        return real_rows(config_dir, limit, strict=strict)
 
     monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
 

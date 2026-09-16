@@ -10,12 +10,14 @@ will take is indistinguishable from one that writes none.
 from __future__ import annotations
 
 import errno
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
+from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
@@ -27,14 +29,25 @@ from local_operator.evaluation.evidence.models import (
     ObservationPayload,
     ReconciliationPayload,
     ScoreArtifact,
+    UsageCostPayload,
 )
 from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.episode import (
     DISCLOSED_INFRA_METADATA_KEYS,
+    MAX_STDERR_TAIL_CHARS,
     EpisodeRunner,
 )
+from local_operator.evaluation.runner.provider_client import ProviderModelClient
+from local_operator.harness.types import (
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamUsageEvent,
+    Usage,
+)
+from scripts.run_episode import _outcome_json
 from tests.unit.evaluation.runner.conftest import (
     ROUTE,
     FakeAdapter,
@@ -66,6 +79,7 @@ def _runner(
     model: ScriptedModel,
     responder: Any = None,
     max_steps: int = 4,
+    redactions: RedactionSet | None = None,
 ) -> EpisodeRunner:
     return EpisodeRunner(
         build_spec(episode_id),
@@ -75,6 +89,7 @@ def _runner(
         responder=responder,
         launch=lambda _: adapter,
         rescue=_rescue_ok,
+        redactions=redactions,
     )
 
 
@@ -695,6 +710,187 @@ async def test_a_waiting_model_runs_to_the_step_cap_under_default_guards(
 
 
 @pytest.mark.asyncio
+async def test_a_bounded_episode_is_not_cut_by_the_cost_rate_ratio(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The regression this guards: an episode that states a step budget is
+    judged by that budget, so a per-cycle cost jump (a prompt-cache miss) no
+    longer truncates it at the ratio's first full windows -- it reaches the
+    step budget instead."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # Ten cheap cycles then a ten-cycle jump: a 3x ratio guard fires on this.
+    model = ScriptedModel(["step"] * 40, cost_micros=[7] * 20 + [70] * 4)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=24),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 24
+    assert [step.truncation_reason for step in steps] == [None] * 23 + ["max-steps"]
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_episode_is_stopped_by_its_cost_cap_not_by_a_prorated_pace(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The caps are the authority, and the cost cap is the only COST stop a
+    bounded episode has: 300_000 micro-USD per cycle is unremarkable until the
+    1_000_000 the operator declared is actually reached, at step 4.
+
+    Before this the same episode was cut at step 2 for exceeding a per-cycle
+    pace prorated from the remaining budget -- a pace no cycle of a real
+    long-horizon episode can keep. That prorated pace is the defect: it cut the
+    campaign's ``batch-k3-canary6/task_010`` at step 337 of 500, and replayed
+    over a lane that finished and scored 50.00% it would have cut that lane on
+    its eleventh cycle.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["step"] * 20, cost_micros=300_000)
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 1_000_000}),
+        build_config(tmp_path, max_steps=8),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 4
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "budget-cap"
+    # ...and the reason an operator reads is the cap's own number, not a
+    # diagnosis of pace.
+    assert outcome.truncation_reason == "budget-cap"
+    assert outcome.truncation_detail is not None
+    assert "provider_usd_micros" in outcome.truncation_detail
+
+
+#: Per-cycle cost profiles a bounded episode may legitimately show, repeated to
+#: their last value. Each would trip the ratio guard on its own (a cache miss, a
+#: growing context, a runaway) and none may reach ``cost-spike`` when the
+#: episode states both its own step budget and its own cost cap.
+_BOUNDED_COST_PROFILES: dict[str, list[int]] = {
+    "flat": [7],
+    "cache-miss-spike": [7] * 20 + [70],
+    "long-horizon-growth": [7_000] * 10 + [63_000],
+    "runaway": [500_000],
+}
+
+
+@pytest.mark.parametrize("profile", sorted(_BOUNDED_COST_PROFILES))
+@pytest.mark.asyncio
+async def test_a_doubly_capped_run_cannot_end_as_a_cost_spike(
+    tmp_path: Path, episode_id: str, profile: str
+) -> None:
+    """End to end for the rule the guard now encodes: with the episode's own
+    step budget and cost cap both declared, and no operator cycle cap set,
+    price is not an authority this episode has. No cost profile can produce
+    ``cost-spike``; the only reasons available are the step cap and the cost
+    cap, whatever the cycle prices do. (The operator's ``max_cycle_usd`` is
+    excluded here on purpose: that one IS an authority, and its firing is
+    asserted in ``test_a_guard_truncation_detail_reaches_the_outcome_record``.)
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["step"] * 40, cost_micros=_BOUNDED_COST_PROFILES[profile])
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 6_000_000}),
+        build_config(tmp_path, max_steps=24),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    reasons = [step.truncation_reason for step in steps]
+    assert "cost-spike" not in reasons
+    assert reasons[-1] in ("max-steps", "budget-cap")
+    assert steps[-1].truncated is True
+
+
+@pytest.mark.asyncio
+async def test_a_guard_truncation_detail_reaches_the_outcome_record(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The verdict's why is reported, not dropped.
+
+    A truncation analysis used to have to be re-derived from ``events.jsonl``
+    by hand: the step payload records the guard's CODE (it must stay a stable
+    identifier consumers compare runs on) and the outcome a caller writes out
+    -- ``scripts/run_episode.py`` prints it as ``outcome.json``, the record the
+    campaign harness collects -- carried neither the code nor the detail. Both
+    are on the outcome now, taken from the firing verdict.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # The operator's absolute cycle cap, the one price-based stop left: a
+    # 1_000 micro-USD cycle against a 100 micro-USD cap fires it on step 1.
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=8, max_cycle_cost_micros=100),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step"] * 8, cost_micros=1_000),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert steps[-1].truncation_reason == "cost-spike"
+    assert outcome.truncation_reason == "cost-spike"
+    assert outcome.truncation_detail == "one model cycle cost 1000 micro-USD (cap 100)"
+    record = _outcome_json(outcome)
+    assert record["truncation_reason"] == "cost-spike"
+    assert record["truncation_detail"] == outcome.truncation_detail
+
+
+@pytest.mark.asyncio
+async def test_a_clean_finish_reports_no_truncation_reason(tmp_path: Path, episode_id: str) -> None:
+    """A run that finished on its own must not look truncated in the record a
+    caller writes out: the fields are set only by a real truncation."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["finish"]))
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.truncation_reason is None
+    assert outcome.truncation_detail is None
+    assert _outcome_json(outcome)["truncation_reason"] is None
+
+
+@pytest.mark.asyncio
 async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id: str) -> None:
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = _runner(
@@ -708,6 +904,114 @@ async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id:
     assert verify_bundle(root).valid
     steps = payloads(root, EnvironmentStepPayload)
     assert [step.truncation_reason for step in steps] == [None, "max-steps"]
+    # The step cap reaches the caller's own record too, with no judge to quote:
+    # ``max-steps`` is its own why, so the detail stays empty rather than being
+    # filled with a sentence nobody wrote.
+    assert outcome.truncation_reason == "max-steps"
+    assert outcome.truncation_detail is None
+
+
+def _wait_reply(observation_message: Any) -> str:
+    """Reply with a wait bound to whichever observation id the message names."""
+
+    text = observation_message.content[0].text
+    observation_id = next(
+        line.split(": ", 1)[1] for line in text.splitlines() if line.startswith("Observation ID: ")
+    )
+    return json.dumps(
+        {"actions": [{"kind": "wait", "observation_id": observation_id, "duration_ms": 1}]}
+    )
+
+
+class DirectProviderStream:
+    """Answers every request the way a DIRECT provider's API does.
+
+    Tokens, and never a dollar amount -- DeepSeek, Anthropic, OpenAI, Gemini,
+    Kimi and xAI all omit ``usage.cost`` (only aggregators precompute a bill).
+    That omission is the whole point of this fixture: it is the shape the
+    runner used to price at 0.
+    """
+
+    def __call__(self, request: Any, signal: Any) -> Any:
+        return self._events(request)
+
+    async def _events(self, request: Any) -> Any:
+        yield StreamTextDelta(delta=_wait_reply(request.messages[-1]))
+        usage = Usage(
+            input_tokens=4783,
+            output_tokens=443,
+            reasoning_tokens=225,
+            cache_read_tokens=3840,
+            # The on-the-wire spec, as ``stream_with_failover`` stamps it.
+            provider="deepseek",
+            model_id="deepseek-flash",
+        )
+        yield StreamUsageEvent(usage=usage)
+        yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+
+@pytest.mark.asyncio
+async def test_a_direct_providers_table_price_reaches_the_budget_cap(
+    tmp_path: Path, episode_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap fires on a table-priced spend, end to end through the real client.
+
+    A direct provider reports tokens and no bill, so before this the episode's
+    ``provider_cost_micros`` stayed 0 and ``BudgetCapGuard`` could never fire:
+    a runaway direct-provider episode was bounded only by its step count. This
+    drives the REAL ``ProviderModelClient`` (scripted wire, real pricing path)
+    through the REAL runner and pins that the priced spend is what truncates.
+
+    The DeepSeek canary tokens price at 838 micro-USD per cycle, so a cap of
+    exactly that figure is reached by the FIRST cycle while the 20-step budget
+    is nowhere near binding -- the cap, not the step count, is what stops this
+    episode. (The cap is reached at its value, ``>=``, not only exceeded: the
+    next cycle would exceed it, and a budget is an authority.)
+
+    838 is DeepSeek's published PEAK table price (the registry stores peak, and
+    the schedule halves it off-peak), and the scripted usage carries no stamp of
+    its own, so the clock is FROZEN into a peak window: left to the wall clock
+    this asserts 838 at 07:00 UTC and half that for the ~79% of the week that is
+    off-peak, which is a flake rather than a test. The tariff's own window
+    behaviour is pinned in ``tests/unit/model/test_tariff.py``.
+    """
+    from datetime import datetime, timezone
+
+    from local_operator.model import tariff
+
+    monkeypatch.setattr(tariff, "now_utc", lambda: datetime(2026, 9, 14, 7, 0, tzinfo=timezone.utc))
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    client = ProviderModelClient(
+        DirectProviderStream(),
+        route=ROUTE,
+        model_spec=ModelSpec(provider="deepseek", model_id="deepseek-flash"),
+        artifact_root=tmp_path / "artifacts",
+        prompt_cache_key="probe",
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 838}),
+        build_config(tmp_path, max_steps=20),
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    # The priced spend is in the journal, not a zero: this is the figure the
+    # cap is enforced on.
+    costs = payloads(root, UsageCostPayload)
+    assert [cost.cost_microusd for cost in costs] == [838]
+    assert payloads(root, ReconciliationPayload)[0].provider_cost_microusd == 838
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 1
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "budget-cap"
 
 
 @pytest.mark.asyncio
@@ -715,11 +1019,14 @@ async def test_budget_cap_truncates_not_cancels(tmp_path: Path, episode_id: str)
     """A reached provider-cost cap is enforced as a scored truncation, where
     before it was only reported as an overrun after the fact."""
 
-    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap.
+    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap. The
+    # step budget is sized so the CAP is what binds -- a cost guard that
+    # prorates a tiny 14-micro-USD allowance over ten steps would stop the
+    # episode as over-pace on its first cycle, which is a different test.
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = EpisodeRunner(
         build_spec(episode_id, caps={"provider_usd_micros": 14}),
-        build_config(tmp_path, max_steps=10),
+        build_config(tmp_path, max_steps=4),
         selector=selector(tmp_path),
         model=ScriptedModel(["step"] * 8),
         launch=lambda _: adapter,
@@ -993,9 +1300,12 @@ async def test_a_rejection_without_a_captured_reply_records_the_diagnostic_alone
     from local_operator.evaluation.runner.episode import _rejection_detail
     from local_operator.evaluation.runner.model import DecisionRejected
 
-    assert _rejection_detail(DecisionRejected("refused")) == "refused"
-    assert _rejection_detail(DecisionRejected("refused", reply="")) == "refused"
-    assert "--- rejected reply ---" in _rejection_detail(DecisionRejected("refused", reply="{}"))
+    # ``None`` is the explicit "in-process rendering, never evidence" case the
+    # signature requires a caller to state (``_diagnostic``'s rule).
+    assert _rejection_detail(DecisionRejected("refused"), None) == "refused"
+    assert _rejection_detail(DecisionRejected("refused", reply=""), None) == "refused"
+    detail = _rejection_detail(DecisionRejected("refused", reply="{}"), None)
+    assert "--- rejected reply ---" in detail
 
 
 @pytest.mark.asyncio
@@ -1046,6 +1356,275 @@ async def test_exhausted_decision_retries_seal_as_a_model_failure(
     assert errors[-1].diagnostic_code == "modelfailure"
     # Cleanup ran on the live session: the environment was never at fault.
     assert "cleanup" in adapter.calls
+
+
+#: The reasoning ladder the canary's route publishes, and the rung it ran at.
+_CANARY_LADDER = ("none", "low", "high", "max")
+
+
+class _TruncatingModel(ScriptedModel):
+    """Plays the canary's output-limit truncations, silent or not.
+
+    The two tokens differ ONLY in whether the reply carried anything: both stop
+    at ``length``, both are billed, both report ``tool_call_count=0``. That is
+    the pair the retreat's boundary has to separate -- ``empty-length`` is the
+    reasoning model that spent its whole budget thinking (``task_002``, the
+    third consecutive one sealing the episode), ``truncated-length`` is the
+    same call whose reply was cut mid-object and has something to correct.
+
+    ``retreat_effort`` is implemented the way the provider client does it:
+    one rung down the model's own ladder, refusing at the bottom. ``retreats``
+    records the rungs, so an assertion can tell "the episode recovered" from
+    "the episode recovered BY retreating".
+    """
+
+    def __init__(self, script: Any, *, effort: str = "max") -> None:
+        super().__init__(script)
+        self.effort = effort
+        self.retreats: list[str] = []
+
+    def retreat_effort(self) -> str | None:
+        index = _CANARY_LADDER.index(self.effort)
+        if index == 0:
+            return None
+        self.effort = _CANARY_LADDER[index - 1]
+        self.retreats.append(self.effort)
+        return self.effort
+
+    async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+        from local_operator.evaluation.runner.model import DecisionRejected
+
+        kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
+        if kind in ("empty-length", "truncated-length"):
+            silent = kind == "empty-length"
+            self.histories.append(tuple(history))
+            self.calls += 1
+            raise DecisionRejected(
+                "Your previous reply was rejected: "
+                + (
+                    "reply carried no tool call and no text: the model ended its turn as "
+                    "'length' without emitting a decision on either channel."
+                    if silent
+                    else "the reply was not one complete JSON object: the object itself was "
+                    "incomplete (cut off or double-escaped)."
+                ),
+                class_key="empty-reply" if silent else "incomplete-json",
+                # The reply the model produced, which is what the bundereader sees.
+                reply="" if silent else '{"actions": [{"kind": "click", "frame_id": "1"}]}',
+                stop_reason="length",
+                # The client's own classification, computed from the stream it
+                # saw. The runner reads this and nothing else.
+                empty_length_truncation=silent,
+                reasoning_effort=self.effort,
+                route=self.route,
+                usage=ModelUsage(
+                    input_tokens=36_221, output_tokens=16_384, reasoning_tokens=16_384
+                ),
+                cost_micros=self._bill(),
+                provider_request_id=f"attempt-{self.calls}",
+            )
+        decision = await super().decide(observation, history, **kwargs)
+        return decision.model_copy(update={"reasoning_effort": self.effort})
+
+
+@pytest.mark.asyncio
+async def test_empty_output_limit_truncations_retreat_the_effort_instead_of_sealing_the_episode(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The canary's zero-scoring failure shape must be recoverable.
+
+    Ground truth, from ``batch-deepseek-flash-canary8``: three episodes each
+    ended on three consecutive replies of ``output_tokens=16384
+    reasoning_tokens=16384 stop_reason=length tool_call_count=0`` -- the model's
+    ENTIRE output budget spent thinking, nothing emitted -- and were sealed
+    ``model_failure`` after 94/82/55 steps. The ordinary harness has a recovery
+    for exactly this (``harness/loop.py``: retry one effort rung lower, bounded
+    by ``MAX_EMPTY_TRUNCATION_RETRIES``); this arm re-prompted at the SAME
+    effort until the corrective bound ran out, which is why the same route
+    failed here and recovered in a session.
+
+    Three silent truncations and then a finish: the first two are retreated
+    (the third is where the retreat allowance is spent, so it counts as an
+    ordinary rejection and the corrective bound still has room), and the
+    episode completes SCORED. Every attempt keeps its own triple, its stop
+    reason and the rung it was asked at.
+    """
+
+    from local_operator.evaluation.evidence.models import ModelRequestPayload
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _TruncatingModel(["empty-length", "empty-length", "empty-length", "finish"])
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=model)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    assert outcome.reportability_label == "reportable"
+    # Two retreats, then the allowance is spent -- not three, and not none.
+    assert model.retreats == ["high", "low"]
+    assert model.calls == 4
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    # Four billed attempts, four triples: the retries are not hidden, and the
+    # episode's spend is the sum of what it actually cost.
+    assert report.counters is not None
+    assert report.counters.model_request_count == 4
+    assert report.counters.model_response_count == 4
+    # Every attempt is legible as what it was, in the evidence an analyst reads.
+    requests = payloads(root, ModelRequestPayload)
+    assert [request.reasoning_effort for request in requests] == ["max", "high", "low", "low"]
+    responses = payloads(root, ModelResponsePayload)
+    assert [response.stop_reason for response in responses] == ["length"] * 3 + ["stop"]
+    # Silent on BOTH channels: the marker alone does not say that, and it is the
+    # property the retreat is keyed on.
+    assert [response.tool_call_count for response in responses[:3]] == [0, 0, 0]
+    assert [response.reasoning_tokens for response in responses[:3]] == [16_384] * 3
+    errors = payloads(root, ErrorPayload)
+    assert [(e.category, e.diagnostic_code, e.retryable) for e in errors] == [
+        ("model", "decision-rejected", True)
+    ] * 3
+
+
+@pytest.mark.asyncio
+async def test_the_retreat_allowance_is_spent_before_the_corrective_bound_sees_it(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A model that never answers is still bounded, and by the same bound as before.
+
+    The retreat must not become a way to buy unbounded retries. Every attempt
+    here is a silent output-limit truncation, so the two retreats are spent
+    first -- ``max``, then ``high``, then ``low`` -- and from there the empty
+    truncations are ORDINARY rejections, retried at the ceiling effort until
+    ``max_decision_retries`` (2, plus the first attempt) seals the episode as
+    ``model_failure``. So the worst case grows by exactly the retreat
+    allowance: 5 billed attempts where it used to be 3, on an episode that was
+    always going to fail -- and the verdict says so, because ``attempts`` counts
+    the billed calls rather than only the corrective ones that exhausted the
+    bound.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _TruncatingModel(["empty-length"] * 8)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert model.retreats == ["high", "low"]
+    assert model.calls == 5
+    assert outcome.status == "failed"
+    assert outcome.score is not None
+    assert outcome.score.status == "unscored"
+    assert outcome.score.reason == "model_failure"
+    assert outcome.diagnostic is not None and "5 attempt(s)" in outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None and report.counters.model_request_count == 5
+
+
+@pytest.mark.asyncio
+async def test_a_truncation_that_carried_text_keeps_the_ordinary_rejection_path(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The NEGATIVE CONTROL, and the line the retreat may not cross.
+
+    Same stop reason, same billing, same zero tool calls -- the reply simply
+    carried text (a JSON batch cut mid-object, which is what ``task_002`` did
+    two calls before it died). That reply is TRUNCATED, not silent: there is
+    something to correct, so it takes the corrective re-prompt at the same
+    effort, and after ``max_decision_retries`` the episode seals
+    ``model_failure`` exactly as it did before this change. Retreating here
+    would spend the effort allowance on a defect the correction can fix, and
+    would make a truncation indistinguishable from a model that cannot answer.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _TruncatingModel(["truncated-length"] * 3 + ["finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert model.retreats == []
+    assert model.calls == 3
+    assert outcome.status == "failed"
+    assert outcome.score is not None
+    assert outcome.score.status == "unscored"
+    assert outcome.score.reason == "model_failure"
+    assert outcome.diagnostic is not None and "3 attempt(s)" in outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None and report.counters.model_request_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_cannot_retreat_degrades_to_the_corrective_path(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The retreat is an OPTIONAL client capability, like ``model_reply_metadata``.
+
+    A scripted or historic client has no effort to lower, and the episode must
+    then behave exactly as it did before: the silent truncations are ordinary
+    rejections, bounded by ``max_decision_retries``. The capability check is
+    what keeps the runner usable against a client that models no effort at all,
+    and this is the case that proves the runner does not assume it.
+    """
+
+    class _SilentScriptedModel(ScriptedModel):
+        """``ScriptedModel`` plus the flag, with NO ``retreat_effort``."""
+
+        async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+            from local_operator.evaluation.runner.model import DecisionRejected
+
+            if self.calls < len(self.script) and self.script[self.calls] == "empty-length":
+                self.histories.append(tuple(history))
+                self.calls += 1
+                raise DecisionRejected(
+                    "reply carried no tool call and no text",
+                    reply="",
+                    class_key="empty-reply",
+                    stop_reason="length",
+                    empty_length_truncation=True,
+                    route=self.route,
+                    usage=ModelUsage(input_tokens=36_221, output_tokens=16_384),
+                    cost_micros=self._bill(),
+                )
+            return await super().decide(observation, history, **kwargs)
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = _SilentScriptedModel(["empty-length"] * 3 + ["finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert model.calls == 3
+    assert outcome.score is not None and outcome.score.reason == "model_failure"
 
 
 @pytest.mark.asyncio
@@ -1735,3 +2314,204 @@ async def test_host_refusal_does_not_publish_supplied_answer(
     assert outcome.bundle_root is not None
     assert "user_simulator_exchange" not in _kinds(outcome.bundle_root)
     assert "execute" not in adapter.calls and "score" not in adapter.calls
+
+
+# ---------------------------------------------------------------------------
+# The adapter worker's stderr tail on the failure path
+# ---------------------------------------------------------------------------
+
+
+class _StubTail:
+    """Stands in for ``AdapterSupervisor.stderr_tail``.
+
+    The real one is a bounded, thread-fed buffer with an idle signal; this is
+    the same surface -- ``settled()`` for the failure path and ``bytes()`` for
+    a snapshot -- so a test can hand the runner a tail without spawning a
+    worker. ``with_settle=False`` models a launch seam whose tail object offers
+    no settle at all, which the failure path must tolerate rather than raise
+    on. The spawned path is covered in ``test_episode_subprocess``.
+    """
+
+    def __init__(self, data: bytes, *, with_settle: bool = True) -> None:
+        self._data = data
+        if with_settle:
+            self.settled = lambda: self._data
+
+    def bytes(self) -> bytes:
+        return self._data
+
+
+_TAIL_HEADER = "--- adapter stderr tail ---"
+
+
+def _fatal_detail_text(root: Path) -> str:
+    fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
+    assert len(fatal) == 1
+    detail = fatal[0].detail_artifact
+    assert detail is not None
+    return (root / "artifacts" / detail.sha256).read_bytes().decode()
+
+
+async def _fatal_run(
+    tmp_path: Path,
+    episode_id: str,
+    adapter: FakeAdapter,
+    *,
+    redactions: RedactionSet | None = None,
+) -> Any:
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "step", "finish"]),
+        redactions=redactions,
+    ).run()
+    assert outcome.status == "failed", outcome.diagnostic
+    assert outcome.bundle_root is not None
+    assert verify_bundle(outcome.bundle_root).valid
+    return outcome
+
+
+def _fatal_adapter(tmp_path: Path, episode_id: str) -> FakeAdapter:
+    return FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError("worker died mid-observe")},
+        fail_after={"execute": 1},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_worker_stderr_tail_rides_the_fatal_detail(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Upstream's own explanation must reach the bundle, not be discarded.
+
+    The supervisor drained the worker's stderr into a bounded tail and nothing
+    read it, so the two canary episodes whose only recorded fact was
+    "environment returned no screenshot frame" left no way to tell a full disk
+    from a dead server.
+    """
+
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(
+        b"desktopenv.pycontroller: Failed to get screenshot. Status code: 502\n"
+    )
+    outcome = await _fatal_run(tmp_path, episode_id, adapter)
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    # The summary is unchanged and still first: the tail is ADDITIONAL evidence.
+    assert text.startswith("SupervisionError: worker died mid-observe")
+    assert _TAIL_HEADER in text
+    assert "Failed to get screenshot. Status code: 502" in text
+
+
+@pytest.mark.asyncio
+async def test_no_stderr_tail_leaves_the_detail_byte_identical(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """An absent tail adds nothing at all, down to the byte."""
+
+    untailed = _fatal_adapter(tmp_path, episode_id)
+    outcome = await _fatal_run(tmp_path, episode_id, untailed)
+    # The pre-change assertion from `test_fatal_error_records_a_bounded_diagnostic_detail`,
+    # restated for the tail-free case: a launch handle with no tail, and an
+    # empty one, must not even add a header.
+    assert _fatal_detail_text(outcome.bundle_root) == "SupervisionError: worker died mid-observe"
+
+    # A second run needs its own roots and its own episode id: the evidence
+    # terminal is immutable and the lifecycle lineage is per episode id.
+    second = tmp_path / "empty-tail"
+    second.mkdir()
+    empty = _fatal_adapter(second, f"{episode_id}-empty")
+    empty.stderr_tail = _StubTail(b"")
+    outcome = await _fatal_run(second, f"{episode_id}-empty", empty)
+    assert _fatal_detail_text(outcome.bundle_root) == "SupervisionError: worker died mid-observe"
+
+
+@pytest.mark.asyncio
+async def test_a_tail_that_can_only_be_snapshotted_still_surfaces(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A launch seam's own tail object may offer no settle; it must not raise.
+
+    The failure path is the last place that may turn a handled failure into a
+    crash, so the narrower surface degrades to a snapshot rather than failing.
+    """
+
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(b"snapshot-only tail\n", with_settle=False)
+    outcome = await _fatal_run(tmp_path, episode_id, adapter)
+    assert "snapshot-only tail" in _fatal_detail_text(outcome.bundle_root)
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.asyncio
+async def test_a_secret_in_the_stderr_tail_withholds_the_tail_whole(
+    tmp_path: Path, episode_id: str, encoded: bool
+) -> None:
+    """The newly surfaced text is canary-checked, and the check is escape-aware.
+
+    ``RedactionSet`` derives base64, percent-encoded and hex canaries from every
+    resolved secret, so a plain substring check on the literal would miss the
+    encoded form a library or a URL might carry. The tail is withheld WHOLE
+    rather than masked, and only the tail: the diagnostic line is still
+    published, so the failure stays bucketed.
+    """
+
+    from urllib.parse import quote
+
+    secret = "AKIA-STDERR-CANARY-0123456789"
+    carried = quote(secret, safe="") if encoded else secret
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(f"upstream said {carried} while fetching\n".encode())
+    outcome = await _fatal_run(
+        tmp_path, episode_id, adapter, redactions=RedactionSet.from_resolved_values((secret,))
+    )
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert secret not in text
+    assert "upstream said" not in text
+    assert _TAIL_HEADER in text and WITHHELD in text
+    assert text.startswith("SupervisionError: worker died mid-observe")
+
+
+@pytest.mark.asyncio
+async def test_the_tail_is_scanned_before_it_is_bounded(tmp_path: Path, episode_id: str) -> None:
+    """A secret outside the retained window is still found, because the scan
+    sees the whole buffer before the bound is applied.
+
+    Bounding first is the ordering that leaks: a canary straddling the cut no
+    longer matches, and ``publish_artifact`` applies the same substring
+    semantics to whatever bytes it receives, so it would publish the surviving
+    fragment as clean.
+    """
+
+    secret = "AKIA-OUTSIDE-WINDOW-CANARY-0123456789"
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    padding = b"x" * 20_000
+    adapter.stderr_tail = _StubTail(secret.encode() + padding)
+    outcome = await _fatal_run(
+        tmp_path, episode_id, adapter, redactions=RedactionSet.from_resolved_values((secret,))
+    )
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert secret not in text
+    assert WITHHELD in text
+
+
+@pytest.mark.asyncio
+async def test_the_tail_section_is_bounded_and_keeps_its_end(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A chatty worker cannot inflate a bundle, and the END is what is kept."""
+
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(b"a" * 10_000 + b"TAIL-END-MARKER\n")
+    outcome = await _fatal_run(tmp_path, episode_id, adapter)
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    section = text.split(_TAIL_HEADER, 1)[1]
+    assert section.endswith("TAIL-END-MARKER\n")
+    assert len(section) <= MAX_STDERR_TAIL_CHARS + 64
+    assert section.count("a") < 10_000

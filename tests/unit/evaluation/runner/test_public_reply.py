@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -27,8 +28,12 @@ from local_operator.evaluation.evidence.models import (
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
-from local_operator.evaluation.runner.episode import EpisodeRunner
-from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
+from local_operator.evaluation.runner.episode import EpisodeRunner, _rejection_detail
+from local_operator.evaluation.runner.model import (
+    DecisionRejected,
+    EpisodeTurn,
+    StreamShape,
+)
 from local_operator.evaluation.runner.provider_client import (
     DecisionParseError,
     _ContextBuilder,
@@ -40,10 +45,12 @@ from local_operator.evaluation.runner.public_reply import (
     _MAX_EXTRA_KEYS_SHOWN,
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
+    REJECTED_REPLY_WITHHELD,
     decode_public_reply,
     looks_like_public_reply,
     public_reply_contract,
     redact_public_reply,
+    rejected_reply_evidence,
 )
 from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
 from tests.unit.evaluation.runner.conftest import (
@@ -97,58 +104,218 @@ def test_invalid_or_oversized_notes_reject_entire_decision(notes: Any) -> None:
         parse_decision(envelope(type_payload(observation()), notes), observation(), route=ROUTE)
 
 
+def _full_envelope(current: Any, notes: str = "visible fact") -> str:
+    """The envelope shape the contract used to REQUIRE, for tolerance tests.
+
+    Kept as the fixture of the old contract on purpose: every accepted-framing
+    case below is a reply the strict decoder refused, so the tests measure the
+    tolerance against the exact bytes it exists for rather than against the
+    shape this build now offers.
+    """
+
+    return envelope(type_payload(current), notes)
+
+
+def _wrapped(variant: str, payload: str) -> str:
+    """One generic tool-call serialization around a full, valid envelope.
+
+    The three shapes are verbatim what the DeepSeek canary arm's rejection
+    artifacts carried; 20 of its 104 refusals were exactly this -- a complete,
+    executable envelope inside one of these wrappers, discarded on framing.
+    """
+
+    if variant == "tool_name-parameters":
+        return json.dumps({"tool_name": "lop_structured_reply", "parameters": json.loads(payload)})
+    if variant == "tool_call-input-string":
+        return json.dumps({"tool_call": "lop_structured_reply", "input": payload})
+    if variant == "input-object":
+        return json.dumps({"input": json.loads(payload)})
+    raise AssertionError(variant)
+
+
+def _changed(change: str, raw: str, current: Any) -> str:
+    """One framing change to a full envelope, as raw reply text."""
+
+    value = json.loads(raw)
+    if change == "missing-version":
+        del value["reply_version"]
+    elif change == "wrong-version":
+        value["reply_version"] = "2.0"
+    elif change == "version-inside-batch":
+        value["action_batch"]["reply_version"] = "1.0"
+    elif change == "notes-inside-batch":
+        value["action_batch"]["public_observations"] = value.pop("public_observations")
+    elif change == "extra-top-level-key":
+        value["thinking"] = "ignored"
+    elif change == "extra-batch-key":
+        value["action_batch"]["episode_id"] = "another-episode"
+    elif change == "hoisted-batch":
+        return json.dumps({"actions": value["action_batch"]["actions"], "public_observations": ""})
+    elif change == "trailing-text":
+        return raw + "\nHope that helps!"
+    else:
+        raise AssertionError(change)
+    return json.dumps(value)
+
+
+def _refused(change: str, raw: str, current: Any) -> str:
+    """One change that must STILL cost the turn, as raw reply text."""
+
+    value = json.loads(raw)
+    if change == "two-batches-in-one-object":
+        value["actions"] = json.loads(type_payload(current))["actions"]
+        return json.dumps(value)
+    if change == "nested-envelope":
+        return json.dumps({"wrapper": value})
+    if change == "nested-batch":
+        value["action_batch"] = {"wrapper": value["action_batch"]}
+        return json.dumps(value)
+    if change == "duplicate-note":
+        return raw.replace(
+            '"public_observations":', '"public_observations":"other", "public_observations":'
+        )
+    if change == "duplicate-action":
+        return raw.replace('"kind":', '"kind":"finish", "kind":')
+    if change == "duplicate-version":
+        return raw.replace('"reply_version":', '"reply_version":"2.0", "reply_version":')
+    if change == "trailing-competing-batch":
+        return raw + finish_payload(current)
+    if change == "truncated-envelope":
+        return raw[:-6]
+    if change == "extra-action-key":
+        # An action-level defect, which stays refused: the envelope around it
+        # being tolerated says nothing about the actions inside it.
+        value["action_batch"]["actions"][0]["x"] = 1
+        return json.dumps(value)
+    if change == "leading-prose":
+        return "commentary " + raw
+    if change == "stale-observation-binding":
+        value["action_batch"] = json.loads(type_payload(observation(1)))
+        return json.dumps(value)
+    raise AssertionError(change)
+
+
 @pytest.mark.parametrize(
     "change",
     [
         "missing-version",
         "wrong-version",
-        "extra-envelope",
-        "extra-batch",
+        "version-inside-batch",
+        "notes-inside-batch",
+        "extra-top-level-key",
+        "extra-batch-key",
+        "hoisted-batch",
+        "trailing-text",
+    ],
+)
+def test_framing_is_normalised_and_never_costs_the_turn(change: str) -> None:
+    """Framing is where the batch SITS, and it decides nothing.
+
+    Each case here was a refusal on the canary arm whose payload was already a
+    complete, executable decision: a ``reply_version`` that was missing, or the
+    wrong value, or nested one level down; a notes key below instead of above;
+    a key the contract has no use for; the same batch without its wrapper; and
+    the correct envelope followed by text. The DECISION must be byte-identical
+    to the legacy one, and the model's own note must survive the normalisation --
+    it is memory, and dropping it would publish a reply the model did not send.
+    """
+
+    current = observation()
+    legacy = parse_decision(type_payload(current), current, route=ROUTE)
+    decision = parse_decision(
+        _changed(change, _full_envelope(current), current), current, route=ROUTE
+    )
+
+    assert decision.action_batch.to_canonical_json() == legacy.action_batch.to_canonical_json()
+    if change == "hoisted-batch":
+        assert decision.public_reply is not None
+        assert decode_public_reply(decision.public_reply)["public_observations"] == ""
+    else:
+        assert decision.public_reply is not None
+        assert decode_public_reply(decision.public_reply)["public_observations"] == "visible fact"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["tool_name-parameters", "tool_call-input-string", "input-object"],
+)
+def test_a_generic_tool_call_serialization_is_unwrapped_and_decoded(variant: str) -> None:
+    """A wrapper around a call is framing, so unwrapping it changes nothing.
+
+    Regression pinned against the base tree: every one of these three verbatim
+    shapes was refused there (``batch-shape`` / ``incomplete-json``) while
+    carrying a complete, duplicate-free batch bound to the current observation.
+    """
+
+    current = observation()
+    visible = _full_envelope(current, "Visible status: ready")
+    legacy = parse_decision(type_payload(current), current, route=ROUTE)
+    wrapped = parse_decision(_wrapped(variant, visible), current, route=ROUTE)
+
+    assert wrapped.action_batch.to_canonical_json() == legacy.action_batch.to_canonical_json()
+    assert decode_public_reply(wrapped.public_reply or "")["public_observations"] == (
+        "Visible status: ready"
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "two-batches-in-one-object",
         "nested-envelope",
         "nested-batch",
         "duplicate-note",
         "duplicate-action",
         "duplicate-version",
-        "trailing-prose",
-        "trailing-batch",
+        "trailing-competing-batch",
         "leading-prose",
-        "wrong-observation",
+        "stale-observation-binding",
     ],
 )
-def test_envelope_is_single_unambiguous_current_decision(change: str) -> None:
+def test_ambiguity_and_broken_input_still_cost_the_turn(change: str) -> None:
+    """The refusals that survive, each for a reason about MEANING or reading.
+
+    Two action arrays that could each be the decision, a batch object that
+    carries none, duplicated JSON keys, a second batch for the same observation,
+    a preamble before the object (skipping to the first ``{`` can execute a
+    batch the model never sent), and a batch bound to another observation are
+    all still refused. Widening what counts as framing was never allowed to
+    widen what counts as a decision.
+
+    The leading-prose case is why the trailing-text tolerance stays ONE-SIDED:
+    it is the same measured rule the legacy decoder has always had, not a new
+    leniency.
+    """
+
     current = observation()
-    value = json.loads(envelope(type_payload(current), "visible fact"))
-    if change == "missing-version":
-        del value["reply_version"]
-    elif change == "wrong-version":
-        value["reply_version"] = "2.0"
-    elif change == "extra-envelope":
-        value["actions"] = json.loads(type_payload(current))["actions"]
-    elif change == "extra-batch":
-        value["action_batch"]["episode_id"] = "another-episode"
-    elif change == "nested-envelope":
-        value = {"wrapper": value}
-    elif change == "nested-batch":
-        value["action_batch"] = {"wrapper": value["action_batch"]}
-    elif change == "wrong-observation":
-        value["action_batch"] = json.loads(type_payload(observation(1)))
-    raw = json.dumps(value)
-    if change == "duplicate-note":
-        raw = raw.replace(
-            '"public_observations":', '"public_observations":"other", "public_observations":'
-        )
-    elif change == "duplicate-action":
-        raw = raw.replace('"kind":', '"kind":"finish", "kind":')
-    elif change == "duplicate-version":
-        raw = raw.replace('"reply_version":', '"reply_version":"2.0", "reply_version":')
-    elif change == "trailing-prose":
-        raw += " commentary"
-    elif change == "trailing-batch":
-        raw += finish_payload(current)
-    elif change == "leading-prose":
-        raw = "commentary " + raw
+    raw = _refused(change, _full_envelope(current), current)
+
     with pytest.raises(DecisionParseError):
         parse_decision(raw, current, route=ROUTE)
+
+
+def test_a_reply_bound_to_another_observation_keeps_its_own_class() -> None:
+    """The binding check is untouched by the framing tolerance.
+
+    A decision made about a screen the environment has already moved past is the
+    one failure worse than losing the turn, so the class key the arm counts it
+    under (``observation-binding``) must keep its own diagnostic. This is the
+    property the scope correction singled out: normalise framing, never meaning.
+    """
+
+    current = observation()
+    stale = observation(1)
+    raw = json.dumps(
+        {
+            "action_batch": {"actions": json.loads(type_payload(stale))["actions"]},
+            "public_observations": "",
+        }
+    )
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(raw, current, route=ROUTE)
+
+    assert "bind to a different observation_id" in str(info.value)
 
 
 def test_legacy_trailing_envelope_cannot_supersede_current_decision() -> None:
@@ -162,6 +329,46 @@ def test_legacy_trailing_envelope_cannot_supersede_current_decision() -> None:
         type_payload(current) + envelope(finish_payload(observation(1))), current, route=ROUTE
     )
     assert decision.public_reply is None
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_envelope_is_still_placeholdered_in_history(
+    tmp_path: Path,
+) -> None:
+    """The history boundary does not move with the framing tolerance.
+
+    A rejected reply that carried notes is withheld from corrective history: its
+    notes are unvalidated text, so the model is corrected from the hint rather
+    than from its own words (the F1 barrier). Pinned on a rejection the framing
+    tolerance does NOT absorb -- a batch bound to another observation -- because
+    that is what makes the point: widening what the decoder ACCEPTS must never
+    widen what an unvalidated reply may PUBLISH.
+    """
+
+    note = "rejected-note-must-not-enter-memory"
+    raw = json.dumps(
+        {
+            "action_batch": {"actions": json.loads(type_payload(observation(1)))["actions"]},
+            "public_observations": note,
+        }
+    )
+    stream = RecordingStream(raw)
+    client = _client(stream, tmp_path)
+    turns = [EpisodeTurn(observation=observation())]
+
+    with pytest.raises(DecisionRejected) as error:
+        await client.decide(observation(), turns)
+
+    assert error.value.class_key == "observation-binding"
+    assert error.value.reply == REJECTED_PUBLIC_REPLY
+
+    stream.reply = finish_payload(observation())
+    await client.decide(observation(), turns)
+    replay = "\n".join(message.text for message in stream.requests[-1].messages)
+
+    assert REJECTED_PUBLIC_REPLY in replay
+    assert note not in replay
+    assert '"observation_id" of the observation being answered' in replay
 
 
 @pytest.mark.asyncio
@@ -290,6 +497,253 @@ async def test_f1_runner_repro_leaves_no_secret_in_bundle_or_replay(
     assert verify_bundle(root).valid
 
 
+@pytest.mark.asyncio
+async def test_a_rejected_envelope_reaches_the_bundle_with_its_class(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The reply is evidence even when it is NOT replayable history.
+
+    An envelope-shaped reply is withheld from the corrective history because its
+    notes are unvalidated text; the bundle is a different boundary, and
+    withholding it there is what made 273 of the campaign's 280 rejection
+    artifacts unreadable. Both halves are asserted on the same run: the
+    artifact carries the reply and the class key, the next request carries the
+    placeholder, and neither carries the other's rendering.
+
+    The reply declares a ``reply_version`` this build does not serve (``9.9``)
+    on purpose. It must no longer be the reason for anything: what is refused
+    here is the DECISION -- a batch bound to another observation -- and the
+    version is simply ignored, which is exactly the split the scope correction
+    asked for.
+    """
+
+    rejected_reply = json.dumps(
+        {
+            "reply_version": "9.9",
+            "action_batch": {"actions": json.loads(type_payload(observation(1)))["actions"]},
+            "public_observations": "visible fact",
+        }
+    )
+    calls = 0
+
+    def reply(message: Message) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return rejected_reply
+        return _wait_reply(message)
+
+    config = build_config(tmp_path)
+    stream = RecordingStream(reply)
+    client = _client(stream, config.artifact_root)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
+        # No canaries: this run is about the boundary, not about redaction --
+        # the F1 tests above cover the withheld case.
+        redactions=RedactionSet.from_resolved_values(()),
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None and len(stream.requests) >= 2
+    texts = [
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in root.rglob("*")
+        if path.is_file()
+    ]
+    assert any(
+        rejected_reply in text and "class: observation-binding" in text for text in texts
+    ), "the rejected reply and its class are in the bundle"
+    replay = "\n".join(message.text for message in stream.requests[1].messages)
+    assert REJECTED_PUBLIC_REPLY in replay
+    assert rejected_reply not in replay
+    assert verify_bundle(root).valid
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        lambda raw, secret: raw,
+        lambda raw, secret: raw.replace("fixture", "\\u0066ixture"),
+        lambda raw, secret: raw.replace(secret, quote(secret, safe="")),
+        lambda raw, secret: raw.replace(secret, base64.b64encode(secret.encode()).decode()),
+        # Escaping COMPOSES, so the scan has to decode more than one level. Both
+        # shapes below were reproduced by the round-1 review as surviving a
+        # single-level scan: the first carries an ESCAPED BACKSLASH before the
+        # escape (a canary inside a JSON string), the second escapes every
+        # character and then escapes the escapes again.
+        lambda raw, secret: raw.replace(secret, secret.replace("fixture", "\\\\u0066ixture")),
+        lambda raw, secret: raw.replace(
+            secret,
+            "".join(f"\\u{ord(character):04x}" for character in secret).replace("\\", "\\\\"),
+        ),
+    ],
+    ids=[
+        "plain",
+        "json-unicode-escape",
+        "percent",
+        "base64",
+        "json-escaped-twice",
+        "per-character-double-escape",
+    ],
+)
+def test_a_reply_carrying_a_canary_is_withheld_whole_from_evidence(transform: Any) -> None:
+    """Evidence publishes the reply ONLY through an escape-aware scan.
+
+    The reply reaches evidence as WIRE bytes, so a canary can be spelt with JSON
+    unicode escapes, percent escapes, or an encoding, and a substring check on
+    the raw text sees none of them. It is also the shape that is most likely to
+    be TRUNCATED (that is usually why it was refused), so the scan cannot lean
+    on a JSON parse -- the raw and unescaped renderings are checked regardless.
+
+    Withheld WHOLE, never partially: ``assert_clear`` matches a substring, so
+    publishing a masked or cut rendering is how a canary stops matching the
+    alarm that exists to catch it.
+    """
+
+    secret = "fixture/canary-evidence-911"
+    redactions = RedactionSet.from_resolved_values([secret])
+    raw = envelope(type_payload(observation()), secret)
+    reply = transform(raw, secret)
+    if reply != raw:
+        # The point of the case: a substring check on the raw text sees nothing.
+        assert secret not in reply
+
+    published = rejected_reply_evidence(reply, redactions)
+
+    assert published == REJECTED_REPLY_WITHHELD
+    assert secret not in published
+    assert reply not in published
+
+
+@pytest.mark.asyncio
+async def test_an_episode_runs_on_wrapper_framed_replies(tmp_path: Path, episode_id: str) -> None:
+    """The framing the arm actually emitted, through a whole assembled episode.
+
+    The unit tests prove the decoder; only this proves the EPISODE. Each reply
+    of a real run (the runner, the real client, a fake adapter and a verified
+    bundle) arrives inside one of the three generic tool-call wrappers -- the
+    shape 20 of the arm's refusals had -- and the run must complete: a wrapped
+    reply costs no turn, and the notes it carries still reach the next request,
+    which is the model's only cross-turn memory on a screenshot-only benchmark.
+    """
+
+    note = "Visible status: wrapped and still carried"
+    wrappers = ["tool_name-parameters", "tool_call-input-string", "input-object"]
+    calls = 0
+
+    def reply(message: Message) -> str:
+        nonlocal calls
+        calls += 1
+        raw = _wait_reply(message)
+        if calls == 2:
+            oid = json.loads(raw)["actions"][0]["observation_id"]
+            raw = json.dumps(
+                {
+                    "actions": [
+                        {
+                            "kind": "finish",
+                            "observation_id": oid,
+                            "status": "done",
+                            "reason": "complete",
+                        }
+                    ]
+                }
+            )
+        return _wrapped(wrappers[(calls - 1) % len(wrappers)], envelope(raw, note))
+
+    config = build_config(tmp_path)
+    stream = RecordingStream(reply)
+    client = _client(stream, config.artifact_root)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
+        redactions=RedactionSet.from_resolved_values([]),
+    )
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    assert calls == 2
+    replay = "\n".join(message.text for message in stream.requests[1].messages)
+    assert note in replay and "was rejected" not in replay
+    responses = payloads(root, ModelResponsePayload)
+    recorded_ref = responses[0].redacted_response
+    assert recorded_ref is not None
+    recorded = (root / "artifacts" / recorded_ref.sha256).read_text()
+    assert json.loads(recorded)["public_observations"] == note
+    batches = payloads(root, ActionBatchPayload)
+    batch = json.loads((root / "artifacts" / batches[0].action_artifact.sha256).read_text())
+    assert batch["actions"] == json.loads(recorded)["actions"]
+
+
+def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:
+    """Withholding the reply must not withhold the rejection.
+
+    A withheld section is still a readable one because the diagnostic, the class
+    and the stream shape are all harness-owned text -- which is what lets the
+    evidence boundary differ from the history boundary without making a bundle
+    unreadable.
+    """
+
+    rejected = DecisionRejected(
+        "Your previous reply was rejected: the reply declared a bad version",
+        reply=REJECTED_PUBLIC_REPLY,
+        evidence_reply='{"public_observations": "fixture-canary"}',
+        class_key="unsupported-reply-version",
+        stream_shape=StreamShape(content_deltas=2, reasoning_deltas=3, stop="stop"),
+    )
+    redactions = RedactionSet.from_resolved_values(["fixture-canary"])
+
+    detail = _rejection_detail(rejected, redactions)
+
+    assert REJECTED_REPLY_WITHHELD in detail
+    assert "fixture-canary" not in detail
+    assert "class: unsupported-reply-version" in detail
+    assert "reasoning_deltas=3" in detail
+    # The history rendering is NOT what evidence shows: the placeholder belongs
+    # to the correction, and pasting it here would read as "the model said this".
+    assert REJECTED_PUBLIC_REPLY not in detail
+
+
+def test_a_marker_that_imitates_a_header_cannot_open_another_section() -> None:
+    """Provider-owned text goes into the header ESCAPED, never raw.
+
+    The artifact promises a fixed section order that a script can read, and the
+    stop marker is the one part of that header the harness does not author. A
+    marker carrying a newline would otherwise write a line that reads like
+    another header (or hide the rest of the section), so non-printables are
+    escaped rather than truncated -- a 64-character bound does not neutralise a
+    short injection.
+    """
+
+    rejected = DecisionRejected(
+        "Your previous reply was rejected: refused",
+        reply="{}",
+        class_key="malformed-json",
+        stream_shape=StreamShape(content_deltas=1, stop="stop\nclass: extra-action-key"),
+    )
+
+    detail = _rejection_detail(rejected, None)
+
+    assert [line for line in detail.splitlines() if line.startswith("class: ")] == [
+        "class: malformed-json"
+    ]
+    assert "stop\\nclass: extra-action-key" in detail
+
+
 def test_reserved_key_scan_preserves_legacy_rejection_replay() -> None:
     """No reserved key means legacy raw-text corrective replay is unchanged;
     escaped or truncated reserved keys fail closed on undecodable output."""
@@ -317,8 +771,12 @@ def test_resolved_secret_notes_are_redacted_before_replay(transform: Any) -> Non
     # JSON escapes cannot hide decoded credentials from the existing boundary.
     raw = raw.replace("known", "\\u006bnown")
     clean = redact_public_reply(raw, RedactionSet.from_resolved_values([secret]))
-    assert json.loads(clean)["public_observations"] == "[redacted public observations]"
-    assert json.loads(clean)["action_batch"] == json.loads(raw)["action_batch"]
+    recorded = json.loads(clean)
+    assert recorded["public_observations"] == "[redacted public observations]"
+    # The redaction rewrites the note and nothing else: the accepted reply is
+    # normalised to the contract's one shape, so its actions are the ones the
+    # model sent, byte for byte.
+    assert recorded["actions"] == json.loads(raw)["action_batch"]["actions"]
     assert secret not in clean
 
 
@@ -329,10 +787,18 @@ def test_contract_identity_is_separate_from_action_surface() -> None:
         "runner-model-reply-v1", contract
     )
     schema = contract["schema"]
+    assert schema["required"] == ["actions"]
     assert schema["properties"]["public_observations"]["maxLength"] == MAX_PUBLIC_OBSERVATIONS_CHARS
-    assert schema["properties"]["action_batch"]["additionalProperties"] is False
+    # The closed envelope is gone from the published contract: no version to pin
+    # and no wrapper to nest, so a reader of a bundle can see that a reply needs
+    # neither without reading the decoder.
+    assert "action_batch" not in schema["properties"]
+    assert "reply_version" not in schema["properties"]
+    assert contract["accepted_framings"]
+    assert "legacy_plain_action_batch" not in contract
     prompt = build_system_prompt()
-    assert '"reply_version": "1.0"' in prompt
+    assert '"actions": [ ... ], "public_observations": ""' in prompt
+    assert "reply_version" not in prompt
     assert "concise NEW factual data" in prompt
     assert "private reasoning" in prompt and "credentials/secrets" in prompt
 
@@ -506,7 +972,7 @@ async def test_real_provider_runner_records_and_replays_public_evidence(
     assert replay == recorded
     batches = payloads(root, ActionBatchPayload)
     batch = json.loads((root / "artifacts" / batches[0].action_artifact.sha256).read_text())
-    assert batch["actions"] == json.loads(recorded)["action_batch"]["actions"]
+    assert batch["actions"] == json.loads(recorded)["actions"]
     manifest = json.loads((root / "manifest.json").read_text())
     assert all(manifest["metadata"][key] == value for key, value in public_reply_contract().items())
     request = payloads(root, ModelRequestPayload)[0]
@@ -542,63 +1008,52 @@ async def test_old_fake_client_does_not_claim_a_new_reply_contract(
     assert decode_public_reply(envelope(type_payload(observation())))
 
 
-@pytest.mark.parametrize(
-    ("body", "carried", "omitted"),
-    [
-        (
-            '{"action_batch": {"actions": []}}',
-            ["'action_batch'"],
-            ["'public_observations'", "'reply_version'"],
-        ),
-        (
-            '{"reply_version": "1.0", "action_batch": {"actions": []}}',
-            ["'action_batch'", "'reply_version'"],
-            ["'public_observations'"],
-        ),
-    ],
-)
-def test_a_partial_envelope_is_told_which_keys_it_missed(
-    body: str, carried: list[str], omitted: list[str]
-) -> None:
-    """Validation is unchanged; what the model is TOLD is what changed.
+def test_a_reply_with_no_usable_actions_states_the_accepted_shape() -> None:
+    """The one batch-shape refusal left, and it names the accepted shape.
 
-    Reserving every envelope key means touching one of them commits the reply
-    to strict decoding, so the common failure is a near-miss: the model emits
-    ``{"action_batch": {...}}`` and used to be told only the rule it had
-    already half-followed, never which half it missed.
-
-    That difference decides whether the correction lands. Measured on
-    ``minimax/minimax-m3``, which produces this exact shape in ~1 of 10
-    replies: re-prompting with the bare rule recovered 4/10, while naming the
-    keys present and missing recovered 9/10 -- the gap between an episode that
-    continues and one that spends its retry bound and seals as a model
-    failure.
+    Two spellings of the same defect: an ``action_batch`` whose contents are not
+    an actions array at all, and an empty one. There is no decision in either, so
+    both are refused -- but the refusal states what to send instead, because a
+    bare rule is not something a model can act on (the doctrine
+    ``rejection_hint`` is written to). The keys that landed in the batch are no
+    longer named: a sibling key no longer refuses the reply at all, so the only
+    bytes this branch speaks about are the accepted shape.
     """
 
-    with pytest.raises(ValueError) as info:
-        decode_public_reply(body)
+    actions = json.loads(type_payload(observation()))["actions"]
+    bodies = [
+        json.dumps({"action_batch": {"actions": []}, "public_observations": ""}),
+        json.dumps({"action_batch": {"wrapper": {"actions": actions}}}),
+    ]
 
-    message = str(info.value)
-    for key in carried:
-        assert key in message.split("omitted")[0]
-    for key in omitted:
-        assert key in message
-    # Both legal shapes are offered, so the model can pick the cheaper one
-    # rather than guessing which half of the contract to repair.
-    assert '{"actions": [...]}' in message
-    assert "reply_version, action_batch, public_observations" in message
+    for body in bodies:
+        with pytest.raises(ValueError) as info:
+            decode_public_reply(body)
+        assert '{"actions": [...]}' in str(info.value)
 
 
-def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
-    """The other near-miss: every required key present, plus one more."""
+def test_an_envelope_with_an_extra_key_is_ignored_and_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other near-miss: every key the contract uses, plus one more.
 
-    with pytest.raises(ValueError) as info:
-        decode_public_reply(
-            '{"reply_version": "1.0", "action_batch": {"actions": []}, '
-            '"public_observations": "", "notes": "x"}'
-        )
+    It used to cost the turn. It is framing -- the actions decode, and a key the
+    contract has no use for cannot change what executes -- so it is ignored. Not
+    silently, though: an unexpected key is a signal (usually a model guessing at
+    a shape it was not given), and the warning is where a reader can still see
+    it.
+    """
 
-    assert "added 1 unexpected key(s): 'notes'" in str(info.value)
+    actions = json.loads(type_payload(observation()))["actions"]
+    body = json.dumps(
+        {"action_batch": {"actions": actions}, "public_observations": "", "notes": "x"}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        decoded = decode_public_reply(body)
+
+    assert decoded["actions"] == actions
+    assert "'notes'" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -609,7 +1064,7 @@ def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
         {"\U000e0001" * 40: 1},
         {"SECRET-" + "z" * 60: 1},
         # Every key here is individually SAFE to quote, so only the count cap
-        # stands between the model's payload and the prompt. Without a case
+        # stands between the model's payload and the log line. Without a case
         # like this the cap is unpinned: the other fixtures withhold every key
         # on safety grounds and never exercise it.
         {f"k{index}": index for index in range(60)},
@@ -622,59 +1077,44 @@ def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
         "many-short-safe-keys",
     ],
 )
-def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object]) -> None:
-    """Model-supplied key names never reach the model again reshaped.
+def test_unexpected_keys_cannot_inflate_the_log_line(
+    extra: dict[str, object], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Model-supplied key names never leave this module reshaped or unbounded.
 
-    ``present`` and ``missing`` intersect a fixed set, so they can only name
-    the three reserved keys. ``extra`` is arbitrary model output, and echoing
-    it whole turned a 50,000-character key into a 50,000-character retry
-    prompt -- intercepted by neither ``MAX_REJECTED_REPLY_CHARS`` nor
-    ``_diagnostic``'s cap.
+    The boundary moved with the contract -- the names used to be quoted into a
+    retry PROMPT, and are now quoted into a log LINE -- and the bound is the same
+    one, so it is pinned against the same payloads. Quoting a key whole is what
+    makes a 50,000-character key a 50,000-character retry prompt, which neither
+    ``MAX_REJECTED_REPLY_CHARS`` nor ``_diagnostic``'s cap intercepts.
 
-    Quoted WHOLE or not at all. The two cases beyond mere size are why
-    truncating was not good enough:
+    Quoted WHOLE or not at all. The two cases beyond mere size are why truncating
+    was not good enough:
 
     ``repr-expanding-key`` -- ``repr`` expands escapes AFTER a cut, so a bound
     applied to the raw key does not bound the rendered output, and the limit
     silently depends on the input's alphabet.
 
     ``long-secret-key`` -- and this is the one that matters: cutting converts a
-    LOUD failure into a SILENT one. ``_assert_redacted`` is substring-based, so
-    a secret longer than the cut survives as a prefix that no longer matches
-    the canary. The leak stops tripping the alarm that exists to catch it.
+    LOUD failure into a SILENT one. ``_assert_redacted`` is substring-based, so a
+    secret longer than the cut survives as a prefix that no longer matches the
+    canary. The leak stops tripping the alarm that exists to catch it.
     """
 
+    actions = json.loads(type_payload(observation()))["actions"]
     payload = json.dumps(
         {
             "reply_version": "1.0",
-            "action_batch": {"actions": []},
+            "action_batch": {"actions": actions},
             "public_observations": "",
             **extra,
         }
     )
 
-    with pytest.raises(ValueError) as info:
+    with caplog.at_level(logging.WARNING):
         decode_public_reply(payload)
 
-    message = str(info.value)
-    # Tight, and deliberately so. A loose ceiling passes while an unsafe key is
-    # quoted in ESCAPED form -- the raw key is absent from the message, so a
-    # substring assertion alone cannot see it, and the 702-character escape
-    # expansion this replaces slipped under a 1,000-char ceiling.
-    #
-    # 600 is chosen against the CODE's reachable worst case, not against these
-    # fixtures. Five 40-character keys are all quotable; adding a carried
-    # reserved key and the " and N more" suffix pushes the rendered maximum to
-    # 539, established by brute-forcing every carried/omitted split against the
-    # real decoder (review round 5) after two narrower measurements -- 513 and
-    # 518 -- each missed a term. Growth is logarithmic in the key count, so the
-    # template stays under ~550 for any input at all.
-    #
-    # A bound below 539 would assert a property the code does not have and
-    # would fail on a legitimate input. These fixtures top out around 344
-    # because every key in them is withheld, which is the point: the margin
-    # between that and this ceiling is the room an escaped quote would need.
-    assert len(message) < 600, f"diagnostic grew to {len(message)} characters"
+    message = caplog.records[-1].getMessage()
     # No fragment of an unsafe key escapes: whole-or-nothing, so a redaction
     # canary still matches and nothing is rendered in a reshaped form.
     quoted = sum(1 for key in extra if repr(key) in message)
@@ -685,28 +1125,40 @@ def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object
             continue
         assert key not in message
         assert key[:_MAX_EXTRA_KEY_CHARS] not in message
-    # The count is still reported, so the model learns how many keys to drop
-    # even when their names are withheld entirely.
-    assert f"added {len(extra)} unexpected key(s)" in message
+    # The count is still reported, so the reader learns how many keys were
+    # dropped even when their names are withheld entirely.
+    assert f"carried {len(extra)} key(s)" in message
+    # 600 is the reachable worst case for five 40-character quotable keys plus
+    # the fixed template and the " and N more" suffix, measured by brute force
+    # in review round 5 -- a bound below it would assert a property the code does
+    # not have. Growth is logarithmic in the key count.
+    assert len(message) < 600, f"log line grew to {len(message)} characters"
 
 
-def test_a_short_plain_unexpected_key_is_still_named() -> None:
+def test_a_short_plain_unexpected_key_is_still_named(caplog: pytest.LogCaptureFixture) -> None:
     """Withholding is for unsafe keys only; the useful case stays useful.
 
-    The 9/10 recovery this diagnostic was measured for came from naming keys,
-    so a bound that withheld every name would protect the prompt by making it
-    useless.
+    Naming keys is what made the old diagnostic corrective (9/10 recovered
+    against 4/10 for the bare rule), so a bound that withheld every name would
+    protect the line by making it useless.
     """
 
-    with pytest.raises(ValueError) as info:
-        decode_public_reply(
-            '{"reply_version": "1.0", "action_batch": {"actions": []}, '
-            '"public_observations": "", "notes": "x", "extra": 1}'
-        )
+    actions = json.loads(type_payload(observation()))["actions"]
+    body = json.dumps(
+        {
+            "version": "1.0",
+            "actions": actions,
+            "public_observations": "",
+            "notes": "x",
+            "extra": 1,
+        }
+    )
 
-    message = str(info.value)
-    assert "'extra'" in message and "'notes'" in message
-    assert "not shown" not in message
+    with caplog.at_level(logging.WARNING):
+        decode_public_reply(body)
+
+    assert "'extra'" in caplog.text and "'notes'" in caplog.text
+    assert "not shown" not in caplog.text
 
 
 def test_a_non_object_reply_keeps_the_plain_rule() -> None:
@@ -715,4 +1167,66 @@ def test_a_non_object_reply_keeps_the_plain_rule() -> None:
     with pytest.raises(ValueError) as info:
         decode_public_reply("[1, 2]")
 
-    assert "requires exactly" in str(info.value)
+    assert "decision must be a JSON object" in str(info.value)
+
+
+#: The three generic tool-call serializations, as ``_wrapped`` builds them.
+_WRAPPER_VARIANTS = ("tool_name-parameters", "tool_call-input-string", "input-object")
+
+#: One verbatim shape per rejection class in the arm's own histogram, and what
+#: this build now does with it. The counts are the arm's, so this table states
+#: the refusals the change exists to recover rather than a claim about them:
+#: incomplete-json 34, envelope-shape 23, batch-shape 20, observation-binding 15,
+#: leading-delimiter 5, other 7.
+_MEASURED_REJECTION_CLASSES = [
+    ("incomplete-json", "trailing-text", True),
+    ("incomplete-json", "truncated-envelope", False),
+    ("envelope-shape", "missing-version", True),
+    ("envelope-shape", "notes-inside-batch", True),
+    ("batch-shape", "tool_name-parameters", True),
+    ("batch-shape", "input-object", True),
+    ("observation-binding", "stale-observation-binding", False),
+    ("leading-delimiter", "leading-prose", False),
+    ("other", "wrong-version", True),
+    ("other", "extra-action-key", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("rejection_class", "change", "accepted"),
+    _MEASURED_REJECTION_CLASSES,
+    ids=[f"{row[0]}-{row[1]}" for row in _MEASURED_REJECTION_CLASSES],
+)
+def test_each_measured_rejection_class_after_the_contract_change(
+    rejection_class: str, change: str, accepted: bool
+) -> None:
+    """The histogram the change was scoped against, one shape per class.
+
+    A reply is judged on its ACTIONS. Every class whose payload was already a
+    complete, executable decision now decodes -- the missing or wrong or nested
+    ``reply_version``, the notes key below instead of above, the envelope inside
+    a generic tool-call wrapper, a complete envelope followed by text, and a
+    version literal this harness does not serve. Two classes still refuse, and
+    both are deliberate: ``observation-binding``, because a decision about a
+    screen the environment has moved past is the one failure worse than losing
+    the turn, and ``leading-delimiter``, because the trailing-text tolerance has
+    only ever run forwards (skipping to the first ``{`` can execute a batch the
+    model never sent). The malformed and action-level defects are pinned as
+    still-refused rows beside them, so a tolerance that quietly widened would
+    fail here rather than in a paid run.
+    """
+
+    current = observation()
+    raw = _full_envelope(current)
+    if change in _WRAPPER_VARIANTS:
+        payload = _wrapped(change, raw)
+    elif accepted:
+        payload = _changed(change, raw, current)
+    else:
+        payload = _refused(change, raw, current)
+
+    if accepted:
+        assert parse_decision(payload, current, route=ROUTE).action_batch.actions
+    else:
+        with pytest.raises(DecisionParseError):
+            parse_decision(payload, current, route=ROUTE)

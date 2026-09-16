@@ -305,3 +305,70 @@ class TestSpeculativeSessionCleanup:
         assert not hasattr(process, "_remove_unwritten_session_dir")
         source = inspect.getsource(process)
         assert "rmdir(" not in source and "rmtree(" not in source
+
+
+def test_the_runtime_child_logs_to_its_own_bounded_file_apart_from_the_daemon(
+    tmp_path, monkeypatch
+) -> None:
+    """The runtime's log must be its OWN, bounded, and attributable.
+
+    Three properties, each from a measured failure on the operator's machine:
+
+    * it goes to ``logs/runtime.log``, NOT the daemon's ``logs/mobile.log``. The
+      daemon's file is a launchd ``StandardOutPath`` it appends to through an fd
+      it never reopens, and bounding a file means RENAMING it: measured after one
+      rename of that path, nine runtime children held the renamed inode while
+      only the daemon held the fresh file, so ``lop mobile logs`` (a
+      ``tail mobile.log``) showed the daemon and none of its children. A test
+      that let the child write the daemon's path again would reintroduce exactly
+      that split.
+    * it is BOUNDED — the ``logging.basicConfig(level=INFO, filename=...)`` this
+      replaces wrote a 420 MB file with nothing rotating it.
+    * the wire clients are pinned, because at the root's INFO they emitted one
+      record per HTTP request — 557,352 of the 420 MB file's lines.
+
+    It also has to say who it is: the file is written by every runtime child, so
+    a line with no pid is a line no one can attribute.
+    """
+    import logging
+    import logging.handlers
+    import os
+    from pathlib import Path
+
+    from local_operator.logger import LOG_BACKUP_COUNT, LOG_MAX_BYTES
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.session.runtime import process
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+
+    async def fake_amain() -> int:
+        return 0
+
+    monkeypatch.setattr(process, "amain", fake_amain)
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    client = logging.getLogger("httpx2")
+    saved_client_level = client.level
+    try:
+        assert process.main() == 0
+        assert len(root.handlers) == 1
+        handler = root.handlers[0]
+        assert isinstance(handler, logging.handlers.RotatingFileHandler)
+        runtime_log = tmp_path / "logs" / "runtime.log"
+        assert Path(handler.baseFilename) == runtime_log
+        assert not (tmp_path / "logs" / "mobile.log").exists(), (
+            "the runtime wrote the daemon's launchd-owned log; a rotation there "
+            "renames the file out of what `lop mobile logs` reads"
+        )
+        assert handler.maxBytes == LOG_MAX_BYTES
+        assert handler.backupCount == LOG_BACKUP_COUNT
+        assert client.level >= logging.WARNING
+        assert f"pid {os.getpid()}" in runtime_log.read_text(encoding="utf-8")
+    finally:
+        for open_handler in list(root.handlers):
+            open_handler.close()
+            root.removeHandler(open_handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+        client.setLevel(saved_client_level)

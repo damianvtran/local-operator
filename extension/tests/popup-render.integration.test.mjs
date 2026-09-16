@@ -18,21 +18,29 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** The popup's markup, reduced to the ids and classes popup.ts touches.
  * Kept as a literal id list rather than parsing popup.html: a test that
  * silently stops covering an element because the parse missed it is worse
  * than one that fails when an id is renamed. */
 const IDS = [
-  "connected", "paired", "pairing", "disconnected", "incompatible", "origin", "origin-ack",
+  "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
+  "standby", "standby-driver", "standby-promise",
+  "severed", "severed-reload",
+  "origin", "origin-ack",
   "origin-host", "origin-again", "origin-scope", "origin-scope-detail", "origin-position",
   "origin-waiting", "origin-allow", "origin-deny", "origin-previous", "origin-next",
-  "origin-ack-title", "origin-ack-sub", "origin-ack-check", "card", "retry",
-  "retry-incompatible", "connected-all-sites", "connected-all-sites-off", "pair-form",
+  "origin-ack-title", "origin-ack-sub", "origin-ack-check", "origin-ack-granted", "card", "retry",
+  "retry-incompatible", "retry-unresponsive", "reload-extension",
+  "origin-wedge", "origin-wedge-reload", "unresponsive-outcome",
+  "connected-all-sites", "connected-all-sites-off", "connected-advisory",
+  "pair-form", "pair-unpaired",
   "pair-code", "pair-error", "port", "port-row",
 ];
 
@@ -59,13 +67,43 @@ function installDomStub() {
           return on;
         },
       },
-      style: { setProperty: () => {}, removeProperty: () => {} },
+      // A real property map rather than a no-op, so a test can read back a
+      // custom property the render set (`--tone` is the card's semantic rule).
+      style: {
+        _props: new Map(),
+        setProperty(name, value) {
+          node.style._props.set(name, String(value));
+        },
+        removeProperty(name) {
+          node.style._props.delete(name);
+        },
+        getPropertyValue(name) {
+          return node.style._props.get(name) ?? "";
+        },
+      },
       setAttribute: () => {},
       removeAttribute: () => {},
       addEventListener: (event, handler) => {
         (node._handlers[event] ||= []).push(handler);
       },
-      focus: () => {},
+      // Records HOW focus was called. `preventScroll` is the whole D7/U8 fix:
+      // focusing an element below the fold scrolls its scroll container to
+      // reveal it, which put the title and the danger banner above the fold at
+      // zoom. A stub that ignores the options object cannot tell the fix from
+      // its absence.
+      focus: (options) => {
+        node._focusCalls.push(options ?? null);
+        globalThis.document.activeElement = node;
+        // The real container scrolls to reveal the focused element unless the
+        // caller opts out — modelled so the assertion is on the OUTCOME (where
+        // the card sits) rather than on the argument alone. The container is the
+        // DOCUMENT: popup.css no longer bounds the card to the viewport (a
+        // popup's `100vh` is its own window height, so the bound collapsed the
+        // popup), and Chrome scrolls the page past its 600px cap — `.body` is
+        // not a scroll container any more.
+        const scroller = globalThis.document.scrollingElement;
+        if (scroller && !(options && options.preventScroll)) scroller.scrollTop = scroller._maxScroll ?? 0;
+      },
       replaceChildren: (...kids) => {
         node.children = kids;
         // A real <select> adopts the first option's value on replaceChildren;
@@ -76,6 +114,8 @@ function installDomStub() {
       },
       querySelectorAll: () => [],
       _handlers: {},
+      _focusCalls: [],
+      scrollTop: 0,
       click: () => (node._handlers.click || []).forEach((h) => h()),
     };
     // The scope select reports its options the way popup.ts reads them.
@@ -86,24 +126,88 @@ function installDomStub() {
     return node;
   };
   for (const id of IDS) nodes.set(id, make(id));
+  // The page scroller popup.ts resets for a fresh prompt. `_maxScroll` stands in
+  // for a card taller than the popup's cap, which is the only condition under
+  // which focus-scrolling is observable at all.
+  const scroller = make("__scroller");
+  scroller._maxScroll = 139;
+  // The body node stays in the stub because popup.html ships a `.body`, even
+  // though nothing scrolls it since the card stopped being viewport-bounded.
+  const bodyNode = make("__body");
+  bodyNode._maxScroll = 139;
+  nodes.set("__body", bodyNode);
+  // Button labels the real markup ships with. popup.ts restores a label it
+  // swapped out (the "Checking…" in-flight state), so a stub whose buttons
+  // start blank would make a correct restore look like a cleared button.
+  nodes.get("retry-unresponsive").textContent = "Check again";
+  // The standby card's promise paragraph, off the same principle: popup.ts
+  // captures the markup's own sentence at module scope and puts it BACK for
+  // every case that has no qualifier to add (U9), so a stub starting blank would
+  // make "the shipped sentence is restored" — the half that keeps the healthy
+  // frame byte-identical — unobservable. Whitespace-normalised, because that is
+  // what the module does to it before appending.
+  nodes.get("standby-promise").textContent = STANDBY_PROMISE;
 
   globalThis.document = {
     getElementById: (id) => nodes.get(id) ?? null,
+    querySelector: (selector) => (selector === ".body" ? nodes.get("__body") : null),
     createElement: () => make("option"),
     querySelectorAll: () => [],
     addEventListener: () => {},
     documentElement: make("html"),
     body: make("body"),
+    scrollingElement: scroller,
     activeElement: null,
   };
   globalThis.window = { close: () => {}, matchMedia: () => ({ matches: false, addEventListener: () => {} }) };
   return nodes;
 }
 
-function installChromeStub() {
+// The identity the loaded build is running under. `chrome.runtime.id` is the
+// install's OWN identity, and the popup compares it against /health's
+// authorised list — see the "WHICH INSTALL AM I?" gate. A test that sets an id
+// list must therefore say which install it is rendering; the default is the
+// store build, the one every pre-existing row implicitly modelled.
+const STORE_ID = "omibaecbjdhgbbcedbnnnmjpmopfheof";
+const DEV_ID = "jbadjeaodkoboanppmpjiifpconegdcj";
+
+/** The standby card's promise paragraph exactly as popup.html ships it, in the
+ * whitespace-normalised form popup.ts keeps. The healthy frame must render THIS
+ * and nothing else — it is the frame the earlier design and UX rounds approved
+ * byte-for-byte, and U9's whole risk is a qualifier leaking into the common
+ * case. */
+const STANDBY_PROMISE =
+  "This browser is paired, but the agent is connected to another browser right now. " +
+  "If that one disconnects, this browser takes over and the agent opens a new tab; " +
+  "the tab the agent was using stays open where it is.";
+
+/** The clause the card appends while the wheel is attached and merely silent. */
+const SILENT_CLAUSE =
+  "If it stops answering instead, this browser takes over as soon as Local " +
+  "Operator gives up on it, usually within about a minute.";
+
+/** The standby install's /health payload; `overrides` carry the silence fields.
+ * `driver_extension_id` names the OTHER install, which is what makes this popup
+ * the standby rather than the driver (see "WHICH INSTALL AM I?"). */
+const standbyHealth = (overrides = {}) => ({
+  paired: true,
+  extension_connected: true,
+  protocol_version: 1,
+  driver_extension_id: STORE_ID,
+  driver_label: "Chrome 0.1.13",
+  authorized_extension_ids: [STORE_ID, DEV_ID],
+  standby_extension_ids: [DEV_ID],
+  ...overrides,
+});
+
+function installChromeStub({ sendMessage, id = STORE_ID } = {}) {
   const areas = { session: new Map(), local: new Map() };
   const listeners = [];
   const sent = [];
+  // Every chrome.runtime.reload() the popup made. Counted rather than flagged:
+  // "the popup reloaded the extension twice" is a real defect (the second call
+  // races the teardown of the first) and a boolean cannot see it.
+  const reloads = [];
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
@@ -138,8 +242,14 @@ function installChromeStub() {
     // The worker resolves the decided entry and writes the queue back. Modelled
     // faithfully, because the ordering under test IS the storage ordering.
     runtime: {
+      id,
+      reload: () => reloads.push(Date.now()),
       sendMessage: async (message) => {
         sent.push(message);
+        // A test-supplied worker replaces the faithful one below: an
+        // unresponsive worker is the whole subject of the decide() tests, and
+        // it is expressed as what sendMessage DOES, not as a flag.
+        if (sendMessage) return sendMessage(message);
         if (message?.event !== "origin_decision") return { applied: true };
         const queue = areas.session.get("accessQueue") ?? [];
         const rest = queue.filter((e) => e.entryId !== message.entryId);
@@ -151,7 +261,7 @@ function installChromeStub() {
     },
     tabs: { query: async () => [] },
   };
-  return { areas, sent };
+  return { areas, sent, reloads };
 }
 
 const entry = (entryId, origin = "https://app.example.com", broad = { scope: "domain", key: "example.com" }) => ({
@@ -197,6 +307,32 @@ function installFetchStub(pendingOrigin) {
       pending_origin: pendingOrigin(),
     }),
   });
+}
+
+/** A localStorage double, so the pin a render WRITES is observable.
+ *
+ * popup.ts guards every access in a try/catch, so without this the writes are
+ * silently swallowed and a wrong pin is indistinguishable from a right one. */
+function installLocalStorageStub() {
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  };
+  return store;
+}
+
+/** Which card is on screen, by the sections the stub tracks. */
+function visibleState(nodes) {
+  // #pending is deliberately absent: the stub does not model the placeholder
+  // (it ships visible and every render replaces it), and a state list that
+  // asked for it would fail rather than report.
+  const states = [
+    "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
+    "standby", "severed", "origin", "origin-ack",
+  ];
+  return states.filter((id) => !nodes.get(id).classList.contains("hidden"));
 }
 
 test("the re-ask card survives a second render and a queue move (U9/U10)", async () => {
@@ -422,6 +558,1754 @@ test("a deny re-ask does not claim the answer was used (U11)", async () => {
       again.textContent,
       /already been used/,
       "nothing was used: the agent did not visit the site",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a wedged worker is not painted as connected (D4)", async () => {
+  const nodes = installDomStub();
+  installChromeStub();
+  // A live daemon that reports the state this whole change exists for: paired,
+  // socket attached, nothing answered. `extension_unresponsive` is the field the
+  // popup must CONSUME — it was in the Health type and never read, so the green
+  // card claimed the agent could drive while no command could be answered.
+  let health = { paired: true, extension_connected: true, protocol_version: 1, pending_origin: undefined };
+  globalThis.fetch = async () => ({ ok: true, json: async () => health });
+  const bundle = await loadPopup();
+  try {
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("connected").classList.contains("hidden"), false, "precondition: healthy renders the connected card");
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), true, "precondition: no wedge, no wedge card");
+
+    // The worker goes mute. /health keeps `paired: true` (and so does the LINK),
+    // which is exactly why the connected card used to stay up.
+    health = { ...health, extension_connected: false, extension_unresponsive: true, link_attached: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "a wedged worker must not render as connected");
+    assert.equal(nodes.get("connected").classList.contains("hidden"), true, "the success card must be REPLACED, not merely annotated");
+
+    // RENDER N+1: the same state, one more storage event. Every defect in this
+    // class is correct on render N and wrong on N+1.
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "must survive a later render");
+    assert.equal(nodes.get("connected").classList.contains("hidden"), true);
+
+    // The link comes back: the card must recover, or the fix would be its own
+    // sticky lie.
+    health = { ...health, extension_connected: true, extension_unresponsive: false };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("connected").classList.contains("hidden"), false, "must recover to the connected card");
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), true);
+
+    // THE OTHER HALF OF THE WINDOW, and the reason this card exists at all: the
+    // post-drop cooling-off period, where the daemon has severed the link so
+    // `/health` reports `paired: false` (it is link-derived) while the pairing on
+    // disk — and the daemon's own `paired:` line — are still true. The card used
+    // to be gated on `paired`, so this exact payload rendered the PAIRING FORM
+    // for a paired browser that is about to re-dial (QA Q2-3 / review R2-5).
+    health = {
+      ...health,
+      paired: false,
+      extension_connected: false,
+      extension_unresponsive: true,
+      link_attached: false,
+    };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(
+      nodes.get("unresponsive").classList.contains("hidden"),
+      false,
+      "the latched half of the window must show the honest card, not the pairing form",
+    );
+    assert.equal(nodes.get("pairing").classList.contains("hidden"), true, "a paired browser must not be asked for a code");
+    assert.equal(nodes.get("connected").classList.contains("hidden"), true);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* --- The stale/unresponsive worker, from the popup's seat -------------------
+ *
+ * The operator's complaint was "I click the toolbar icon and nothing happens,
+ * it takes 2-3 tries". Chrome owns opening the popup, so a click that shows
+ * NOTHING means the MV3 worker never started; but a click that shows a popup
+ * whose buttons then do nothing is this module's fault, and that is what these
+ * cover: decide() awaited the worker with no bound and no catch, so a stale
+ * worker left Allow/Deny disabled for the life of the popup with no message.
+ *
+ * Assertions are on what the user can SEE and DO — the buttons' disabled state
+ * and the text in the ack slot — never on the presence of a call.
+ */
+
+/** A live daemon whose /health payload the test controls per render. */
+function installHealth(get) {
+  globalThis.fetch = async () => ({ ok: true, json: async () => get() });
+}
+
+const pendingEntry = (entryId = "gen-1") => ({
+  entryId,
+  origin: "https://app.example.com",
+  displayAuthority: "app.example.com",
+  requester: "req-1",
+  kind: "async",
+  requestedAt: Date.now(),
+  expiresAt: Date.now() + 600_000,
+  sequence: 1,
+  broad: { scope: "domain", key: "example.com" },
+});
+
+test("a decision whose worker REJECTS leaves the controls usable and says so", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({
+    // Exactly what MV3 throws when the worker is gone and nothing receives the
+    // message — captured from the operator's own console.
+    sendMessage: async () => {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    },
+  });
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const rejections = [];
+  const onRejection = (error) => rejections.push(error);
+  process.on("unhandledRejection", onRejection);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin").classList.contains("hidden"), false, "precondition: the prompt is up");
+    assert.equal(nodes.get("origin-allow").disabled, false, "precondition: Allow is clickable");
+
+    nodes.get("origin-allow").click();
+    // Past the notice hold (1500ms), so the settled state is what is asserted.
+    await tick(1800);
+
+    // THE DEFECT: setOriginBusy(true) ran, the await rejected, and nothing ever
+    // re-enabled these. From the user's seat the popup stopped responding.
+    assert.equal(nodes.get("origin-allow").disabled, false, "Allow must not be left disabled by an unreachable worker");
+    assert.equal(nodes.get("origin-deny").disabled, false, "Deny must not be left disabled by an unreachable worker");
+
+    // And the click must be ACKNOWLEDGED honestly rather than silently dropped.
+    const title = nodes.get("origin-ack-title").textContent;
+    const sub = nodes.get("origin-ack-sub").textContent;
+    assert.match(title, /didn't|did not|no answer/i, `the user must be told the extension did not answer, got ${JSON.stringify(title)}`);
+    assert.doesNotMatch(
+      title + " " + sub,
+      /request changed/i,
+      "'Request changed.' means a REPLACED generation — a live worker's answer — and must not be reused for an unreachable one",
+    );
+    assert.deepEqual(rejections, [], "the failed round-trip escaped as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    await bundle.close();
+  }
+});
+
+test("a decision whose worker NEVER ANSWERS is bounded and ends the same way", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({
+    // The nastier half, and the one the operator actually hit: the worker is
+    // loaded but mute, so the send neither resolves nor rejects — ever. Without
+    // a bound this await is permanent and the popup is dead until it closes.
+    sendMessage: () => new Promise(() => {}),
+  });
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const rejections = [];
+  const onRejection = (error) => rejections.push(error);
+  process.on("unhandledRejection", onRejection);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin-allow").disabled, false, "precondition: Allow is clickable");
+
+    nodes.get("origin-allow").click();
+    // Still inside the 5s bound: the popup is legitimately waiting, and saying
+    // "no answer" here would libel a merely-slow worker.
+    await tick(300);
+    assert.equal(nodes.get("origin-allow").disabled, true, "while the round-trip is in flight the controls stay busy");
+
+    // Past the bound plus the notice hold.
+    await tick(7000);
+    assert.equal(nodes.get("origin-allow").disabled, false, "the timeout path must re-enable Allow");
+    assert.equal(nodes.get("origin-deny").disabled, false, "the timeout path must re-enable Deny");
+    assert.match(
+      nodes.get("origin-ack-title").textContent,
+      /didn't|did not|no answer/i,
+      "a click that timed out must still be acknowledged",
+    );
+    assert.deepEqual(rejections, [], "the timed-out round-trip escaped as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    await bundle.close();
+  }
+});
+
+test("the wedged-worker card offers a one-click reload, and a healthy one never does", async () => {
+  const nodes = installDomStub();
+  const { reloads } = installChromeStub();
+  // The daemon is the authority here, deliberately: the worker's own
+  // `connState` reads "connected" long after the worker is dead (it is that
+  // worker's last write), so a reload offered from it would appear on a healthy
+  // popup and disappear on a wedged one — backwards.
+  let health = { paired: true, extension_connected: true, protocol_version: 1 };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    await bundle.import();
+    await tick(20);
+
+    // HEALTHY: the remedy is not on offer. A reload discards open tab handles,
+    // snapshot refs and pending site decisions, so offering it to a working
+    // browser invites a user to pay that for nothing.
+    assert.equal(nodes.get("connected").classList.contains("hidden"), false, "precondition: the healthy card is up");
+    assert.equal(
+      nodes.get("unresponsive").classList.contains("hidden"),
+      true,
+      "a healthy worker must not be offered a reload",
+    );
+    // "Hidden section" is only the same thing as "no reload on offer" because
+    // the control lives INSIDE that section. This harness's DOM is flat (every
+    // id is a sibling), so it cannot express containment and a click on it here
+    // would fire in a state a real user cannot reach. Assert the containment
+    // against the real markup instead, which is what makes the line above a
+    // statement about what the user can do rather than about a CSS class.
+    const markup = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+    const section = markup.slice(markup.indexOf('<section id="unresponsive"'));
+    const body = section.slice(0, section.indexOf("</section>"));
+    assert.ok(
+      body.includes('id="reload-extension"'),
+      "the reload control must live inside #unresponsive, or hiding that card does not withdraw the offer",
+    );
+    assert.deepEqual(reloads, [], "nothing on the healthy path may reload the extension");
+
+    // WEDGED: the daemon says the extension is not answering.
+    health = { ...health, extension_connected: false, extension_unresponsive: true, link_attached: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "precondition: the wedge card is up");
+
+    nodes.get("reload-extension").click();
+    await tick(20);
+    assert.equal(reloads.length, 1, "the wedge card's primary action must reload the extension exactly once");  } finally {
+    await bundle.close();
+  }
+});
+
+/* --- Round 1 remediation: the wedged worker WITH a decision pending ---------
+ *
+ * The state three review streams found independently (reviewer/UX U1, QA Q5,
+ * design D3) and the shape of the reported incident: the operator's dead clicks
+ * happened while the agent was driving, i.e. with a request queued. renderOnce()
+ * paints the consent card and returns before the `unresponsive` branch, so the
+ * PR's own remedy was in a hidden section exactly when it was needed.
+ */
+
+test("a decision pending against a WEDGED worker surfaces the remedy inline", async () => {
+  const nodes = installDomStub();
+  const { areas, reloads } = installChromeStub();
+  let health = { paired: true, extension_connected: true, protocol_version: 1 };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+
+    // HEALTHY worker, same pending decision: the prompt is a normal prompt. No
+    // banner, and no remedy on offer — a working worker must never be told to
+    // reload, and this is the control that keeps the banner honest.
+    assert.equal(nodes.get("origin").classList.contains("hidden"), false, "precondition: the prompt is up");
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      true,
+      "a healthy worker must not be told its extension stopped answering",
+    );
+
+    // The worker goes mute while the request is still queued. The prompt STAYS
+    // — it is what the user opened the popup for, and hiding it would answer
+    // "the remedy is unreachable" by making the request unreachable instead.
+    health = { ...health, extension_connected: false, extension_unresponsive: true, link_attached: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("origin").classList.contains("hidden"), false, "the pending decision stays visible");
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      false,
+      "the card must say the decision cannot be applied right now",
+    );
+
+    // And the remedy is reachable from here, in one click, without finding
+    // another card first.
+    nodes.get("origin-wedge-reload").click();
+    await tick(20);
+    assert.equal(reloads.length, 1, "the inline remedy must reload the extension");
+
+    // RENDER N+1 — every defect in this class is right on N and wrong on N+1.
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("origin-wedge").classList.contains("hidden"), false, "the banner must survive a re-render");
+
+    // Recovery: the worker answers again, so the banner must go. A sticky
+    // warning would be its own lie.
+    health = { ...health, extension_connected: true, extension_unresponsive: false };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      true,
+      "the banner must clear when the worker answers again",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a decision in flight does not claim success until the worker confirms", async () => {
+  const nodes = installDomStub();
+  let release;
+  const { areas } = installChromeStub({
+    // A worker that answers only when the test says so: the window between the
+    // click and the answer IS the subject, and it was 4.9s of green "Site
+    // allowed." over a decision that was never applied (UX U2).
+    sendMessage: () => new Promise((resolve) => { release = () => resolve({ applied: true }); }),
+  });
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    nodes.get("origin-allow").click();
+    await tick(50);
+
+    // IN FLIGHT. The click is acknowledged — the user must see it landed — but
+    // none of the three things that read as "done" may be on screen.
+    assert.match(
+      nodes.get("origin-ack-title").textContent,
+      /allowing/i,
+      "an in-flight decision must acknowledge the click and name which way it went",
+    );
+    assert.equal(nodes.get("origin-ack-check").classList.contains("hidden"), true, "no check before the worker confirms");
+    assert.equal(
+      nodes.get("origin-ack-granted").classList.contains("hidden"),
+      true,
+      "the granted trough means 'this is what you granted' and must not precede the grant",
+    );
+
+    // CONFIRMED: now, and only now, the success card.
+    release();
+    await tick(60);
+    // The entry's default scope is `domain`, so the confirmed ack names the
+    // domain grant — asserting the CONFIRMED vocabulary, not a fixed string:
+    // what matters is that it switched out of the progressive in-flight voice.
+    assert.match(
+      nodes.get("origin-ack-title").textContent,
+      /allowed\./i,
+      "a confirmed decision reads as done, not as in progress",
+    );
+    assert.doesNotMatch(nodes.get("origin-ack-title").textContent, /allowing/i);
+    assert.equal(nodes.get("origin-ack-check").classList.contains("hidden"), false, "a confirmed decision shows the check");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("the unreachable-worker notice carries no granted value", async () => {
+  const nodes = installDomStub();
+  // The trough is filled by a CONFIRMED ack, so the only way to reach the bug
+  // is the real sequence: one decision lands (printing the granted host), the
+  // next one cannot be delivered. Asserting it from a first, never-confirmed
+  // click would pass with the fix reverted, because the in-flight ack no longer
+  // fills the trough at all — the guard has to be proven where it bites.
+  let worker = "alive";
+  const { areas } = installChromeStub({
+    sendMessage: async (message) => {
+      if (worker === "dead") {
+        throw new Error("Could not establish connection. Receiving end does not exist.");
+      }
+      const queue = areas.session.get("accessQueue") ?? [];
+      await chrome.storage.session.set({
+        accessQueue: queue.filter((e) => e.entryId !== message.entryId),
+      });
+      return { applied: true };
+    },
+  });
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry("gen-1"), pendingEntry("gen-2")]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+
+    // Decision one lands, so the granted host is printed in the trough.
+    nodes.get("origin-allow").click();
+    await tick(80);
+    assert.equal(
+      nodes.get("origin-ack-granted").classList.contains("hidden"),
+      false,
+      "precondition: a confirmed decision prints what it granted",
+    );
+    const granted = nodes.get("origin-ack-granted").textContent;
+    assert.ok(granted, "precondition: the trough actually carries a value");
+
+    // The worker dies before the next decision can be delivered.
+    worker = "dead";
+    await tick(40);
+    nodes.get("origin-allow").click();
+    await tick(1800);
+
+    // The trough is the element a user reads as the granted value. Leaving the
+    // previous decision's host under "may not have been applied" prints an
+    // answer to a question the popup just said it cannot answer (UX U3).
+    assert.match(nodes.get("origin-ack-title").textContent, /didn't|did not|no answer/i);
+    assert.equal(
+      nodes.get("origin-ack-granted").classList.contains("hidden"),
+      true,
+      "a decision that may not have been applied must not print a granted value",
+    );
+    assert.equal(
+      nodes.get("origin-ack-granted").textContent,
+      "",
+      "the granted trough must be cleared, not merely hidden — a later ack would reveal the stale host",
+    );
+    assert.equal(nodes.get("origin-ack-check").classList.contains("hidden"), true, "no check on an unapplied decision");  } finally {
+    await bundle.close();
+  }
+});
+
+test("a decision does not resurrect queue controls the renderer disabled", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    // Two entries, so Previous/Next start live; deciding one leaves a single
+    // request, and a single-request prompt must not offer two inert stops (U4).
+    areas.session.set("accessQueue", [pendingEntry("gen-1"), pendingEntry("gen-2")]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin-previous").disabled, false, "precondition: two entries, navigation is live");
+
+    nodes.get("origin-allow").click();
+    await tick(60);
+
+    // The decision owns its own three controls. Previous/Next are DERIVED from
+    // queue length by renderQueueControls, and the decision's cleanup runs
+    // after that render — so re-enabling them here overwrote the renderer.
+    assert.equal(nodes.get("origin-allow").disabled, false, "the decision's own controls come back");
+    assert.equal(
+      nodes.get("origin-previous").disabled,
+      true,
+      "one entry left: queue navigation stays the renderer's call, not the decision's",
+    );
+    assert.equal(nodes.get("origin-next").disabled, true, "same for Next");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Check again shows that it checked, and says so when nothing changed", async () => {
+  const nodes = installDomStub();
+  installChromeStub();
+  const health = {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+  };
+  let probes = 0;
+  globalThis.fetch = async () => {
+    probes += 1;
+    return { ok: true, json: async () => health };
+  };
+  const bundle = await loadPopup();
+  try {
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "precondition: the wedge card is up");
+    const before = probes;
+
+    nodes.get("retry-unresponsive").click();
+    // Mid-probe: the click must own the button, or a re-check that changes
+    // nothing is indistinguishable from a dead click — the exact complaint this
+    // PR was filed about, reappearing on the recovery card (UX U4).
+    await tick(30);
+    assert.equal(nodes.get("retry-unresponsive").disabled, true, "the button acknowledges the click while probing");
+    assert.match(nodes.get("retry-unresponsive").textContent, /checking/i, "and says what it is doing");
+
+    await tick(700);
+    assert.ok(probes > before, "the re-check must actually re-probe /health");
+    assert.equal(nodes.get("retry-unresponsive").disabled, false, "the button comes back");
+    assert.equal(nodes.get("retry-unresponsive").textContent, "Check again", "with its label restored");
+    // An unchanged verdict is the one outcome the DOM cannot express by itself.
+    assert.equal(
+      nodes.get("unresponsive-outcome").classList.contains("hidden"),
+      false,
+      "an unchanged answer must still be stated",
+    );
+    assert.match(nodes.get("unresponsive-outcome").textContent, /still not answering/i);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* --- Round 2: the banner must not over-claim, and the card must open at its top */
+
+test("the banner stays hidden while the decision is still deliverable (M1)", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  // The post-drop latch: the daemon severed the socket, so `link_attached` is
+  // false, but `extension_unresponsive` stays true for LINK_DROP_TTL_S = 60s
+  // while the worker is usually alive and re-dialling. A decision travels over
+  // chrome.runtime.sendMessage, which never touched that socket — so it is
+  // deliverable, and the banner claiming otherwise steers the user at a reload
+  // that would destroy the very decision they came to answer (review M1).
+  let health = {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: false,
+    protocol_version: 1,
+  };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin").classList.contains("hidden"), false, "precondition: the prompt is up");
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      true,
+      "a severed-but-re-dialling link must not be reported as an undeliverable decision",
+    );
+
+    // And the decision really is deliverable in that state — which is what
+    // makes the banner a false claim rather than a cautious one.
+    nodes.get("origin-allow").click();
+    await tick(80);
+    assert.match(
+      nodes.get("origin-ack-title").textContent,
+      /allowed\./i,
+      "the decision must apply normally while the link is merely dropped",
+    );
+
+    // ATTACHED and mute is the case the banner is actually for: sendMessage
+    // genuinely has nowhere to land.
+    health = { ...health, link_attached: true };
+    areas.session.set("accessQueue", [pendingEntry("gen-2")]);
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(30);
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      false,
+      "an attached-but-mute worker must still raise the banner",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a fresh prompt opens at the top of its card, not scrolled past its banner (D7/U8)", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    // THE SEED, and it is the whole falsifiability of this test: the user has the
+    // popup open and scrolled, and a request arrives. Without it the modelled
+    // scroller never moves (`preventScroll` is honoured, so the focus model
+    // writes nothing), and the assertion below then passes whether the render
+    // resets the document, still resets the now-inert `.body`, or resets
+    // nothing at all — measured: deleting the reset left 44/44 green.
+    globalThis.document.scrollingElement.scrollTop = 88;
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(30);
+
+    const scope = nodes.get("origin-scope");
+    const scroller = globalThis.document.scrollingElement;
+    assert.equal(nodes.get("origin-wedge").classList.contains("hidden"), false, "precondition: the banner is up");
+
+    // The keyboard landing point is unchanged — the fix must not cost it.
+    assert.ok(scope._focusCalls.length > 0, "the scope select is still focused for the keyboard");
+    assert.equal(globalThis.document.activeElement, scope, "and it really holds focus");
+
+    // THE DEFECT: focusing below the fold scrolled the card's container to its
+    // maximum, putting the title and the whole danger banner above the fold at
+    // >=125% zoom — a zoomed user saw an ordinary consent prompt with live
+    // Allow/Deny and no sign their answer could not land. The seeded scroll is
+    // ALSO what a forgotten retarget looks like: the reset now targets
+    // `document.scrollingElement` (popup.ts), because `.body` stopped being the
+    // scroll container when the card stopped being viewport-bounded.
+    assert.equal(
+      scroller.scrollTop,
+      0,
+      "the card must open at its top: the question and the banner qualifying it are the first things to read",
+    );
+    assert.ok(
+      scope._focusCalls.some((options) => options && options.preventScroll === true),
+      "focus must opt out of scrolling rather than rely on the card being short enough",    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * The standby card (design note §9.2 row E4, §8.4).
+ *
+ * A standby install is paired and connected and is deliberately receiving no
+ * commands, because another authorised identity holds the wheel. It is neither
+ * the connected card (which would claim the agent can drive THIS browser) nor a
+ * fault the user must fix. These rows pin the card choice, the name of the
+ * OTHER install the daemon reported, the pin (so the card does not resize on
+ * reopen), and the negatives that keep it honest: a driver render must not take
+ * the standby card, and a revoked pairing must not keep showing it from a stale
+ * session value.
+ *
+ * Uses `installHealth`, the helper the stale-worker rows introduced, rather than
+ * a second way of overriding /health.
+ * ------------------------------------------------------------------------- */
+
+test("E4: a standby render shows the standby card, names the driver, and is pinned", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  const pins = installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+    ],
+    standby_extension_ids: ["jbadjeaodkoboanppmpjiifpconegdcj"],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    // The worker records the daemon's own role statement in session storage.
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["standby"],
+      "a standby install must show the standby card and nothing else",
+    );
+    assert.match(
+      nodes.get("standby-driver").textContent,
+      /Chrome 0\.1\.10/,
+      "the card must NAME the other install when the daemon reported a label",
+    );
+    // The card states the failover cost rather than hiding it (design §5.3):
+    // the session loses the tab it was using and a fresh one appears.
+    assert.equal(
+      pins.get("lop:pin-hint"),
+      "193px",
+      "the standby card must pin the height it was measured at, or it resizes on reopen",
+    );
+
+    // RENDER N+1 — the recomputation half of every defect in this class: a
+    // second render off a storage event must not fall through to another card.
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["standby"], "render N+1 drifted off the standby card");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("E4: a driver render does NOT take the standby card", async () => {
+  // The negative that stops the card from being a function of "a daemon said
+  // someone is driving". A connected install is the driver, and the two must
+  // never be confused: one means the agent can drive this browser, the other
+  // means it explicitly cannot.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+    assert.equal(
+      nodes.get("standby-driver").textContent,
+      "",
+      "the connected card must not carry the standby line",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("E4: a revoked pairing does not keep showing the standby card", async () => {
+  // `connState` lives in SESSION storage and survives until the worker
+  // overwrites it, so a revoke can leave "standby" behind. /health is the
+  // authority on whether any pairing exists, and the card is gated on it —
+  // otherwise a revoked install would sit on "paired … standing by" forever.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installLocalStorageStub();
+  installHealth(() => ({ paired: false, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.ok(
+      !visibleState(nodes).includes("standby"),
+      "a stale standby connState must not claim a pairing that is gone",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * THE STANDBY CARD'S PROMISE (UX round 4, U9/U10 — the two user-visible lies).
+ *
+ * U9: the card promised an immediate takeover through the whole window in which
+ * the driver was mute, because the paragraph was static markup. Measured at
+ * 50.3 s of silence, the daemon already reported `takeover_within_s: 19.7` while
+ * the card rendered byte-identically to its healthy frame. U10: once the daemon
+ * severed the wheel and nothing had taken it, BOTH installs' fresh popups
+ * painted "Paired. Code accepted. Connecting this browser…" — a pairing flow
+ * claiming progress over a connection that does not exist.
+ *
+ * These rows drive the real module and read the PAINTED text, so they fail if
+ * either sentence loses its qualifier — which is the failure mode that matters,
+ * not whether the field is on the wire.
+ * ------------------------------------------------------------------------- */
+
+test("U9: a silent wheel appends the event the promise was missing", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  // 41.2 s of silence, and `takeover_within_s` still null: the FIRST ~50 s of
+  // the wedge, which is the whole window the old card lied through. The number
+  // is UX's own measurement at t+35.3 s of their run.
+  installHealth(() => standbyHealth({ link_attached: true, link_silent_s: 41.2, takeover_within_s: null }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["standby"]);
+    const promise = nodes.get("standby-promise").textContent;
+    assert.ok(
+      promise.startsWith(STANDBY_PROMISE),
+      "the shipped promise must survive: the clause qualifies it, it does not replace it",
+    );
+    assert.ok(promise.endsWith(SILENT_CLAUSE), `silent wheel must name its own event, got: ${promise}`);
+    assert.ok(
+      !promise.includes("Switching to this browser in about"),
+      "nothing has been committed yet, so there is no countdown to render",
+    );
+    // The fixture sentence is a hand-copy of the markup's, and the module composes
+    // its output from the MARKUP's — so a popup.html edit that drifted from this
+    // constant would otherwise be invisible here while changing every frame.
+    const markup = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+    const para = markup.slice(markup.indexOf('id="standby-promise"'));
+    const shipped = para.slice(para.indexOf(">") + 1, para.indexOf("</p>")).replace(/\s+/g, " ").trim();
+    assert.equal(
+      shipped,
+      STANDBY_PROMISE,
+      "STANDBY_PROMISE must be popup.html's own sentence, or every assertion above is about a copy",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U9: a committed takeover swaps the clause for the countdown", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  // The instant UX measured (t+44.3 s): silence past the deadline, so the daemon
+  // reports 19.7 s to the severance. Rounded to the nearest 5 s — the field is an
+  // upper bound, so a to-the-second render would claim precision it lacks.
+  installHealth(() => standbyHealth({ link_attached: true, link_silent_s: 50.3, takeover_within_s: 19.7 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    const promise = nodes.get("standby-promise").textContent;
+    assert.equal(
+      promise,
+      `${STANDBY_PROMISE} The other install has stopped answering. Switching to this browser in about 20 seconds.`,
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U9: the healthy standby frame is untouched, and clears a stale qualifier", async () => {
+  // Both halves of the risk in one row. The healthy driver (silence ~1.6 ms,
+  // measured) must render the SHIPPED sentence exactly — the byte-identical
+  // frame every earlier design and UX approval rests on — and a render that
+  // follows a qualified one must put the sentence back rather than leave the
+  // last clause on screen.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  let health = standbyHealth({ link_attached: true, link_silent_s: 50.3, takeover_within_s: 19.7 });
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+    assert.match(nodes.get("standby-promise").textContent, /Switching to this browser in about 20 seconds/);
+
+    // RENDER N+1: the wedge cleared (same shape, healthy values), and the render
+    // is driven by the storage event every real re-render goes through.
+    health = standbyHealth({ link_attached: true, link_silent_s: 0.0016, takeover_within_s: null });
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.equal(
+      nodes.get("standby-promise").textContent,
+      STANDBY_PROMISE,
+      "a driver that answers again must return the card to its shipped sentence",
+    );
+
+    // The clause is keyed on ATTACHED silence, not on a bare number: a value left
+    // over from a severed link is not a wheel anybody is holding.
+    health = standbyHealth({ link_attached: false, link_silent_s: 55.0, takeover_within_s: null });
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.equal(nodes.get("standby-promise").textContent, STANDBY_PROMISE);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U10: a severed wheel says so instead of claiming the pairing success copy", async () => {
+  // QA's §6.2 / UX's U10 state, verbatim: the daemon severed the mute driver and
+  // nothing took the wheel (the standby was taken offline so nothing could be
+  // promoted), so BOTH installs are authorised and NEITHER is named as driving.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: false,
+    protocol_version: 1,
+    driver_extension_id: "",
+    takeover_within_s: null,
+    standby_extension_ids: [],
+    authorized_extension_ids: [DEV_ID, STORE_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["severed"],
+      "a fresh popup after severance must not paint the pairing-success card",
+    );
+    // The copy itself, against the real markup: this harness's DOM is flat and
+    // does not parse popup.html, so a section's text and its containment are
+    // asserted where they actually live. Two properties, and both are the
+    // finding: the reload control must be INSIDE #severed (or the card offers
+    // nothing to do) and the sentence must stay CONDITIONAL — the daemon cannot
+    // name a culprit once the driver field is cleared, and "your extension
+    // stopped answering" is a claim this popup cannot make about itself.
+    const markup = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+    const section = markup.slice(markup.indexOf('<section id="severed"'));
+    const body = section.slice(0, section.indexOf("</section>"));
+    // Collapsed, because the markup wraps these sentences across source lines and
+    // an assertion that only held for one line-length would be about formatting.
+    const copy = body.replace(/\s+/g, " ");
+    assert.ok(
+      body.includes('id="severed-reload"'),
+      "the reload control must live inside #severed, or the card offers no route out",
+    );
+    assert.ok(
+      copy.includes("Local Operator isn't driving this browser right now."),
+      "the card must state the fact it can state: nothing is driving this browser",
+    );
+    assert.ok(
+      copy.includes("If this browser's extension has stopped answering, reload it."),
+      "the remedy must stay conditional, because either install could be the mute one",
+    );
+    assert.ok(
+      !/your extension/i.test(copy),
+      "the copy must not blame THIS install's extension: the driver field is empty, so both are candidates",
+    );
+    assert.ok(
+      !copy.includes("Code accepted"),
+      "the pairing-success sentence is the lie this card exists to replace",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U10: the severed card is keyed on the latch, and never steals a named standby", async () => {
+  // Two controls, because the copy cannot name a culprit and the condition is
+  // shared with a healthy transient:
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  let health = {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: "",
+    takeover_within_s: null,
+    standby_extension_ids: [DEV_ID],
+    authorized_extension_ids: [DEV_ID, STORE_ID],
+  };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+    assert.deepEqual(
+      visibleState(nodes),
+      ["standby"],
+      "an install the daemon still LISTS as a standby keeps the standby card: nothing has been severed",
+    );
+
+    // The SAME empty-driver, not-attached shape without the latch is the idle
+    // wheel — a daemon that has simply not been dialled yet, where the worker is
+    // about to reconnect. It keeps the pre-existing reading, so the new card
+    // cannot swallow the common case.
+    health = {
+      paired: true,
+      extension_connected: false,
+      protocol_version: 1,
+      driver_extension_id: "",
+      link_attached: false,
+      standby_extension_ids: [],
+      authorized_extension_ids: [DEV_ID, STORE_ID],
+    };
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.deepEqual(
+      visibleState(nodes),
+      ["paired"],
+      "without the unresponsive latch this is the idle wheel, not a severance",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * WHICH INSTALL AM I? (QA round 1, Q1 — blocker).
+ *
+ * /health's `paired`, `extension_connected` and the wedge latch all describe
+ * the DRIVER's link, because they answer "can the agent drive this browser
+ * right now?". They were also read as "is this install paired?", which is a
+ * different question now that two identities can be authorised at once: a
+ * never-paired second install rendered "Connected." with the pairing form
+ * hidden, so the operator's own flow — store build paired and driving, then
+ * load the dev build and pair it from its own popup — had no UI route to the
+ * code field at all.
+ *
+ * These rows pin the per-install answer: this popup's own `chrome.runtime.id`
+ * against /health's `authorized_extension_ids`, plus `driver_extension_id` to
+ * decide which card. Row "the driver's own popup" and "a predating daemon" are
+ * the negatives that keep it honest in the other direction: the fix must not
+ * turn a genuinely connected install into a pairing form.
+ * ------------------------------------------------------------------------- */
+
+test("Q1: a never-paired second install shows the FORM while another drives", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true, // the DRIVER is paired — not this install
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    // Exactly what QA measured on the real rig: the install's own state knows
+    // it is unpaired, and the daemon's driver-scoped `paired` is true.
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "a second install must get the code field, not the driver's 'Connected.' card",
+    );
+    assert.ok(
+      !nodes.get("pair-code")["classList"].contains("hidden") ||
+        visibleState(nodes).includes("pairing"),
+      "the pairing form must be the visible one",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: a never-paired install with a STALE connected connState still gets the form", async () => {
+  // `connState` is session storage and survives an uninstall/re-pair, so it can
+  // say "connected" for an install the daemon does not authorise. The id list is
+  // the live answer and must win — otherwise the stale value re-creates the
+  // blocker for anyone who re-installed.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "stale-token");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: a REVOKED install gets the form, not the driver's card nor a stale standby", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true, // the OTHER install is still paired and driving
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "revoked-token");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby"); // what the revoke left behind
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "a revoked install must be offered the code dance again, whatever the driver is doing",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1 negative: the DRIVER's own popup still shows the connected card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: an authorised install is a standby from /health alone, before its worker writes", async () => {
+  // The `drivesThis` half of the gate, independent of session storage: a fresh
+  // popup on an authorised install that is not the driver belongs on the
+  // standby card even with no connState yet.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["standby"]);
+    assert.match(nodes.get("standby-driver").textContent, /Chrome 0\.1\.10/);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1 back-compat: a daemon predating the id lists keeps the old reading", async () => {
+  // No `authorized_extension_ids`, no `driver_extension_id`: one identity could
+  // be authorised, so the driver-scoped `paired` IS this install's answer. This
+  // is the pre-change behaviour, deliberately preserved in that direction.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: the pair latch clears on a STANDBY confirmation, so a later revoke re-offers the form", async () => {
+  // The latch exists for the window between a successful pair and /health
+  // confirming it. It was cleared only in the connected branch, so an install
+  // that paired INTO THE STANDBY ROLE held it for as long as it stood by — and
+  // a later revoke then rendered the success view instead of putting the code
+  // field back, which is the Q1 dead end one state later. Found by rendering
+  // the real popup: pair -> standby card -> revoke -> blank/latched, not the
+  // form. This row drives the popup's own pair path with a stubbed socket so
+  // the latch is genuinely set, then confirms it survives... no further than
+  // the first standby render.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  // Stage 1: not authorised yet — the form.
+  let health = {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.13",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  };
+  installHealth(() => health);
+  // A socket that answers the popup's own pair request, exactly as the daemon
+  // does: one pair_result with a token, then close.
+  const realWebSocket = globalThis.WebSocket;
+  class PairingSocket {
+    onopen = null; onmessage = null; onerror = null; onclose = null;
+    constructor() {
+      setTimeout(() => this.onopen && this.onopen(), 0);
+    }
+    send() {
+      setTimeout(
+        () => this.onmessage && this.onmessage({ data: JSON.stringify({ event: "pair_result", ok: true, token: "new-token" }) }),
+        5,
+      );
+    }
+    close() {}
+  }
+  globalThis.WebSocket = PairingSocket;
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["pairing"], "the form must be up before pairing");
+
+    // Submit the form: real code path, stubbed socket -> latch set + success view.
+    nodes.get("pair-code").value = "123456";
+    // The stub records listeners rather than implementing an event loop, so the
+    // submit handler is invoked the way a real form would invoke it.
+    for (const handler of nodes.get("pair-form")._handlers.submit || []) {
+      handler({ preventDefault: () => {} });
+    }
+    await tick(60);
+    assert.ok(
+      !visibleState(nodes).includes("pairing"),
+      "after a successful pair the form must be replaced by the success view",
+    );
+
+    // The worker reconnects as a STANDBY: /health now lists this install, and
+    // the render must take the standby card AND drop the latch.
+    health = {
+      paired: true,
+      extension_connected: true,
+      protocol_version: 1,
+      driver_extension_id: STORE_ID,
+      driver_label: "Chrome 0.1.13",
+      authorized_extension_ids: [STORE_ID, DEV_ID],
+      standby_extension_ids: [DEV_ID],
+    };
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(30);
+    assert.deepEqual(visibleState(nodes), ["standby"]);
+
+    // Now the operator revokes it. With the latch cleared, the form returns.
+    health = {
+      paired: true,
+      extension_connected: true,
+      protocol_version: 1,
+      driver_extension_id: STORE_ID,
+      driver_label: "Chrome 0.1.13",
+      authorized_extension_ids: [STORE_ID],
+      standby_extension_ids: [],
+    };
+    await chrome.storage.session.set({ connState: "pairing" });
+    await tick(30);
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "a revoked install must be offered the code field again, not a latched success view",
+    );
+  } finally {
+    globalThis.WebSocket = realWebSocket;
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * Round 2 (QA R2-2 / R2-3, review R2-2 / R2-3).
+ *
+ * R2-2: the gate must not read the FILE's allow-list as "this link is paired".
+ * An install the file authorises whose worker holds no token rendered the
+ * standby card — "This one takes over if that one disconnects" — while the
+ * daemon did not list it as a standby, it could never be promoted, and the code
+ * field it needed was hidden. The link's own state decides; the file only
+ * widens authority.
+ *
+ * R2-3: with two signals available, `driver_extension_id` has THREE cases, not
+ * two — absent (a daemon predating the field), empty (a multi-identity daemon
+ * with nothing attached), and naming an id.
+ * ------------------------------------------------------------------------- */
+
+const TOKENLESS = {
+  paired: false,
+  extension_connected: false,
+  protocol_version: 1,
+  driver_extension_id: STORE_ID,
+  driver_label: "Chrome 0.1.13",
+  // The FILE authorises this install — but its link holds no token, which is
+  // exactly what the daemon reports: not a standby, counted as an unlisted dial.
+  authorized_extension_ids: [STORE_ID, DEV_ID],
+  standby_extension_ids: [],
+  unlisted_extension_count: 1,
+};
+
+test("R2-2: a file-authorised install whose link is unpaired gets the FORM", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => TOKENLESS);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    // The worker's own statement: its hello_ack said paired: false.
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "the file's allow-list is authority, not authentication: this install must be offered the code field",
+    );
+    assert.equal(nodes.get("pair-code")["hidden"] ?? false, false, "the code field must be visible");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-2: a stale standby connState is overruled by the daemon's live list", async () => {
+  // The token went away and the worker has not re-dialled yet, so session
+  // storage still says "standby" while /health lists this install in NO role.
+  // The live answer wins: no standby claim, and no form either (this install
+  // holds a token) — the "Paired." card, which is what it will be again after
+  // the next dial.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => TOKENLESS);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "kept-token");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["paired"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-3: the state that changed is the daemon's list, and no card goes stale", async () => {
+  // QA's R2-3 repro, one step on: the tokenless install, then a revoke. Nothing
+  // writes session storage, so nothing re-renders on an event — which is only a
+  // defect if the card that stays up is WRONG. It is not: the install was
+  // already on the form (R2-2) and the form is still the right answer, so the
+  // repaint is a no-op rather than a stale claim. This row pins the pair of
+  // states so the next change cannot reintroduce a card that outlives its state.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  let health = TOKENLESS;
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+
+    // The out-of-process revoke: the file no longer authorises this id, and no
+    // storage key changes. The same render is re-entered by the popup's own
+    // paths; assert the card a re-render produces AND that the live one was
+    // already correct.
+    health = { ...TOKENLESS, authorized_extension_ids: [STORE_ID], unlisted_extension_count: 1 };
+    await chrome.storage.session.set({ connState: "pairing" });
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["pairing"], "the form must survive the revoke");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-3: an empty driver field is 'nobody drives', not 'this install drives'", async () => {
+  // A multi-identity daemon with nothing attached names NO driver (`""`), which
+  // is a different state from a daemon that predates the field. The install is
+  // authorised and paired, so it shows "Paired. Code accepted. Connecting…" —
+  // never the connected card (the agent cannot drive it yet) and never the form
+  // (it holds a token).
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: false,
+    extension_connected: false,
+    protocol_version: 1,
+    driver_extension_id: "",
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["paired"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-3: an absent driver field still means the old single-identity reading", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("review R2-2: a wedged DRIVER does not show the wedge card to another install", async () => {
+  // `extension_unresponsive` is the driver's latch. Before this was scoped, a
+  // never-paired second install rendered "the extension has stopped responding"
+  // — a false statement about itself, with a Reload that reloads its own worker
+  // and clears nothing — instead of the form it needed.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "the driver's wedge must not hide this install's code field",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("review R2-2 control: the DRIVER's own popup still gets the wedge card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["unresponsive"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/**
+ * Round 3 (design D2 / UX U1, review R3-1): the wedge card belongs to the
+ * install that DRIVES. The round-2 gate excluded only `selfAuthorized === false`
+ * — the never-paired install — so a PAIRED standby, the operator's actual shape,
+ * read the driver's diagnosis as its own: "the extension has stopped answering"
+ * about a worker that was answering, with a Reload that would reload the install
+ * currently serving commands, and the standby card it should have shown was
+ * unreachable because this branch returns first.
+ */
+test("R3-1: a healthy authorised STANDBY is not shown the driver's wedge card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome extension 0.1.13",
+    driver_short_id: STORE_ID.slice(0, 8),
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["standby"],
+      "a standby must read the standby card, never the driver's wedge diagnosis",
+    );
+    // ...and the card names the driver with a handle the user can act on.
+    assert.equal(
+      nodes.get("standby-driver").textContent,
+      `Chrome extension 0.1.13 (${STORE_ID.slice(0, 8)}…) is driving right now.`,
+      "the card must name the driver, with the id prefix that resolves in `drive`",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R3-1 control: the install that DRIVES is still shown the wedge card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["unresponsive"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R3-1 control: nobody drives (empty driver field) is not a wedge either", async () => {
+  // The empty field means "no driver attached" — the mid-handoff state. A wedged
+  // *other* install must not be painted on this one when nobody holds the wheel.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: "",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["paired"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/**
+ * Round 3 (UX U5): a revoke was silent in the revoked install's own popup. The
+ * worker now records the 4003 close as a sticky `revoked` flag, so the form can
+ * say what happened rather than looking like a fresh install — and so the
+ * destructive-feeling transition of this flow has a signal where the user is
+ * looking.
+ */
+test("U5: a revoked install's form says it was unpaired", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "dead");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    areas.session.set("revoked", true);
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+    assert.equal(
+      nodes.get("pair-unpaired").classList.contains("hidden"),
+      false,
+      "the revoked form must name the revoke",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U5 control: a never-paired install's form says nothing about a revoke", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: false,
+    extension_connected: false,
+    protocol_version: 1,
+    authorized_extension_ids: [],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+    assert.equal(nodes.get("pair-unpaired").classList.contains("hidden"), true);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("the update advisory fills the Connected card's reserved slot, and only when /health says so", async () => {
+  // The slot is RESERVED whether or not there is anything to say (popup.css),
+  // so the assertions here are about the CONTENT and the hidden class: a slot
+  // that renders text while still carrying `hidden` is invisible (the CSS
+  // overrides `display` but not `visibility`), and one that shows without the
+  // class would be blank space on every card.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  const health = {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    pending_origin: undefined,
+    extension_version: "0.1.10",
+    extension_expected_version: "0.1.14",
+    extension_update_available: true,
+  };
+  globalThis.fetch = async () => ({ ok: true, json: async () => health });
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+    const slot = nodes.get("connected-advisory");
+    assert.equal(
+      nodes.get("connected").classList.contains("hidden"),
+      false,
+      "precondition: the connected card is what is showing",
+    );
+    assert.equal(slot.classList.contains("hidden"), false, "an older extension must be called out");
+    // The sentence is the GENERATED template with the live versions in it, so
+    // this pins the one-spelling rule: a second, hand-written string here would
+    // pass only if it happened to match.
+    assert.equal(
+      slot.textContent,
+      "Browser extension 0.1.10 < 0.1.14 — update it in Chrome when a newer version is offered; nothing is blocked.",
+    );
+    assert.doesNotMatch(slot.textContent, /requir|must/i, "an older extension is never a requirement");
+
+    // Up to date: the slot empties and the reservation alone remains.
+    health.extension_version = "0.1.14";
+    health.extension_update_available = false;
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(slot.textContent, "", "an up-to-date extension must leave the slot empty");
+    assert.equal(slot.classList.contains("hidden"), true, "and must leave it hidden");
+
+    // No state of the card may report an unavailable update as a fault tone:
+    // the slot is a note, and the card's own tone is unaffected.
+    assert.equal(
+      nodes.get("card").style.getPropertyValue("--tone"),
+      "var(--success)",
+      "the connected card keeps its success tone with an advisory showing",
     );
   } finally {
     await bundle.close();

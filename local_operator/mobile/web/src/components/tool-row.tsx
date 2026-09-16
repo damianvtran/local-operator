@@ -14,6 +14,9 @@ import type { TranscriptEntry } from "../types";
 
 const GLYPH: Record<TranscriptEntry["tool_state"], string> = {
 	composing: "⟳",
+	/* Not a spinner: nothing is turning. The elision says "still to come", which
+	   is the honest thing for a call waiting its turn to execute. */
+	queued: "⋯",
 	running: "⟳",
 	done: "✓",
 	failed: "✗",
@@ -91,6 +94,12 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 	const setOpen = setOverride;
 	const running =
 		entry.tool_state === "running" || entry.tool_state === "composing";
+	/* A queued row is live — the call has been announced and may still execute —
+	   so it keeps the raised background of a live row, but it does NOT pulse:
+	   the pulse is the "work is happening" signal (branding §7.3), and nothing
+	   is happening while the call waits behind a sibling. Its glyph is dim like
+	   composing's for the same reason. */
+	const queued = entry.tool_state === "queued";
 	const isDiffFirst =
 		DIFF_FIRST_TOOLS.has(entry.tool_name.toLowerCase()) &&
 		entry.details.diff != null;
@@ -105,7 +114,7 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 		<div
 			className={cn(
 				"rounded-sm px-1.5",
-				running && "bg-elevated",
+				(running || queued) && "bg-elevated",
 				entry.tool_state === "failed" && "bg-danger-wash",
 				entry.tool_state === "done" && "bg-surface",
 			)}
@@ -121,7 +130,8 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 						entry.tool_state === "failed" && "text-danger",
 						entry.tool_state === "done" && "text-success",
 						(entry.tool_state === "interrupted" ||
-							entry.tool_state === "composing") &&
+							entry.tool_state === "composing" ||
+							queued) &&
 							"text-ink-dim",
 						running && "lo-pulse text-accent",
 					)}

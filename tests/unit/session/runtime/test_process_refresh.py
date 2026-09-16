@@ -37,13 +37,18 @@ class FakeRegistrant:
         self._attaches = attaches
         self.closed = False
         self._boot_build = boot
-        self.retiring: list[tuple[str, str]] = []
+        #: ``(reason, to, draining, leaving)`` — see the mirror in
+        #: ``test_process_build_bound``: the caller decides the third term and
+        #: the fourth (the phrase the same call publishes for the fleet).
+        self.retiring: list[tuple[str, str, bool, str]] = []
 
     def attach_clients(self) -> int:
         return self._attaches
 
-    async def announce_retiring(self, reason: str, *, to: str = "") -> None:
-        self.retiring.append((reason, to))
+    async def announce_retiring(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        self.retiring.append((reason, to, draining, leaving))
 
     async def aclose(self) -> None:
         self.closed = True
@@ -91,6 +96,7 @@ def disk(monkeypatch):
     """Control what ``installed_build``/``build_marker_age_s`` report."""
     state = {"build": NEW, "age": 999.0}
     monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: state["build"])
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: state["build"])
     monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: state["age"])
     monkeypatch.delenv("LOP_BUILD_SETTLE_S", raising=False)
     monkeypatch.delenv("LOP_BUILD_STAGGER_S", raising=False)
@@ -180,6 +186,7 @@ def test_unreadable_stamp_is_no_change(disk, monkeypatch) -> None:
         raise OSError("dist-info gone")
 
     monkeypatch.setattr(update_mod, "installed_build", boom)
+    monkeypatch.setattr(update_mod, "disk_build", boom)
     assert _build_changed(OLD) is None
 
 
@@ -224,7 +231,9 @@ async def test_stamp_flip_announces_then_exits(disk, monkeypatch) -> None:
     disk["build"] = NEW  # lop-update ran
     await _run_until(stop)
     assert stop.is_set()
-    assert reg.retiring == [("stale-build", NEW.label())]
+    assert reg.retiring == [
+        ("stale-build", NEW.label(), False, "")
+    ], "the idle rung refuses nothing: the frame must not claim it does"
     assert handle.disposed and reg.closed
     await task
 
@@ -240,8 +249,10 @@ async def test_work_arriving_after_the_announce_keeps_the_runtime(disk, monkeypa
     reg = FakeRegistrant()
     handle = FakeHandle()
 
-    async def announce(reason: str, *, to: str = "") -> None:
-        reg.retiring.append((reason, to))
+    async def announce(
+        reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        reg.retiring.append((reason, to, draining, leaving))
         if len(reg.retiring) == 1:
             handle._busy = True  # a turn starts between announce and exit, ONCE
 

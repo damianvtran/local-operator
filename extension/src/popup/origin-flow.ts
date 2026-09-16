@@ -42,7 +42,31 @@ export interface DecisionAck {
   check: boolean;
 }
 
-/** The acknowledgement each decision renders. Deny is a COMPLETED choice, not
+/** The acknowledgement shown from the CLICK ALONE, while the worker round-trip
+ * is still outstanding.
+ *
+ * It reports RECEIPT, never outcome. The optimistic ack below is right once a
+ * decision has landed, but until the worker answers the popup does not know
+ * that it has: against a mute worker the success copy, the success tone and
+ * the check sat on screen for 4.9s asserting a grant that was never applied
+ * (UX U2), and a popup is dismissed by clicking anywhere outside it — so the
+ * realistic outcome was a user closing it believing the site was allowed.
+ *
+ * Neutral tone and no check, deliberately: those are the two things a user
+ * reads as "done". The verb is progressive for the same reason. `decision` is
+ * named so the in-flight line already says WHICH way the click went — the user
+ * should not have to wait for the confirmation to see what they chose. */
+export function ackInFlight(decision: OriginDecision): DecisionAck {
+  return {
+    title: decision === "deny" ? "Denying…" : "Allowing…",
+    sub: "Waiting for the extension to apply your choice.",
+    tone: "neutral",
+    check: false,
+  };
+}
+
+/** The acknowledgement each decision renders ONCE THE WORKER HAS CONFIRMED it.
+ * Deny is a COMPLETED choice, not
  * a failure, so it takes the neutral register and no check — danger is
  * reserved for states the user must recover from (error/incompatible), and a
  * check over "denied" would read as the wrong verdict. `broadScope` names
@@ -306,5 +330,25 @@ export function noticeForRejectedDecision(
   return {
     title: "Request expired.",
     sub: "It timed out or was cancelled, so nothing was granted or denied.",
+  };
+}
+
+/** The notice for a decision whose round-trip to the WORKER never completed —
+ * it rejected, or it never answered inside the popup's bound.
+ *
+ * Deliberately NOT `noticeForRejectedDecision`'s "Request changed." copy. That
+ * one means a live worker replaced the generation, which is a statement about
+ * the REQUEST; this one means nothing answered at all, so the popup knows
+ * nothing about the request's fate. Reusing it here would tell the user their
+ * request was superseded when in truth it may have been applied, may not, and
+ * the extension cannot say which.
+ *
+ * The consequence line is what the user needs: reopening re-reads /health, so
+ * the popup will show the real state — including the wedged-worker card, whose
+ * own copy carries the remedy. */
+export function noticeForUnreachableWorker(): OriginNotice {
+  return {
+    title: "No answer from the extension.",
+    sub: "Your click was received, but the extension didn't respond, so this may not have been applied. Reopen this popup to see the current state.",
   };
 }

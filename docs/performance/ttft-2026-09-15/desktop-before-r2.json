@@ -1,0 +1,118 @@
+{
+  "tui": {
+    "summary": {
+      "runs": 2,
+      "cold_first_delta_ms": {
+        "median": 540.5,
+        "min": 213.4,
+        "max": 867.6
+      },
+      "cold_request_built_ms": {
+        "median": 20.7,
+        "min": 17.4,
+        "max": 23.9
+      },
+      "cold_turn_ms": {
+        "median": 550.7,
+        "min": 227.4,
+        "max": 873.9
+      },
+      "warm_first_delta_ms": {
+        "median": 10.5,
+        "min": 8.1,
+        "max": 12.9
+      },
+      "warm_request_built_ms": {
+        "median": 5.0,
+        "min": 4.9,
+        "max": 5.2
+      },
+      "warm_turn_ms": {
+        "median": 19.3,
+        "min": 15.2,
+        "max": 23.4
+      }
+    },
+    "results": [
+      {
+        "cold_request_built_ms": 17.40908299689181,
+        "cold_first_delta_ms": 867.6460410060827,
+        "cold_turn_ms": 873.9187500032131,
+        "warm_request_built_ms": 5.1510419871192425,
+        "warm_first_delta_ms": 12.936541985254735,
+        "warm_turn_ms": 23.365666973404586,
+        "run": 0.0
+      },
+      {
+        "cold_request_built_ms": 23.930541006848216,
+        "cold_first_delta_ms": 213.4174160019029,
+        "cold_turn_ms": 227.41970801143907,
+        "warm_request_built_ms": 4.905667010461912,
+        "warm_first_delta_ms": 8.06691701291129,
+        "warm_turn_ms": 15.16091701341793,
+        "run": 1.0
+      }
+    ]
+  },
+  "desktop-cold": {
+    "summary": {
+      "runs": 2,
+      "admitted_ms": {
+        "median": 5269.7,
+        "min": 3419.8,
+        "max": 7119.5
+      },
+      "first_token_ms": {
+        "median": 5315.1,
+        "min": 3484.9,
+        "max": 7145.3
+      }
+    },
+    "results": [
+      {
+        "admitted_ms": 7119.492124998942,
+        "first_token_ms": 7145.344582997495,
+        "run": 0.0
+      },
+      {
+        "admitted_ms": 3419.8374999978114,
+        "first_token_ms": 3484.9102500011213,
+        "run": 1.0
+      }
+    ]
+  },
+  "desktop-warm": {
+    "summary": {
+      "runs": 2,
+      "admitted_ms": {
+        "median": 43.6,
+        "min": 32.0,
+        "max": 55.2
+      },
+      "first_token_ms": {
+        "median": 45.1,
+        "min": 33.6,
+        "max": 56.6
+      },
+      "prime_ms": {
+        "median": 2574.8,
+        "min": 2529.0,
+        "max": 2620.6
+      }
+    },
+    "results": [
+      {
+        "prime_ms": 2620.6106670142617,
+        "admitted_ms": 31.992499978514388,
+        "first_token_ms": 33.61208297428675,
+        "run": 0.0
+      },
+      {
+        "prime_ms": 2529.017458000453,
+        "admitted_ms": 55.23154200636782,
+        "first_token_ms": 56.56958298641257,
+        "run": 1.0
+      }
+    ]
+  }
+}

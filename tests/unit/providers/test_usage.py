@@ -538,6 +538,163 @@ async def test_deepseek_reports_a_balance_per_currency() -> None:
     assert units["deepseek:balance:usd"] == "usd"
 
 
+#: The SHAPE is DeepSeek's documented `/user/balance` schema and matches the
+#: live endpoint; the AMOUNTS are synthetic round numbers. The real figures are
+#: the operator's private account balance and are deliberately not committed.
+_DEEPSEEK_BALANCE_BODY = {
+    "is_available": True,
+    "balance_infos": [
+        {
+            "currency": "CNY",
+            "total_balance": "863.00",
+            "granted_balance": "63.00",
+            "topped_up_balance": "800.00",
+        },
+        {
+            "currency": "USD",
+            "total_balance": "120.00",
+            "granted_balance": "20.00",
+            "topped_up_balance": "100.00",
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_carries_the_granted_paid_split_per_currency() -> None:
+    """Granted credit EXPIRES, so a total alone overstates durable balance. The
+    currency rides on each number because the amount itself is deliberately
+    unitless for anything but USD."""
+    client = _client_for(_DEEPSEEK_BALANCE_BODY)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    details = {lim.id: lim.detail for lim in report.limits}
+    assert details["deepseek:balance:usd"] == "100.00 USD paid · 20.00 USD granted"
+    assert details["deepseek:balance:cny"] == "800.00 CNY paid · 63.00 CNY granted"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_reports_no_split_when_the_body_carries_none() -> None:
+    """An empty detail renders no line at all, rather than an empty scaffold."""
+    payload = {
+        "is_available": True,
+        "balance_infos": [{"currency": "USD", "total_balance": "5.00"}],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert [lim.detail for lim in report.limits] == [""]
+
+
+@pytest.mark.asyncio
+async def test_deepseek_states_a_status_rather_than_leaving_it_derived() -> None:
+    """A balance-only amount has no denominator, so ``UsageAmount.status()`` can
+    only ever say ``unknown`` — which drew a reported number as one we do not
+    have and tallied it in the footer as "not reported"."""
+    client = _client_for(_DEEPSEEK_BALANCE_BODY)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert {lim.effective_status() for lim in report.limits} == {"ok"}
+
+
+@pytest.mark.asyncio
+async def test_a_zeroed_deepseek_wallet_is_exhausted_not_unknown() -> None:
+    """Zero is definitive: the wallet cannot pay for the next request."""
+    payload = {
+        "is_available": True,
+        "balance_infos": [{"currency": "USD", "total_balance": "0.00"}],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert [lim.effective_status() for lim in report.limits] == ["exhausted"]
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_deepseek_account_exhausts_every_funded_row() -> None:
+    """``is_available: false`` means the account cannot serve requests, so a row
+    with money in it is still not spendable."""
+    payload = {
+        "is_available": False,
+        "balance_infos": [{"currency": "USD", "total_balance": "120.00"}],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert [lim.effective_status() for lim in report.limits] == ["exhausted"]
+
+
+@pytest.mark.asyncio
+async def test_an_absent_availability_flag_still_counts_as_available() -> None:
+    """Only a JSON ``false`` is evidence of suspension. Coercing a missing key
+    would paint a healthy account red on any schema change."""
+    payload = {"balance_infos": [{"currency": "USD", "total_balance": "120.00"}]}
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert [lim.effective_status() for lim in report.limits] == ["ok"]
+    assert report.notes is None
+
+
+@pytest.mark.parametrize("flag", [None, 0, ""])
+@pytest.mark.asyncio
+async def test_a_falsy_but_non_false_flag_never_suspends_the_account(flag) -> None:
+    """Only the documented boolean suspends. This is a deliberate CHANGE from the
+    old truthiness test, which read ``null``, ``0`` and ``""`` as unavailable —
+    so a schema change that started sending one of them reddened every row of a
+    healthy account. Fail-open on those three, and the row's status still comes
+    from the total rather than from the flag alone."""
+    payload = {
+        "is_available": flag,
+        "balance_infos": [{"currency": "USD", "total_balance": "120.00"}],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert report.notes is None
+    assert [lim.effective_status() for lim in report.limits] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_one_unparsable_deepseek_balance_does_not_drop_the_others() -> None:
+    """A garbage row is skipped; the currencies that parsed still report."""
+    payload = {
+        "is_available": True,
+        "balance_infos": [
+            {"currency": "CNY", "total_balance": "not-a-number"},
+            {"currency": "USD"},
+            {"currency": "EUR", "total_balance": "7.50"},
+        ],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert [lim.id for lim in report.limits] == ["deepseek:balance:eur"]
+
+
+@pytest.mark.asyncio
+async def test_deepseek_keeps_the_vendors_currency_order() -> None:
+    """The peer tools disagree with each other about which currency to prefer
+    (one takes the first entry, one hard-prefers USD), which is evidence there
+    is no right answer — so the vendor's own order is the tiebreak."""
+    client = _client_for(_DEEPSEEK_BALANCE_BODY)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert [lim.id for lim in report.limits] == [
+        "deepseek:balance:cny",
+        "deepseek:balance:usd",
+    ]
+
+
 #: A REAL Z.AI coding-plan quota body, captured from
 #: `GET https://api.z.ai/api/monitor/usage/quota/limit` on 2026-08-17. Pinned
 #: verbatim because the shape is the whole contract here: the TOKENS_LIMIT rows

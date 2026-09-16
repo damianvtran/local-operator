@@ -22,6 +22,7 @@ import {
 } from "./access-queue";
 import { grantExactOriginLocked, grantSiteLocked } from "./access-grants";
 import { broadGrantFor } from "./origin-policy";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getLocal, getSession, withSessionMutation, type SessionState } from "./state";
 
 export interface QueueSnapshot {
@@ -66,9 +67,18 @@ export function nextAccessExpiry(snapshot: QueueSnapshot): number | undefined {
 
 export async function armNextExpiry(snapshot: QueueSnapshot): Promise<void> {
   const when = nextAccessExpiry(snapshot);
+  // `chrome.alarms.clear` is the one storage-class await on this lane that does
+  // not go through state.ts, so it needs the same bound as everything else the
+  // queue sweep awaits: the sweep runs inside the approval-store mutation lane,
+  // and an unbounded await there parks every later approval for every session.
   if (when === undefined) {
-    await chrome.alarms.clear(ACCESS_EXPIRY_ALARM);
+    await deadline(
+      chrome.alarms.clear(ACCESS_EXPIRY_ALARM),
+      CHROME_API_DEADLINE_MS,
+      "chrome.alarms.clear(access expiry)",
+    );
   } else {
+    // create() is synchronous (void), not a promise to await.
     chrome.alarms.create(ACCESS_EXPIRY_ALARM, { when });
   }
 }
@@ -145,25 +155,39 @@ async function normalizedLocked(now: number): Promise<QueueSnapshot> {
     }
   }
   queue.sort((a, b) => a.sequence - b.sequence);
-  await chrome.storage.session.set({
-    accessQueueVersion: ACCESS_QUEUE_VERSION,
-    accessQueue: queue,
-    accessResults: cleanResults(results, now),
-    onceGrants,
-  });
-  if (needsMigration) await chrome.storage.session.remove(["accessRequest", "pendingOrigin"]);
+  await deadline(
+    chrome.storage.session.set({
+      accessQueueVersion: ACCESS_QUEUE_VERSION,
+      accessQueue: queue,
+      accessResults: cleanResults(results, now),
+      onceGrants,
+    }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.set(access queue)",
+  );
+  if (needsMigration) {
+    await deadline(
+      chrome.storage.session.remove(["accessRequest", "pendingOrigin"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.remove(legacy access records)",
+    );
+  }
   const snapshot = { queue, results: cleanResults(results, now), onceGrants };
   await armNextExpiry(snapshot);
   return snapshot;
 }
 
 async function persistLocked(snapshot: QueueSnapshot): Promise<void> {
-  await chrome.storage.session.set({
-    accessQueueVersion: ACCESS_QUEUE_VERSION,
-    accessQueue: snapshot.queue,
-    accessResults: snapshot.results,
-    onceGrants: snapshot.onceGrants,
-  });
+  await deadline(
+    chrome.storage.session.set({
+      accessQueueVersion: ACCESS_QUEUE_VERSION,
+      accessQueue: snapshot.queue,
+      accessResults: snapshot.results,
+      onceGrants: snapshot.onceGrants,
+    }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.set(access queue)",
+  );
   await armNextExpiry(snapshot);
 }
 
@@ -183,6 +207,33 @@ export function sweepQueue(now: number = Date.now()): Promise<QueueSnapshot> {
     await persistLocked(snapshot);
     observer?.(snapshot);
     return snapshot;
+  });
+}
+
+/** The queue as it is NOW, for a caller that only has to RENDER it: no migration,
+ * no persist, no alarm, and no observer notification.
+ *
+ * It exists for the cosmetic surface's follow-up reconcile (origins.ts), which
+ * needs a snapshot newer than the one an ABANDONED Chrome write carried, and
+ * must not start a second sweep to get one: `sweepQueue` notifies the queue
+ * observer, and that observer is what schedules reconciliation in the first
+ * place, so a follow-up built on it would re-enter the lane it is repairing and
+ * put a second cosmetic burst on the wire for one failure. The read stays inside
+ * the mutation lane so it cannot observe a half-applied mutation, and it is a
+ * pure projection of the same helpers `normalizedLocked` uses.
+ *
+ * A queue still on an older `accessQueueVersion` is not migrated here — this is a
+ * display path, and the sweep that migrates it also announces it. */
+export function readQueueSnapshot(now: number = Date.now()): Promise<QueueSnapshot> {
+  return withSessionMutation(async () => {
+    const session = await getSession();
+    return {
+      queue: liveQueue(session.accessQueue, now),
+      results: cleanResults(session.accessResults, now),
+      onceGrants: Object.fromEntries(
+        Object.entries(session.onceGrants ?? {}).filter(([, grant]) => now < grant.expiresAt),
+      ) as OnceGrants,
+    };
   });
 }
 

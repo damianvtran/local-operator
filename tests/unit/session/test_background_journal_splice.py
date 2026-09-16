@@ -47,6 +47,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.message_types import SESSION_MODEL_SWITCH_MESSAGE_TYPE
 from local_operator.harness.types import (
     AgentTool,
     ChatRequest,
@@ -64,7 +65,6 @@ from local_operator.providers.clients import (
     _messages_to_openai_responses,
 )
 from local_operator.session.session import (
-    SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     CustomMessage,
     Session,
     _pair_spliced_tool_results,

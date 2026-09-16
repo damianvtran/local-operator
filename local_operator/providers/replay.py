@@ -16,6 +16,38 @@ from typing import Any
 
 from local_operator.harness.types import Message, ModelSpec
 
+#: What a model that REQUIRES a reasoning echo is sent for an assistant turn the
+#: harness has no reasoning for. See ``ModelSpec.requires_reasoning_echo`` for
+#: what is measured about the requirement (and for what is deliberately not
+#: claimed about it).
+#:
+#: THIS TEXT IS MODEL-VISIBLE AND BILLED. The API concatenates the echo into the
+#: context it reads, so the model sees the sentence and the provider charges the
+#: input: measured on the wire at +330 input tokens for one real request (66
+#: placeholders x 5, exactly what :func:`reasoning_echo_placeholder_tokens`
+#: estimates). Deliberately a visible sentence rather than an empty string or a
+#: space, because the corpus on what the validator reads is thin and
+#: contradictory -- on one shape an all-blank body answered 200 where the same
+#: body with the keys ABSENT answered 400 -- so a blank relies on leniency no
+#: replica has promised, and it is also a value an intermediary could normalise
+#: away. Text cannot be normalised into absence.
+#:
+#: It is deliberately not a harness bookkeeping word either: a phrase like
+#: "payload" or "details" would collide with the names the harness uses for its
+#: own provider state (``provider_payload["details"]`` and friends, which are
+#: never shipped), and the model reads this line as part of its own conversation.
+REASONING_ECHO_PLACEHOLDER = "[thinking not recorded]"
+
+
+def reasoning_echo_placeholder_tokens() -> int:
+    """Token estimate for one echo placeholder, on the counting ruler used here.
+
+    Held next to the constant so the body builder (which spends it) and
+    ``providers.context`` (which counts it) cannot drift into disagreeing about
+    what a placeholder costs.
+    """
+    return max(1, len(REASONING_ECHO_PLACEHOLDER) // 4)
+
 
 def credential_scope(api_key: str | None, oauth_access: Any = None) -> str:
     """Opaque identity, never the credential, for native-state provenance.

@@ -164,6 +164,43 @@ SIDEBAR_SPINNER_INTERVAL_S = 0.15
 
 
 class SessionSidebar(Widget, can_focus=True):
+    #: A pointer press on this list acts on the row under the pointer and nothing
+    #: else: it does NOT move the keyboard (design round, D1).
+    #:
+    #: With Textual's default (``True``) the click-to-focus walk lands on this
+    #: widget (``Screen._forward_event`` -> ``get_focusable_widget_at``,
+    #: ``screen.py:1933-1939``, consulting ``Widget.focus_on_click``) and the
+    #: keyboard LEAVES the composer. Measured on the design round's frames at
+    #: 120x40: a click anywhere in the panel — a row and the dead space below the
+    #: list alike — dimmed the composer's chevron, took the caret, and then
+    #: swallowed everything typed next (four typed keys, a 0-cell frame delta,
+    #: the draft untouched). The user cannot even tell that state apart from
+    #: "nothing holds the keys", and nothing on the frame says typing is going
+    #: nowhere. The gesture is complete when the click lands — it attached a
+    #: session or it missed — and this list has no text input, so it has nothing
+    #: to do with the keys afterwards.
+    #:
+    #: ``can_focus`` deliberately stays ``True``: the list keeps its keyboard
+    #: mode and its arrows/``enter``/cursor tint unchanged, entered only on
+    #: purpose (``f9``, or ``/sidebar focus`` — its own footer names the key) and
+    #: left with Esc or ``f9`` again. The app already behaves this way in the one
+    #: click path that DOES act: clicking the attached session's own row focuses
+    #: the editor itself (:meth:`OperatorApp.on_session_sidebar_selected`), so
+    #: this only makes the rest of the panel agree with it.
+    #:
+    #: Accepted trade-off, stated so it is not discovered later: with the click no
+    #: longer changing the composer's state, ``enter`` right after a row click
+    #: still means "send the draft" (``editor.py`` ``_submit``) rather than "open
+    #: the row". A frame that did not visibly change is the price; the alternative
+    #: was text that vanished with no frame change at all.
+    #:
+    #: Do NOT pair this with forwarding printable keys from ``on_key`` to the
+    #: composer (the mechanism the UX diagnosis floated): under this rule the list
+    #: is only ever entered deliberately, so there is nothing to repair, and the
+    #: forwarding would contradict itself the day the list grows the filter field
+    #: a click on it implies.
+    FOCUS_ON_CLICK = False
+
     #: Textual re-renders a widget on every pointer move to look for link
     #: spans (``Widget.watch_hover_style``, whose own comment notes it fires
     #: "even when there are no links"). That repaint is paid INLINE on the
@@ -878,7 +915,37 @@ class SessionSidebar(Widget, can_focus=True):
         hint = "esc return" if self.has_focus else "f9 focus · ctrl+b hide"
         if len(self.entries) > self.page_size:
             last = min(len(self.entries), self._offset + self.page_size)
-            hint = f"{self._offset + 1}–{last}/{len(self.entries)} · ctrl+b hide"
+            position = f"{self._offset + 1}–{last}/{len(self.entries)}"
+            # TWO rules, one helper, and they are the same rule applied to the
+            # two ends of the list's keyboard mode. D4: the counter may never be
+            # the reason the EXIT hint disappears — it used to REPLACE the hint
+            # outright, so the focused frame that most needs to name a way out
+            # (41 rows, cursor deep inside) read `1–32/41 · ctrl+b hide` and
+            # `esc return` was gone. U1: the same counter left a full list
+            # naming NOWHERE how to enter that mode — a whole-frame search for
+            # `f9`/`focus` found nothing at 120x40 or 70x24, focused or not, so
+            # the only route in (f9, or `/sidebar focus`) was advertised solely
+            # by the copy the counter had just displaced.
+            #
+            # Longest form that fits, then the lead key WITH the position, then
+            # today's unpaginated copy. The lead key is the exit when the list
+            # has the keyboard and the way IN when it does not, so the counter
+            # can never be the reason either one is missing. `ctrl+b hide` is
+            # what gives way: the position is discoverable by scrolling (the
+            # cursor row is painted) and the panel's own toggle is on the frame
+            # that opens it.
+            lead = "esc return" if self.has_focus else "f9 focus"
+            hint = next(
+                (
+                    candidate
+                    for candidate in (
+                        f"{position} · {lead} · ctrl+b hide",
+                        f"{position} · {lead}",
+                    )
+                    if truncate_cells(candidate, width) == candidate
+                ),
+                hint,
+            )
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
         result.append(
             "\n" + truncate_cells(footer, width),

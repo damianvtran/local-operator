@@ -7,7 +7,12 @@ import * as api from "./api";
 import * as store from "./store";
 import type { SessionProjection, SubagentDetail, SubagentRow, TranscriptEntry } from "./types";
 
-vi.mock("./api", () => ({
+/* Spreads the ACTUAL api module so class exports keep their identity: the
+   screen distinguishes a terminal 404 by `instanceof HttpError`, which a
+   partial factory would replace with `undefined`. Network functions are
+   still stubbed per test. */
+vi.mock("./api", async (importOriginal) => ({
+	...(await importOriginal<typeof api>()),
 	getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentDetail: vi.fn(),
@@ -409,6 +414,154 @@ describe("AgentConversation", () => {
 		expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
 	});
 
+	it("treats a 404 child history as terminal, not a retry loop", async () => {
+		/* A child the daemon cannot route has no transcript to serve: the route
+		   answers 404 forever. The body must say so and offer a way back to the
+		   parent instead of a Retry that can never succeed (the console error
+		   this replaced). The way back REPLACES the hierarchy fallback rather
+		   than pushing it, like the header's own "‹" (D2/MINOR-1): a pushed
+		   entry leaves the dead child as the predecessor the phone's Back key
+		   returns to. */
+		const replaceState = vi.spyOn(history, "replaceState");
+		const pushState = vi.spyOn(history, "pushState");
+		history.replaceState({}, "", "#/s/root/a/current");
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			transcript: [],
+			prompt: "",
+			launch_message_id: "",
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(
+			new api.HttpError(404, "subagent history unavailable"),
+		);
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("No transcript for this agent.")).toBeTruthy());
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Back to parent" }));
+		expect(replaceState).toHaveBeenCalledWith(expect.anything(), "", "#/s/root/a/parent");
+		expect(pushState).not.toHaveBeenCalled();
+	});
+
+	it("renders the terminal 404 notice for a child that carries a launch prompt (D1/Q1)", async () => {
+		/* The shape the phone actually receives for a launched child: the roster
+		   push fills ``prompt``, ``agentConversationEntries`` synthesizes a head
+		   row from it, and the history route 404s. The notice must therefore not
+		   be gated on an empty body — it renders under that row and above the
+		   result tail, with the launch row kept as context. */
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			result_text: "Found the seam.",
+			transcript: [],
+		};
+		expect(settled.prompt).not.toBe("");
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(
+			new api.HttpError(404, "subagent history unavailable"),
+		);
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("No transcript for this agent.")).toBeTruthy());
+		expect(
+			screen.getByText(
+				"Its conversation steps couldn't be read, so only the result and activity below are shown.",
+			),
+		).toBeTruthy();
+		// The launch row is kept, not suppressed to make room for the notice.
+		const launchRow = screen.getAllByText(/One request/)[0];
+		expect(launchRow).toBeTruthy();
+		// Terminal: no Retry that cannot succeed.
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+		// Order matters: launch row, then the notice, then the result tail.
+		const order = Array.from(document.querySelectorAll("*"));
+		expect(order.indexOf(launchRow)).toBeLessThan(
+			order.indexOf(screen.getByText("No transcript for this agent.")),
+		);
+		expect(order.indexOf(screen.getByText("No transcript for this agent."))).toBeLessThan(
+			order.indexOf(screen.getByText(/Result from current-agent/)),
+		);
+	});
+
+	it("keeps the retry card for a prompt-carrying child when the fetch drops (Q2)", async () => {
+		/* The same suppression hit the transient branch: a dropped fetch on a
+		   launched child (rows on screen from the synthesized head) must still
+		   surface the error and recover in place, exactly as the prompt-less
+		   control does. */
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			result_text: "Found the seam.",
+			transcript: [],
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory
+			.mockRejectedValueOnce(new Error("network down"))
+			.mockResolvedValueOnce({
+				entries: [entry("recovered", "assistant", "Recovered step")],
+				has_more: false,
+			});
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		expect(screen.getAllByText(/One request/).length).toBeGreaterThan(0);
+		// The live region carries the words only — never the control (D4).
+		expect(screen.getByRole("alert").querySelector("button")).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+		await waitFor(() => expect(screen.getByText("Recovered step")).toBeTruthy());
+		expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+	});
+
+	it("keeps the terminal notice's live region off its action (D4)", async () => {
+		/* ``role="alert"`` wrapped the whole card, so the AX tree announced an
+		   unnamed alert containing a button. The region is the text; the action
+		   is its sibling. */
+		const { detail, projection } = fixture();
+		const settled = { ...detail, status: "completed" as const, transcript: [] };
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(
+			new api.HttpError(404, "subagent history unavailable"),
+		);
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("No transcript for this agent.")).toBeTruthy());
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toContain("No transcript for this agent.");
+		expect(alert.textContent).not.toContain("Back to parent");
+		expect(alert.querySelector("button")).toBeNull();
+		expect(screen.getByRole("button", { name: "Back to parent" })).toBeTruthy();
+	});
+
+	it("shows the loading affordance under the launch row while the tail is in flight", async () => {
+		/* Same guard, third state: a prompt-carrying child whose first fetch has
+		   not landed renders its synthesized launch row AND the loading
+		   affordance — not a launch row alone that reads like a complete
+		   conversation (U2). */
+		const { detail, projection } = fixture();
+		const empty = { ...detail, transcript: [] };
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockReturnValueOnce(new Promise(() => undefined));
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={empty} />,
+		);
+		expect(screen.getAllByText(/One request/).length).toBeGreaterThan(0);
+		expect(screen.getByText("Loading agent activity…")).toBeTruthy();
+	});
+
 	it("re-pulls a settled child's transcript when the link reconnects (U1)", async () => {
 		/* The fetch effect lists ``connected`` as a dependency, mirroring the
 		   detail loader, so a restored link re-pulls a settled child that missed
@@ -495,6 +648,227 @@ describe("AgentConversation", () => {
 		expect(screen.queryByText("Loading activity")).toBeNull();
 		// Effort tier spelled out to match the session footer (D3): "hi" → "high".
 		expect(screen.getByText(/reviewer · high/)).toBeTruthy();
+	});
+
+	it("keeps a running child's dropped poll quiet while its rows are on screen", async () => {
+		/* A running child polls every 1.5 s, so its own poll is the recovery path
+		   for a dropped tick (see the catch block): the transient card must not
+		   paint over rows that are still live — on the flaky link this surface
+		   exists for it would flash an error once per drop over a transcript the
+		   user can read — and the next successful tick restores the tail. The row
+		   has to LAND first, so the first fetch succeeds and the failure is the
+		   tick after it. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const running = {
+				...detail,
+				status: "running" as const,
+				transcript: [],
+				prompt: "",
+				launch_message_id: "",
+			};
+			const live = entry("live", "assistant", "Live step one");
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockReset();
+			getSubagentHistory
+				.mockResolvedValueOnce({ entries: [live], has_more: false })
+				.mockRejectedValueOnce(new Error("poll dropped"))
+				.mockResolvedValueOnce({
+					entries: [live, entry("tail", "assistant", "Live step two")],
+					has_more: false,
+				});
+			render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(screen.getByText("Live step one")).toBeTruthy());
+			// One dropped poll tick: the fetch really ran and really failed...
+			await vi.advanceTimersByTimeAsync(1600);
+			expect(getSubagentHistory).toHaveBeenCalledTimes(2);
+			await vi.advanceTimersByTimeAsync(10);
+			// ...the rows are still there, and the drop is not announced over them.
+			expect(screen.getByText("Live step one")).toBeTruthy();
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+			expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+			// The next tick lands the tail with no card in between, no retry needed.
+			await vi.advanceTimersByTimeAsync(1600);
+			await vi.waitFor(() => expect(screen.getByText("Live step two")).toBeTruthy());
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps a running child's dropped polls quiet once a prompt-carrying tail has landed", async () => {
+		/* The same rule as the test above, in the shape the daemon actually
+		   sends: ``prompt`` set (so ``agentConversationEntries`` synthesizes a
+		   ``parent_message`` head) AND running AND polling. That head is a label
+		   for the child, not a landed transcript row — the gate has to read what
+		   the FETCH returned, or this shape would be silent about a drop it must
+		   not report; a landed row still suppresses the card, and the poll still
+		   recovers without the user asking. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			// ``launch_message_id`` kept: the roster row for a launched child
+			// carries both fields, and the entry it names is not in the wire tail.
+			const running = { ...detail, status: "running" as const, transcript: [] };
+			expect(running.prompt).not.toBe("");
+			const live = entry("live", "assistant", "Live step one");
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockReset();
+			// A mode rather than a call counter: the number of ticks a virtual
+			// interval produces is an implementation detail of the timer, and the
+			// property under test is "every tick since the landing one failed".
+			let mode: "live" | "broken" | "recovered" = "live";
+			getSubagentHistory.mockImplementation(async () => {
+				if (mode === "broken") throw new Error("poll dropped");
+				return {
+					entries: mode === "live" ? [live] : [live, entry("tail", "assistant", "Live step two")],
+					has_more: false,
+				};
+			});
+			render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(screen.getByText("Live step one")).toBeTruthy());
+			// Every tick from here fails: the landed row stays and no card is painted.
+			mode = "broken";
+			await vi.advanceTimersByTimeAsync(3200);
+			expect(getSubagentHistory.mock.calls.length).toBeGreaterThanOrEqual(3);
+			expect(screen.getByText("Live step one")).toBeTruthy();
+			expect(screen.getAllByText(/One request/).length).toBeGreaterThan(0);
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+			expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+			mode = "recovered";
+			await vi.advanceTimersByTimeAsync(1600);
+			await vi.waitFor(() => expect(screen.getByText("Live step two")).toBeTruthy());
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("tells the user when a running child's launch-prompted tail never lands (MAJOR-1)", async () => {
+		/* The production shape for a launched child — ``prompt`` set, running,
+		   and the history route failing on EVERY poll — with nothing landed. The
+		   synthesized head row is a label, not content: gating the exemption on
+		   the painted list let it stand in for the transcript, so this child
+		   painted its launch row and a live "running" header with no error, no
+		   Retry and no loading affordance for as long as it ran. The card is the
+		   only signal anything failed, and it is honest here because nothing is
+		   in flight; a later tick that lands content clears it in place. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const running = { ...detail, status: "running" as const, transcript: [] };
+			expect(running.prompt).not.toBe("");
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockReset();
+			// Released on demand: the assertion is that the route fails on every
+			// poll for a while and then recovers, not that it fails N times.
+			let released = false;
+			getSubagentHistory.mockImplementation(async () => {
+				if (!released) throw new Error("history route dropped");
+				return { entries: [entry("landed", "assistant", "Landed at last")], has_more: false };
+			});
+			render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(getSubagentHistory).toHaveBeenCalledTimes(1));
+			// ~6 s of polls, every one of them failing: the launch row is there,
+			// the body is not silent about it.
+			await vi.advanceTimersByTimeAsync(6800);
+			expect(getSubagentHistory.mock.calls.length).toBeGreaterThanOrEqual(4);
+			expect(screen.getAllByText(/One request/).length).toBeGreaterThan(0);
+			expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy();
+			expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+			// The next tick lands rows; the card clears without the user asking.
+			released = true;
+			await vi.advanceTimersByTimeAsync(1600);
+			await vi.waitFor(() => expect(screen.getByText("Landed at last")).toBeTruthy());
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps the retry card when a settled child's later fetch fails (U1)", async () => {
+		/* The mirror of the rule above, and the reason it keys on ``running``
+		   rather than on rows alone: a settled child has NO poll, so nothing
+		   recovers a dropped fetch — not even when rows from an earlier fetch are
+		   still on screen, where a rows-only gate would lose the transcript
+		   silently. Here the first fetch lands, the link drops, the effect re-runs
+		   (``connected`` is a dependency) and fails: the card must be back under
+		   the row that is still there. */
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			transcript: [],
+			prompt: "",
+			launch_message_id: "",
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory
+			.mockResolvedValueOnce({
+				entries: [entry("landed", "assistant", "Landed step")],
+				has_more: false,
+			})
+			.mockRejectedValueOnce(new Error("link dropped"));
+		const view = (connected: boolean) => (
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected={connected} detail={settled} />
+		);
+		const { rerender } = render(view(true));
+		await waitFor(() => expect(screen.getByText("Landed step")).toBeTruthy());
+		rerender(view(false));
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		expect(screen.getByText("Landed step")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+	});
+
+	it("gives both notice cards the app's 8 px title/body pair gap (D6)", async () => {
+		/* The D4 wrapper took the pair spacing over from the card's own
+		   ``flex … gap-2``, so the title and body sat flush at 0 px where the
+		   app's equivalent pair (``AgentUnavailable`` → ``InlineState``) is 8 px.
+		   Layout is not measurable in happy-dom, so this pins the utility the
+		   designer specified rather than the rendered geometry; the two branches
+		   are one component and must not drift apart on it. */
+		const { detail, projection } = fixture();
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(
+			new api.HttpError(404, "subagent history unavailable"),
+		);
+		const { unmount } = render(
+			<AgentConversation
+				sessionId="root"
+				jobId="current"
+				projection={projection}
+				connected
+				detail={{ ...detail, status: "completed" as const, transcript: [] }}
+			/>,
+		);
+		await waitFor(() => expect(screen.getByText("No transcript for this agent.")).toBeTruthy());
+		const terminal = screen.getByRole("alert");
+		expect(terminal.classList.contains("gap-2")).toBe(true);
+		expect(terminal.className).toContain("flex-col");
+		unmount();
+		// The transient branch takes the same class: same title/body pair rhythm.
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(new Error("transient drop"));
+		render(
+			<AgentConversation
+				sessionId="root"
+				jobId="current"
+				projection={projection}
+				connected
+				detail={{ ...detail, status: "completed" as const, transcript: [], prompt: "" }}
+			/>,
+		);
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		expect(screen.getByRole("alert").classList.contains("gap-2")).toBe(true);
 	});
 
 	it("keeps a running child's sheet live by polling its transcript", async () => {

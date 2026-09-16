@@ -1,3 +1,6 @@
+import type { SnapshotRef } from "./driver/ax-compact";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
+
 export const DEFAULT_PORT = 4099;
 
 // Hard ceiling on concurrently-driven tabs. Parallel sessions each open their
@@ -33,11 +36,6 @@ export interface StoredSurface {
   appliedGroupId?: number;
 }
 
-export interface SnapshotRef {
-  backendNodeId: number;
-  epoch: number;
-}
-
 export interface PendingOrigin {
   origin: string;
   /** Browser-normalized authority shown to the user, including any
@@ -51,7 +49,9 @@ export interface PendingOrigin {
 // Queue authority stays session-scoped: it survives MV3 worker death but not
 // the browser session that owns the logins being approved.
 export type { AccessQueueEntry, AccessResults, OnceGrants } from "./access-queue";
-export type { AccessRequest } from "./access-flow";
+// The ref handle follows the module that produces it; see driver/ax-compact.ts.
+export type { SnapshotRef } from "./driver/ax-compact";
+export type { AccessRequest } from "./driver/access-flow";
 
 export interface LocalState {
   token?: string;
@@ -76,8 +76,8 @@ export interface SessionState {
   refs?: Record<string, Record<string, SnapshotRef>>;
   // Legacy #329 slots are read only by the lazy migration.
   pendingOrigin?: PendingOrigin;
-  accessRequest?: import("./access-flow").AccessRequest;
-  accessTombstones?: import("./access-flow").AccessTombstones;
+  accessRequest?: import("./driver/access-flow").AccessRequest;
+  accessTombstones?: import("./driver/access-flow").AccessTombstones;
   accessQueueVersion?: number;
   accessQueue?: import("./access-queue").AccessQueueEntry[];
   accessResults?: import("./access-queue").AccessResults;
@@ -85,25 +85,40 @@ export interface SessionState {
 }
 
 export async function getLocal(): Promise<LocalState> {
-  return chrome.storage.local.get(["token", "port", "origins", "hostGrants", "siteGrants", "allowAllSites"]);
+  // Bounded like every other chrome API await a serialized chain or the
+  // connect() path depends on: a stalled storage read used to leave `connect`
+  // unable to decide and the store queue parked behind it.
+  return deadline(
+    chrome.storage.local.get(["token", "port", "origins", "hostGrants", "siteGrants", "allowAllSites"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.local.get(local state)",
+  );
 }
 
 export async function getSession(): Promise<SessionState> {
-  return chrome.storage.session.get([
-    "surfaces",
-    "refs",
-    "pendingOrigin",
-    "accessRequest",
-    "accessTombstones",
-    "accessQueueVersion",
-    "accessQueue",
-    "accessResults",
-    "onceGrants",
-  ]);
+  return deadline(
+    chrome.storage.session.get([
+      "surfaces",
+      "refs",
+      "pendingOrigin",
+      "accessRequest",
+      "accessTombstones",
+      "accessQueueVersion",
+      "accessQueue",
+      "accessResults",
+      "onceGrants",
+    ]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.get(session state)",
+  );
 }
 
 export async function getSurfaces(): Promise<Record<string, StoredSurface>> {
-  const { surfaces = {} } = (await chrome.storage.session.get(["surfaces"])) as SessionState;
+  const { surfaces = {} } = (await deadline(
+    chrome.storage.session.get(["surfaces"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.get(surfaces)",
+  )) as SessionState;
   return surfaces;
 }
 
@@ -114,6 +129,21 @@ export async function getSurfaces(): Promise<Record<string, StoredSurface>> {
 // had to face). Same promise-chain pattern as snapshot's axQueue: mutations
 // are rare and tiny, and each link swallows its predecessor's failure so the
 // chain cannot poison later calls.
+//
+// "Swallows its predecessor's failure" is true for a REJECTION and false for a
+// HANG — `.catch()` never runs on a promise that never settles. The chain is
+// self-draining only because every chrome API await INSIDE these ops carries a
+// `deadline` (settle.ts), so an op always settles. That includes this file's
+// ops AND the grant helpers in access-grants.ts, which reach this same lane
+// through `withSessionMutation`: `grep -rn 'await chrome\.' extension/src
+// --include=*.ts | grep -v '/popup/\|/options/'` is the closed inventory, and
+// anything it returns without a `deadline` is a hole in this promise rather
+// than an exemption (review R1-3 — that grep used to return 11 bare awaits in
+// access-grants.ts, command-reachable from the popup's Allow path). Do not
+// "fix" a wedge by resetting the chain head instead: `withStore` is the
+// atomicity mechanism for these read-modify-write sequences, and abandoning an
+// op mid-read while the next one reads the pre-mutation state loses an update
+// or double-spends a one-shot grant (see withSessionMutation below).
 let storeQueue: Promise<unknown> = Promise.resolve();
 function withStore<T>(op: () => Promise<T>): Promise<T> {
   const run = storeQueue.catch(() => {}).then(op);
@@ -134,56 +164,169 @@ export function withSessionMutation<T>(op: () => Promise<T>): Promise<T> {
   return withStore(op);
 }
 
+/**
+ * POOL ADMISSION: the read-modify-write boundary for the eight-surface cap.
+ *
+ * The cap is a READ of the surfaces map (`liveSurfaces` + `atSurfaceCap`, both
+ * in the `open` handler) followed by a WRITE to it (`putSurface` after
+ * `chrome.tabs.create`), so two owners admitted concurrently both observe the
+ * last free slot and both take it — nine tabs against a cap of eight. This lane
+ * makes that pair atomic, exactly as `storeQueue` does for individual map
+ * entries, and it lives here because this module owns `MAX_SURFACES`, the map
+ * and `storeQueue`.
+ *
+ * It is deliberately NARROWER than the lane it replaces. The old lane was in
+ * ownership.ts and spanned the ENTIRE `open` handler — attach, log capture,
+ * grouping, and `navigate()` including a redirect that parks on a human
+ * origin-approval prompt — for the global `allocations` chain. One owner's slow
+ * or human-blocked navigation therefore delayed a DIFFERENT owner's admission
+ * (audit A4). Admission is now one `chrome.tabs.create` plus one storage write
+ * (worst case 2 x CHROME_API_DEADLINE_MS, versus the old whole-handler hold),
+ * and everything after `putSurface` runs outside it.
+ *
+ * NESTING IS ACYCLIC and must stay so: `withAdmission` -> `withStore` (via
+ * `putSurface`), never the reverse. A `withStore` op that reached for admission
+ * would deadlock against its own lane.
+ *
+ * Known cost, flagged rather than hidden (addendum D5): the cap read calls
+ * `liveSurfaces`, which loops up to MAX_SURFACES x `chrome.tabs.get` at
+ * CHROME_API_DEADLINE_MS each — so a pathological browser can hold admission for
+ * ~40 s, and a concurrent `open` waits that long before its own budget starts.
+ * The loop cannot move outside the lane without reintroducing the race, and
+ * bounding it is a separate change with pruning-semantics questions (a stalled
+ * get must NOT prune a live surface).
+ */
+let admissionQueue: Promise<unknown> = Promise.resolve();
+export function withAdmission<T>(op: () => Promise<T>): Promise<T> {
+  const run = admissionQueue.catch(() => {}).then(op);
+  admissionQueue = run;
+  return run;
+}
+
 export function putSurface(surface: StoredSurface): Promise<void> {
   return withStore(async () => {
     const surfaces = await getSurfaces();
     surfaces[surfaceToken(surface)] = surface;
-    await chrome.storage.session.set({ surfaces });
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
   });
 }
 
 /** Remove one surface and its snapshot refs; other surfaces are untouched. */
 export function removeSurface(token: string): Promise<void> {
   return withStore(async () => {
-    const { surfaces = {}, refs = {} } = (await chrome.storage.session.get([
-      "surfaces",
-      "refs",
-    ])) as SessionState;
+    const { surfaces = {}, refs = {} } = (await deadline(
+      chrome.storage.session.get(["surfaces", "refs"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.get(surfaces, refs)",
+    )) as SessionState;
     delete surfaces[token];
     delete refs[token];
-    await chrome.storage.session.set({ surfaces, refs });
+    await deadline(
+      chrome.storage.session.set({ surfaces, refs }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces, refs)",
+    );
   });
 }
 
 /**
- * Refresh a surface's ``lastUsedAt`` — only if it is still in the map.
+ * How long a surface's ``lastUsedAt`` may go unwritten before another refresh
+ * is worth a whole-map read-modify-write.
+ *
+ * This is the fix for the measured fleet-wide stall: the refresh used to run
+ * inside ``requireSurface``, i.e. on EVERY command's critical path, so a
+ * read-class command paid one extra ``get(surfaces)`` plus one full-map
+ * ``set(surfaces)`` — two of its three session-storage round trips — and every
+ * one of those mutations is serialized through the ONE module-global store
+ * lane (``withStore``). Four concurrent commands measured a
+ * 603/1004/1405/1807 ms staircase against an artificial per-op delay: the
+ * latency was proportional to how many sessions were talking at once, not to
+ * the work. The value only ORDERS the `tabs` listing for a human, so a few
+ * seconds of staleness is invisible to every reader (nothing branches on it),
+ * while a continuously driven tab drops from one write per command to at most
+ * one per interval. Deliberately coarse rather than tuned: any value in this
+ * range fixes the fan-out, and a tighter one would buy nothing anyone can
+ * observe.
+ */
+export const TOUCH_INTERVAL_MS = 10_000;
+
+// Last SCHEDULED refresh per token, checked and set synchronously (no await
+// between) so two commands of the same tab interleaving after their replies
+// cannot both decide to write. Bounded because tokens accumulate across
+// open/close cycles over a worker's lifetime: past the cap the OLDEST INSERTED
+// entry is forgotten. Insertion order is not recency, so the token dropped can
+// be one that is actively driven while a never-driven stale one survives — that
+// surface then pays one extra write per interval, i.e. the pre-fix rate for one
+// token, which is why the bound is kept and the ordering not chased.
+const TOUCHED_TOKENS_MAX = 64;
+const touchedAt = new Map<string, number>();
+
+/**
+ * Refresh a surface's ``lastUsedAt`` — only if it is still in the map, and at
+ * most once per {@link TOUCH_INTERVAL_MS}.
+ *
+ * Call this AFTER a command has replied (``worker.ts``'s dispatch tail), never
+ * on the command's critical path: it is best-effort bookkeeping whose own
+ * comment always said so, and putting it in front of the reply made every
+ * session pay for it.
  *
  * An unconditional put could resurrect an entry a concurrent prune (tabs /
  * status run under a different daemon lock key) just removed, leaving a dead
  * surface counting toward the cap until the next prune (review finding m5).
  * The presence check runs inside the store queue, so it cannot interleave
  * with the prune's own read-modify-write.
+ *
+ * The timestamp is recorded as SCHEDULED, before the queued write settles: a
+ * storage failure is not retried here (a recency stamp is never worth a retry
+ * storm), and the next command past the interval simply writes again.
  */
 export function touchSurface(token: string, at: number): Promise<void> {
+  const previous = touchedAt.get(token) ?? 0;
+  if (at - previous < TOUCH_INTERVAL_MS) return Promise.resolve();
+  if (touchedAt.size >= TOUCHED_TOKENS_MAX) {
+    const oldest = touchedAt.keys().next().value;
+    if (oldest !== undefined) touchedAt.delete(oldest);
+  }
+  touchedAt.set(token, at);
   return withStore(async () => {
     const surfaces = await getSurfaces();
     const surface = surfaces[token];
     if (!surface) return;
     surface.lastUsedAt = at;
-    await chrome.storage.session.set({ surfaces });
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
   });
 }
 
 export function setRefs(token: string, forSurface: Record<string, SnapshotRef>): Promise<void> {
   return withStore(async () => {
-    const { refs = {} } = (await chrome.storage.session.get(["refs"])) as SessionState;
+    const { refs = {} } = (await deadline(
+      chrome.storage.session.get(["refs"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.get(refs)",
+    )) as SessionState;
     refs[token] = forSurface;
-    await chrome.storage.session.set({ refs });
+    await deadline(
+      chrome.storage.session.set({ refs }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(refs)",
+    );
   });
 }
 
 export async function getRefs(token: string): Promise<Record<string, SnapshotRef>> {
-  const { refs = {} } = (await chrome.storage.session.get(["refs"])) as SessionState;
+  const { refs = {} } = (await deadline(
+    chrome.storage.session.get(["refs"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.get(refs)",
+  )) as SessionState;
   return refs[token] ?? {};
 }
 

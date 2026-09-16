@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import multiprocessing
 import os
@@ -1105,6 +1106,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
 def test_streaming_redaction_memory_is_bounded_for_64mib(tmp_path: Path) -> None:
     chunk = b"x" * (1024 * 1024)
+    expected = hashlib.sha256()
+    for _ in range(64):
+        expected.update(chunk)
     scanner_peak = 0
 
     def source() -> Any:
@@ -1123,6 +1127,9 @@ def test_streaming_redaction_memory_is_bounded_for_64mib(tmp_path: Path) -> None
     finally:
         tracemalloc.stop()
     assert ref.byte_count == 64 * 1024 * 1024
+    assert ref.sha256 == expected.hexdigest()
+    with (tmp_path / "bundle" / "artifacts" / ref.sha256).open("rb") as artifact:
+        assert hashlib.file_digest(artifact, "sha256").hexdigest() == ref.sha256
     assert scanner_peak < 32 * 1024 * 1024
 
 

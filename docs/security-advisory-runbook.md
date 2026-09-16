@@ -108,7 +108,7 @@ security patch that breaks the CLI is a second incident.
   is enough. Never touch `pyproject.toml` in the fix PR.
 - If the fix changes an API contract the desktop app relies on, the companion
   repository (`local-operator-ui`) needs a matching change and its own release
-  (phase 4, step 6). Enumerate callers rather than recalling them.
+  (phase 4, step 7). Enumerate callers rather than recalling them.
 
 ## 4. Release
 
@@ -147,10 +147,14 @@ they are vulnerable with no version to move to.
    pip index versions local-operator | head -1
    ```
 
-5. Run `lop-update` so the stable local runtime is on the fixed version, and
-   smoke test `lop` from outside the repository (see "Releasing the stable
-   `lop` runtime" in `AGENTS.md`).
-6. If the API contract changed, cut the companion `local-operator-ui` release
+5. Install so the stable local runtime is on the fixed version — with the
+   fleet drained, never against a busy one: wait until no session reports
+   `busy`, install, then re-engage what the swap displaced. See "Installing
+   over a live fleet" in `AGENTS.md` for why.
+6. Smoke the built command from outside the repository. Where the host has
+   more than one `lop` install, name the uv-tool build by path — a bare `lop`
+   can resolve to a different one and report the wrong version.
+7. If the API contract changed, cut the companion `local-operator-ui` release
    now, so desktop users are not left on an incompatible client.
 
 ## 5. Advisory publication — field checklist
