@@ -433,6 +433,50 @@ def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEn
     )
 
 
+def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``status_of``'s pair with the CLOCK term removed — the edge channel's key.
+
+    WHY THE PAIR IS NOT ENOUGH (review round 1, MINOR 2). One label carries a
+    live clock: the ``wedged`` arm embeds ``format_duration(heartbeat_age_s)``
+    (``46s`` -> ``47s`` -> ``1m``), so a wedged session's pair changes with the
+    clock alone, with no write and no event behind it — roughly one change per
+    second for the 45-59 s window after the beat crosses
+    ``HEARTBEAT_TIMEOUT_S``, then one a minute, for every wedged session. A
+    channel whose whole promise is "a frame per EVENT" cannot treat that as an
+    edge, so it dedupes on this key and still PUBLISHES the pair.
+
+    The key is the same derivation on the same row with the age cleared, which
+    is a no-op for every arm but ``wedged`` (that arm is the only reader of
+    ``heartbeat_age_s``). So it rides :func:`status_of` rather than restating the
+    precedence, and the dedupe cannot drift from what the row says.
+
+    The cost of the rule, stated because it is real: a client that keeps a
+    wedged row's frame therefore keeps the label it was published with, and the
+    age in that sentence stops advancing until the row's next real edge (or the
+    client's own 30 s safety poll) refreshes it. A tooltip's age is not worth a
+    frame a second per wedged session, which is the same trade the 15 s
+    heartbeat rewrite already makes.
+    """
+    if row.heartbeat_age_s is None:
+        return status_of(row, attention)
+    return status_of(row._replace(heartbeat_age_s=None), attention)
+
+
+def active_of(row: SessionRow, attention: Mapping[str, Any] | None) -> bool:
+    """``CatalogEntry.active`` for one row — which SECTION the sidebar files it in.
+
+    A second CALLER of the same home, for the same reason :func:`status_of` is
+    one: section membership is derived state (``pending or unseen or
+    live_state``), and a caller that restated it would be free to move a row the
+    list does not move. The desktop feed asks this beside ``status_of`` because a
+    row can need to change section while its pair changes too — a background
+    session that finishes goes from "Previous chats" to "Active chats", and
+    placement is carried by a LIST read, so the feed owes its client an
+    invalidation when that happens (finding 8).
+    """
+    return entry_for(row, attention).active
+
+
 def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
     """``(status_code, status)`` for one row — the transport spelling and the label.
 
@@ -507,7 +551,20 @@ def decorate_rows(
     live: dict[str, tuple[Any, str]] = {}
     for record, state in scanned:
         session_id = getattr(record, "session_id", "")
-        if session_id:
+        # A ``stale`` VERDICT IS NO RECORD (review round 1, MINOR 1). The pid is
+        # gone, so nothing the record says about work in progress is true any
+        # more — which is the rule the desktop feed already applies
+        # (``DesktopFeed._row_for``) and the reason a dead record's row must not
+        # read as busy/attached. Without this the two surfaces disagreed for
+        # exactly the poll that reaps the record, and they disagreed on the
+        # feed's OWN verdict: the list painted the corpse's ``busy`` while the
+        # frame said ``complete``, and because both writers read the same
+        # revision counter the client's strictly-greater guard kept the list's
+        # wrong value until the next 30 s poll. Taking the rule at BOTH readers
+        # removes the divergence rather than documenting it, and the sweep this
+        # function's own ``scan`` performs is unaffected: the record is still
+        # moved aside, and the row simply stops describing it.
+        if session_id and state != "stale":
             live[session_id] = (record, state)
 
     if include_live:

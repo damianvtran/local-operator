@@ -54,6 +54,14 @@ transitions NO file write announces (``live -> wedged`` is an age crossing, and
 ``scheduled``/``dormant`` live in the wake index, outside ``run/mobile``). The
 comparison is on the DERIVED PAIR, never on a file's mtime, which is what keeps
 a 15 s heartbeat rewrite — and any other no-op republish — completely silent.
+The comparison is on the pair with its CLOCK removed (``catalog.
+status_dedupe_key``), because one label carries a live age and would otherwise
+tick once a second on its own.
+
+AND IT IS A READER, INCLUDING WHEN NOTHING HAS EVER RUN. The run directory is
+resolved as a plain path and neither status read calls ``registry.run_dir`` — the
+probe and the connection baseline decline to scan when the directory is absent —
+so a backend that has never served a session creates nothing under ``run/``.
 """
 
 from __future__ import annotations
@@ -156,6 +164,25 @@ STATUS_PROBE_INTERVAL_S = 1.0
 #: this slow — a `revision()` over the ledger is the per-row work the doorbell's
 #: own comment says must not run at 10 Hz.
 AUTHORITATIVE_RECOVERY_INTERVAL_S = 30.0
+
+#: How often a PERSISTENT tick failure is reported at WARNING. ``_poll_loop``
+#: keeps the poller alive through a bad tick, which is right, but at DEBUG the
+#: one failure mode this channel has — a status channel that has gone silently
+#: dead — looked exactly like a quiet machine (QA Q3). The first failure is
+#: reported at WARNING immediately, and then at most once per this interval while
+#: it persists, so a persistent failure is visible without a traceback per tick.
+TICK_FAILURE_WARNING_INTERVAL_S = 60.0
+
+#: The shortest gap between two DOORBELL-fallback probes (review NIT 1). The
+#: fallback exists for a session's FIRST record, which has no cached file to
+#: compare against; a stream of ticks where the directory moved and no cached
+#: record did (a staged write caught mid-rename, a new pid per tick) would
+#: otherwise spend a full scan per tick, up to 10 Hz. One per
+#: ``STATUS_PROBE_INTERVAL_S`` is the tightest limit that loses nothing: the
+#: probe's own clock is stamped by whichever probe ran, so a suppressed fallback
+#: is always covered within one interval by the regular one — the fallback can
+#: never make a first record slower than the probe's own promise.
+UNATTRIBUTED_PROBE_MIN_INTERVAL_S = STATUS_PROBE_INTERVAL_S
 
 #: THE BURST CEILING — at most this many individual banners per doorbell tick.
 #:
@@ -312,20 +339,45 @@ class DesktopFeed:
         #: When the bounded authoritative revision read last ran (R1).
         #: Monotonic, and initialised to 0 so the FIRST tick pays for it.
         self._revision_probed_at = 0.0
+        self._catalogue_probed_at = 0.0
+        #: THE CATALOGUE REVISION A CLIENT SEES, and it is a monotone COUNTER
+        #: rather than the membership token it started as (finding 8). The row
+        #: SET can be invalidated by two causes — a session entering or leaving
+        #: the catalogue, and a row's derived ACTIVITY changing, which moves it
+        #: between "Active chats" and "Previous chats" — and the client's refetch
+        #: effect re-runs only on a value it has never seen. A token that is a
+        #: hash of the directory can repeat, and cannot express the second cause
+        #: at all; a counter that only ever rises cannot do either. The ``open``
+        #: snapshot reports this same value, so a connecting client's view is
+        #: expressed in the currency the frames use.
         self._catalogue_revision = 0
         self._catalogue_names: tuple[str, ...] = ()
-        self._catalogue_probed_at = 0.0
+        #: The membership TOKEN the counter's last comparison was made against
+        #: (the probe's ``(inode, mtime, dirname set)`` answer). Kept beside the
+        #: counter rather than inside it: the token answers "did the set move",
+        #: the counter answers "has the client seen this state".
+        self._catalogue_token: int | None = None
+        #: Set when something OTHER than a membership move invalidates the row
+        #: set — an ACTIVITY transition (finding 8) — and cleared when the frame
+        #: carrying it is published.
+        self._catalogue_invalidated = False
+        #: The tick the counter last published in, so a burst of simultaneous
+        #: transitions costs ONE refetch rather than N: the second and later
+        #: causes in a tick leave the flag up and the next tick (~100 ms) carries
+        #: them.
+        self._catalogue_emitted_tick = -1
+        self._tick_index = 0
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
         #: plain path rather than through ``registry.run_dir``, which mkdirs and
-        #: chmods: this feed is a READER, and a reader that created the directory
-        #: would be mutating the run directory on every backend start — including
-        #: on a machine that has never run a session. Absent stays absent
-        #: (``_fingerprint`` answers ``None``), the doorbell is silent, and the
-        #: 1 s probe resolves it through ``registry.scan`` the moment a runtime
-        #: publishes its first record, which is exactly how the list's own
-        #: ``decorate_rows`` behaves.
+        #: chmods, and the resolution is only half the promise: ``registry.scan``
+        #: opens with its own ``run_dir`` call, so the two reads below decline to
+        #: SCAN while the directory is absent (review round 1, MAJOR 1 / QA Q2 —
+        #: ``_probe_status`` and ``_prime_status``). Absent therefore stays absent:
+        #: ``_fingerprint`` answers ``None``, the doorbell is silent, and the
+        #: directory is created by the runtime that publishes the first record —
+        #: through ``registry.publish``, i.e. by a WRITER, never by this reader.
         self._registry_dir = root / RUN_DIRNAME
         #: ``(st_ino, st_size, st_mtime_ns)`` of that directory. EVERY record
         #: write is a staged write + rename IN it (``registry._staged_write``),
@@ -357,7 +409,18 @@ class DesktopFeed:
         #: ``session_id -> (code, label)`` as last PUBLISHED. The whole dedupe:
         #: a heartbeat rewrite moves ``heartbeat_at`` and nothing the pair is
         #: derived from, so it publishes nothing.
+        #:
+        #: The key stored here is ``catalog.status_dedupe_key`` — the same pair
+        #: with the CLOCK term removed — so the one label that carries a live age
+        #: (the ``wedged`` sentence) cannot turn the clock itself into an edge
+        #: (review round 1, MINOR 2).
         self._status_seen: dict[str, tuple[str, str]] = {}
+        #: ``session_id -> bool``, the derived ACTIVITY (i.e. which section the row
+        #: is filed in, ``catalog.active_of``) as of the last edge published for
+        #: it. A change here is a change the row's own frame cannot express —
+        #: placement travels on a LIST read — so it invalidates the catalogue
+        #: (finding 8).
+        self._activity_seen: dict[str, bool] = {}
         #: ``session_id -> monotone counter``, bumped only when a frame is
         #: actually published and travelled to the list route (``status_stamps``)
         #: so a client can discard a list that was computed before the frame it
@@ -366,6 +429,13 @@ class DesktopFeed:
         #: When the authoritative status probe last ran. Monotonic, and
         #: initialised to 0 so the FIRST tick pays for it.
         self._status_probed_at = 0.0
+        #: When the unattributed-move FALLBACK last probed, on its own clock
+        #: rather than the probe's (review NIT 1). See
+        #: ``_maybe_probe_unattributed``: the fallback is what carries a
+        #: session's first record on the 10 Hz doorbell, so it cannot be gated by
+        #: a stamp the connection baseline set a moment ago — but a stream of
+        #: unattributed moves must not cost a scan per tick either.
+        self._unattributed_probed_at = 0.0
         #: Set when a tick found a record had moved but could not finish
         #: publishing it, mirroring ``_delta_pending`` and for the same reason:
         #: the reads that DID succeed have already advanced
@@ -536,6 +606,8 @@ class DesktopFeed:
         """
         try:
             await asyncio.to_thread(self._take_baseline)
+            failures = 0
+            warned_at = 0.0
             while True:
                 await asyncio.sleep(DOORBELL_INTERVAL_S)
                 if not self.subscribers:
@@ -543,7 +615,27 @@ class DesktopFeed:
                 try:
                     await self._tick()
                 except Exception:  # noqa: BLE001 — one bad tick is not the feature
+                    failures += 1
+                    # ONE BAD TICK IS NOT THE FEATURE, but a bad tick EVERY tick
+                    # is the feature going silently dead — and at DEBUG it looked
+                    # exactly like a quiet machine (QA Q3). The first failure is
+                    # reported at WARNING at once; while it persists the report is
+                    # rate-limited, so a dead channel is visible without a
+                    # traceback per tick.
                     logger.debug("desktop feed tick failed", exc_info=True)
+                    now = time.monotonic()
+                    if now - warned_at >= TICK_FAILURE_WARNING_INTERVAL_S:
+                        warned_at = now
+                        logger.warning(
+                            "desktop feed tick failed %d time(s): the status and "
+                            "attention channels are publishing nothing",
+                            failures,
+                            exc_info=True,
+                        )
+                else:
+                    if failures:
+                        logger.warning("desktop feed recovered after %d failed tick(s)", failures)
+                        failures = 0
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -587,7 +679,18 @@ class DesktopFeed:
         rule for this channel. A session whose status was already ``approval``
         when the client connected produces no frame until the pair CHANGES,
         which is the same rule ``_take_baseline`` applies to the attention
-        revision and the attention baseline.
+        revision and the attention baseline. Its ACTIVITY is primed beside it for
+        the same reason (finding 8): a section move is a catalogue invalidation,
+        and a baseline that did not record where each row already was would fire
+        one on the first edge for every row.
+
+        A MACHINE THAT HAS NEVER RUN A SESSION IS NOT ONE THIS CREATES THE RUN
+        DIRECTORY FOR (review round 1, MAJOR 1). ``registry.scan`` opens with
+        ``run_dir()``, which mkdirs and chmods, so the scan is skipped while the
+        directory is absent — the rest of the prime still runs, because a session
+        with no record has a status (``recent``) whether or not the directory
+        exists, and a status the client's list already shows must not be
+        announced as news when the first record does appear.
 
         PRIMED OVER EVERY USER SESSION, not only over the candidates an event
         could name. A session with no record, no wake and no attention has a
@@ -599,7 +702,11 @@ class DesktopFeed:
         per connection rather than per tick, which is the budget the feed's own
         docstring sets for connection-time work.
         """
-        scanned = registry.scan(self.root, check_zombie=None, reap=False)
+        scanned = (
+            registry.scan(self.root, check_zombie=None, reap=False)
+            if self._registry_dir.is_dir()
+            else []
+        )
         records: dict[str, tuple[Any, str]] = {}
         paths: dict[str, Path] = {}
         fingerprints: dict[str, tuple[int, int, int] | None] = {}
@@ -620,7 +727,12 @@ class DesktopFeed:
         # is why this asks for no names of its own: the marker read is the one
         # per-directory cost ``_snapshot`` already calls affordable once per
         # connection, and the two now share it instead of paying it twice.
-        _revision, names = self._catalogue_probe()
+        _token, names = self._catalogue_probe()
+        # The TOKEN is recorded as part of the baseline, not merely consulted: the
+        # first tick compares against the row set the client was told about, so a
+        # set that has not moved since the connection is not an invalidation —
+        # the same no-replay rule the attention baseline applies to the revision.
+        self._catalogue_token = _token
         candidates = [*records, *self._wake_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -628,11 +740,14 @@ class DesktopFeed:
         for session_id in candidates:
             row = self._row_for(session_id)
             if row is not None:
-                self._status_seen[session_id] = catalog.status_of(
-                    row, self._attention.get(session_id)
-                )
+                attention = self._attention.get(session_id)
+                self._status_seen[session_id] = catalog.status_dedupe_key(row, attention)
+                self._activity_seen[session_id] = catalog.active_of(row, attention)
 
     async def _tick(self) -> None:
+        # The tick's own number, so a frame that may only be published once per
+        # tick can say which tick it is in (the catalogue invalidation, finding 8).
+        self._tick_index += 1
         # 1. THE DOORBELL. Three stats, no SQL, no connection — the database and
         # each journal sidecar (R1; see ``_db_fingerprint`` for why the main file
         # alone is not a doorbell).
@@ -699,14 +814,11 @@ class DesktopFeed:
                     # THE DIRECTORY MOVED AND NO CACHED RECORD DID. That is the
                     # session's FIRST record (there was no cached file to compare
                     # against, so the fast path has nothing to re-read), and it is
-                    # also what a write caught mid-stage looks like. Both are
-                    # answered by looking properly ONCE, now, rather than waiting
-                    # on the probe's one-second clock: a runtime starting up is
-                    # exactly the edge this channel exists to carry promptly, and
-                    # the fallback fires only on a tick whose directory already
-                    # moved — never on the quiet tick the stat budget is spent to
-                    # protect.
-                    await self._probe_status()
+                    # also what a write caught mid-stage looks like. Looking
+                    # properly now is what keeps that first edge on the 10 Hz
+                    # clock instead of the probe's one-second one — rate-limited,
+                    # because the second case can repeat on every tick (NIT 1).
+                    await self._maybe_probe_unattributed()
             except Exception:
                 self._record_pending = True
                 raise
@@ -726,6 +838,41 @@ class DesktopFeed:
         # ``run/mobile``) — never move the record directory at all, so a quiet
         # store is exactly the case the doorbell cannot cover.
         await self._maybe_probe_status()
+        # 5. THE INVALIDATION THE STATUS CHANNEL OWES (finding 8). The probe above
+        # is a second source of status edges — the ones no write announces — and a
+        # status edge can also move its row between sections, which only a LIST
+        # read carries. Publishing the invalidation HERE and not only in step 3 is
+        # what keeps a section move inside the same tick as the frame that caused
+        # it; the once-per-tick guard inside ``_maybe_emit_catalogue`` keeps a
+        # burst of simultaneous transitions at one refetch.
+        await self._maybe_emit_catalogue()
+
+    async def _maybe_probe_unattributed(self) -> None:
+        """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
+
+        The fallback is worth having: a session's first record has no cached file
+        to compare against, so without it every session start would wait for the
+        one-second clock instead of riding the 10 Hz doorbell. What the docstring
+        used to claim was "one-shot" is in fact "on any tick that satisfies the
+        condition" — a write caught mid-stage (temp file created, rename not yet
+        landed) or a new pid per tick fires it at the doorbell's own rate, and
+        each firing is a full scan that also stamps the probe's clock.
+
+        #: The limit is the FALLBACK's own clock rather than the probe's: the
+        #: probe's stamp is set by the connection baseline moments before the
+        #: first record of a session is written, so gating on that one would
+        #: suppress exactly the case the fallback exists for. A suppressed
+        #: fallback is covered within one interval by the regular probe, because
+        #: the clock that gates THAT one was stamped by the last probe of either
+        #: kind — so the worst case for a first record is the probe's own promise
+        #: (1 s) and not worse, while a stream of unattributed moves costs one
+        #: scan per second instead of ten.
+        """
+        now = time.monotonic()
+        if now - self._unattributed_probed_at < UNATTRIBUTED_PROBE_MIN_INTERVAL_S:
+            return
+        self._unattributed_probed_at = now
+        await self._probe_status()
 
     async def _emit_delta(self) -> None:
         """Publish one ``attention`` frame per changed session, then banners.
@@ -769,7 +916,9 @@ class DesktopFeed:
             supersede_cursor = max(supersede_cursor, int(row["sequence"]))
             changed.append(str(row["conversation"]))
 
-        identities = [item for item in dict.fromkeys(changed) if self._is_user_session(item)]
+        identities = [
+            item for item in dict.fromkeys(changed) if self._user_session(self._session_id(item))
+        ]
         states: dict[str, dict[str, Any]] = {}
         if identities:
             states = await asyncio.to_thread(self.store.state_many, identities)
@@ -983,16 +1132,37 @@ class DesktopFeed:
     # -- catalogue ---------------------------------------------------------
 
     async def _maybe_emit_catalogue(self) -> None:
+        """The catalogue invalidation: the row SET moved, or a row's ACTIVITY did.
+
+        TWO CAUSES, ONE COUNTER (finding 8). The membership token says the row
+        set moved (one readdir, one second). The second cause is what the token
+        cannot express at all: a row whose derived ACTIVITY changed needs a LIST
+        read to change SECTION — with "Previous chats" collapsed by default the
+        user sees nothing until one happens — and a client only re-runs its
+        refetch effect on a revision it has never seen. So the value published is
+        a monotone counter, bumped once per invalidation whatever caused it, and
+        the ``open`` snapshot reports that same counter.
+
+        AT MOST ONE FRAME PER TICK: a burst of simultaneous transitions — a
+        fleet starting, a batch finishing — costs one refetch, not N. The flag
+        stays up and the next tick carries it, i.e. ~100 ms later.
+        """
         now = time.monotonic()
-        if now - self._catalogue_probed_at < CATALOGUE_PROBE_INTERVAL_S:
+        if now - self._catalogue_probed_at >= CATALOGUE_PROBE_INTERVAL_S:
+            self._catalogue_probed_at = now
+            token, names = await asyncio.to_thread(self._catalogue_probe)
+            if token != self._catalogue_token:
+                self._catalogue_token = token
+                self._catalogue_names = names
+                self._catalogue_invalidated = True
+        if not self._catalogue_invalidated:
             return
-        self._catalogue_probed_at = now
-        revision, names = await asyncio.to_thread(self._catalogue_probe)
-        if revision == self._catalogue_revision:
+        if self._catalogue_emitted_tick == self._tick_index:
             return
-        self._catalogue_revision = revision
-        self._catalogue_names = names
-        self._publish("catalogue", {"revision": revision})
+        self._catalogue_invalidated = False
+        self._catalogue_emitted_tick = self._tick_index
+        self._catalogue_revision += 1
+        self._publish("catalogue", {"revision": self._catalogue_revision})
 
     def _catalogue_probe(self) -> tuple[int, tuple[str, ...]]:
         """A cheap invalidation token for the sidebar's ROW SET.
@@ -1068,10 +1238,14 @@ class DesktopFeed:
         """``_is_user_session``, with the answer remembered per session.
 
         Both the 10 Hz delta and the 1 s probe ask this for every candidate, and
-        the underlying read opens a file in the session directory. The cache is
-        primed by ``_catalogue_probe`` in a worker thread; a miss here is
-        therefore a directory created inside the last second (or a record for a
-        session the catalogue's name set has not listed yet).
+        the underlying read opens a file in the session directory — so both go
+        through here, including ``_emit_delta``'s identity filter, which is the
+        one place on the 10 Hz path that used to ask the uncached predicate
+        directly (review round 1, MINOR 4). The two are interchangeable for a
+        bare id (the predicate accepts either spelling). The cache is primed by
+        ``_catalogue_probe`` in a worker thread; a miss here is therefore a
+        directory created inside the last second (or a record for a session the
+        catalogue's name set has not listed yet).
         """
         cached = self._user_cache.get(session_id)
         if cached is None:
@@ -1105,10 +1279,10 @@ class DesktopFeed:
         if cached is not None and cached[1] != "stale":
             # ``stale`` IS TREATED AS NO RECORD, and that is not a shortcut: the
             # pid is gone, so nothing the record says about work in progress is
-            # true any more. The list reaches the same answer the moment a sweep
-            # moves the record aside — and this feed must never be that sweep
-            # (``reap=False``), so it takes the destination rather than the
-            # route. One list read is the most they can disagree by.
+            # true any more. ``decorate_rows`` takes the same rule (review round
+            # 1, MINOR 1), so the list and the frame agree even in the poll that
+            # performs the sweep that moves the record aside — and this feed must
+            # never be that sweep (``reap=False``).
             record, state = cached
             if state == "wedged":
                 live_state = "wedged"
@@ -1234,12 +1408,25 @@ class DesktopFeed:
         Runs in worker threads, both reads at once. The clock is stamped HERE
         rather than by the caller so the doorbell's unattributed-move fallback
         consumes the same one-second slot: an early probe is a probe.
+
+        A MACHINE THAT HAS NEVER RUN A SESSION KEEPS IT THAT WAY (review round
+        1, MAJOR 1 / QA Q2). ``registry.scan`` opens with ``run_dir()``, which
+        mkdirs and chmods, so the scan is asked for only while the directory is
+        there — this reader must not be the thing that creates ``run/mobile``
+        0700, and on a machine with no runtime there is nothing in it to read.
+        The wake index is read either way: it lives OUTSIDE ``run/mobile``, and a
+        wake armed for a session with no record at all is exactly the cold-row
+        case this clock exists for.
         """
         self._status_probed_at = time.monotonic()
-        scanned, wake_index = await asyncio.gather(
-            asyncio.to_thread(registry.scan, self.root, check_zombie=None, reap=False),
-            asyncio.to_thread(read_index, self.root),
-        )
+        scanned: list[tuple[Any, str]] = []
+        if self._registry_dir.is_dir():
+            scanned, wake_index = await asyncio.gather(
+                asyncio.to_thread(registry.scan, self.root, check_zombie=None, reap=False),
+                asyncio.to_thread(read_index, self.root),
+            )
+        else:
+            wake_index = await asyncio.to_thread(read_index, self.root)
         records: dict[str, tuple[Any, str]] = {}
         paths: dict[str, Path] = {}
         fingerprints: dict[str, tuple[int, int, int] | None] = {}
@@ -1277,8 +1464,14 @@ class DesktopFeed:
           nothing, which is what makes a 15 s heartbeat rewrite (and every other
           no-op republish: a title change, ``started``, a de-duped
           ``set_busy``) completely silent. The comparison is on the derived pair
-          and never on a file's mtime, which is what lets "status changed" mean
-          exactly that;
+          with its CLOCK term removed (``catalog.status_dedupe_key``) and never on
+          a file's mtime, which is what lets "status changed" mean exactly that
+          rather than "a wedged row's age ticked"; the frame still carries the
+          pair, age and all;
+        * a pair change that also moves the row between SECTIONS publishes a
+          catalogue invalidation, in the same tick, so the client's list read
+          re-files it instead of leaving it in the wrong section until the 30 s
+          safety poll (finding 8);
         * COMMIT LAST: ``_status_seen`` and the revisions advance only after every
           frame has been fanned out, so a failure mid-way costs a retry of the
           whole set rather than a half-published edge — the same rule
@@ -1307,26 +1500,45 @@ class DesktopFeed:
                 if state is not None:
                     self._attention[session_id] = state
         pending: list[tuple[str, tuple[str, str], int]] = []
+        published_keys: dict[str, tuple[str, str]] = {}
+        refile: bool = False
         revisions = dict(self._status_revision)
         for session_id in ids:
             row = self._row_for(session_id)
             if row is None:
                 continue
-            pair = catalog.status_of(row, self._attention.get(session_id))
-            if self._status_seen.get(session_id) == pair:
+            attention = self._attention.get(session_id)
+            key = catalog.status_dedupe_key(row, attention)
+            if self._status_seen.get(session_id) == key:
                 continue
+            pair = catalog.status_of(row, attention)
             revision = revisions.get(session_id, 0) + 1
             revisions[session_id] = revision
             pending.append((session_id, pair, revision))
+            published_keys[session_id] = key
+            # ACTIVITY — which SECTION the row is filed in. It is derived from
+            # the same three inputs the pair's arms are ordered by, so an edge
+            # that moves a row always arrives here as a pair change; the cost is
+            # one entry build per EDGE, never per tick. The client cannot express
+            # this itself: placement travels on a list read, so a background
+            # session that finishes would sit in "Previous chats" for as long as
+            # the next one (measured at 7.5-8.9 s), which is the gap finding 8
+            # exists to close.
+            active = catalog.active_of(row, attention)
+            if self._activity_seen.get(session_id) != active:
+                self._activity_seen[session_id] = active
+                refile = True
         for session_id, pair, revision in pending:
             self._publish(
                 "session_status",
                 {"code": pair[0], "label": pair[1], "revision": revision},
                 session_id=session_id,
             )
-        for session_id, pair, _revision in pending:
-            self._status_seen[session_id] = pair
+        for session_id, key in published_keys.items():
+            self._status_seen[session_id] = key
         self._status_revision = revisions
+        if refile:
+            self._catalogue_invalidated = True
 
     # -- identity helpers --------------------------------------------------
 
@@ -1390,11 +1602,17 @@ class DesktopFeed:
         THAT READ IS SHARED with the status baseline (``_prime_status`` primes
         ``_user_cache`` through ``_catalogue_probe``), so the marker is read once
         per session per connection rather than once per caller.
+
+        The probe's TOKEN is recorded and the COUNTER is reported (finding 8):
+        the token is what the feed compares against next tick, while the counter
+        is the value a client compares against, so a snapshot that reported the
+        token would hand a connecting client a number no ``catalogue`` frame has
+        ever published — and the next real invalidation could then repeat it.
         """
-        revision, names = self._catalogue_probe()
-        self._catalogue_revision = revision
+        token, names = self._catalogue_probe()
+        self._catalogue_token = token
         self._catalogue_names = names
         self._catalogue_probed_at = time.monotonic()
         identities = [f"session/{name}" for name in names if self._user_session(name)]
         states = self.store.state_many(identities) if identities else {}
-        return states, revision
+        return states, self._catalogue_revision
