@@ -19,6 +19,7 @@ from local_operator.clients.radient import (
     RadientSearchProvidersResponse,
     RadientSearchResponse,
     RadientSearchResult,
+    RadientTranscriptionResponseData,
 )
 
 
@@ -807,3 +808,68 @@ def test_list_search_providers_success(
         assert provider.id == mock_search_providers_response["providers"][i]["id"]
         assert provider.name == mock_search_providers_response["providers"][i]["name"]
         assert provider.description == mock_search_providers_response["providers"][i]["description"]
+
+
+# Transcription: the provider/model passthrough contract.
+#
+# These two tests pin the wire behaviour that the daemon's `POST /v1/transcriptions`
+# relies on: an unset provider/model must be ABSENT from the multipart body so the
+# Radient agent-server's configured default governs, and an explicitly requested
+# pair must travel verbatim. They live here rather than in the server tests because
+# the route-level mocks only see kwargs; only these observe the actual form body.
+
+
+def _transcription_post_response() -> MagicMock:
+    """Build a mocked `requests.post` returning a successful transcription payload."""
+    mock_requests_post = MagicMock()
+    mock_requests_post.return_value.status_code = 200
+    mock_requests_post.return_value.json.return_value = {
+        "result": {"text": "hello", "provider": "elevenlabs", "status": "completed"}
+    }
+    return mock_requests_post
+
+
+def test_create_transcription_omits_unset_provider_and_model(
+    radient_client: RadientClient, base_url: str, tmp_path: Path
+) -> None:
+    """Test that an unset provider and model are left out of the request body.
+
+    This is the daemon's default path. The fields must be *absent* rather than
+    sent empty: a server defaulted to a non-OpenAI provider rejects an OpenAI
+    model id, so sending one at all would lock the talk feature to OpenAI.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    mock_requests_post = _transcription_post_response()
+
+    with patch("requests.post", mock_requests_post):
+        response = radient_client.create_transcription(file_path=str(audio_file))
+
+    assert isinstance(response, RadientTranscriptionResponseData)
+    call_args, call_kwargs = mock_requests_post.call_args
+    assert call_args[0] == f"{base_url}/tools/transcriptions"
+    assert "model" not in call_kwargs["data"]
+    assert "provider" not in call_kwargs["data"]
+    assert "prompt" not in call_kwargs["data"]
+    assert call_kwargs["data"]["response_format"] == "json"
+    assert call_kwargs["files"]["file"][0] == str(audio_file)
+
+
+def test_create_transcription_forwards_explicit_provider_and_model(
+    radient_client: RadientClient, base_url: str, tmp_path: Path
+) -> None:
+    """Test that an explicitly requested provider and model are forwarded verbatim."""
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    mock_requests_post = _transcription_post_response()
+
+    with patch("requests.post", mock_requests_post):
+        response = radient_client.create_transcription(
+            file_path=str(audio_file), model="scribe_v2", provider="elevenlabs"
+        )
+
+    assert isinstance(response, RadientTranscriptionResponseData)
+    call_args, call_kwargs = mock_requests_post.call_args
+    assert call_args[0] == f"{base_url}/tools/transcriptions"
+    assert call_kwargs["data"]["model"] == "scribe_v2"
+    assert call_kwargs["data"]["provider"] == "elevenlabs"

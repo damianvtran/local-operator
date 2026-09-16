@@ -981,24 +981,30 @@ class RadientClient:
     def create_transcription(
         self,
         file_path: str,
-        model: Optional[str] = "gpt-4o-transcribe",
+        model: Optional[str] = None,
         prompt: Optional[str] = None,
         response_format: Optional[str] = "json",
         temperature: Optional[float] = 0.0,
         language: Optional[str] = None,
-        provider: Optional[str] = "openai",
+        provider: Optional[str] = None,
     ) -> RadientTranscriptionResponseData:
         """Create an audio transcription using the Radient API.
 
         Args:
             file_path (str): Path to the audio file to transcribe.
-            model (Optional[str]): The transcription model to use. Defaults to "gpt-4o-transcribe".
+            model (Optional[str]): Transcription model id. Defaults to None, which
+                                   sends no `model` field and leaves the choice to
+                                   the Radient agent-server's configured default.
             prompt (Optional[str]): Optional text prompt to guide the model. Max 1000 chars.
             response_format (Optional[str]): Format of the response ('json', 'text', 'srt',
                                              'verbose_json', 'vtt'). Defaults to "json".
             temperature (Optional[float]): Sampling temperature (0-2). Defaults to 0.0.
             language (Optional[str]): Language of audio in ISO-639-1 format (e.g., "en").
-            provider (Optional[str]): Transcription provider. Defaults to "openai".
+            provider (Optional[str]): Transcription provider. Defaults to None, which
+                                      sends no `provider` field and leaves the choice
+                                      to the Radient agent-server's configured
+                                      default. It must be sent together with a
+                                      `model` id the provider actually serves.
 
         Returns:
             RadientTranscriptionResponseData: The transcription result.
