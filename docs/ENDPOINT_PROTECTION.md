@@ -53,7 +53,7 @@ return {
 ```
 
 With only `ProgramArguments` set, launchd uses element 0 as **both** the image
-and argv[0], which is why the pre-branding shape had the interpreter path
+and argv[0], which is why the pre-branding shape had the branded image path
 there and every daemon collapsed to one indistinguishable `Local Operator` row
 in launchd's own listing. An EDR rule or a vendor report keyed on
 `ProgramArguments[0]` therefore reads a role label, not a binary; the image is
@@ -191,10 +191,11 @@ compiled-then-executed bundle, and it is the one artefact whose paths sit
   be read-only, is replaced wholesale on upgrade, and is shared between
   environments.
 - It is then ad-hoc signed in place (`codesign --force --sign -`), and its
-  bundle identifier is `BUNDLE_ID` in that same module
-  (`me.<individual>.localoperator`, spelled literally in the source). This is the one artefact whose identifier is personalised rather
-  than product-named — every other bundle here is `com.local-operator` — so a
-  rule written against the product's bundle identifier does not cover it.
+  bundle identifier is `BUNDLE_ID` in that same module — spelled literally in
+  the source, anonymised here as `me.<individual>.localoperator`. This is the
+  one artefact whose identifier is personalised rather than product-named —
+  every other bundle here is `com.local-operator` — so a rule written against
+  the product's bundle identifier does not cover it.
 - A `.build-stamp` file beside it makes the build once-only, so the bundle
   persists across sessions rather than being compiled per run.
 
@@ -316,7 +317,7 @@ the name says, the signature is CPython's.
 
 ### Class 2: the app-provisioned interpreters (Application Support)
 
-The images the desktop app installs are **not** in this class. Measured against
+The images the desktop app installs are **not** in Class 1. Measured against
 the program path the live `wakes` plist names:
 
 ```console
@@ -475,10 +476,11 @@ install:
    under `~/Library/Application Support/Local Operator/…`, not from a normal
    toolchain location. Every installer run rewrites its own plist and
    re-registers the job (§1), and this machine shows what that does to the
-   supervised path: the stale `…wakes.plist.bak-…` names the uv-tool prefix
-   while the live plist names the Application Support image, so a tool that
-   watches the plist sees a supervised program being repointed at a directory
-   that is itself the kind of place persistence hides.
+   supervised path: the stale `…wakes.plist.bak-…` (a leftover §1 flags as
+   unknown provenance, but on this machine it is the old path) names the
+   uv-tool prefix while the live plist names the Application Support image, so
+   a tool that watches the plist sees a supervised program being repointed at a
+   directory that is itself the kind of place persistence hides.
 4. **A binary that is not what it is called.** The program the EDR sees is
    named `Local Operator` while its code signature's identity is CPython's,
    because it is a hardlink (§2). This is a genuine **name/identity
@@ -584,19 +586,25 @@ The quotations above are what was actually read, and they are worth naming as
 sources rather than paraphrasing:
 
 - SentinelOne's exclusion-mode text as reproduced by a SentinelOne partner
-  knowledge base — the mode definitions and the `Suppress Alerts`
-  root-process clause (`support.guardz.com/en/articles/13429787-…`), and the
-  per-OS agent support matrix quoted above
-  (`support.guardz.com/en/articles/13429659-path-exclusion-modes-in-detail`),
-  which cites SentinelOne community article `000006818` for its source text.
+  knowledge base: the mode definitions and the per-OS agent support matrix
+  quoted above
+  (`https://support.guardz.com/en/articles/13429659-path-exclusion-modes-in-detail`),
+  and the `Suppress Alerts` root-process clause and the macOS certificate line
+  (`https://support.guardz.com/en/articles/13429787-additional-notes-for-exclusion-configuration-via-sentinelone-console`).
+  The root-process clause — the one this recipe leans on — has a second
+  partner copy
+  (`https://support.guardz.com/en/articles/10807055-creating-a-path-exclusion-for-sentinelone`),
+  and the partner page whose own source note credits SentinelOne's community
+  documentation (its link: community article `000006818`) is
+  `https://support.guardz.com/en/articles/10807589-path-exclusions-best-practices-for-sentinelone`.
 - SentinelOne's own FAQ, for the "consult with SentinelOne Support before using
   Interoperability or Performance exclusions" line
   (`sentinelone.com/faq`).
 
 The same mode text appears in the SentinelOne console's exclusion-mode help,
 which is the first-party copy; it was not reachable from here (the console needs
-a tenanted login and the community pages render client-side), so the two links
-above are the copies this document was written against.
+a tenanted login and the community pages render client-side), so the partner-KB
+pages above are the copies this document was written against.
 
 ### Filing the false positive with the vendor
 
@@ -665,8 +673,9 @@ Two pieces of work, stated as work rather than intent:
   artefacts are unsigned", and worth stating precisely after §2: the desktop
   app bundle is signed and notarized, the app-provisioned interpreter images
   under Application Support carry that same Developer ID and team, but the
-  **CLI install path carries no signature at all** (Class 1), and where a
-  Developer ID is present it is an individual's, not the organisation's.
+  **CLI install path carries no identity signature an admin can key on**
+  (Class 1), and where a Developer ID is present it is an individual's, not
+  the organisation's.
   A company certificate closes both halves: the CLI artefact gains an identity
   to key on, and the identity an admin keys on becomes one the organisation
   owns. Note the cost before reaching for it as a shortcut, though — on macOS a
@@ -682,21 +691,28 @@ Two pieces of work, stated as work rather than intent:
   it is worth spelling out, because the obvious objection is one experiment
   wide: `codesign -f` on a hardlinked name does **not** refuse it — it detaches
   the name into a new, independently signed inode and leaves the interpreter's
-  inode untouched. Measured in a scratch directory, so the real install was not
-  touched:
+  inode untouched. Measured on a copy of the interpreter in a scratch
+  directory, so the real install was not touched:
 
   ```console
   $ ls -li ./orig ./branded        # before: one inode, two names
-  1153254184 -rwxr-xr-x@ 2 ./branded
-  1153254184 -rwxr-xr-x@ 2 ./orig
+  1153987269 -rwxr-xr-x@ 2 ./branded
+  1153987269 -rwxr-xr-x@ 2 ./orig
   $ codesign -s - -i com.local-operator.test -f ./branded
   ./branded: replacing existing signature
   $ ls -li ./orig ./branded        # after: the signed name is its own inode
-  1153254201 -rwxr-xr-x@ 1 ./branded
-  1153254184 -rwxr-xr-x@ 1 ./orig
-  $ codesign -dv ./orig  | head -2  # the interpreter's signature is intact
+  1153987330 -rwxr-xr-x@ 1 ./branded
+  1153987269 -rwxr-xr-x@ 1 ./orig
+  $ codesign -dv ./orig            # the interpreter's signature is intact
+  Executable=/private/tmp/…/orig
   Identifier=-
+  Format=Mach-O thin (arm64)
+  CodeDirectory v=20400 size=520 flags=0x20002(adhoc,linker-signed) hashes=13+0 location=embedded
   Signature=adhoc
+  Info.plist=not bound
+  TeamIdentifier=not set
+  Sealed Resources=none
+  Internal requirements=none
   ```
 
   The detached copy even runs when a venv-like `lib/` sits beside it, which is
