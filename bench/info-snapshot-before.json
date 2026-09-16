@@ -1,0 +1,257 @@
+{
+  "blocks": {
+    "concurrency_ceiling_ms": 92.47,
+    "independent_blocks": [
+      "install",
+      "sessions",
+      "env"
+    ],
+    "independent_max_ms": 5128.55,
+    "independent_sum_ms": 5221.02,
+    "medians_ms": {
+      "agents": 100.98,
+      "env": 60.17,
+      "install": 32.3,
+      "process": 0.04,
+      "sessions": 5128.55
+    },
+    "runs": {
+      "agents": [
+        358.28,
+        31.45,
+        25.92,
+        290.14,
+        100.98
+      ],
+      "env": [
+        99.12,
+        144.17,
+        60.17,
+        7.58,
+        5.61
+      ],
+      "install": [
+        32.3,
+        65.61,
+        326.99,
+        15.9,
+        6.75
+      ],
+      "process": [
+        0.41,
+        0.06,
+        0.04,
+        0.04,
+        0.04
+      ],
+      "sessions": [
+        5432.21,
+        5128.55,
+        5077.48,
+        5205.98,
+        5124.71
+      ]
+    },
+    "serial_sum_ms": 5322.04,
+    "warm": true
+  },
+  "checks": [
+    "FAILED: session_resource_usage median took 5068.21 ms: the whole-system `top` dump is back on the macOS path",
+    "12/12 fixture sessions were listed",
+    "collect_snapshot median 5758.1 ms \u2014 NOT gated: load was 19.11x the CPU count",
+    "FAILED: only 0 of 12 fixture sessions got a footprint",
+    "direct probe absent from this tree: equivalence not measured",
+    "FAILED: route_in_process answered with 12 fixture rows (0 with a footprint): the route did not read the fixture",
+    "route_in_process first request 6144.32 ms \u2014 NOT gated: load was 19.11x the CPU count",
+    "FAILED: route_http answered with 12 fixture rows (0 with a footprint): the route did not read the fixture",
+    "route_http first request 6064.58 ms \u2014 NOT gated: load was 19.11x the CPU count"
+  ],
+  "equivalence": {
+    "available": false,
+    "reason": "this tree has no direct probe"
+  },
+  "failures": [
+    "session_resource_usage median took 5068.21 ms: the whole-system `top` dump is back on the macOS path",
+    "only 0 of 12 fixture sessions got a footprint",
+    "route_in_process answered with 12 fixture rows (0 with a footprint): the route did not read the fixture",
+    "route_http answered with 12 fixture rows (0 with a footprint): the route did not read the fixture"
+  ],
+  "fixture": {
+    "processes": 12,
+    "root": "/var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-info-bench-_hq92r0i"
+  },
+  "load_per_cpu": 19.11,
+  "loadavg": [
+    267.49,
+    235.3,
+    216.59
+  ],
+  "loadavg_end": [
+    488.48,
+    336.42,
+    261.46
+  ],
+  "local_operator": "/private/tmp/lo-info-bench/base-tree/local_operator/__init__.py",
+  "platform": "darwin",
+  "probes": {
+    "direct_rusage": {
+      "available": false
+    },
+    "footprint_by_pid": {
+      "25597": null,
+      "25605": null,
+      "25607": null,
+      "25609": null,
+      "25614": null,
+      "25617": null,
+      "25619": null,
+      "25620": null,
+      "25622": null,
+      "25625": null,
+      "25639": null,
+      "25640": null
+    },
+    "ps_batched_ms": {
+      "first": 93.08,
+      "median": 37.1,
+      "runs": [
+        93.08,
+        18.05,
+        37.1,
+        46.84,
+        26.15
+      ]
+    },
+    "session_resource_usage_ms": {
+      "first": 5111.71,
+      "median": 5068.21,
+      "runs": [
+        5111.71,
+        5043.26,
+        5068.21,
+        5047.27,
+        5087.63
+      ]
+    },
+    "top_dump_ms": {
+      "available": true,
+      "first": 8594.82,
+      "median": 9532.07,
+      "runs": [
+        8594.82,
+        11029.05,
+        9532.07
+      ]
+    }
+  },
+  "processes": 12,
+  "route_http": {
+    "boot_ms_to_health": 19693.96,
+    "first_ms": 6064.58,
+    "fixture_rows": 12,
+    "fixture_rows_with_footprint": 0,
+    "footprint_by_pid": {
+      "25597": null,
+      "25605": null,
+      "25607": null,
+      "25609": null,
+      "25614": null,
+      "25617": null,
+      "25619": null,
+      "25620": null,
+      "25622": null,
+      "25625": null,
+      "25639": null,
+      "25640": null
+    },
+    "median_ms": 5444.45,
+    "route": "/v1/desktop/info",
+    "runs": [
+      6064.58,
+      5397.95,
+      5387.75,
+      5445.33,
+      5444.45
+    ],
+    "server_local_operator": "/private/tmp/lo-info-bench/base-tree/local_operator/__init__.py",
+    "transport": "http"
+  },
+  "route_in_process": {
+    "first_ms": 6144.32,
+    "fixture_rows": 12,
+    "fixture_rows_with_footprint": 0,
+    "footprint_by_pid": {
+      "25597": null,
+      "25605": null,
+      "25607": null,
+      "25609": null,
+      "25614": null,
+      "25617": null,
+      "25619": null,
+      "25620": null,
+      "25622": null,
+      "25625": null,
+      "25639": null,
+      "25640": null
+    },
+    "median_ms": 5653.11,
+    "route": "/v1/desktop/info",
+    "runs": [
+      6144.32,
+      5486.53,
+      5507.69,
+      5653.11,
+      5815.74
+    ],
+    "transport": "asgi"
+  },
+  "runs": 5,
+  "snapshot": {
+    "collect_snapshot_ms": {
+      "first": 7446.64,
+      "max": 7446.64,
+      "median": 5758.1,
+      "min": 5263.46,
+      "runs": [
+        7446.64,
+        5811.05,
+        5513.03,
+        5263.46,
+        5758.1
+      ]
+    },
+    "fixture_rows": 12,
+    "fixture_rows_with_footprint": 0,
+    "footprint_by_pid": {
+      "25597": null,
+      "25605": null,
+      "25607": null,
+      "25609": null,
+      "25614": null,
+      "25617": null,
+      "25619": null,
+      "25620": null,
+      "25622": null,
+      "25625": null,
+      "25639": null,
+      "25640": null
+    },
+    "rss_by_pid": {
+      "25597": 9601024,
+      "25605": 9601024,
+      "25607": 9601024,
+      "25609": 9601024,
+      "25614": 9601024,
+      "25617": 9601024,
+      "25619": 9601024,
+      "25620": 9601024,
+      "25622": 9601024,
+      "25625": 9601024,
+      "25639": 9601024,
+      "25640": 9601024
+    },
+    "session_rows": 12
+  },
+  "tolerance_pct": 1.0,
+  "tree": "/private/tmp/lo-info-bench/base-tree"
+}
