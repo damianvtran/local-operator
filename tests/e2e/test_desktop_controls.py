@@ -131,6 +131,10 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             stream = ControlledStream(
                 [
                     text_turn("Seed answer"),
+                    # The goal command's own admitted turn, in call order: the
+                    # standing objective is stored AND its argument is submitted,
+                    # so it consumes a provider turn before the loop starts.
+                    text_turn("Goal turn answered"),
                     text_turn("First loop step"),
                     text_turn("Second loop step"),
                     text_turn("Private aside answer"),
@@ -255,13 +259,28 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             before = (await client.get(target + "/history")).json()["result"]
             await command("clear")
             assert (await client.get(target + "/history")).json()["result"] == before
-            await command("goal", "Complete two steps")
+            # ``/goal <text>`` is the one command that BOTH stores a standing
+            # objective and submits its argument as an ordinary user turn, and
+            # the desktop host is the one that completes the receipt (see
+            # ``desktop_viewer_must_submit`` in the route and
+            # ``test_desktop_goal_admission`` for the rule and its guards). Its
+            # turn is counted with every other provider call below.
+            #
+            # THE THREE CENSUS NUMBERS (here, and after the achieved loop and
+            # the cancelled live loop) are positional hand-counts, and each is
+            # this command's ONE turn more than it would be without it. The
+            # scripted answers above shift with it, so the next edit that adds
+            # or removes a turn must move all three — they are a census of
+            # provider calls, deliberately absolute so that an unnoticed extra
+            # turn fails here rather than passing as a proportional difference.
+            goal_stored = await command("goal", "Complete two steps")
+            assert goal_stored["admission"]["status"] == "admitted"
             loop_id = request_id()
             started = await command("loop", "2", loop_id)
             assert started["data"]["status"] == "running"
             await until(lambda: handle._goal_loop.state["status"] == "completed")
             await command("loop", "2", loop_id)
-            assert len(stream.requests) == 3
+            assert len(stream.requests) == 4
             snapshot = (await client.get(target)).json()["result"]["payload"]["frontend"][
                 "snapshot"
             ]
@@ -345,14 +364,14 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             await command("loop", "Verify the fixture goal")
             await until(lambda: handle._goal_loop.state["status"] == "achieved")
             assert session.goal == "Complete two steps"
-            assert len(stream.requests) == 6
+            assert len(stream.requests) == 7
             stream.block = True
             await command("loop", "3")
             await asyncio.wait_for(stream.started.wait(), 15)
             cancelled = await command("loop", "cancel")
             assert cancelled["data"]["status"] == "cancelled"
             await until(lambda: not session.is_streaming and not handle._prompt_queue)
-            assert len(stream.requests) == 7
+            assert len(stream.requests) == 8
             print(
                 (
                     "Goal loop judged ACHIEVED off-record without replacing standing "
