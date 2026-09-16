@@ -63,14 +63,21 @@ Turning the layer on costs screen space before it shows a single row. Each
 section spends a heading plus the blank line beneath it, and every heading after
 the first takes a separating blank as well, so going from two sections to four
 takes section chrome from 5 lines to 11. On a 30-row terminal that is enough to
-turn a list that fitted into a paged one: the footer then shows a pager
-(`1–16/21`) in place of the `ctrl+b hide` hint. This is accepted and expected,
-not a defect — the blank above a heading is what keeps it from sitting flush
-against the previous group's last row.
+turn a list that fitted into a paged one: the footer then gains a position
+counter (`1–16/21`), and `ctrl+b hide` becomes the first hint to yield when the
+full form no longer fits the width. This is accepted and expected, not a defect
+— the blank above a heading is what keeps it from sitting flush against the
+previous group's last row.
 
-When the list pages, the footer keeps `f9 focus` and drops `ctrl+b hide`:
-reaching the list matters more than hiding it, and `f9` is also the gate to the
-two sidebar-scoped chords. `/help` still lists `ctrl+b`.
+When the list pages, the footer is a fitted ladder, not a fixed string. It tries
+the full form (`{position} · {lead} · ctrl+b hide · {chip}`) and drops whichever
+fact does not fit, least-load-bearing first: `ctrl+b hide` yields before the
+position counter. The lead key is focus-aware — `esc return` when the list holds
+the keyboard, `f9 focus` when it does not — and never yields, because a page
+counter may never be the reason the only named exit disappears (main's D4 rule).
+The `⌥N` chip never yields either: the position is recoverable by scrolling (the
+cursor row is painted), but the hidden population is recoverable from nowhere
+else on the frame. `/help` still lists `ctrl+b`.
 
 The layer is capped at 40 rows and does not page. A sub row is labelled by what
 it was delegated to do (`label · role`, degrading to whichever half exists),
@@ -84,10 +91,10 @@ is an explicit request for that row.
 
 When hidden subagent runs exist, the footer gains a `· ⌥N` chip on its existing
 line — never a second line, which would cost a session row at every terminal
-height. The count is capped at `999+` so the footer's width stays predictable,
-and it is refreshed every 15 polls (about 30 s) plus whenever the sidebar is
-opened, rather than on every poll: reading it is a second full scan of the
-session store.
+height. The count is capped at `1k+` above 999 (`⌥999` still renders exactly) so
+the footer's width stays predictable, and it is refreshed every 15 polls (about
+30 s) plus whenever the sidebar is opened, rather than on every poll: reading it
+is a second full scan of the session store.
 
 ### One behaviour change to know about
 

@@ -4580,7 +4580,7 @@ class OperatorApp(App[None]):
         self._sidebar_refresh_pending = False
         #: Polls since the footer chip's population count was last read.
         #: `subagent_population` is a SECOND full `_scan_sessions` of the store
-        #: (resume.py:1351, not memoized) — measured +2.36 ms, +21% on the 2 s
+        #: (resume.py _scan_sessions, not memoized) — measured +2.36 ms, +21% on the 2 s
         #: poll with the layer OFF. The count answers "how many subagent runs
         #: exist", which changes on the scale of a delegated run starting, not
         #: on the scale of a repaint, so it is read on sidebar open and then
@@ -36381,22 +36381,25 @@ class OperatorApp(App[None]):
         # be named somewhere durable. The list's own footer says `f9 focus`
         # while the panel is on the frame — which is not while the composer has
         # the keys, i.e. exactly when the question is asked — and a full list's
-        # footer is further squeezed by the page counter (U1). One row carries
-        # both ends: in with `f9`, back out with `esc`. Lowercase `f9` to match
-        # the copy the panel paints, not the `F8` spelling of the row above.
-        # MEASURED: 35 description cells, well inside the 74-cell ceiling this
-        # block documents (and below the ~55 the description column wraps past).
-        lines.append(_key_row("f9", "keys the sessions list; esc returns"))
+        # footer is further squeezed by the page counter (U1). One row now
+        # carries the list's whole keyboard story: in with `f9`, pin with
+        # `f10`, back out with `esc`. `f10` folds in here rather than taking
+        # its own row because this frame has zero vertical headroom — any
+        # added row scrolls the topmost asserted key off the 44-row frame the
+        # paste-key test renders at — and the block's convention is one gesture
+        # per row with a partner chord in the description (cf. `ctrl+pageup`).
+        # The two sidebar-SCOPED chords (ctrl+a, ctrl+o) still get no row:
+        # /help lists app-wide keys, and a row for a chord that only fires in
+        # f9 mode would be a lie — the docs carry them, not the footer chip
+        # (which carries only the count). Lowercase `f9` to match the copy the
+        # panel paints, not the `F8` spelling of the row above. MEASURED: 45
+        # description cells (65 composed), inside the 74-cell ceiling this
+        # block documents and below the ~55 the description column wraps past.
+        lines.append(_key_row("f9", "keys the sessions list; f10 pins; esc returns"))
         # Beside ctrl+b, because it is the same surface: the list is where the
         # user learns what "next" means, and the one-press switch is otherwise
         # undiscoverable (UX round 3, U5).
         lines.append(_key_row("ctrl+shift+↑/↓", "switch to the previous/next conversation"))
-        # Sidebar block, and adjacent to F8/F9 so the function keys stay
-        # together. 63 composed cells against the 74-cell ceiling. The two
-        # sidebar-SCOPED chords (ctrl+a, ctrl+o) get no row here: /help lists
-        # app-wide keys, and a row for a chord that only fires in F9 mode
-        # would be a lie. They live in the footer chip and the docs.
-        lines.append(_key_row("F10", "pin or unpin the session under the pointer"))
         lines.append(_key_row("F8", "open an aside; ctrl+f forks it in"))
         # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits
