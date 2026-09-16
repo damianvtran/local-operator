@@ -135,10 +135,12 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #:   - "temporary failure in name resolution" / "name or service not known" /
 #:     "getaddrinfo failed": Linux/glibc ``EAI_AGAIN`` / ``EAI_NONAME`` and the
 #:     generic resolver-failure wording.
-#:   - "network is unreachable" / "errno 51": no route to the network at all
-#:     (macOS ``ENETUNREACH`` 51, Linux 101) — the interface has no default
-#:     route yet after waking.
-#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113).
+#:   - "network is unreachable" / "errno 51": ``ENETUNREACH`` (macOS 51, Linux
+#:     101) — no route to the network, which is the interface having no default
+#:     route yet after waking... but ALSO what one unroutable address family
+#:     looks like, which is why this half is held to a stricter standard below.
+#:   - "no route to host" / "errno 65": ``EHOSTUNREACH`` (macOS 65, Linux 113),
+#:     and ambiguous in exactly the same way.
 #:   - "network is down" / "errno 50": ``ENETDOWN`` — the interface is still
 #:     coming up.
 #:   - "can't assign requested address" / "cannot assign requested address" /
@@ -159,16 +161,17 @@ _TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "stream stalled
 #: genuinely-down LOCAL provider (ollama, LM Studio, a localhost proxy) the
 #: 8-minute patient wait AND suppress the fallback-chain walk that otherwise
 #: routes around it — a regression. A refusal stays an ordinary transient error.
-_CONNECTIVITY_LOSS_MARKERS = (
+#:
+#: The list is split in two below by WHAT THE EVIDENCE PROVES, which is not a
+#: stylistic division: see :data:`_MACHINE_ONLY_MARKERS` for the failures no
+#: destination can cause, and :data:`_ROUTE_EVIDENCE_MARKERS` for the route
+#: errors that can mean either the machine or the one address that was dialled.
+_MACHINE_ONLY_MARKERS = (
     "nodename nor servname",
     "errno 8",
     "temporary failure in name resolution",
     "name or service not known",
     "getaddrinfo failed",
-    "network is unreachable",
-    "errno 51",
-    "no route to host",
-    "errno 65",
     "network is down",
     "errno 50",
     "can't assign requested address",
@@ -177,26 +180,66 @@ _CONNECTIVITY_LOSS_MARKERS = (
     "errno 99",
 )
 
-#: The ``errno`` values, read off the exception objects themselves, that mean
-#: "this machine could not reach the network". A second encoding of the same
-#: judgement as :data:`_CONNECTIVITY_LOSS_MARKERS`, and deliberately NOT a
-#: replacement for it: the markers still carry the failures whose only evidence
-#: IS text (a provider relayed the wording, or a caller built a
-#: :class:`ProviderError` by hand and there is no chain left to read), while an
-#: ``OSError`` on the chain states its errno exactly, in the platform's own
-#: numbering, with no wording to parse. Using the ``errno`` module rather than
-#: literals is what makes each entry correct on BOTH platforms at once: macOS
-#: ``EADDRNOTAVAIL`` is 49 and Linux's is 99, and hard-coding either number is a
-#: classifier that silently stops working when the same code runs under Linux.
+#: Route errors: evidence that can mean EITHER "this machine has no route" or
+#: "this one address is not routable from here", and therefore NOT sufficient
+#: on its own when it is only reached by unwinding the chain.
 #:
-#: The set mirrors the marker list one-for-one — DNS/route/address failures that
-#: happen BEFORE a single byte reaches anyone — so the two encodings agree about
-#: what an offline machine looks like.
-_CONNECTIVITY_LOSS_ERRNOS: tuple[int, ...] = (
+#: The ambiguity is real and was measured (agent review R1-3): a dial to a single
+#: IPv6 literal from a machine with no v6 route raises
+#: ``ConnectError("All connection attempts failed")`` over ``OSError(65)`` — the
+#: same shape as an interface that woke up with no default route yet. The two
+#: want opposite treatment: the first is a per-target condition whose remedy is
+#: the fallback walk, the second is the waking-laptop case this whole path
+#: exists for.
+#:
+#: So a route error counts on its own only when it is the failure's OWN account
+#: (the exception the caller holds, or the ``message`` of a wrapped one — see
+#: ``is_connectivity_loss``), which is what this module has always read and what
+#: its docstring above promised. Reached any other way it must be corroborated,
+#: by :data:`_MACHINE_ONLY_MARKERS`/``_MACHINE_ONLY_ERRNOS`` or by anyio's
+#: multi-address aggregate: ``connect_tcp`` raises an ``ExceptionGroup`` for
+#: ``len(oserrors) > 1`` and a bare ``OSError`` otherwise, so a group IS anyio
+#: telling us EVERY address of the name failed to route, where one lone failure
+#: says nothing about the machine.
+_ROUTE_EVIDENCE_MARKERS = (
+    "network is unreachable",  # macOS ENETUNREACH 51, Linux 101
+    "errno 51",
+    "no route to host",  # EHOSTUNREACH — macOS 65, Linux 113
+    "errno 65",
+)
+
+#: Every wording that marks a pre-connect failure, in one tuple, for callers that
+#: only want "does this text look like connectivity at all". The two halves are
+#: kept separate above because ``is_connectivity_loss`` weights them differently.
+_CONNECTIVITY_LOSS_MARKERS = _MACHINE_ONLY_MARKERS + _ROUTE_EVIDENCE_MARKERS
+
+#: ``errno`` values no DESTINATION can cause: the socket could not be given a
+#: source address, or the interface is down. Sufficient on their own, wherever on
+#: the chain they appear. Read off the ``OSError`` objects rather than parsed out
+#: of their text, and through the ``errno`` module rather than as literals, so
+#: each entry is correct on BOTH platforms at once: ``EADDRNOTAVAIL`` is 49 on
+#: macOS and 99 on Linux, and hard-coding either number is a classifier that
+#: silently stops working when the same code runs under Linux.
+#:
+#: NOT a one-for-one mirror of the marker lists, and the difference is not an
+#: oversight to be "restored": the resolution half of
+#: :data:`_MACHINE_ONLY_MARKERS` (``nodename nor servname``, ``errno 8``,
+#: ``temporary failure in name resolution``, ``name or service not known``,
+#: ``getaddrinfo failed``) has NO counterpart here, because ``getaddrinfo``
+#: reports ``EAI_*`` codes, which are not ``errno`` values at all and whose
+#: numbering is not stable across platforms. The mapping is exact for the
+#: route/address/interface failures only.
+_MACHINE_ONLY_ERRNOS: tuple[int, ...] = (
     errno.EADDRNOTAVAIL,  # macOS 49 / Linux 99 — no source address to bind
+    errno.ENETDOWN,  # macOS 50 / Linux 100 — the interface is still coming up
+)
+
+#: The ``errno`` counterparts of :data:`_ROUTE_EVIDENCE_MARKERS`, and admitted on
+#: the same terms: sufficient when the failure's own text carries it, otherwise
+#: only with corroboration.
+_ROUTE_EVIDENCE_ERRNOS: tuple[int, ...] = (
     errno.ENETUNREACH,  # macOS 51 / Linux 101 — no route to the network
     errno.EHOSTUNREACH,  # macOS 65 / Linux 113 — no route to that host
-    errno.ENETDOWN,  # macOS 50 / Linux 100 — the interface is still coming up
 )
 
 #: Wordings that prove the DESTINATION was reached, which refutes
@@ -1252,6 +1295,18 @@ def _transport_chain(error: BaseException) -> Iterator[BaseException]:
     whose v6 route happens to be missing. Which of the two it is can only be
     decided by looking inside. ``id()`` memoisation is what makes a cyclic or
     self-referential chain terminate instead of spinning.
+
+    ``__context__`` IS the interpreter's IMPLICIT link, so this walk can reach
+    an exception that has nothing to do with the failure: any exception raised
+    inside an unrelated ``except`` block inherits its handler's as ``__context__``.
+    Nothing today is affected, and one constraint keeps it that way — every
+    caller hands the classifier the exception the client ACTUALLY raised
+    (``wrap_transport_error`` is passed the ``exc`` of the ``except`` it is
+    called from, and passes that one on), so the chain walked is this failure's
+    own. A future caller that wraps an error it merely happened to be holding
+    inside an unrelated handler would be reading that neighbour's evidence as
+    this failure's. That is the reason the walk is not offered as a general
+    "what went wrong" utility.
     """
     seen: set[int] = set()
     stack: list[BaseException] = [error]
@@ -1342,6 +1397,32 @@ def _is_destination_reached(node: BaseException) -> bool:
     return any(marker in lowered for marker in _DESTINATION_REACHED_MARKERS)
 
 
+def _carries_machine_only_evidence(node: BaseException) -> bool:
+    """Does this node state a failure no DESTINATION can cause?
+
+    Resolution failures, ``EADDRNOTAVAIL`` and ``ENETDOWN`` are about this
+    machine and nothing else, so they are sufficient wherever they appear — see
+    :data:`_MACHINE_ONLY_MARKERS` / :data:`_MACHINE_ONLY_ERRNOS`.
+    """
+    if getattr(node, "errno", None) in _MACHINE_ONLY_ERRNOS:
+        return True
+    text = _evidence_text(node)
+    return any(marker in text for marker in _MACHINE_ONLY_MARKERS)
+
+
+def _carries_route_evidence(node: BaseException) -> bool:
+    """Does this node state a ROUTE failure — machine, or one address?
+
+    Deliberately a separate question from the one above: this evidence is
+    ambiguous, and :func:`is_connectivity_loss` decides whether anything
+    corroborates it. See :data:`_ROUTE_EVIDENCE_MARKERS`.
+    """
+    if getattr(node, "errno", None) in _ROUTE_EVIDENCE_ERRNOS:
+        return True
+    text = _evidence_text(node)
+    return any(marker in text for marker in _ROUTE_EVIDENCE_MARKERS)
+
+
 def is_connectivity_loss(error: BaseException) -> bool:
     """The MACHINE is offline — DNS/route/socket-connect failed before any HTTP.
 
@@ -1365,16 +1446,27 @@ def is_connectivity_loss(error: BaseException) -> bool:
     refused connection raises ``ECONNREFUSED`` in the same place.
 
     THE HONEST RULE FOR A SILENT CHAIN. A connect-class failure
-    (:func:`_is_connect_class`) with no readable cause chain, no HTTP status and
-    no evidence the destination answered is classified as a connectivity loss.
-    The reasoning is a negative one: at that point our own client could not open
-    a socket, and the only alternative explanation it could have produced — a
-    refusal, or a TLS failure — leaves evidence this walk would have seen. What
-    remains is the machine. The alternative, returning ``False`` on silence, is
-    what the incident did, and the cost of it is worse than the cost of being
-    wrong here: the failure it discards is the one that heals by itself within
-    seconds, while a false positive on a genuinely broken CERTIFICATE is already
-    excluded above and a false positive on a refusal is excluded by the veto.
+    (:func:`_is_connect_class`) that yields no other readable evidence, no HTTP
+    status and no sign the destination answered is classified as a connectivity
+    loss. The reasoning is a negative one: at that point our own client could
+    not open a socket, and the only alternative explanation it could have
+    produced — a refusal, or a TLS failure — leaves evidence this walk would
+    have seen. What remains is the machine. The alternative, returning ``False``
+    on silence, is what the incident did, and the cost of it is worse than the
+    cost of being wrong here: the failure it discards is the one that heals by
+    itself within seconds, while a false positive on a genuinely broken
+    CERTIFICATE is already excluded above and a false positive on a refusal is
+    excluded by the veto.
+
+    ROUTE EVIDENCE IS NOT SILENCE, AND NOT ENOUGH ON ITS OWN. A route error on
+    the chain means the walk DID find an explanation, which is why it never
+    reaches the fallback above — but that explanation is ambiguous ("this machine
+    has no route" or "this one address is not routable from here"), so it is
+    believed only where something corroborates it: in the failure's own text, or
+    beside anyio's multi-address group. A lone route error reached by unwinding
+    stays on the fast path it had before this change, because its remedy is the
+    fallback walk, and parking that target for minutes instead was measured as a
+    regression (agent review R1-3).
 
     Deliberately NOT gated on ``ProviderError.transport`` (provenance), unlike
     :func:`is_mid_stream_connectivity_loss`: this predicate only chooses a
@@ -1413,20 +1505,37 @@ def is_connectivity_loss(error: BaseException) -> bool:
     # never a connectivity loss — whatever the chain below it looks like.
     if isinstance(error, ProviderError) and error.status is not None:
         return False
-    offline = False
+    machine_only = False
+    route_evidence = False
+    multi_address = False
     connect_class = False
+    # The failure's OWN account — the exception handed to us, or the message a
+    # ProviderError was built from. Route evidence HERE is what this module has
+    # always read (and what its docstring promises); the same wording reached by
+    # unwinding is held to a stricter standard. See the tuples.
+    route_in_own_account = _carries_route_evidence(error)
     for node in _transport_chain(error):
         if _is_destination_reached(node):
             return False
         if _is_connect_class(node):
             connect_class = True
-        if getattr(node, "errno", None) in _CONNECTIVITY_LOSS_ERRNOS:
-            offline = True
-        if any(marker in _evidence_text(node) for marker in _CONNECTIVITY_LOSS_MARKERS):
-            offline = True
-    # ``offline or connect_class``: see THE HONEST RULE FOR A SILENT CHAIN above
-    # for why silence is a verdict here rather than a shrug.
-    return offline or connect_class
+        if isinstance(node, BaseExceptionGroup):
+            # anyio's shape for a dial that tried MORE THAN ONE address
+            # (`oserrors[0] if len(oserrors) == 1 else ExceptionGroup(...)`), so
+            # its presence is the multi-address corroboration route evidence
+            # needs — every address of the name failed to route.
+            multi_address = True
+        if _carries_machine_only_evidence(node):
+            machine_only = True
+        if _carries_route_evidence(node):
+            route_evidence = True
+    if machine_only:
+        return True
+    if route_evidence:
+        return route_in_own_account or multi_address
+    # ``connect_class`` alone: see THE HONEST RULE FOR A SILENT CHAIN above for
+    # why silence is a verdict here rather than a shrug.
+    return connect_class
 
 
 def is_invalidated_credential_error(error: BaseException) -> bool:
