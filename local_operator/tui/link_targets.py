@@ -52,13 +52,16 @@ WHAT COUNTS AS A URL
 
 Three rules, each stated once:
 
-* :data:`_URL_BODY` — the characters a URL is made of, shared by BOTH patterns
-  so a markdown link's target and a bare URL are cut at the same place. A
-  parenthesised run is included only when it is BALANCED, which is what keeps
-  ``…/wiki/Foo_(bar)`` whole. Review round 1 found what happens when that rule
-  lived on one path only: the markdown capture stopped at the link's own
-  terminator, and the picker painted two rows for one link with the cursor on
-  the truncated one (MAJOR-1).
+* :func:`_body_end` — the characters a URL is made of, and where it stops,
+  shared by BOTH captures so a markdown link's target and a bare URL are cut at
+  the same place. A parenthesised run is included only when it is BALANCED, at
+  any depth, which is what keeps ``…/wiki/Foo_(bar)`` and ``…/a_(b_(c))_d``
+  whole. Review round 1 found what happens when that rule lived on one path
+  only: the markdown capture stopped at the link's own terminator, and the
+  picker painted two rows for one link with the cursor on the truncated one
+  (MAJOR-1). Review round 2 found the other half — a rule written as a
+  nesting-level PATTERN rather than as a balance is a rule with a silent edge,
+  one level past its bound.
 * :func:`_trim` — the punctuation that belongs to the prose or the emphasis
   AROUND the URL (``…/docs.``, ``**…/x**``), applied to both captures for the
   same reason.
@@ -71,36 +74,92 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+#: What a URL begins with, in ONE literal: the guard that decides what may
+#: reach the browser and the finder that decides what is offered are then the
+#: same characters rather than two spellings of "http or https" that can drift.
+_SCHEME = r"https?://"
+
 #: The only schemes that may reach the browser. Deliberately a prefix test on
 #: the raw string rather than ``urlparse(...).scheme``: ``urlparse`` accepts
 #: almost anything as a scheme, and the point here is to REFUSE, not to parse.
-_OPENABLE_RE = re.compile(r"^https?://", re.IGNORECASE)
+_OPENABLE_RE = re.compile(rf"^{_SCHEME}", re.IGNORECASE)
 
-#: The URL BODY both patterns share, so the parentheses rule has one spelling.
-#:
-#: A parenthesised run belongs to the URL only when it is BALANCED, which keeps
-#: a documentation URL whole (``…/wiki/Foo_(bar)``) without swallowing the
-#: ``)`` that closes the prose around it. It has to live in the PATTERN and not
-#: in :func:`_trim`, and that is where review round 1 found the defect
-#: (MAJOR-1): ``[label](…)``\ 's own terminator is a ``)``, so a capture that
-#: stopped at the FIRST one truncated the target — and because the bare pattern
-#: then found the correct form at the same offset, the picker painted TWO rows
-#: for one link with ``❯`` on the truncated one, so a plain ``enter`` opened a
-#: 404. A fix on the markdown path alone would have left the two paths
-#: disagreeing about the same characters; one shared body is what makes them
-#: agree by construction.
-#:
-#: ``<>`` are excluded because a URL in angle brackets is an autolink and its
-#: closing ``>`` is punctuation; quotes because a URL inside prose is very
-#: often quoted.
-_URL_BODY = r"https?://(?:[^\s()<>\"'`]+|\([^\s()]*\))+"
+#: Where a bare URL starts.
+_URL_START_RE = re.compile(_SCHEME, re.IGNORECASE)
 
-#: ``[label](target)`` — the markdown link, with an optional title. Matched
-#: against the SOURCE, so the label may be anything Rich would render.
-_MARKDOWN_LINK_RE = re.compile(rf"\[[^\]]*\]\(\s*({_URL_BODY})(?:\s+[^)]*)?\)", re.IGNORECASE)
+#: Characters that end a body outright: the brackets and quotes a URL inside
+#: prose is very often wrapped in. ``<>`` because a URL in angle brackets is an
+#: autolink and its closing ``>`` is punctuation; the quotes because the URL is
+#: usually inside them. Whitespace is left to :meth:`str.isspace` in the scan,
+#: so every character Python counts as whitespace ends a URL rather than the
+#: four an ASCII list would name.
+_BODY_STOP = frozenset("<>\"'`")
 
-#: A bare URL: the same body, so both paths cut a URL at the same characters.
-_BARE_URL_RE = re.compile(_URL_BODY, re.IGNORECASE)
+
+def _body_end(text: str, start: int) -> int:
+    """The index just past the URL body that begins at ``start``.
+
+    WHY THIS IS A SCAN AND NOT A PATTERN, because the next reader will reach
+    for the pattern. Python's ``re`` cannot match arbitrarily nested
+    parentheses — the language has no recursion — so the balance has to be
+    either written out for a FIXED number of levels or walked. The fixed
+    pattern is the trap: it matches ``…/Foo_(bar)`` and then says nothing past
+    its bound, so a URL one level deeper is not refused, it is TRUNCATED, and
+    the truncated string is a legal ``https://`` URL that the picker paints as
+    a row and ``enter`` opens as a 404. That is review round 2's BLOCKER: the
+    round-1 fix added a parenthesised alternative that could match ONE level,
+    and it turned ``https://a.test/a_(b_(c))_d`` — which the round-1 head got
+    right — into ``https://a.test/a_``. Nesting depth belongs to the text and
+    not to the rule, so NO bound is the right bound; the balance is, and a loop
+    is what can hold it.
+
+    The balance is the rule the pattern stated: a ``(`` opens a run that must
+    close, and a run that never closes is not URL text — that ``(`` and
+    everything after it belong to the prose, so the body ends before it
+    (``…/x_(y`` → ``…/x_``). A ``)`` reached with nothing open ends the body
+    there, which is what makes ``[label](url)``'s own terminator a terminator
+    and keeps the closer of ``(see …)`` out of the URL.
+
+    Shared by both captures, and it has to be: ``[label](…)``'s own terminator
+    is a ``)``, so a body that stopped at the FIRST ``)`` truncated the target
+    — and because the bare finder then found the correct form at the same
+    offset, the picker painted TWO rows for one link with ``❯`` on the
+    truncated one, so a plain ``enter`` opened a 404 (review round 1,
+    MAJOR-1). One shared body is what makes the two paths agree by
+    construction.
+    """
+    depth = 0
+    # Where the outermost still-open ``(`` sits, or -1 when nothing is open.
+    unclosed_at = -1
+    index = start
+    limit = len(text)
+    while index < limit:
+        char = text[index]
+        if char in _BODY_STOP or char.isspace():
+            break
+        if char == "(":
+            if depth == 0:
+                unclosed_at = index
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+            if depth == 0:
+                unclosed_at = -1
+        index += 1
+    return unclosed_at if depth else index
+
+
+#: ``[label](`` — the markdown link's head. Its TARGET is then read from the
+#: text by :func:`_body_end`, exactly as a bare URL is, so the two paths cannot
+#: cut the same characters in two places. Matched against the SOURCE, so the
+#: label may be anything Rich would render.
+_MARKDOWN_OPEN_RE = re.compile(r"\[[^\]]*\]\(\s*", re.IGNORECASE)
+
+#: What may follow a markdown target: an optional title, then the ``)`` that
+#: closes the link. ``[^)]`` still excludes a ``)`` from the title, as before.
+_MARKDOWN_TAIL_RE = re.compile(r"(?:\s+[^)]*)?\)")
 
 #: Trailing characters that belong to the SENTENCE (or to emphasis), not the
 #: URL. A URL written at the end of a clause arrives as ``…/docs.`` and opening
@@ -110,8 +169,9 @@ _BARE_URL_RE = re.compile(_URL_BODY, re.IGNORECASE)
 #: ``*`` and ``~`` are here for the emphasis marks a model writes around a URL
 #: (``**https://a.test/x**``) — review round 1, MAJOR-2. They cost a real URL
 #: that ENDS in one of those characters, which is rarer than the bold link.
-#: Unbalanced ``)`` is NOT here: :data:`_URL_BODY` cannot emit one, which is why
-#: there is no second trimmer for it.
+#: Unbalanced ``)`` is NOT here: :func:`_body_end` cannot return a body that
+#: ends on one — it breaks before a ``)`` with nothing open, and backs up past a
+#: ``(`` that never closes — which is why there is no second trimmer for it.
 _TRAILING_JUNK = ".,;:!?'\"*~"
 
 #: What each side of the conversation is called in the picker's hint column.
@@ -156,11 +216,11 @@ def _trim(url: str) -> str:
     what lets the dedupe collapse them to one row.
 
     Nothing here handles parentheses. A balanced run is part of the URL by
-    :data:`_URL_BODY`, and an unbalanced closer can never reach this function:
-    the body excludes ``)`` from its first alternative and requires a matching
-    ``(`` for its second, so a capture cannot end on one. The trimmer this used
-    to carry was dead code the moment the pattern learned the rule, and two
-    places deciding the same question is how they come to disagree.
+    :func:`_body_end`, and an unbalanced closer can never reach this function:
+    the scan breaks before a ``)`` with nothing open and backs up past a ``(``
+    that never closes, so a capture cannot end on one. The trimmer this used to
+    carry was dead code the moment the body learned the rule, and two places
+    deciding the same question is how they come to disagree.
     """
     while url and url[-1] in _TRAILING_JUNK:
         url = url[:-1]
@@ -170,37 +230,61 @@ def _trim(url: str) -> str:
 def extract_links(text: str) -> list[str]:
     """Every openable URL in ``text``, in the order it appears, deduped.
 
-    Markdown links and bare URLs are found by two patterns and then merged on
+    Markdown links and bare URLs are found by two heads and then merged on
     POSITION rather than concatenated: a message that says "see [the
     docs](https://a.test/x) or https://b.test/y" has an order the reader can
-    see, and running one pattern's results after the other's would list it
-    wrong. A markdown link's target also appears inside the bare pattern's
-    reach, so the merge is what keeps each URL to one entry.
+    see, and running one head's results after the other's would list it wrong.
+    A markdown link's target is also inside the bare head's reach, so the merge
+    is what keeps each URL to one entry.
 
-    Both captures go through the SAME :func:`_trim`, which is what makes the
-    two patterns produce the same string for the same characters — the property
-    the dedupe depends on, and the one whose absence put a truncated row under
-    the cursor in review round 1 (MAJOR-1).
+    Both captures take their body from the SAME :func:`_body_end` and then go
+    through the SAME :func:`_trim`, which is what makes the two paths produce
+    the same string for the same characters — the property the dedupe depends
+    on, and the one whose absence put a truncated row under the cursor in
+    review round 1 (MAJOR-1).
+
+    The bare pass resumes AFTER the body it just read rather than after the
+    ``https://`` that started it, so a URL containing another one —
+    ``…/r?u=https://b.test/y``, the shape of every redirector and share link —
+    stays ONE row instead of being found a second time from its own interior.
 
     Both captures are also filtered through :func:`is_openable`, though
-    :data:`_URL_BODY` already starts with ``https?://``: the rule that only
-    http(s) may become a ROW is stated rather than implied by a pattern, and a
-    later edit to the body cannot quietly admit a scheme.
+    :data:`_SCHEME` already starts the body: the rule that only http(s) may
+    become a ROW is stated rather than implied by a pattern, and a later edit
+    to the body cannot quietly admit a scheme.
     """
     found: list[tuple[int, str]] = []
-    for match in _MARKDOWN_LINK_RE.finditer(text):
-        url = _trim(match.group(1))
+    for match in _MARKDOWN_OPEN_RE.finditer(text):
+        # The target begins where the head ends, past any space after the ``(``.
+        body_at = match.end()
+        body_to = _body_end(text, body_at)
+        # No body at all is ``[label]()``; a body the link's own ``)`` does not
+        # follow is prose that happens to look like a link's head. Either way
+        # this is not a markdown link.
+        if body_to == body_at or not _MARKDOWN_TAIL_RE.match(text, body_to):
+            continue
+        url = _trim(text[body_at:body_to])
         if is_openable(url):
-            found.append((match.start(1), url))
-    for match in _BARE_URL_RE.finditer(text):
-        url = _trim(match.group(0))
+            found.append((body_at, url))
+    cursor = 0
+    while True:
+        match = _URL_START_RE.search(text, cursor)
+        if match is None:
+            break
+        body_to = _body_end(text, match.end())
+        if body_to == match.end():
+            # ``https://`` with nothing a URL can be made of after it.
+            cursor = match.end()
+            continue
+        url = _trim(text[match.start() : body_to])
         if is_openable(url):
             found.append((match.start(), url))
+        cursor = body_to
     # Ranked by position, then deduped by URL. The second step is load-bearing
-    # rather than tidiness: a markdown link's TARGET is inside the bare
-    # pattern's reach, so `[docs](https://a.test/x)` arrives twice from the two
-    # patterns — once at the label's offset and once at the target's — and the
-    # earlier offset is the one the reader sees first.
+    # rather than tidiness: a markdown link's TARGET is inside the bare head's
+    # reach, so `[docs](https://a.test/x)` arrives twice, once from each head —
+    # once at the label's offset and once at the target's — and the earlier
+    # offset is the one the reader sees first.
     seen: set[str] = set()
     urls: list[str] = []
     for _, url in sorted(found, key=lambda pair: pair[0]):
