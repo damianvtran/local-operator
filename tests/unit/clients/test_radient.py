@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -976,6 +976,157 @@ def test_create_transcription_forwards_provider_without_a_model(
     fields = _multipart_fields(bodies[0])
     assert fields["provider"] == "elevenlabs"
     assert "model" not in fields
+
+
+# --- Upstream failures on the transcription path -------------------------------
+#
+# WHY THESE USE A REAL `requests.Response` AND NOT A MagicMock: the callers of
+# these helpers are responses, not mocks, and that difference is load-bearing --
+# `requests.Response.__bool__` returns `response.ok`, so a 4xx/5xx is falsy while a
+# MagicMock is always truthy. The mocked tests around this path stayed green
+# through the bug that discarded every error body. `real_response` (tests/unit/
+# conftest.py) builds the real thing.
+
+# The refusal Radient actually returned on 2026-09-17: the provider's own words,
+# in the body of a 500.
+UPSTREAM_QUOTA_BODY = (
+    b'{"error":"[internal] Transcription failed: OpenAI API error: OpenAI API error '
+    b"(insufficient_quota): You have no credits remaining. Add credits to your plan to "
+    b'continue."}'
+)
+
+
+def test_create_transcription_http_error_keeps_the_upstream_reason(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """A refused transcription carries the upstream status and the provider's words.
+
+    The route classifies on those attributes, so losing either would take the
+    failure's truthfulness with it: a status alone cannot tell a Radient edge
+    refusal from a provider one, and the body is where the provider names itself.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+
+    with patch("requests.post", MagicMock(return_value=real_response(500, UPSTREAM_QUOTA_BODY))):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 500
+    assert exc.body == UPSTREAM_QUOTA_BODY.decode()
+    assert "500" in str(exc)
+    assert "insufficient_quota" in str(exc)
+    assert "You have no credits remaining" in str(exc)
+
+
+def test_create_transcription_http_error_without_a_body_says_so(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """An empty 500 keeps the status and carries no body to quote.
+
+    The status is what tells the two apart for a reader of the message: a 500
+    that said nothing is not the same failure as a request that never arrived,
+    and the latter reports no status at all.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+
+    with patch("requests.post", MagicMock(return_value=real_response(500, b""))):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 500
+    assert exc.body is None
+    assert "500" in str(exc)
+    assert NO_RESPONSE_BODY in str(exc)
+
+
+def test_create_transcription_network_failure_keeps_its_own_text(
+    radient_client: RadientClient, tmp_path: Path
+) -> None:
+    """A request that never reached Radient carries the transport error alone."""
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    error = requests.exceptions.ConnectionError("Connection refused")
+
+    with patch("requests.post", MagicMock(side_effect=error)):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code is None
+    assert exc.body is None
+    assert "Connection refused" in str(exc)
+
+
+def test_create_transcription_error_in_a_200_body_is_an_upstream_failure(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """Radient reports provider failures in a 200 body as well as in a 500.
+
+    That branch used to be raised as a runtime error inside the try and then
+    re-wrapped by the catch-all, so the message read "Failed to create
+    transcription: Failed to create transcription: ..." and the shape of the
+    failure was lost with it.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+
+    with patch("requests.post", MagicMock(return_value=real_response(200, UPSTREAM_QUOTA_BODY))):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 200
+    assert exc.body == UPSTREAM_QUOTA_BODY.decode()
+    assert str(exc).count("Failed to create transcription") == 1
+
+
+def test_create_transcription_reports_a_non_json_body_as_upstream(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """A 200 that is not the documented shape is an upstream protocol failure."""
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    response = real_response(200, b"<html>gateway error</html>")
+
+    with patch("requests.post", MagicMock(return_value=response)):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 200
+    assert "gateway error" in (exc.body or "")
+
+
+def test_create_transcription_without_an_api_key_stays_internal(
+    base_url: str, tmp_path: Path
+) -> None:
+    """The missing-key failure is ours, so it stays a plain RuntimeError.
+
+    The route reports a plain RuntimeError as a 500 and a typed upstream error
+    as a 502/402; anything typed here would blame Radient for our own
+    misconfiguration.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    client = RadientClient(api_key=None, base_url=base_url)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        client.create_transcription(file_path=str(audio_file))
+
+    assert not isinstance(exc_info.value, APIError)
+    assert "RADIENT_API_KEY is not configured" in str(exc_info.value)
 
 
 # --- Instruction-set publication ----------------------------------------------

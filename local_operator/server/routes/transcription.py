@@ -4,8 +4,13 @@ import tempfile
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
+from starlette.status import (
+    HTTP_402_PAYMENT_REQUIRED,
+    HTTP_500_INTERNAL_SERVER_ERROR,
+    HTTP_502_BAD_GATEWAY,
+)
 
+from local_operator.clients._http import APIError
 from local_operator.clients.radient import (
     RadientClient,
     RadientTranscriptionResponseData,
@@ -14,6 +19,106 @@ from local_operator.server.dependencies import get_radient_client
 from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter()
+
+
+# Upstream text that means "the provider (not Radient) refused for want of
+# credit". Matched as a substring against the lowercased upstream body.
+#
+# The list is deliberately short and literal. A provider quota refusal is the
+# one upstream failure a user can fix from the UI, so it is worth recognising;
+# anything broader ("error", "failed") would catch an ordinary provider fault
+# and mislabel it as a billing problem, which is worse than not classifying it.
+PROVIDER_CREDIT_MARKERS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "no credits remaining",
+    "out of credits",
+    "insufficient credits",
+    "credit balance",
+    "billing",
+)
+
+# Statuses that mean the provider rejected the request itself -- a bad or
+# revoked key, an unavailable model, a parameter it will not accept. Radient
+# usually proxies these as a plain 500, which is why the body matters more than
+# the status it arrives with.
+PROVIDER_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 422})
+
+
+def _upstream_clause(exc: APIError) -> str:
+    """Render the upstream status and body as a trailing diagnostic clause.
+
+    The sentence in front of it says what to do; this says what actually
+    happened, in the upstream's own words. Both are kept because the two
+    audiences differ: a user reads the sentence, whoever is on support reads
+    the clause -- and today a provider quota refusal reached the client as no
+    text at all, which is what made it untriageable.
+    """
+    if exc.body:
+        return f" Upstream responded {exc.status_code}: {exc.body}"
+    return f" Upstream responded {exc.status_code} with no body."
+
+
+def _classify_upstream_failure(exc: APIError, provider: str) -> HTTPException:
+    """Map an upstream transcription failure onto a status the client can act on.
+
+    The client only ever shows ``detail``, but it branches on the status, so the
+    status has to be truthful on its own:
+
+    * 402 -- out of credit, and the fix is to add some. Used for Radient's own
+      refusal *and* for a provider quota refusal: the action is the same class
+      of thing for the user (top up, or switch provider), the failure is not
+      retryable so it must not look like a 429 that the client may retry, and
+      402 is the status the desktop already understands for exhausted credit,
+      so that client keeps working without an update.
+    * 502 -- the upstream call failed: a provider rejection, a provider fault,
+      or a transport failure that never reached Radient at all. Not our fault,
+      so never a 500.
+    * 500 -- left to the caller for genuine internal faults only.
+    """
+    if exc.status_code is None:
+        # A transport failure never reached Radient, so there is no upstream
+        # status or body to add: the client's own text ("Connection refused",
+        # "timed out") is the entire diagnostic and is passed through verbatim.
+        return HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+    # Radient's own credit refusal. Checked before the body markers below so
+    # that "insufficient credits" in a Radient 402 is attributed to Radient
+    # rather than to whichever provider the request happened to name.
+    if exc.status_code == HTTP_402_PAYMENT_REQUIRED:
+        return HTTPException(
+            status_code=HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                "Transcription is unavailable: your Radient credit balance is too low. "
+                "Add credits to continue." + _upstream_clause(exc)
+            ),
+        )
+
+    body = (exc.body or "").lower()
+    if any(marker in body for marker in PROVIDER_CREDIT_MARKERS):
+        return HTTPException(
+            status_code=HTTP_402_PAYMENT_REQUIRED,
+            detail=(
+                f"Transcription is unavailable: the {provider} provider has run out of "
+                f"credits. Add credits to that provider, or switch to another one."
+                + _upstream_clause(exc)
+            ),
+        )
+
+    if exc.status_code in PROVIDER_REJECTION_STATUSES:
+        return HTTPException(
+            status_code=HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"The {provider} provider rejected the transcription request."
+                + _upstream_clause(exc)
+            ),
+        )
+
+    return HTTPException(
+        status_code=HTTP_502_BAD_GATEWAY,
+        detail="Transcription failed upstream." + _upstream_clause(exc),
+    )
 
 
 @router.post(
@@ -107,7 +212,13 @@ async def create_transcription_endpoint(
         )
     except ValueError as ve:  # For validation errors from the client
         raise HTTPException(status_code=400, detail=str(ve))
+    except APIError as upstream:
+        raise _classify_upstream_failure(upstream, provider or "upstream")
     except RuntimeError as re:  # For API errors or other runtime issues from the client
+        # A plain RuntimeError from the client is ours: the client raises one
+        # only for a server-side configuration fault (no Radient API key) or an
+        # unforeseen internal error. Every failure that came from Radient or
+        # from the provider it called arrives typed, handled above.
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(re))
     except Exception as e:
         raise HTTPException(

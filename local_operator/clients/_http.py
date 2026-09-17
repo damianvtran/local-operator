@@ -270,9 +270,21 @@ class APIError(RuntimeError):
         code: The upstream's stable error code, or ``None`` when it did not send
             one (an intermediary's HTML error page, a 500 with prose only).
         details: The upstream's structured details, always a dict (empty when it
-            sent none). Never the raw body, and never a credential: the string
+            sent none). Never the raw body -- that is :attr:`body`'s job, and only
+            where the prose sites need it -- and never a credential: the string
             values are masked on the way in (see :func:`scrub_details`), so this
             attribute does not hold one for a caller to surface later.
+        body: The upstream body, ALREADY SCRUBBED, for the callers that have no
+            machine-readable account of the failure and whose value is the
+            upstream's own sentence: the legacy prose sites, and the
+            transcription/speech paths that classify an upstream refusal by
+            reading its envelope. ``None`` wherever the upstream sent a designed
+            vocabulary -- :func:`api_error_from_response` deliberately leaves it
+            unset there, because such a refusal is fully described by
+            :attr:`code` and :attr:`details` and not carrying the body is one
+            fewer place a credential could reach a client. The value comes from
+            :func:`scrubbed_response_body` (shape rules) and :func:`redact_secrets`
+            (this caller's own credential), so it is never the unscrubbed body.
     """
 
     def __init__(
@@ -282,11 +294,67 @@ class APIError(RuntimeError):
         status_code: Optional[int] = None,
         code: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
+        body: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.details: Dict[str, Any] = dict(details) if details else {}
+        self.body = body
+
+
+def api_error_from_exception(
+    exc: RequestException,
+    *,
+    prefix: str,
+    secrets: Iterable[Optional[str]] = (),
+) -> APIError:
+    """Build an :class:`APIError` from the exception a ``requests`` call raised.
+
+    The typed twin of the legacy prose shape
+    ``RuntimeError(f"{prefix}: {exc}, Response Body: {body}")``: the message is
+    byte-for-byte what that produced, and the status and the scrubbed body are
+    ALSO carried as attributes so a caller can classify the failure instead of
+    re-parsing its own message text. That difference is the whole point on the
+    transcription path, where a transport failure, a provider quota refusal and
+    the daemon's own internal fault have to reach a client as different statuses
+    and only the failure itself knows which it was.
+
+    The message keeps the ``Response Body`` clause only when there was a response
+    to quote: "the status was 500 and it sent no body" and "we never reached it"
+    are different failures, and a reader of the log cannot tell them apart from a
+    shared message otherwise. The 2xx envelope legs are built by the clients
+    directly -- there is no exception to pass here when the status was a success.
+
+    Args:
+        exc: The ``RequestException`` that was caught.
+        prefix: What the caller was doing, e.g. ``"Failed to create transcription"``.
+        secrets: Credential values to remove from the message and the body. An
+            upstream that reflects the request it received must not be able to
+            put this caller's key into either.
+
+    Returns:
+        An :class:`APIError` carrying the upstream status and the scrubbed body.
+    """
+
+    response = exc.response
+    # The module's own shape rules have already run inside
+    # :func:`scrubbed_response_body`; this adds the caller's credential, which no
+    # shape rule can recognise as one. Identity, not equality, for the sentinel:
+    # it is a module singleton, so `is` cannot be fooled by a server whose body
+    # genuinely reads "No response body" -- that text is decoded fresh and is a
+    # different string object, and a real body must be kept rather than dropped as
+    # if it were the sentinel.
+    raw = scrubbed_response_body(response)
+    scrubbed = redact_secrets(raw, secrets)
+    message = f"{prefix}: {exc}"
+    if response is not None:
+        message = f"{message}, Response Body: {scrubbed}"
+    return APIError(
+        message,
+        status_code=response.status_code if response is not None else None,
+        body=None if raw is NO_RESPONSE_BODY else scrubbed,
+    )
 
 
 def error_payload(body: str) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
