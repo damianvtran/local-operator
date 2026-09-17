@@ -25,11 +25,14 @@ ONES — ``bench/analytics-rollup-before.json`` / ``-after.json``, produced by
 are the only set any comment or document should quote; a second, uncommitted
 sample of the same code is not a second opinion, it is a second measurement. On
 the operator's 342.8 MB, 1 155 845 call ledger the panel's 30-day window costs
-6 166 ms wall / 3 191 ms CPU on the raw ledger (1 802 ms / 1 705 ms CPU for the
-first read of a fresh copy), while the rollup answers the same window in 123 ms
-wall / 121 ms CPU. Those wall figures were taken at load ~34-42 on a shared
-14-core host under a RAM hold and are still not portable between machines — the
-CPU column is, and it is the one to compare. The raw-ledger query is still there,
+4 868 ms wall / 3 179 ms CPU on the raw ledger (2 764 ms / 2 134 ms CPU for the
+first read of a fresh copy), while the rollup answers the same window in 187 ms
+wall / 166 ms CPU. Both arms were measured in ONE session at load ~215-280 on a
+shared 14-core host under a RAM hold, and that matters more than it looks: CPU is
+MORE portable than wall but not immune to this box's memory pressure (the same
+fast path measured 121 ms of CPU at load 38 and 166 ms at load 237), so a
+committed pair is only meaningful read as a pair, with its load. The ratio — 19x
+of CPU, 26x of wall — is the durable part. The raw-ledger query is still there,
 unchanged, behind a fail-closed gate that answers whenever the rollup cannot prove
 the same numbers (``aggregate()``'s docstring has the account).
 
@@ -302,14 +305,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 --
 -- WHY THIS EXISTS. ``aggregate()`` used to be three full scans of ``calls`` with
 -- a non-covering index range scan, so every one of the ledger's 1.16 M rows cost
--- a random table lookup: the committed measurement is 6 166 ms wall / 3 191 ms CPU
+-- a random table lookup: the committed measurement is 4 868 ms wall / 3 179 ms CPU
 -- for the desktop panel's 30-day window on the operator's 342.8 MB ledger, and
--- 1 802 ms / 1 705 ms CPU for the FIRST touch of a fresh copy, which is what a
--- cold start feels like. The rollup answers the same window in 123 ms wall /
--- 121 ms CPU, reads 1.1 MB instead of the ledger's hundreds, and its cost stops
+-- 2 764 ms / 2 134 ms CPU for the FIRST touch of a fresh copy, which is what a
+-- cold start feels like. The rollup answers the same window in 187 ms wall /
+-- 166 ms CPU, reads 1.1 MB instead of the ledger's hundreds, and its cost stops
 -- tracking ledger growth. Every number here comes from the ONE committed pair —
--- ``bench/analytics-rollup-before.json`` / ``-after.json``, both arms at load
--- ~34-44 — and no other sample belongs in a comment.
+-- ``bench/analytics-rollup-before.json`` / ``-after.json``, both arms in one
+-- session at load ~215-280 — and no other sample belongs in a comment.
 --
 -- ``day`` is the LOCAL calendar date (YYYY-MM-DD), from the same
 -- ``_local_day_month`` the write path already uses for ``usage_daily``, so there
@@ -599,12 +602,6 @@ class SessionDailyPlan(NamedTuple):
     days: list[str]
     mode: str
     recent_count: int
-    #: A ``rebucket`` plan may only publish its new zone when it re-labelled the
-    #: LEDGER'S WHOLE SPAN: a partial re-label published as complete would leave
-    #: days still labelled by the old rule while the meta named the new one, and
-    #: the gate would then stop refusing. False for a ``pass`` plan, which has
-    #: nothing to publish.
-    span_complete: bool = False
 
 
 _DAILY_UPSERT_SQL = _rollup_upsert_sql("usage_daily", "day")
@@ -1335,6 +1332,14 @@ class AnalyticsStore:
         # applies to ``calls``: a shape this code cannot write to reads as "no
         # rollup", so the ledger keeps recording and every read takes the ledger
         # path — slower, never a hole.
+        #
+        # A SUPERSET check, and worth saying what it therefore does not cover
+        # (review R15): a future ``session_daily`` with an extra column that is
+        # ``NOT NULL`` and has no default passes here and then makes the upsert
+        # raise — the very outcome this guard exists to prevent. Unreachable
+        # while rollup tables have no ``ALTER`` path (nothing can add a column to
+        # one), and if one ever needs an ALTER this check has to grow the
+        # ``notnull``/``dflt_value`` columns of ``PRAGMA table_info`` with it.
         try:
             present = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_daily)")}
             meta_present = (
@@ -1974,8 +1979,18 @@ class AnalyticsStore:
         if max_days <= 0:
             return SessionDailyPlan([], "pass", 0)
         if state.get(_SESSION_DAILY_META_ZONE, "") not in ("", _local_zone_key()):
-            whole = _days_descending(oldest_day, top)
-            return SessionDailyPlan(whole[:max_days], "rebucket", 0, len(whole) <= max_days)
+            # A re-label is ONE indivisible job and deliberately ignores the
+            # per-pass budget (review R11). A truncated re-label cannot publish —
+            # publishing a partially re-labelled table would name a zone that
+            # half the days do not belong to — so a capped plan would re-derive
+            # the same newest days on every launch, forever, and the latch R2 set
+            # out to remove would survive with a per-launch cost on top. Its work
+            # is bounded by the LEDGER's day span instead: at most one label per
+            # retention day (91 at the default 90), a one-off repair, ~2.5 ms per
+            # label measured, so ~0.23 s at that worst case on the maintenance
+            # thread. A normal ``pass`` keeps its budget, because that one IS
+            # resumable: it records how far it got.
+            return SessionDailyPlan(_days_descending(oldest_day, top), "rebucket", 0)
         covered = state.get(_SESSION_DAILY_META_COVERED, "")
         last_sweep = state.get(_SESSION_DAILY_META_LAST_SWEEP, "")
         # Newest-first, and the hole range is pinned to the previous pass: with
@@ -2015,11 +2030,30 @@ class AnalyticsStore:
         """Publish a completed zone re-label, in ONE transaction.
 
         THE POINT OF THE SEPARATE COMMIT: while the sweep is re-labelling, the
-        recorded zone is still the OLD one, so the gate's zone check refuses and
-        no read can observe a table whose buckets come from two zones. This flips
-        the table to the new zone only after every day the ledger can answer has
-        been re-derived, so after it commits the fast path works again and before
-        it commits nothing is served — fail-closed in both directions.
+        recorded zone is still the OLD one, so the gate's zone check refuses —
+        which keeps reads off a half-re-labelled table for as long as the
+        mismatch stands, and the mismatch cannot clear except by finishing. This
+        flips the table to the new zone only after every day the ledger can
+        answer has been re-derived, so after it commits the fast path works again
+        and before it commits nothing is served — fail-closed in both directions.
+
+        WHAT IT DOES NOT GUARANTEE, stated because the comments used to overclaim
+        it (review R12): a re-label interrupted mid-span leaves days labelled by
+        the new rule beside days labelled by the old one, and if the process then
+        returns to the OLD zone the zone precondition passes and those days are
+        servable. That is harmless for THIS reader, for a reason worth writing
+        down: ``aggregate()`` serves window-level facts only, and a call
+        misassigned between two days *inside* the window changes no window total,
+        while the count check pins the window's total to the ledger's. What the
+        gate guarantees is "the served window's total is the ledger's", not "the
+        labels belong to the recorded zone".
+
+        IRRELEVANT TODAY, LOAD-BEARING TOMORROW: any future PER-DAY consumer of
+        this table — the deferred all-time-from-rollup change, or moving the daily
+        chart onto it — inherits the weaker property as it stands and would be
+        served misassigned days. Such a read needs its own per-day check; the
+        verify pass cannot repair a mixing that preserves each day's call COUNT,
+        because both the gate and the verify compare counts.
 
         Everything outside ``[oldest_day, top_day]`` is DELETED, on both ends.
         Below, because a day the ledger can no longer answer is labelled with the
@@ -2066,9 +2100,11 @@ class AnalyticsStore:
         table. Comparing per day finds them wherever they are, and re-deriving
         the day is what removes them.
 
-        Cost: two index-only queries per day — tens of milliseconds for a
-        ledger's whole 90-day reach, once per process, on the maintenance
-        thread. Cheaper than one of the reads it protects.
+        Cost: two index-only queries per day, measured at ~2.5 ms per label —
+        66.5 ms for the operator's 27-label ledger, ~0.23 s at a full 91-label
+        reach, once per process, on the maintenance thread. Cheaper than one of
+        the reads it protects, and it does not run at all when the ledger holds
+        no rows, so a fresh install and an idle machine pay nothing.
 
         Bounded twice on purpose: bounded by ``max_days`` so one pass stays one
         pass, and bounded below by ``ledger_whole_from_day`` so a day the prune
@@ -2241,11 +2277,30 @@ class AnalyticsStore:
         The two paths assemble their rows through :meth:`_assemble_aggregate`,
         so `dataclasses.asdict` equality between them is structural rather than
         a thing two code blocks are separately trusted to maintain.
+
+        ONE SNAPSHOT FOR THE WHOLE ANSWER (review R13). Every statement here —
+        the gate's five checks, its count verification, and all three grouped
+        reads — runs inside ONE ``BEGIN DEFERRED``. Without it each statement is
+        autocommit and therefore a different WAL snapshot: the gate could approve
+        a window on rows the read then no longer sees, which is precisely the
+        hole the count check exists to close, and the ledger path's three scans
+        could likewise disagree with each other about totals that are supposed
+        to sum to the headline. A read transaction cannot block a writer under
+        WAL, so the cost is a slightly longer-lived read snapshot and nothing
+        else.
         """
         conn = self._read_connection()
         if conn is None:
             return UsageAggregate()
         try:
+            if not conn.in_transaction:
+                try:
+                    conn.execute("BEGIN DEFERRED")
+                except sqlite3.OperationalError:
+                    # Losing the pin degrades to the pre-R13 behaviour (each
+                    # statement its own snapshot), never to a wrong number, so
+                    # it is logged rather than fatal.
+                    logger.debug("analytics: could not pin a read snapshot", exc_info=True)
             window, refusal = self._session_daily_window(conn, since_ms, until_ms)
             if window is not None:
                 try:
@@ -2267,6 +2322,15 @@ class AnalyticsStore:
                 conn, since_ms=since_ms, until_ms=until_ms, session_id=session_id
             )
         finally:
+            try:
+                # End the R13 read transaction before closing: a read snapshot
+                # left open holds the WAL back from checkpointing for as long as
+                # the connection lives, and rolling back is what makes the next
+                # caller start from a fresh snapshot rather than a stale one.
+                if conn.in_transaction:
+                    conn.rollback()
+            except Exception:  # noqa: BLE001 — closing is what matters
+                pass
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -2397,6 +2461,16 @@ class AnalyticsStore:
             rollup's buckets are derived from the SAME snapshots, so their
             edges would be visible where the ledger's ``_PARENT_EDGE_SQL``
             substitutes ``''`` — the two surfaces would disagree about the tree.
+            DEFENCE IN DEPTH, not the only thing standing there: the rollup read
+            substitutes ``''`` too when the column is missing (round 1 Q2), so
+            the two paths agree in that state whether or not this refuses. Kept
+            because refusing is the cheaper and more honest answer for a ledger
+            whose edge data is physically absent, and because ``_migrate``
+            normally makes the state unreachable — a guard that can only fire on
+            a store this code could not have opened is still worth naming
+            rather than silently absent. The count check cannot see a side-map
+            divergence, which is exactly why the agreement is enforced in the
+            read rather than assumed from the guard.
         ``not-day-aligned``  ``aggregate()`` accepts arbitrary millisecond
             bounds; the rollup is day-grain. A bound that is not the first
             instant of a local day cannot be expressed as a day range, so the
@@ -2410,16 +2484,20 @@ class AnalyticsStore:
             near every day boundary by up to the offset delta. This is a
             refusal the sweep is expected to CLEAR, not one it lives with: the
             worklist sees the mismatch and re-labels every day the ledger can
-            still answer, publishing the new zone only once the whole span is
-            done (``commit_session_daily_rebucket``). Until that commits, the
-            recorded zone is the old one and reads keep refusing — so the state
-            is fail-closed while it is being repaired, which is why this reason
-            must never be treated as a permanent condition (review R2).
+            still answer in ONE pass (its work is bounded by the ledger's own
+            day span, not by any per-pass budget), publishing the new zone only
+            once the whole span is done (``commit_session_daily_rebucket``).
+            Until that commits, the recorded zone is the old one and reads keep
+            refusing — so the state is fail-closed while it is being repaired,
+            which is why this reason must never be treated as a permanent
+            condition (review R2, R11).
         ``no-coverage``      the backfill has not swept far enough down yet: days
             at or after ``covered_from_day`` are complete, anything older is a
-            hole. Also the state of every existing ledger on the upgrade launch,
-            which is why the panel's first read after upgrading is still the
-            ledger's.
+            hole. This is also the state of every existing ledger on the upgrade
+            launch, and of a rollup whose tables exist but hold nothing — a
+            missing ``covered_from_day`` with no zone recorded (review round 1
+            Q1: the two states are distinguishable and this is the label for the
+            one with nothing to mislabel).
         ``empty-window``     the day range is empty (``until_ms`` is not after
             ``since_ms`` once both are day-aligned). Not an error, but the
             ledger answers it exactly, so there is nothing to gain here.
@@ -2436,10 +2514,11 @@ class AnalyticsStore:
             ``calls`` WITHOUT maintaining the rollup — a ``lop`` still running
             the pre-rollup binary. Cheap to check (both sides are an indexed
             MAX) and it is the difference between "the rollup is current" and
-            "the rollup is current as of whenever it was last written". An
-            EMPTY rollup arrives here too (0 != the ledger's newest), which is
-            why there is no separate empty-rollup branch: the outcome is the
-            same refusal for the same reason (review R7).
+            "the rollup is current as of whenever it was last written". A rollup
+            that was emptied while its meta kept a matching zone arrives here
+            too (``0 != the ledger's newest``), which is why there is no separate
+            empty-rollup branch (review R7) — but the empty-with-empty-meta state
+            is refused earlier, as ``no-coverage`` (round 1 Q1).
 
         ``count-mismatch``   the window's own row count is not the ledger's. The
             other checks each pin a boundary — the tail pins the newest row,
@@ -2492,7 +2571,17 @@ class AnalyticsStore:
         except Exception as exc:  # noqa: BLE001 — an unreadable rollup has no fast path
             logger.debug("analytics: session_daily gate could not read state", exc_info=True)
             return None, f"unreadable: {type(exc).__name__}"
-        if meta.get(_SESSION_DAILY_META_ZONE, "") != _local_zone_key():
+        # The zone refusal only applies when a zone was actually RECORDED. The
+        # writer latches it in the same transaction as the first bucket, so a
+        # missing zone means there are no buckets to have mislabelled: an empty
+        # ``session_daily`` *and* an empty meta is the state of every existing
+        # ledger on the upgrade launch, and the honest reason there is
+        # ``no-coverage`` (the sweep has not run yet), not a zone problem that
+        # does not exist. Both states are distinguished deliberately, because a
+        # diagnostic that names the wrong cause costs the next reader an hour
+        # (review round 1 Q1).
+        recorded_zone = meta.get(_SESSION_DAILY_META_ZONE, "")
+        if recorded_zone and recorded_zone != _local_zone_key():
             return None, "zone-changed"
         covered = meta.get(_SESSION_DAILY_META_COVERED, "")
         if not covered:
@@ -2521,10 +2610,17 @@ class AnalyticsStore:
             return None, "ledger-bottom-partial"
         # THE LAST PRECONDITION, and the only one that checks the CONTENT rather
         # than the bookkeeping: the served window's row count must be the
-        # ledger's row count. ~5 ms on a 1.15 M-row ledger (``COUNT(*)`` rides
-        # ``idx_calls_ts``; both sides are index-only), against a fast path two
-        # orders of magnitude slower than that, so it is affordable on every
-        # read rather than only in the sweep.
+        # ledger's row count. Both sides are index-only (``COUNT(*)`` rides
+        # ``idx_calls_ts``, the rollup side is 9k rows), but the cost is a
+        # function of the WINDOW rather than of the table: measured 21.8 ms for a
+        # 30-day window and 26.7 ms unbounded on a 1.2 M-call ledger, because on
+        # a ledger that is all recent history a 30-day window IS the whole file.
+        # It converges toward ~5 ms as the file fills out (a 30-day window over
+        # 90 days of history scans a third of the rows), so it is ~20 % of the
+        # committed 187 ms fast path today rather than the ~4 % an earlier
+        # comment claimed from a stale measurement — and it still pays for itself
+        # on every read rather than only in the sweep, because a wrong total is
+        # not a diagnostic.
         #
         # WHY IT IS WORTH THE 5 ms: every other check pins a boundary. The tail
         # check pins the NEWEST row, coverage pins the OLDEST day, the zone pins
@@ -2594,6 +2690,19 @@ class AnalyticsStore:
             params.append(session_id)
         clause = " WHERE " + " AND ".join(where)
         sums = _SESSION_DAILY_READ_COLUMNS_SQL
+        # THE EDGE DEGRADES WITH THE LEDGER'S SCHEMA, exactly as the ledger path
+        # degrades (review round 1 Q2). A ledger missing ``calls.parent_session_id``
+        # cannot express an edge, so ``_ledger_aggregate`` substitutes ``''`` —
+        # and if this read kept serving ``MAX(parent_session_id)`` from its own
+        # buckets, the two paths would disagree on the whole ``session_parents``
+        # side map while every call COUNT still matched, which is a divergence the
+        # count check is blind to by construction. That state is unreachable in
+        # practice (``_migrate`` adds the column, and nothing drops it), which is
+        # why the gate also refuses it outright with ``no-parent-column`` — but a
+        # guard that cannot fire must not be the only thing between a schemaless
+        # ledger and an edge map nothing else verifies. Mirroring the fallback
+        # makes the two paths agree in that state whether or not the guard runs.
+        edge = "MAX(parent_session_id)" if self._has_parent_column() else "''"
         top = conn.execute(f"SELECT {sums} FROM session_daily{clause}", params).fetchone()
         per_provider = conn.execute(
             f"SELECT provider, {sums} FROM session_daily{clause} "
@@ -2601,7 +2710,7 @@ class AnalyticsStore:
             params,
         ).fetchall()
         per_session = conn.execute(
-            f"SELECT session_id, MAX(parent_session_id), {sums} FROM session_daily{clause} "
+            f"SELECT session_id, {edge}, {sums} FROM session_daily{clause} "
             "GROUP BY session_id ORDER BY session_id",
             params,
         ).fetchall()

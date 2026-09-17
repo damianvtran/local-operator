@@ -380,29 +380,35 @@ PYTHONPATH=. .venv/bin/python scripts/bench_panel_latency.py \
 Both JSONs come from that one command against the *same* snapshot copy
 (`/tmp/bench-live/analytics.db`, 342.8 MB, 1,155,845 calls, 7,241 sessions,
 2026-08-22 → 2026-09-16): `before` from a worktree at `f8111eecc`, `after` from
-the change's worktree, sequentially, on a 14-core host under a heavy RAM hold —
-recorded load **33.5-42.2** before and **37.8-44.5** after (`host.loadavg` in
-each file), which is why this pair is the committed one: the arms have to be
-measured at comparable load or the table is a comparison of the machine, not the
-code. An earlier pair taken at load 334-463 exists in the PR thread and is
-superseded. Wall time still moves 2-3x between runs of the same code at the same
-load; **CPU is the portable column**, the `min` of a sample set is the
-least-contended estimate of the real cost, and both are reported beside the wall
-everywhere.
+the change's worktree, sequentially in ONE session on a 14-core host under a
+heavy RAM hold — recorded load **280 / 246 / 221** before and **227 / 234 / 215**
+after (`host.loadavg` in each file).
+
+**Both arms MUST come from one session, and this is not a nicety.** CPU is more
+portable than wall but it is not immune to this host's memory pressure: the SAME
+fast path measured **121 ms of CPU at load 38** and **166 ms at load 237**, a 37 %
+swing with no code change, because page-fault work is charged to the thread. So
+the committed pair is meaningful only read as a pair, with its load; quoting one
+arm from one session against the other from another is how the earlier pair at
+load 34-42 became misleading, and both it and the load 334-463 pair in the PR
+thread are superseded by this one. The `min` of a sample set is the
+least-contended estimate of the real cost, wall is inflated by load, and both are
+reported beside the CPU everywhere.
 
 ### `/analytics`: raw ledger → maintained day rollup
 
 | arm (1.16 M calls, 342.8 MB) | before: raw ledger | after: rollup | ratio |
 | --- | --- | --- | --- |
-| panel's 30-day window, wall p50 | 6,166 ms | **123 ms** | 50x |
-| panel's 30-day window, CPU p50 | 3,191 ms | **121 ms** | 26x |
-| TUI all-time (no bounds), wall p50 | 1,755 ms | **116 ms** | 15x |
-| TUI all-time, CPU p50 | 1,680 ms | **114 ms** | 15x |
-| last 7 days, wall p50 / CPU p50 | 2,506 / 1,596 ms | **90 / 88 ms** | 28x / 18x |
-| **first** read of a fresh copy (cold stand-in) | 1,802 ms / 1,705 ms CPU | **111 ms / 110 ms CPU** | 16x / 15x |
+| panel's 30-day window, wall p50 | 4,868 ms | **187 ms** | 26x |
+| panel's 30-day window, CPU p50 | 3,179 ms | **166 ms** | 19x |
+| TUI all-time (no bounds), wall p50 | 2,634 ms | **168 ms** | 16x |
+| TUI all-time, CPU p50 | 2,178 ms | **146 ms** | 15x |
+| last 7 days, wall p50 / CPU p50 | 2,360 / 1,662 ms | **141 / 117 ms** | 17x / 14x |
+| **first** read of a fresh copy (cold stand-in) | 2,764 ms / 2,134 ms CPU | **247 ms / 176 ms CPU** | 11x / 12x |
 | route payload (`asdict` + `json.dumps`, 3.74 MB) | 37.2 ms CPU | 52.4 ms CPU | — |
-| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.17 / 0.38 / 0.63 ms | 0.20 / 0.29 / 0.48 ms (+session_daily 0.28 / 0.49 / 0.68) | +0.08 / +0.20 / +0.20 ms |
-| backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 26 days, 2,142 ms wall / 1,740 ms CPU (9,060 buckets) | 70 ms/day p50 |
+| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.07 / 0.22 / 0.49 ms | 0.12 / 0.35 / 0.71 ms (+session_daily 0.12 / 0.35 / 0.71) | +0.05 / +0.13 / +0.22 ms |
+| backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 27 days, 2,206 ms wall / 1,789 ms CPU (9,060 buckets) | 64 ms/day p50 |
+| per-day verify pass (the R3 fix) | n/a | **66.5 ms** over 27 labels, ~2.5 ms/label | once per launch |
 
 Reading it:
 
@@ -438,11 +444,11 @@ figures, ONE combined `GROUP BY purpose, outcome, provider, model_id` that the
 three breakdowns are re-derived from by integer addition, and the recent-rows
 tail. Measured on the three busiest real sessions:
 
-| session | calls | before wall p50 (min) | after wall p50 (min) | before CPU p50 | after CPU p50 |
+| session | calls | before wall p50 | after wall p50 | before CPU p50 | after CPU p50 |
 | --- | --- | --- | --- | --- | --- |
-| `835fbcafdc27` | 27,974 | 212 ms (203 in min run) | **165 ms (139)** | 203.0 ms | **139.2 ms** |
-| `29435655756c` | 25,445 | 127 ms (117) | **87 ms (78)** | 117.5 ms | **77.7 ms** |
-| `13669a0d7af1` | 21,927 | 94 ms (92) | **73 ms (67)** | 92.2 ms | **67.3 ms** |
+| `835fbcafdc27` | 27,974 | 604 ms | **210 ms** | 272.3 ms | **150.6 ms** |
+| `29435655756c` | 25,445 | 374 ms | **213 ms** | 152.5 ms | **90.7 ms** |
+| `13669a0d7af1` | 21,927 | 252 ms | **196 ms** | 123.3 ms | **73.9 ms** |
 
 - **Equivalence is recorded, not asserted in prose**: the JSON carries
   `session_report_equivalence` — `{"equal": true, "fields": 15}` for each of the

@@ -2314,11 +2314,15 @@ Things that will bite you if you forget them:
   rollup as new as the ledger's newest row, and a ledger bottom the prune has
   not cut inside), and otherwise runs the original three ledger scans
   unchanged, naming the refusal in a `debug` log. Measured on the operator's
-  342.8 MB ledger (1 155 845 calls), p50, both arms at load ~34-44: the panel's
-  30-day window goes from 6 166 ms wall / 3 191 ms CPU to 123 ms / 121 ms CPU —
+  342.8 MB ledger (1 155 845 calls), p50, both arms measured in one session at
+  load ~215-280: the panel's 30-day window goes from 4 868 ms wall / 3 179 ms CPU
+  to 187 ms / 166 ms CPU —
+  
   `scripts/bench_panel_latency.py`, `bench/analytics-rollup-*.json`, and THOSE
-  committed numbers are the canonical ones; wall is not portable between hosts,
-  the CPU column is. Three properties matter more than the mechanism:
+  committed numbers are the canonical ones. Wall is not portable between hosts,
+  and neither is CPU to the same degree: the same fast path cost 121 ms of CPU at
+  load 38 and 166 ms at load 237 on this box, so quote the pair with its load and
+  never one arm alone. Three properties matter more than the mechanism:
   - the gate FAILS CLOSED (a wrong fast-path number is far worse than a slow
     one; `store.last_aggregate_source` says which path ran and every refusal
     reason has a test, including the two that guard the day arithmetic and an

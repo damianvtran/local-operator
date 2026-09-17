@@ -875,3 +875,148 @@ def test_a_zone_change_is_recovered_by_the_rebucket_pass(tmp_path, monkeypatch):
         # worker runs, whatever happened above.
         monkeypatch.undo()
         time.tzset()
+
+
+def test_a_rebucket_completes_when_the_ledger_span_exceeds_one_pass(tmp_path, monkeypatch):
+    """A re-label is one indivisible job, so it cannot be capped by ``max_days``.
+
+    Review R11's failure, and why the fix is "plan the whole span" rather than
+    "record progress": ``DEFAULT_SESSION_DAILY_DAYS_PER_PASS == retention_days``
+    and the prune keeps every row at or after ``now - 90 d``, so the steady-state
+    ledger spans **91** day labels against a budget of 90. A capped plan then
+    re-derives the same newest 90 labels on every launch, never publishes (a
+    partial re-label may not name a zone half the days do not belong to), and the
+    latch is permanent again — with ~90 day re-derives per launch on top. The
+    span is bounded by the ledger, which is what makes the whole-span plan safe.
+    """
+    today = _today()
+    oldest = _day_shift(today, -90)
+    store = AnalyticsStore(tmp_path / "analytics.db", retention_days=90)
+    # One call per label, plus one late call on the oldest label so the day stays
+    # alive (but partial) after the prune — which is what makes the span 91
+    # labels rather than 90. Same constants the production path uses, no
+    # monkeypatching of the budget.
+    store.record_batch(
+        [
+            _call(session_id=PARENT, ts_ms=_at(day, 9))
+            for day in (_day_shift(today, -offset) for offset in range(91))
+        ]
+    )
+    store.record_batch([_call(session_id=PARENT, ts_ms=_at(oldest, 23))])
+    store.prune(now_ms=_at(today, 12))
+    store = AnalyticsStore(tmp_path / "analytics.db", retention_days=90)
+    span = store.ledger_day_span()
+    assert span is not None
+
+    # Poison the zone the way a `TZ=`-prefixed run does.
+    monkeypatch.setattr(store_module, "_local_zone_key", lambda: "Elsewhere/Nowhere")
+
+    plan = store.session_daily_worklist(max_days=90)
+    assert plan.mode == "rebucket"
+    # The whole span, not the budget: this is the fix, asserted structurally.
+    assert len(plan.days) > 90, plan.days[:3]
+    assert store.session_daily_state()["zone"] != "Elsewhere/Nowhere"
+
+    # ONE launch. Without the whole-span plan this derives 90 labels and
+    # publishes nothing, so the next assertion is the one that fails.
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= len(plan.days)
+    assert store.session_daily_state()["zone"] == "Elsewhere/Nowhere"
+
+    store.aggregate()
+    assert (
+        store.last_aggregate_refusal != "zone-changed"
+    ), "the re-label published, so the zone is no longer a reason to refuse"
+
+
+def test_an_upgrade_launch_refuses_for_coverage_not_for_a_zone_it_never_set(
+    tmp_path,
+):
+    """The empty rollup has no zone to have changed (review round 1, Q1).
+
+    An existing ledger's first open creates both rollup tables empty, and the
+    zone comparison used to run first — so the reason was ``zone-changed``, which
+    sends the next reader looking for travel or a ``TZ=`` run that never
+    happened. Nothing has been labelled, so nothing can be mislabelled: the
+    honest reason is that no day is covered yet.
+    """
+    _seeded_store(tmp_path)
+    with sqlite3.connect(tmp_path / "analytics.db") as conn:
+        conn.execute("DELETE FROM session_daily")
+        conn.execute("DELETE FROM session_daily_meta")
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    store.aggregate()
+    assert store.last_aggregate_source == "ledger"
+    assert store.last_aggregate_refusal == "no-coverage"
+
+
+def test_the_rollup_read_degrades_its_edges_with_the_ledgers_schema(tmp_path, monkeypatch):
+    """Both paths must agree about a ledger that cannot express a parent edge.
+
+    Review round 1, Q2. The ``no-parent-column`` precondition cannot fire in
+    practice (``_migrate`` adds the column and nothing drops it), so the state it
+    guards is only reachable through the guard being bypassed — and in that state
+    the two paths used to disagree on the whole ``session_parents`` side map
+    (6,456 edges from the rollup's buckets against none from the ledger) while
+    every call COUNT still matched, which the count check cannot see. The guard is
+    kept, but the agreement is now enforced where it matters: in the read.
+    """
+    store = _seeded_store(tmp_path)
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+    served = store.aggregate()
+    assert store.last_aggregate_source == "rollup"
+    assert _parents(served), "sanity: the fixture has parent edges to lose"
+    # The schemaless shape, with the precondition switched off so the rollup read
+    # is actually exercised in it.
+    monkeypatch.setattr(store, "_has_parent_column", lambda: False)
+    conn = store._read_connection()
+    span = store.ledger_day_span()
+    assert conn is not None, "the store could not open a read connection"
+    assert span is not None
+    window = (span[0], None)
+    from_rollup = store._session_daily_aggregate(conn, window, None)
+    from_ledger = store._ledger_aggregate(conn, since_ms=None, until_ms=None, session_id=None)
+    assert _parents(from_rollup) == _parents(from_ledger) == {}
+    # The session SET must still match — the divergence was in the edges, and the
+    # TUI's forest reads both.
+    assert sorted(from_rollup.by_session) == sorted(from_ledger.by_session)
+
+
+def test_the_gate_decides_on_the_snapshot_it_serves(tmp_path, monkeypatch):
+    """One read snapshot for the gate, its count check and both grouped reads.
+
+    Review R13. Without the pin, each statement is autocommit and therefore a
+    different WAL snapshot: the gate could approve a window on rows the read then
+    no longer sees (and the ledger path's three scans could disagree with each
+    other about totals that must sum to the headline). Asserted structurally —
+    the fast path is *observed* from inside a transaction — rather than by racing
+    a writer, which would be a bet on timing.
+    """
+    store = _seeded_store(tmp_path)
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+    seen: list[bool] = []
+    real = store._session_daily_aggregate
+
+    def spy(conn, *args, **kwargs):
+        seen.append(bool(conn.in_transaction))
+        return real(conn, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_session_daily_aggregate", spy)
+    store.aggregate()
+    assert store.last_aggregate_source == "rollup"
+    assert seen == [True], "the rollup read ran outside the gate's snapshot"
+
+    # Both paths share the pin, and it must not leak: the ledger path's three
+    # scans see one snapshot, and the connection is left clean for the next call.
+    seen.clear()
+    monkeypatch.setattr(store, "_session_daily_window", lambda conn, since, until: (None, "test"))
+    ledger_seen: list[bool] = []
+    real_ledger = store._ledger_aggregate
+
+    def ledger_spy(conn, *args, **kwargs):
+        ledger_seen.append(bool(conn.in_transaction))
+        return real_ledger(conn, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_ledger_aggregate", ledger_spy)
+    store.aggregate()
+    assert store.last_aggregate_source == "ledger"
+    assert ledger_seen == [True]
