@@ -23,6 +23,21 @@ from typing import Callable
 #: capping it keeps the volatile tail small and bounds the per-turn cost.
 MAX_GOAL_CHARS = 2000
 
+#: The ``/goal`` arguments that UNSET the standing goal instead of becoming one.
+#:
+#: ONE set for the three hosts that implement ``/goal`` — the TUI's local handler,
+#: its routed one, and the detached runtime's — because a word honoured on one
+#: host and stored as a goal body on another is the worst of the two outcomes:
+#: the user's intent is executed in one window and silently becomes the standing
+#: objective in another. The bare words predate the flag; ``--clear`` is the
+#: discoverable form the palette and the argument picker now teach.
+#:
+#: The flag is matched as the WHOLE argument, never as a prefix: ``/goal --clear``
+#: is a flag, while ``/goal --clear the flaky job`` is still free text the user
+#: meant as an objective. Eating the tail of a real goal would be silent data
+#: loss in the one command whose argument the MODEL is told.
+GOAL_CLEAR_ARGS = frozenset({"clear", "none", "reset", "--clear"})
+
 
 @dataclass
 class GoalState:

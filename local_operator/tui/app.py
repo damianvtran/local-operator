@@ -135,9 +135,11 @@ from local_operator.session.frontend_state import CostKnowledge
 from local_operator.session.goal_loop import (
     _BOTCHED_COUNT_RE,
     DEFAULT_LOOP_ITERATIONS,
+    LOOP_CLEAR_ARGS,
     LOOP_GOAL_PROMPT,
     LOOP_JUDGE_PROMPT,
     LOOP_PROMPT,
+    LOOP_STOP_ARGS,
     MAX_LOOP_ITERATIONS,
     MAX_LOOP_JUDGE_FAILURES,
     _parse_loop_verdict,
@@ -32141,12 +32143,18 @@ class OperatorApp(App[None]):
     def _cmd_goal(
         self, arg: str, notice: NoticeFn, attachments: Mapping[int, Marked] | None = None
     ) -> None:
-        """``/goal`` — show; ``/goal <text>`` — set and send; ``/goal clear`` — unset.
+        """``/goal`` — show; ``/goal <text>`` — set and send; ``/goal --clear`` — unset.
 
         The goal is a standing objective carried in the prompt's volatile
         tail, so it survives every turn (and compaction) without being
         re-typed, and ``/loop`` uses it as the thing to iterate toward.
+
+        ``--clear`` (and the bare words it joins, see ``GOAL_CLEAR_ARGS``) is a
+        FLAG: it is matched as the WHOLE argument before the set path, so it can
+        never be stored as the literal goal ``--clear`` and never starts a turn.
         """
+        from local_operator.session.goal import GOAL_CLEAR_ARGS
+
         session = self._session
         if session is None or not hasattr(session, "set_goal"):
             # A rejected command changed nothing, so the conversation has not
@@ -32159,7 +32167,7 @@ class OperatorApp(App[None]):
             current = session.goal
             notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
             return
-        if request.lower() in ("clear", "none", "reset"):
+        if request.lower() in GOAL_CLEAR_ARGS:
             session.set_goal("")
             notice("goal cleared")
             return
@@ -32180,15 +32188,30 @@ class OperatorApp(App[None]):
         self._submit_command_prompt(arg, attachments)
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
-        """``/loop [n]`` — iterate toward the goal; ``/loop stop`` cancels.
+        """``/loop [n]`` — iterate toward the goal; ``/loop --stop`` cancels.
 
         Each iteration is a real turn that asks the agent to advance the
         standing goal, so the loop is bounded, interruptible, and visible in
         the transcript rather than a hidden background process.
+
+        ``--clear`` is the owner-path dismissal of a FINISHED loop's published
+        state (see ``serving._route_shared_slash``). There is no such state
+        here: this terminal's loop lives in ``_loop_running`` and is published
+        nowhere, so `--clear` answers with the same sentence the idle `--stop`
+        does rather than inventing a second story about a surface no viewer has.
         """
         session = self._session
-        if arg.lower() in ("stop", "cancel", "abort"):
+        if arg.lower() in LOOP_STOP_ARGS or arg.lower() in LOOP_CLEAR_ARGS:
             if self._loop_running:
+                if arg.lower() in LOOP_CLEAR_ARGS:
+                    # Never a silent cancel: `--clear` while a loop runs would
+                    # otherwise stop real work under a word that promises only
+                    # to tidy a snapshot away.
+                    notice(
+                        "a loop is running in THIS terminal — /loop --stop to stop it",
+                        "warning",
+                    )
+                    return
                 self._loop_cancelled = True
                 notice("loop will stop after the current turn")
             else:
@@ -32226,7 +32249,7 @@ class OperatorApp(App[None]):
             self._system_notice("session is still starting…", "warning")
             return
         if self._loop_running:
-            notice("a loop is already running — /loop stop to cancel", "warning")
+            notice("a loop is already running — /loop --stop to cancel", "warning")
             return
         # Dispatch on the argument SHAPE: an integer (or empty) is numeric mode,
         # unchanged; any other non-empty text is a GOAL, not a typo. Goal mode is
@@ -32274,7 +32297,7 @@ class OperatorApp(App[None]):
             )
             return
         self._loop_cancelled = False
-        notice(f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel")
+        notice(f"looping toward the goal ({iterations} iteration(s)) — /loop --stop to cancel")
         self.run_worker(
             self._loop_worker(iterations, self._interaction),
             thread=False,
@@ -32301,7 +32324,7 @@ class OperatorApp(App[None]):
         # untrusted user text, so it is control-char-stripped (a pasted escape
         # sequence must not rewrite the terminal) and length-capped for the
         # notice only — the full string still drives the loop.
-        notice(f"looping toward: {_loop_goal_label(goal)} — /loop stop to cancel")
+        notice(f"looping toward: {_loop_goal_label(goal)} — /loop --stop to cancel")
         self.run_worker(
             self._loop_goal_worker(goal, self._interaction),
             thread=False,
@@ -34401,6 +34424,37 @@ class OperatorApp(App[None]):
             return
         if message.command == "analytics":
             picker.set_choices(self._analytics_choices())
+            picker.set_notice("")
+            return
+        if message.command == "goal":
+            # ONE row, and only while there is a goal to unset. `/goal`'s
+            # argument is free text (the objective the model is given), so this
+            # list is an OFFER beside it — the shape `/rename`'s `--refresh` row
+            # has: nothing here filters or constrains what may be submitted, and
+            # a typed `/goal ship it` simply does not match the row, which closes
+            # the list and submits the goal unchanged.
+            #
+            # Gated on the LIVE state, not on the command: `--clear` is a no-op
+            # with nothing to clear, and a palette that taught it anyway would be
+            # advertising a dead end. Empty rows with no notice close the list,
+            # so the ungated case shows the user nothing at all.
+            picker.set_choices(
+                [ArgumentChoice("--clear", "Clear the standing goal")]
+                if getattr(self._session, "goal", "")
+                else []
+            )
+            picker.set_notice("")
+            return
+        if message.command == "loop":
+            # The same offer for the loop, gated on the loop THIS terminal is
+            # running: `_loop_running` is app-local and unpublished, and the
+            # published state a detached owner clears is not visible here, so
+            # `--clear` would name something no surface can show. While a loop is
+            # running `--stop` is the flag that does something, and it is the word
+            # the launch and busy notices name.
+            picker.set_choices(
+                [ArgumentChoice("--stop", "Stop the running loop")] if self._loop_running else []
+            )
             picker.set_notice("")
             return
         if message.command == "move":
@@ -36770,6 +36824,8 @@ class OperatorApp(App[None]):
         )
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        from local_operator.session.goal import GOAL_CLEAR_ARGS, MAX_GOAL_CHARS
+
         arg = arg.strip()
         session = self._session
         if session is None or not hasattr(session, "set_goal"):
@@ -36778,12 +36834,10 @@ class OperatorApp(App[None]):
             current = session.goal
             text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
             return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in ("clear", "none", "reset"):
+        if arg.lower() in GOAL_CLEAR_ARGS:
             session.set_goal("")
             return SlashResult(kind="notice", text="goal cleared", style="info")
         stored = session.set_goal(arg)
-        from local_operator.session.goal import MAX_GOAL_CHARS
-
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
                 kind="notice",
@@ -37400,8 +37454,16 @@ class OperatorApp(App[None]):
         notices.
         """
         session = self._session
-        if arg.lower() in ("stop", "cancel", "abort"):
+        if arg.lower() in LOOP_STOP_ARGS or arg.lower() in LOOP_CLEAR_ARGS:
             if self._loop_running:
+                if arg.lower() in LOOP_CLEAR_ARGS:
+                    # Same refusal as the local handler: `--clear` never stops
+                    # work it did not start, and it names the word that does.
+                    return SlashResult(
+                        kind="notice",
+                        text="a loop is running in THIS terminal — /loop --stop to stop it",
+                        style="warning",
+                    )
                 self._loop_cancelled = True
                 return SlashResult(
                     kind="notice", text="loop will stop after the current turn", style="info"
@@ -37412,7 +37474,7 @@ class OperatorApp(App[None]):
         if self._loop_running:
             return SlashResult(
                 kind="notice",
-                text="a loop is already running — /loop stop to cancel",
+                text="a loop is already running — /loop --stop to cancel",
                 style="warning",
             )
         if not getattr(session, "goal", ""):
@@ -37443,7 +37505,7 @@ class OperatorApp(App[None]):
         )
         return SlashResult(
             kind="notice",
-            text=f"looping toward the goal ({iterations} iteration(s)) — /loop stop to cancel",
+            text=f"looping toward the goal ({iterations} iteration(s)) — /loop --stop to cancel",
             style="info",
         )
 

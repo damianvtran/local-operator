@@ -260,6 +260,29 @@ class SlashCommand:
     #: ``tests/unit/tui/test_slash_prefixes_text.py`` so a new command cannot be
     #: added without stating this choice.
     argument_shape: ArgumentShape = field(default=ArgumentShape.NONE, kw_only=True)
+    #: Whether this command's argument list is a NAME slot: the first token is a
+    #: name drawn from a roster (`/team <name> <request>`, `/agent <name> <message>`),
+    #: and free text follows it.
+    #:
+    #: A SEPARATE fact from ``arguments``, and it has to be. Two readers need
+    #: "is there a name slot" and both used to ask "is there a value list"
+    #: instead, because for every command that existed the two answers coincided:
+    #: the `$skill` floor (a `$` inside a prompt command's argument is ordinary
+    #: text until the NAME SLOT has been passed, so the picker has to know which
+    #: commands have one) and the composer's inline reassembly in
+    #: ``Editor._apply_command`` (a bare inline `/team` deliberately does NOT
+    #: reassemble its draft — the name is picked from the list first — while a
+    #: bare `/goal` does). Giving a value list to a command with NO name slot is
+    #: what splits them: ``/goal --clear``'s first token is not a name, so the
+    #: proxy would have swallowed the ``$skill`` claim inside `/goal ` and
+    #: stopped a bare inline `/goal` from reassembling — both documented, both
+    #: pinned by tests (``test_skill_in_command_argument``).
+    #:
+    #: Keyword-only and defaulting to FALSE for the reason the fields above do: a
+    #: command that has not stated a name slot does not get one.
+    #: ``test_slash_goal_loop_flags`` pins the flag against the registry, so a
+    #: third party has to state its choice the way the other fields' pins do.
+    name_argument: bool = field(default=False, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

@@ -55,7 +55,6 @@ from textual.widgets import Static
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import (
     ArgumentChoice,
-    ArgumentMode,
     SlashCommand,
     match_choices,
     match_commands,
@@ -1306,7 +1305,7 @@ class CommandPicker(Static):
         # for the model gives up its claim PAST the name slot, so a skill can be
         # reached from inside the request; `_skill_argument_floor` reads both
         # sets to find that boundary. Derived from the registry so they cannot
-        # drift from the flag they describe.
+        # drift from the flags they describe.
         self._prompt_command_names = frozenset(
             name.lower()
             for command in commands
@@ -1316,7 +1315,7 @@ class CommandPicker(Static):
         self._name_prompt_commands = frozenset(
             name.lower()
             for command in commands
-            if command.consumes_prompt and command.arguments is not ArgumentMode.NONE
+            if command.consumes_prompt and command.name_argument
             for name in command.names
         )
 
