@@ -89,6 +89,44 @@ REAP_CHECK_S = 0.25
 #: quiescent. This is a drain for newly arriving work, not a reconnect grace.
 DEFAULT_GRACE_S = 3.0
 
+#: HOW LONG A BUSY PROBE THAT CANNOT BE EVALUATED MAY PIN A RUNTIME.
+#:
+#: Deliberately a linear COUNT and not a deadline: the reaper samples
+#: ``_should_exit`` once per :data:`REAP_CHECK_S`, so counting the samples counts
+#: the wall clock at the one cadence that exists, and a count cannot be warped
+#: by a clock jump (the same reason ``_buildwatch`` counts checks). At 0.25 s
+#: per sample this is ~60 s.
+#:
+#: THE STATE THIS BOUNDS is the one term that can pin a runtime BY
+#: CONSTRUCTION: ``_work_in_flight`` answers "work is in flight, stay resident"
+#: for every sample whose probe raises, and nothing else in the predicate can ever
+#: contradict it — so a handle that has come apart keeps the process resident for
+#: the life of the machine, invisible to every reader in the product, because they
+#: all resolve a runtime through a record (or a boot record, or an environment)
+#: that a broken handle stops maintaining. A probe that has answered nothing for a
+#: minute is not evidence of work; it is a broken instrument, and a broken
+#: instrument must not be able to keep a process alive for the life of the
+#: machine.
+#:
+#: HOW MANY RUNTIMES ARE ACTUALLY IN THAT STATE IS NOT KNOWN, and the honest
+#: figure matters more than the alarming one: the fleet on this machine on
+#: 2026-09-17 was first counted as 34 of 57 runtimes with no record — but a second
+#: census, asking each process for the config root it ACTUALLY uses, found every
+#: one of them holding a fresh record in its OWN root (a sibling QA store), so that
+#: population was a root-scoping artifact rather than a set of pinned corpses. What
+#: this bound answers is the state that cannot be counted from outside at all: a
+#: runtime whose own instrumentation has failed. The census, the refusals and the
+#: sweep that can end such a process from outside are in ``reclaim``.
+#:
+#: WHY THE BOUND IS SO MUCH LONGER THAN THE DRAIN (3 s). The grace exists to
+#: absorb work that ARRIVES; this bound exists to absorb a probe that is
+#: TRANSIENTLY unevaluable, and it is chosen an order of magnitude beyond any
+#: transient this module has a record of. Both errors are recoverable in the safe
+#: direction: leaving early loses at most the turn the transcript resumes on the
+#: next engage, while pinning forever costs a resident process that no surface in
+#: the product can even see.
+PROBE_DEFER_BOUND = 240
+
 # The build-watch timings, the env readers that shorten them for the e2e stage,
 # and the changed-and-settled comparison `_build_changed` live in ONE module that
 # the ``serve`` daemon (`server/retire.py`) imports too — a second copy of a
@@ -533,6 +571,66 @@ def _viewer_attached(runtime: object) -> bool:
     return isinstance(live, int) and live > 0
 
 
+class _ProbeDefers:
+    """Consecutive samples whose busy probe RAISED, and the last failure's text.
+
+    Process-scoped rather than per-handle for the same reason
+    ``_boot_record_pid`` is: one runtime per process, so this is the runtime's
+    own state and a handle that is replaced mid-life (``/new``) must not hand a
+    fresh probe a fresh sixty seconds.
+
+    A HEALTHY SAMPLE RESETS THE STREAK, whatever it answered. The count is of
+    CONSECUTIVE failures, so a probe that answers ``True`` (real work) or
+    ``False`` (idle) between two failures clears it: the runtime is not being
+    pinned by an unusable probe, and a later streak starts from zero.
+    """
+
+    def __init__(self) -> None:
+        self.streak = 0
+        self.detail = ""
+
+    def evaluated(self) -> None:
+        """The probe answered (either way). Clears the streak."""
+        self.streak = 0
+        self.detail = ""
+
+    def unevaluable(self, detail: str) -> int:
+        """Record one failure and return the new streak length."""
+        self.streak += 1
+        self.detail = detail
+        return self.streak
+
+    def reset(self) -> None:
+        """Forget the streak. For tests, which share this module's state."""
+        self.evaluated()
+
+
+#: The one instance, at the scope of the one runtime each process hosts.
+_probe_defers = _ProbeDefers()
+
+
+def _busy_verdict(handle: object) -> tuple[bool, str]:
+    """``(busy, unevaluable_detail)`` — the probe's answer AND its usability.
+
+    SEPARATES "THE PROBE SAID YES" FROM "THE PROBE DID NOT ANSWER", which the
+    ``bool`` return cannot express and which the residency bound has to
+    distinguish: the first is work and pins the runtime forever by design, the
+    second is a broken instrument and may pin it only for
+    :data:`PROBE_DEFER_BOUND` samples. ``detail`` is empty exactly when the probe
+    answered, and it is what the log line and the exit reason quote — a bound
+    that fires without naming what was wrong with the probe is an unattributable
+    exit, the failure mode this module's whole instrumentation exists to remove.
+    """
+    probe = getattr(handle, "is_busy", None)
+    if not callable(probe):
+        return False, ""
+    try:
+        return bool(probe()), ""
+    except Exception as exc:  # noqa: BLE001 — uncertainty must keep the runtime working
+        logger.debug("busy probe failed; treating work as in flight", exc_info=True)
+        return True, f"{type(exc).__name__}: {exc}"
+
+
 def _work_in_flight(handle: object) -> bool:
     """Is there work in flight that disposing NOW would destroy?
 
@@ -557,14 +655,7 @@ def _work_in_flight(handle: object) -> bool:
     evaluated must never be the thing that ends a turn. (Letting it propagate,
     which the inline form did, also took the reaper down with it.)
     """
-    probe = getattr(handle, "is_busy", None)
-    if not callable(probe):
-        return False
-    try:
-        return bool(probe())
-    except Exception:  # noqa: BLE001 — uncertainty must keep the runtime working
-        logger.debug("busy probe failed; treating work as in flight", exc_info=True)
-        return True
+    return _busy_verdict(handle)[0]
 
 
 def _should_exit(handle: object, runtime: object) -> bool:
@@ -582,6 +673,24 @@ def _should_exit(handle: object, runtime: object) -> bool:
        a 3 s pause costs a cold start" into "the first message of a
        conversation costs one".
 
+    AND THE FIRST TERM IS NOT ALLOWED TO PIN FOREVER BY FAILING. When the probe
+    RAISES, the immediate answer stays fail-closed (``True`` — see
+    :func:`_busy_verdict`: uncertainty must never be what ends a turn), but the
+    failures are COUNTED, and a streak of :data:`PROBE_DEFER_BOUND` of them with
+    nothing else holding the runtime is itself the verdict: a probe that has
+    answered nothing for a minute is broken, not busy, and it may not keep a
+    process alive for the life of the machine. Terms 2 and 3 must be consulted
+    before that verdict is taken — a viewer or an imminent wake is a reason to
+    stay that has nothing to do with the probe, and a streak measured through
+    one would spend the bound on a runtime that was legitimately wanted — so
+    this is the one path where the order is term 1, then 2 and 3, then the
+    count. The exit is announced (WARNING at the first failure of a streak, and
+    again with the reason at the bound) because an unattributable exit is the
+    failure the whole of this module's instrumentation exists to remove.
+
+    ORDER IS OTHERWISE UNCHANGED: for a probe that ANSWERS, this is the three
+    terms in the order above and nothing else.
+
     Reconciling term 3 with the older rule "watchers and replicas observe
     work; they do not own it": both are still true, and they are about
     different things. OWNERSHIP of the work is the turn's — a viewer leaving
@@ -593,12 +702,43 @@ def _should_exit(handle: object, runtime: object) -> bool:
     daemon's connection is not the user's attention, and the phone's
     interactive attach dials as ``"attach"`` when it wants warmth.
     """
-    if _work_in_flight(handle):
+    busy, unevaluable = _busy_verdict(handle)
+    if not unevaluable:
+        # The ordinary path, byte for byte: the probe answered, so "would lose
+        # nothing" has exactly one meaning here and in the signal drain.
+        _probe_defers.evaluated()
+        if busy:
+            return False
+        if _wake_within_window(handle):
+            return False
+        if _viewer_attached(runtime):
+            return False
+        return True
+    # FAIL-CLOSED, COUNTED. A probe that raises pins for the immediate decision
+    # (`_busy_verdict`), but only while nothing else is holding this runtime:
+    # a viewer or an imminent wake is a reason to stay of its own, and counting
+    # through one would spend the bound on a runtime whose residency was never
+    # the probe's doing.
+    if _wake_within_window(handle) or _viewer_attached(runtime):
+        _probe_defers.reset()
         return False
-    if _wake_within_window(handle):
+    streak = _probe_defers.unevaluable(unevaluable)
+    if streak == 1:
+        logger.warning(
+            "session runtime: the busy probe is unusable (%s); deferring, and leaving "
+            "if it is still unusable after %d consecutive samples (~%.0fs)",
+            unevaluable,
+            PROBE_DEFER_BOUND,
+            PROBE_DEFER_BOUND * REAP_CHECK_S,
+        )
+    if streak < PROBE_DEFER_BOUND:
         return False
-    if _viewer_attached(runtime):
-        return False
+    logger.warning(
+        "session runtime: the busy probe has been unusable for %d consecutive samples "
+        "(%s); work that cannot be read is not work still in flight, so leaving",
+        streak,
+        unevaluable,
+    )
     return True
 
 
@@ -747,6 +887,30 @@ def _clear_boot_record() -> None:
         logger.debug("session runtime: could not withdraw its boot record", exc_info=True)
 
 
+def _idle_exit_reason() -> str:
+    """The cause string a quiet exit reports, naming the term that actually held.
+
+    Two quiet exits reach ``_clean_exit`` from the same branch and they mean very
+    different things, so the cause distinguishes them: an ordinary idle exit was
+    PROVEN idle (no work, no viewer, no wake), while an exit on
+    :data:`PROBE_DEFER_BOUND` was never proven anything — it was proven
+    UNREADABLE. Folding the second into the first would put the most informative
+    departure in this module's history behind the same word as a routine one,
+    which is exactly the ambiguity ``_clean_exit``'s ``reason`` argument exists to
+    remove (design §1.6/§5.3: an exit that says nothing about itself).
+
+    A function rather than an expression at the call site because the streak, the
+    bound and the last failure are three separate pieces of module state and the
+    ONE place that reads them together is here.
+    """
+    if _probe_defers.streak < PROBE_DEFER_BOUND:
+        return "idle-exit"
+    return (
+        f"idle-exit (busy probe unusable for {_probe_defers.streak} samples: "
+        f"{_probe_defers.detail})"
+    )
+
+
 async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
     """Exit the disposable session runtime after one uninterrupted idle drain.
 
@@ -848,13 +1012,16 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         if callable(begin_retire) and not begin_retire("idle-exit"):
             logger.info("session runtime: work arrived as the idle drain closed; keeping")
             continue
+        # THE REASON NAMES THE TERM THAT ACTUALLY HELD; see ``_idle_exit_reason``.
+        reason = _idle_exit_reason()
         logger.info(
             "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
-            "exiting cleanly",
+            "exiting cleanly (%s)",
             grace_s,
             WARM_WINDOW_S,
+            reason,
         )
-        await _clean_exit(handle, runtime, reason="idle-exit")
+        await _clean_exit(handle, runtime, reason=reason)
         stop.set()  # amain's wait() returns; exit code stays 0
         return
 
