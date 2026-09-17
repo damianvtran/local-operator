@@ -406,13 +406,13 @@ readings.
 | POST `/v1/desktop/sessions` | `{request_id, cwd, target?, model?}` | `{session_id}`; cwd must exist |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
-| GET `/v1/desktop/sessions/{id}` | — | snapshot frame below |
-| GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
+| GET `/v1/desktop/sessions/{id}` | — | snapshot frame below (**read envelope**) |
+| GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` (**read envelope**) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | runtime receipt; stale runtime/request/question409 |
-| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1` | authenticated SSE, `data: <DesktopSessionFrame>` |
-| POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 |
+| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**) |
+| POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
 
@@ -616,13 +616,91 @@ Set `/goal <text>` while a turn is running therefore behaves as it does on one
 Enter in the terminal: the text is steered into the turn in flight rather than
 parked, and the reply is never withheld for the running turn's duration.
 
+### A read never needs an answering owner
+
+Every route in the endpoint table marked **read envelope** answers from the
+durable transcript even when the session's runtime is alive but not answering.
+Its ATTACH is one bounded attempt and never a refusal: `READ_ATTACH_BUDGET_S`
+(2.0 s) is a deadline for that whole attempt — the dial, its welcome and the
+canonical sync — so a read that does not land answers cold inside the budget
+rather than raising, whatever the owner is doing. The read-envelope
+routes are exactly those whose answer exists without an owner, and the list is
+closed: `GET .../{id}` (snapshot), `GET .../{id}/history`, `GET .../{id}/events`,
+`POST .../{id}/watch` (the presence beat), and the five session-scoped GETs whose
+rows come from the checkpoint, the local registries or the config store —
+`GET .../{id}/mcp`, `GET .../{id}/variables`, `GET /v1/desktop/skills`,
+`GET .../{id}/failovers` and `GET .../{id}/command-entities`. Everything else
+that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
+`/move` — keeps the control envelope, because none of those can be served
+without the owner that admitted them.
+
+`POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
+and it says so rather than leaving it to be discovered: after the attach it
+re-states the viewer's presence lease to the owner, bounded by
+`_DESKTOP_WATCH_ACK_BOUND_S` (5 s) — the LEASE's own bound, not the read's — so a
+silent-but-connected owner answers the beat in ≤ 2 s + 5 s while the snapshot,
+`/history`, `/events` and the five GETs above stay inside the budget. The hint is
+best-effort by design (design D2.1): its TTL expires it and the next beat (15 s)
+states it again, and clamping it to whatever remains of one request's budget would
+make a lease renewal's patience depend on which request happened to arrive first.
+
+A read makes ONE bounded attempt to attach to an existing runtime and then
+serves the cold facade. It never answers `503` for a session that exists on
+disk, and it never starts a runtime: `POST .../{id}/warm` (fired on the first
+keystroke) and a live **visible** `/watch` lease remain the only creators, which
+is what keeps a GET side-effect free on a 100-row sidebar sweep. The attempt is
+bounded because a runtime that is merely busy will answer again as soon as its
+loop is free, while the durable answer — the same transcript `/history` reads —
+is available the whole time: with a silent-but-alive owner the read used to be
+refused after ~15 s, while the identical rows came back in 0.02 s with no owner
+at all.
+
+The snapshot frame reports WHY it is cold, in a TOKEN rather than a sentence
+(the copy belongs to the app, the same discipline `code` follows in the error
+ladder), and it also reports an in-flight attempt:
+
+- `cold_reason: "no-runtime"` — no pid holds this session's transcript lease.
+  Also the default a reader must assume for a cold frame from a backend that
+does not send the field at all.
+- `cold_reason: "owner-silent"` — a pid DOES hold the lease and did not deliver
+  canonical state inside the budget. A stuck (wedged-heartbeat) record and a
+  live pid publishing nothing dialable both land here rather than being
+  reported as "no runtime", which is a claim the registry has not made.
+- `cold_reason: "owner-leaving"` — the record carries a `leaving` phrase: the
+  runtime has committed to a handover and is finishing work in flight first.
+- `cold_reason: null` — the frame is live.
+- `attaching: true` — the dial authenticated and its canonical state has not
+  arrived yet. The reads keep answering from disk, and when the sync lands the
+  bridge publishes the rollover (`frontend.update`, new epoch, full changes,
+  `cold: false`) that the renderer already handles for a canonical epoch change.
+  An authenticated dial is RETAINED for that purpose, bounded by a hard landing
+  deadline (30 s): an attach socket is a residency term of the runtime's own exit
+  predicate **for a VISIBLE panel** — `runtime.server.attach_clients` counts a
+  desktop client only while its lease is live and `visible` or `can_notify` — so
+  a viewer that has given up must hand the slot back, and a background read that
+  asserted `visible=false` was never pinning the process to begin with.
+
+Both fields are ADDITIVE and DEFAULTED (`cold_reason` null, `attaching` false),
+so a renderer that predates them reads exactly what it read before. They ride the
+snapshot, `frontend.replace` and `frontend.update` frames, computed together so
+no frame can state one and contradict another.
+
+The CONTROL routes keep their refusal, because a request that was not admitted
+must be able to say so: `503` with `{"detail": {"code": "runtime_unreachable",
+"message": …}}` — the same envelope the move refusal uses (`{"detail": {"code":
+"move_outcome_unknown", …}}`) — for a session-scoped unreachability, distinct
+from a `503` that is the server not answering at all. Clients key on the `code`; the sentence rides along
+for the ones that do not.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
 that the model succeeded or the turn completed. The runtime's canonical events
 and durable history are the authority for completion and side effects. Explicit
 mutations use `AttachedSession.bind_runtime` / existing `engage_runtime` lease
-arbitration. A cold read or stream attaches only to an already-live runtime.
+arbitration. A cold read or stream attaches only to an already-live runtime — and
+attaches to it BOUNDED (see "A read never needs an answering owner" above),
+never starts one, and answers from disk if it does not.
 HTTP shutdown/last-reader cleanup only disposes the viewer; it never stops work.
 
 The private0600 `desktop-receipts.db` stores request fingerprints and completed
@@ -646,7 +724,10 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    metadata, **not** permission to discard replay up through that number.
 2. If retained, ordered frames after the supplied receipt cursor are replayed.
    This includes semantic `event` frames already covered by newer paint state.
-3. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold}`. Its
+3. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold,`
+   `cold_reason,attaching}`. `cold_reason` is the token that says WHICH cold
+   (see "A read never needs an answering owner" above); `attaching` says an
+   authenticated dial is retained and its state has not arrived yet. Its
    history page is the transcript's durable tail — the newest ≤100 entries,
    `limit` unchanged — read once for this frame, which is the same unbounded read
    `/history` serves. `has_more` means *older rows exist below the page*, not that
@@ -671,7 +752,10 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    published once per accepted move and ordered by the BRIDGE's outer `seq`
    rather than the owner's clock (see "The replacement frame" under the move
    route). It carries no `history` field and neither creates a gap nor
-   invalidates a history cursor.
+   invalidates a history cursor. Both `frontend.replace` and `frontend.update`
+   carry the same `cold`/`cold_reason`/`attaching` triple the snapshot does,
+   which is what lets a viewer that opened cold against a busy runtime learn from
+   the rollover frame that it is live again.
 5. `notification` carries one bridge-composed banner:
    `{contract,kind,title,status,body,body_is_snippet,body_is_failure,`
    `title_is_session_name,dedupe_key,completion_token,session_name,`

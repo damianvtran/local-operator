@@ -734,6 +734,40 @@ def find_runtime_record(
     return None, owner
 
 
+def dialable_owner_record(config_dir: Path, pid: int) -> SessionRecord | None:
+    """``pid``'s own record in the LIVE **or** WEDGED state, else ``None``.
+
+    ``find_runtime_record`` selects on the ``live`` state alone, and that is
+    right for what it is for: an ordinary attach wants an owner that is
+    answering. It is wrong for a caller whose question is "is this pid hosting
+    this session" — for which the ``wedged`` state (pid alive, heartbeat older
+    than ``HEARTBEAT_TIMEOUT_S``) is neither ``live`` nor absent. It is a
+    stuck owner, and ``dialable_record_exists`` below already records why that
+    record is kept: "a stuck owner may recover on its own, which is the
+    transient the budget is sized to outlast". Collapsing it into "no runtime"
+    is a claim the registry has not made.
+
+    So this is the second reading of the same scan, offered to a caller that
+    lets the welcome projection's identity check arbitrate
+    (``AttachClient.connect``). The record is returned whatever ``session_id``
+    it is stamped with, deliberately: the rebind race is exactly a record for
+    the live pid still carrying the previous conversation, and one refused dial
+    is its whole cost — the same arbitration ``find_runtime_record``'s own
+    fallback relies on.
+
+    ``None`` means the pid publishes no record this build could dial at all (an
+    older binary, or a registrant that failed to start): a fact the caller may
+    report, and the one state where "there is no runtime here" is true.
+    """
+    try:
+        for record, state in scan(config_dir):
+            if state in ("live", "wedged") and record.pid == pid and record.protocol >= 2:
+                return record
+    except OSError:
+        return None
+    return None
+
+
 def dialable_record_exists(config_dir: Path, pid: int) -> bool | None:
     """Whether ``pid`` publishes a record this build could dial.
 
