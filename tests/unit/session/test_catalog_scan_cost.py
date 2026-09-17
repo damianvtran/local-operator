@@ -1269,14 +1269,19 @@ class TestAPinnedConversationSurvivesThePage:
         assert "user00000000" not in {entry.id for entry in entries}
 
     def test_the_extras_keep_the_ranking_s_own_order(self, tmp_path: Path) -> None:
-        """No re-sort and no pin-recency order: the appended rows are already in
-        rank order because every extra ranks below every page row by
-        construction. A second ordering here would make the app and the TUI's
-        Pinned section disagree about the order of one list."""
+        """No re-sort, no pin-recency order, and not the caller's own list order
+        either: the appended rows come back in the RANKING's order, which is what
+        the page's rows use and what the TUI's `★ Pinned` section draws. A second
+        ordering here would make the app and the TUI present one list two ways.
+
+        The parameter is passed in the REVERSE of rank order on purpose: if this
+        function ordered the extras by the sequence it was handed — the shape a
+        caller-driven or pin-recency order would take — the assertion fails.
+        """
         for index in range(5):
             _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
 
-        entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000000", "user00000002"])
+        entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000002", "user00000000"])
 
         assert [entry.id for entry in entries] == [
             "user00000004",

@@ -2345,10 +2345,19 @@ class SessionPage:
     recency window produced: on a store bigger than the client's page — which
     is the ordinary case, not an edge one — a pin made on an older conversation
     would otherwise have no row anywhere in the app, with no count and no trace
-    of it. The TUI has kept such a pin resolvable since #1200
-    (``load_catalog(..., pinned_hidden_ids=...)``); this is the desktop half of
-    the same promise, and it is what makes "pin in the TUI, see it in the app"
-    true on a store of thousands rather than only on a small one.
+    of it. The operator's store is the measured case: 5,267 sessions against a
+    500-row page.
+
+    The TUI reports the same FACT differently, which is why this is not simply
+    the desktop half of one promise. A TUI SIDEBAR holds its whole listing and
+    draws only a window of it, so an off-page pin is COUNTED there —
+    ``+N more pinned — scroll`` — and reachable by scrolling; it does not draw
+    its row either. A client that holds one page has no scroll to offer and no
+    listing to count against, so the row itself has to come with the answer.
+    (``pinned_hidden_ids``, the parameter that sentence is usually about, is the
+    other axis entirely: it keeps a HIDDEN session resolvable in the entries a
+    sidebar scrolls, where a hidden id is absent because the catalogue never
+    built it. An off-page id IS built and is dropped by the ``limit`` slice.)
 
     TWO LISTS, NOT ONE, and the route concatenates them for the wire. They are
     kept apart here because they answer different questions and only the caller
@@ -2496,12 +2505,14 @@ class DesktopSessions:
         VALIDATION DELIBERATELY DIFFERS FROM ``acknowledge_attention`` ABOVE,
         which is the closest neighbour and the trap here. That method requires
         ``is_user_session(path)``; this one must NOT, because the sidebar pins
-        DELEGATED RUNS too — `load_catalog(..., pinned_hidden_ids=...)` exists
-        precisely so a pinned delegated run stays resolvable — and a desktop pin
-        the user cannot remove is the worst shape of bug in this feature: the
-        remedy for an unwanted pin is the thing such a check would refuse. A
-        delegated run lives in `sessions/` like every other session, so the
-        id-shape check plus the is-dir check is the whole admission test.
+        DELEGATED RUNS too — a delegated run is a HIDDEN session, and pins are
+        kept resolvable across BOTH visibility axes (``pinned_hidden_ids`` for
+        the hidden one, ``pinned_off_page`` for a visible session outside a
+        page) — and a desktop pin the user cannot remove is the worst shape of
+        bug in this feature: the remedy for an unwanted pin is the thing such a
+        check would refuse. A delegated run lives in `sessions/` like every other
+        session, so the id-shape check plus the is-dir check is the whole
+        admission test.
 
         Cold like its neighbour: no bridge, no runtime, no receipt. The write is
         a small file replace, and a receipt would buy at-most-once for a call

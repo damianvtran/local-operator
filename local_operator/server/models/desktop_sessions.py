@@ -61,15 +61,24 @@ class SessionList(BaseModel):
     PRESENT rather than omitted when empty, so a client can tell "nothing to
     report" from "this server is too old to know".
 
-    ``sessions`` IS MORE THAN THE PAGE, deliberately. It carries the newest
-    ``limit`` conversations AND every pinned conversation the page did not
-    reach, because it is the array a client REPLACES its rows with: a pinned
+    ``sessions`` IS MORE THAN THE PAGE, deliberately, and the consequence is
+    part of the contract: **``len(sessions)`` may exceed ``limit``**. It carries
+    the newest ``limit`` conversations AND every pinned conversation the page did
+    not reach, because it is the array a client REPLACES its rows with — a pinned
     conversation parked in a sibling field would be one the client does not hold
-    until it learns about that field, and on a store larger than the page — the
-    ordinary case — the pin would then have no row, no count and no trace
-    anywhere in the app. The additions are ordinary rows in the ranking's own
-    order (every one of them ranks below every page row), each with
-    ``pinned: true``, so a client sections them with no new field and no sort.
+    until it learns about that field, and on a store larger than the page (the
+    ordinary case; 5,267 sessions against a 500-row page on the operator's) the
+    pin would then have no row, no count and no trace anywhere in the app. The
+    additions are ordinary rows in the catalogue's own ranking order — the page's
+    order continued below the page, NOT pin recency, which the store also holds
+    and which would put a second ordering authority inside one section — each
+    with ``pinned: true``, so a client sections them with no new field and no
+    sort. ``limit`` and ``truncated`` describe the PAGE ONLY.
+
+    The CLIENT half of that decision cannot be tested from this repository: there
+    is no in-tree consumer of this route, so what is pinned here is the shape the
+    app is handed, not the rendering it does with it. The boundary is worth
+    knowing before someone reads a green suite as coverage of the feature.
     """
 
     sessions: list[SessionRow]
