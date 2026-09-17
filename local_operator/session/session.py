@@ -2456,6 +2456,12 @@ class Session:
         # persistence — needs it between events, and the stream fn is an
         # optional capability some hosts construct sessions without.
         self._active_fallback: ModelSpec | None = None
+        # A ``time.monotonic()`` deadline until which ``_errand_model`` must
+        # not prefer the ``lo`` tier, because an errand already ASKED that tier
+        # and it could not answer. ``0.0`` means "not blocked" — the tier is
+        # preferred as usual. Set only by ``complete_once``, and only after a
+        # request that actually went out on the tier's route.
+        self._errand_tier_blocked_until: float = 0.0
         # The pin itself — (selector, the chain entry's own effort or None) —
         # kept beside the derived spec above because the spec is a SNAPSHOT:
         # an `/effort` change while a fallback serves has to re-derive the
@@ -10645,6 +10651,17 @@ class Session:
     #: session stays unnamed.
     ERRAND_MAX_TOKENS = 1024
 
+    #: How long ``_errand_model`` stops preferring the ``lo`` tier after an
+    #: errand on it failed. The ceiling is borrowed from
+    #: ``MAX_CREDENTIAL_BLOCK_MS`` (``local_operator/providers/auth_store.py``),
+    #: which caps any per-credential block at one hour. A weekly token-plan
+    #: exhaustion is NOT representable in that store — and the store is
+    #: per-credential and unreachable from here anyway — so this is a
+    #: session-scoped memo carrying the same bound, not an attempt to model the
+    #: real reset. Session-scoped on purpose: a new session re-tries the tier
+    #: immediately, so an operator who fixes the tier does not wait out a clock.
+    ERRAND_TIER_BLOCK_S = 3600.0
+
     async def complete_once(self, system: str, prompt: str) -> str:
         """One CHEAP, ISOLATED, near-single-attempt provider call for a host errand.
 
@@ -10676,9 +10693,71 @@ class Session:
           has configured one, otherwise this session's model — either way
           clamped to the lowest reasoning effort the spec accepts, because that
           token cap counts thinking tokens as well as the title.
+        * a tier that RESOLVES but cannot ANSWER is demoted for
+          ``ERRAND_TIER_BLOCK_S`` and the call is retried ONCE on this session's
+          model. That is the third case: the operator's preference is still
+          asked first, but a dead tier no longer means no title at all, and the
+          next errand within the hour skips it instead of paying for it again.
+          ``isolated`` is UNCHANGED by this — the retry is a second request that
+          also carries it, so each request still gets at most two auth attempts
+          *on the model it names*. What is new is that the errand may name a
+          second model, which is the sound fallback of its own that
+          ``_resolve_subagent_model``'s leniency already assumed this caller
+          had.
         """
         model = self._errand_model()
-        request = ChatRequest(
+        # Asked BEFORE the request so the answer is not re-derived inside an
+        # ``except`` block, where the block this failure is about to set would
+        # change it.
+        from_tier = self._errand_tier_in_use()
+        try:
+            return await self._drain_errand(self._errand_request(model, system, prompt))
+        except Exception as exc:  # noqa: BLE001 — see below: ANY dead tier, not just a 429.
+            # Deliberately bare ``Exception`` and not ``ProviderError``: a tier
+            # that is misconfigured, decommissioned (404), missing a credential
+            # (401) or quota-dead (429) all present identically to naming — the
+            # tier route cannot answer and the session route can. Keying on
+            # "the tier failed" covers every one of them without importing
+            # provider classification into this decision.
+            #
+            # ``asyncio.CancelledError`` derives from ``BaseException`` on 3.12,
+            # so it does NOT land here: a cancel is not a failure and must
+            # neither be swallowed nor charge the tier a block.
+            if not from_tier:
+                raise
+            self._errand_tier_blocked_until = time.monotonic() + self.ERRAND_TIER_BLOCK_S
+            session_spec = self._lowest_effort(self.effective_model)
+            logger.warning(
+                "naming errand tier %s/%s failed (%s: %s); demoting to %s/%s for %.0fs",
+                model.provider,
+                model.model_id,
+                type(exc).__name__,
+                exc,
+                session_spec.provider,
+                session_spec.model_id,
+                self.ERRAND_TIER_BLOCK_S,
+            )
+            if (session_spec.provider, session_spec.model_id) == (model.provider, model.model_id):
+                # The tier and the session model are the same route: there is
+                # nowhere to fall back TO, and a second identical request would
+                # only burn another wire attempt for the same answer. The block
+                # above still stands — the route is dead either way.
+                raise
+            # Exactly one retry, inside the caller's existing ``wait_for``
+            # budget (``naming.py``'s TITLE_TIMEOUT_S). No loop, no backoff: a
+            # second failure propagates to ``_ask_for_title``, which already
+            # logs it and returns CALL_FAILED.
+            return await self._drain_errand(self._errand_request(session_spec, system, prompt))
+
+    def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
+        """The errand's request shape, in ONE place.
+
+        Extracted so the fallback retry in ``complete_once`` cannot drift from
+        the first attempt: both attempts are built here, so both carry
+        ``isolated``, ``replayable=False``, the token cap and the empty tool
+        surface by construction rather than by two field lists staying in sync.
+        """
+        return ChatRequest(
             model=model,
             purpose="naming",
             system_blocks=[system],
@@ -10708,11 +10787,32 @@ class Session:
             replayable=False,
             isolated=True,
         )
+
+    async def _drain_errand(self, request: ChatRequest) -> str:
+        """Run one errand request to completion and return its text."""
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
         return "".join(parts)
+
+    def _errand_tier_in_use(self) -> bool:
+        """Whether the spec ``_errand_model`` just returned came from the tier.
+
+        Deliberately NON-comparative: it re-asks the same two questions
+        ``_errand_model`` asks, in the same order, rather than comparing the
+        returned spec against ``effective_model``. A configured tier and the
+        session model can name the SAME route and still be different
+        ``ModelSpec`` objects (``build_model_spec`` seeds a context window the
+        session's spec need not share), so both a tuple comparison and an object
+        comparison answer this question wrongly on one of those cases. This
+        agrees with ``_errand_model`` by construction.
+        """
+        if time.monotonic() < self._errand_tier_blocked_until:
+            # The block is in force, so ``_errand_model`` never consulted the
+            # tier — whatever it returned came from the session.
+            return False
+        return self._resolve_subagent_model("task", "lo") is not None
 
     def _errand_model(self) -> ModelSpec:
         """The cheapest spec this session can reach for a decorative errand,
@@ -10740,7 +10840,18 @@ class Session:
         configured ``lo`` tier used to reach the wire unclamped. Naming is a
         formatting job, not a thinking job. A model with no effort knob is
         unaffected.
+
+        A tier that RESOLVES but cannot ANSWER is skipped for
+        ``ERRAND_TIER_BLOCK_S`` after ``complete_once`` sees it fail. The
+        leniency ``_resolve_subagent_model`` grants this caller was only ever
+        honoured when the CONFIG READ failed; a quota-dead tier resolved
+        perfectly well and got no fallback at all, which pinned naming to a dead
+        route for as long as the quota lasted. While the block is in force the
+        tier is not even resolved — skipping the config read is the point, the
+        tier is known bad — and the session's own model answers instead.
         """
+        if time.monotonic() < self._errand_tier_blocked_until:
+            return self._lowest_effort(self.effective_model)
         tier = self._resolve_subagent_model("task", "lo")
         return self._lowest_effort(tier if tier is not None else self.effective_model)
 
