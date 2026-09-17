@@ -619,8 +619,11 @@ parked, and the reply is never withheld for the running turn's duration.
 ### A read never needs an answering owner
 
 Every route in the endpoint table marked **read envelope** answers from the
-durable transcript even when the session's runtime is alive but not answering,
-and answers within `READ_ATTACH_BUDGET_S` (2.0 s) when it is. The read-envelope
+durable transcript even when the session's runtime is alive but not answering.
+Its ATTACH is one bounded attempt and never a refusal: `READ_ATTACH_BUDGET_S`
+(2.0 s) is a deadline for that whole attempt — the dial, its welcome and the
+canonical sync — so a read that does not land answers cold inside the budget
+rather than raising, whatever the owner is doing. The read-envelope
 routes are exactly those whose answer exists without an owner, and the list is
 closed: `GET .../{id}` (snapshot), `GET .../{id}/history`, `GET .../{id}/events`,
 `POST .../{id}/watch` (the presence beat), and the five session-scoped GETs whose
@@ -630,6 +633,16 @@ rows come from the checkpoint, the local registries or the config store —
 that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
+
+`POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
+and it says so rather than leaving it to be discovered: after the attach it
+re-states the viewer's presence lease to the owner, bounded by
+`_DESKTOP_WATCH_ACK_BOUND_S` (5 s) — the LEASE's own bound, not the read's — so a
+silent-but-connected owner answers the beat in ≤ 2 s + 5 s while the snapshot,
+`/history`, `/events` and the five GETs above stay inside the budget. The hint is
+best-effort by design (design D2.1): its TTL expires it and the next beat (15 s)
+states it again, and clamping it to whatever remains of one request's budget would
+make a lease renewal's patience depend on which request happened to arrive first.
 
 A read makes ONE bounded attempt to attach to an existing runtime and then
 serves the cold facade. It never answers `503` for a session that exists on

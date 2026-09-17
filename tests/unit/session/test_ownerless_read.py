@@ -30,6 +30,7 @@ the ``cold_reason`` tokens on the wire) lives in
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import time
@@ -672,5 +673,40 @@ async def test_a_read_never_spawns_a_runtime(tmp_path: Path, monkeypatch) -> Non
 
     assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
     assert spawned == [], "the read attempted to engage a runtime"
+    await viewer.dispose()
+    await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_connected_leaving_owner_is_reported_as_leaving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NIT-2: the connected arm can produce the third token.
+
+    The arm exists for a facade whose client is connected while
+    ``_ready_for_events`` is cleared for a display refresh, and it classified with
+    ``record=None`` — a pair that can only ever answer ``owner-silent``. A record
+    that is LEAVING is the more accurate token (the one state that is both alive
+    and knowingly unavailable), and the record this facade dialled is in hand, so
+    the arm now passes it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    owner = _FakeOwner(SESSION_ID, tmp_path, sync_on_connect=True)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    viewer = await _cold_viewer(tmp_path)
+    await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S)
+    assert viewer.is_cold is False, "the fixture did not reach a live facade"
+    record = viewer._runtime_record
+    assert record is not None, "the dial did not keep the record it read"
+
+    # A retiring owner whose socket is still up, read during the mid-resync window.
+    viewer._runtime_record = dataclasses.replace(record, leaving=True)
+    viewer._ready_for_events = False
+    viewer._read_cold_reason = None
+
+    assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
+    assert viewer.cold_reason == "owner-leaving"
     await viewer.dispose()
     await owner.stop()
