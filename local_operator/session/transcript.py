@@ -608,11 +608,12 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     ``frontend_state`` / ``subagent_roster`` row say" is a ONE-ROW question, and
     every caller that asked it built a whole ``Transcript`` to answer it — a
     construction that JSON-decodes the entire journal into memory. On the
-    operator's store that is **2971.7 ms of construction and 2492.9 ms for the
-    read** on the 261 MB conversation, 628.8/671.9 ms on the 96 MB one
-    (median of 3, load average 210-221, measured against ``origin/main`` at
-    ``bf67bf699``; the benchmark and the full table are in
-    ``scripts/bench_session_page.py`` and ``docs/evidence/session-load-central-cache``).
+    operator's store that is **2286.7 ms of construction and 2059.5 ms for the
+    read** on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one — the
+    before column of the A/B in ``docs/evidence/session-load-central-cache``,
+    measured with ``scripts/bench_session_page.py`` (median of 3 samples per
+    operation, host load average 179-260, recorded per worker in the output)
+    against a clean ``origin/main`` worktree at ``bf67bf699``.
     Two of those callers are on the desktop OPEN path — ``DesktopSessions.
     session().locate()`` when a session carries no ``desktop.json`` marker, and
     ``_persisted_children`` — so a cold open paid seconds of JSON decode for one
@@ -640,6 +641,21 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     question. Nothing here creates the directory, so a pure read of somebody
     else's session leaves nothing behind — the ``defer_materialise`` guarantee
     the TUI's child reads used to borrow from ``Transcript`` by construction.
+
+    ONE NAMED DIVERGENCE from that reference, in the safe direction, and it is
+    the same one the page reader documents: this scan decodes with
+    ``errors="replace"``, so a BYTE-CORRUPT journal — an interrupted append
+    truncated mid-character — is read with the damaged bytes replaced. A row
+    that still parses is answered (a stray ``\xff`` inside a string value
+    becomes U+FFFD), and a row that no longer parses is skipped like any
+    malformed line. The resident implementation decodes through
+    ``Transcript.__init__``'s strict ``read_text`` and raises
+    ``UnicodeDecodeError`` for the same file, so "matched row for row" is exact
+    for every well-formed journal — and for a malformed LINE, which both skip —
+    but NOT for invalid UTF-8. Answering rather than failing is deliberate, and
+    it is pinned by
+    ``tests/unit/session/test_transcript.py::test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises``
+    so the sentence cannot drift away from the behaviour.
     """
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():

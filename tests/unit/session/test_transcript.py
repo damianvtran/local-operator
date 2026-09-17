@@ -1527,13 +1527,15 @@ async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> 
 #
 # ``read_latest_custom_entry``/``read_latest_custom`` exist because seven call
 # sites answered a ONE-ROW question by constructing a whole ``Transcript`` — a
-# full JSON decode of the journal. Measured on the operator's store at
-# ``origin/main`` (median of 3, load average 210-221): 2971.7 ms to construct and
-# 2492.9 ms to read on the 261 MB conversation, 628.8/671.9 ms on the 96 MB one,
-# and two of those seven sites are on the desktop OPEN path. Two things make the
-# swap safe and both are tested here: the DIFFERENTIAL (it must answer exactly
-# what the resident object answered) and the STRUCTURAL cost (it must not pay for
-# the rows above its match).
+# full JSON decode of the journal. Measured against a clean ``origin/main``
+# worktree at ``bf67bf699`` with ``scripts/bench_session_page.py`` (median of 3
+# samples per operation, host load average 179-260, recorded per worker in the
+# output — the full table is in ``docs/evidence/session-load-central-cache``):
+# 2286.7 ms to construct and 2059.5 ms to read on the 261 MB conversation,
+# 580.7/546.3 ms on the 96 MB one, and two of those seven sites are on the
+# desktop OPEN path. Two things make the swap safe and both are tested here: the
+# DIFFERENTIAL (it must answer exactly what the resident object answered) and the
+# STRUCTURAL cost (it must not pay for the rows above its match).
 
 
 #: Sentinel for "this key is absent from the row" — distinct from any real value,
@@ -1760,3 +1762,41 @@ def test_a_metadata_read_near_the_head_costs_the_journal_and_is_still_correct(
 
     assert entry is not None and entry.id == "ancient"
     assert decoded == 501, "the walk must reach the file start to answer honestly"
+
+
+def test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises(tmp_path):
+    """The one NAMED divergence, pinned rather than left in a docstring.
+
+    A journal whose newest matching row holds one invalid byte — what an
+    interrupted append truncated mid-character leaves — is answered here: the
+    damaged byte decodes to U+FFFD under ``errors="replace"`` and the row still
+    parses. The resident ``Transcript`` decodes through a strict ``read_text`` and
+    raises ``UnicodeDecodeError`` for the same file.
+
+    The direction is deliberate (a damaged journal is answered, not turned into a
+    500 on the desktop open), and a differential that asserted EQUALITY for this
+    shape would be asserting the wrong thing — which is why the equality matrix
+    above covers every well-formed journal and the divergence gets this test
+    instead.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    raw = (
+        TranscriptEntry(
+            "torn",
+            2.0,
+            "custom",
+            {"custom_type": "todo_snapshot", "details": {"x": "MARKER-VALUE"}},
+        )
+        .to_json()
+        .encode("utf-8")
+    )
+    assert b'"MARKER-VALUE"' in raw
+    (directory / TRANSCRIPT_FILENAME).write_bytes(
+        raw.replace(b'"MARKER-VALUE"', b'"MARK\xffER-VALUE"') + b"\n"
+    )
+
+    with pytest.raises(UnicodeDecodeError):
+        Transcript(directory, defer_materialise=True)
+
+    assert read_latest_custom(directory, "todo_snapshot") == {"x": "MARK\ufffdER-VALUE"}

@@ -48,8 +48,25 @@ to read, and the milliseconds are beside it only because a reader wants them.
     --output /tmp/page-bench/ab.json
 ```
 
+The raw run behind the table is committed beside this file as `bench_ab.json` —
+the driver's own output, not a transcription — and the **before** column is the
+one the code's docblocks cite, because it is the only side measured on an
+unmodified tree. Its provenance is inside it: `trees.base` is
+`~/workspace/repos/lo-session-load-base` at `bf67bf699`, `dirty: false` — a clean
+`origin/main` worktree. `trees.head` was captured from the branch's working tree
+mid-development (`dirty: true`, a SHA that no longer exists, since the commits
+were later rebuilt), so only the before side is used to state a cost; the after
+side's new rows (`metadata_row_scan`, `cached_page_hit`) are what the same run
+shows of the change. That run predates the per-worker load recording in the
+harness, so `load_average_at_end` is its only load figure (`176.87 273.00
+312.10`); the per-worker range quoted in this README comes from the same run's
+console log.
+
 | session | size MB | operation | before ms | after ms | before rows decoded | after rows decoded |
 |---|---|---|---|---|---|---|
+<!-- before = the clean `origin/main` worktree at `bf67bf699`; after = this branch.
+     The driver's own columns are `head ms` then `base ms`; this table relabels
+     them in the order a reader needs them. -->
 | bda7b76d34e0 | 261.0 | tail_page | 1.3 | 1.2 | 101 | 101 |
 | bda7b76d34e0 | 261.0 | through_id_page | 0.9 | 1.0 | 101 | 101 |
 | bda7b76d34e0 | 261.0 | before_id_page | 1.7 | 1.5 | 201 | 201 |

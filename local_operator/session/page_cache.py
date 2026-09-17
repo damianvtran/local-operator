@@ -49,6 +49,25 @@ invalidation. Anything that notified this cache would be a mechanism beside the
 one that already decides (``desktop_sessions.py``'s ``warm`` docblock is the
 in-tree statement of that rule).
 
+THE RESIDUAL, named here because ``TranscriptPageCache``'s docstring points at
+it. Identity is ``(st_ino, st_size)``, so a file whose bytes change while BOTH
+stay the same is served as a hit. Exactly two shapes reach that:
+
+- an IN-PLACE rewrite at an unchanged size. ``_write_entries``'s rebuild branch
+  (``transcript.py``) opens the journal ``"w"`` on the same inode, so it keeps
+  the inode AND can land on an equal byte length;
+- an INODE RECYCLED onto an identical byte length after an ``os.replace`` or an
+  unlink, which is the unbounded one: it is the kernel's business, not this
+  cache's.
+
+Neither is reachable from this codebase's writers today — the rebuild branch
+runs only when the journal is ABSENT (so there are no older bytes to serve), and
+``compact_file`` replaces through a temp file, which is the new-inode path the
+key is built to catch. It stays named rather than assumed because the alternative
+is a reader inferring a guarantee this class does not make: the delta against the
+sibling ``DurableFoldCache`` is that ``mtime`` is excluded here deliberately, so
+``size`` is the only part of the key that moves on an append.
+
 CROSS-THREAD DISCIPLINE, and this is the one thing a caller must not get wrong.
 The cache and the flight map are mutated ONLY from the event loop: ``get`` in the
 façade's own frame, ``put`` in the leader's publish step after its
@@ -214,8 +233,9 @@ class TranscriptPageCache:
     Every failure mode here is ordinary: a page too large to admit is a MISS, an
     evicted key is a MISS, a cold cache is a MISS. Nothing on the read path
     raises because of this class, and nothing about a stale entry can be
-    observed without a file whose identity is unchanged (see the module
-    docstring for where the residual is and why it is accepted).
+    observed without a file whose identity is unchanged (THE RESIDUAL, in the
+    module docstring, states which shapes reach that and why neither is
+    reachable from this codebase's writers).
     """
 
     def __init__(
@@ -247,14 +267,19 @@ class TranscriptPageCache:
             return None
         self._entries.move_to_end(key)
         self.hits += 1
-        # SHARED, not copied, and the callers are what make that safe: the row
-        # type is a frozen dataclass and every consumer only reads it — the
-        # desktop envelope re-serializes each row with ``to_json()`` and the TUI
-        # folds rows into its own list of ``SubagentEntry``. A page is therefore
-        # hundreds of kilobytes of JSON parsed once per switch rather than once
-        # per request, which is the whole point. A future caller that mutates a
-        # row's payload must copy first; ``_DisplayWindowCache`` copies for
-        # exactly that reason, over pydantic models rendering does annotate.
+        # SHARED, not copied, and what makes that safe is the CONSUMERS rather
+        # than any immutability: every consumer only reads — the desktop
+        # envelope re-serializes each row with ``to_json()``, the TUI folds rows
+        # into its own list of ``SubagentEntry``. Do not read more into it than
+        # that. ``TranscriptPage`` is ``frozen=True`` so its ``entries`` tuple
+        # cannot be reassigned, but ``TranscriptEntry`` is NOT frozen and its
+        # ``payload`` is a plain dict, so this is a contract on callers, not a
+        # type guarantee — and freezing the entry type would not buy it either,
+        # because freezing forbids attribute assignment, not dict mutation. A
+        # future caller that mutates a row must copy first;``_DisplayWindowCache``
+        # copies for exactly that reason, over pydantic models rendering does
+        # annotate. A page is therefore hundreds of kilobytes of JSON parsed once
+        # per switch rather than once per request, which is the whole point.
         return cached[0]
 
     def put(self, key: PageKey, page: TranscriptPage) -> None:

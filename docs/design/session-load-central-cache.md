@@ -20,11 +20,12 @@ measurements. Read the notes below before using any number in the body.
   request for a 642-byte session answered in 829 ms while the 261 MB session's
   open was in flight, because `DesktopSessions.session` held the pool-wide lock
   across `locate()` and `acquire()`.
-- **One number in §2.4 did not survive implementation**: `PAGE_CACHE_BYTES` was
-  sized from serialized page sizes, while the same section specifies an
+- **One number in §2.2/§2.4 did not survive implementation**: `PAGE_CACHE_BYTES`
+  was sized from serialized page sizes, while the same section specifies an
   accounting instrument that charges ~2x more. At 4 MiB accounted the cache
   admitted nothing at all for an ordinary conversation (measured; the shipped
-  constant and the reason are in `session/page_cache.py`).
+  constant and the reason are in `session/page_cache.py`). The §2.2 paragraph
+  that states the bound carries the correction inline.
 - **(D) lazy `Transcript._entries` remains deferred**, for exactly the reason
   §3(D) gives, and is now the largest cost left on the runtime's cold engage.
 
@@ -431,7 +432,13 @@ what makes the rest of the cost disappear, and it is the part that makes
    disk at all.
 
 Where it lives: `session/page_cache.py`, process-wide module state, one LRU of
-16 entries / 4 MiB accounted bytes. `DesktopSessions` is one instance per app
+16 entries / 24 MiB accounted bytes. **[Corrected at implementation: this
+paragraph and §2.4's code block both say 4 MiB, sized from serialized page
+sizes, while §2.4's own accounting instrument charges ~1.7-2.7x more — at 4 MiB
+accounted the cache admitted nothing at all for an ordinary conversation. The
+shipped constant and the measurement are in `page_cache.py`; read 24 MiB
+above, never the 4 MiB this paragraph was drafted with.]** `DesktopSessions` is
+one instance per app
 (`routes/desktop_sessions.py:225-230` caches it on `app.state`) in a single
 uvicorn process (`cli.py:4030-4038` runs one), so a module-level cache is
 coherent; the TUI is a different process and gets its own, which is correct —

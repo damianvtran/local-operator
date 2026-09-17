@@ -3081,66 +3081,67 @@ class DesktopSessions:
                 self._take_handout(session_id)
                 taken = True
                 bridge = self.bridges.get(session_id)
-            if bridge is None:
-                path = self.root / "sessions" / session_id
+                if bridge is None:
+                    path = self.root / "sessions" / session_id
 
-                def locate() -> tuple[str, str | None]:
-                    """This session's opening directory, and the MARKER's own value.
+                    def locate() -> tuple[str, str | None]:
+                        """This session's opening directory, and the MARKER's own value.
 
-                    The second element is provenance, not decoration: it is what
-                    lets the caller ask
-                    :func:`_cwd_is_unconfirmed` whether the directory is a
-                    durable claim a failed move could have written (the marker),
-                    or the checkpoint fallback for a pre-checkpoint transcript,
-                    which has no marker to doubt.
-                    """
-                    if not path.is_dir() or not is_user_session(path):
-                        raise KeyError("Unknown session")
-                    # Through the TOLERANT reader, not ``json.loads``: a marker this
-                    # code cannot parse (a hand edit, an interrupted write, a
-                    # directory where the document should be) is a document with no
-                    # cwd, and a session whose marker has no readable cwd still opens
-                    # here — on the checkpoint fallback below — instead of failing the
-                    # open with a 409/404 raised out of a parse error. Round 1 of
-                    # #1110 wrote the coverage for a malformed marker and found the
-                    # strict read behind it (R3).
-                    stored = read_desktop_marker(path)
-                    marker_cwd = (stored or {}).get("cwd")
-                    if isinstance(marker_cwd, str) and marker_cwd:
-                        return marker_cwd, marker_cwd
-                    # The cold facade restores cwd from the durable canonical
-                    # checkpoint. This fallback is only used by pre-checkpoint
-                    # transcripts, whose historical launch directory is unknown.
-                    from local_operator.session.frontend_state import (
-                        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-                    )
+                        The second element is provenance, not decoration: it is what
+                        lets the caller ask
+                        :func:`_cwd_is_unconfirmed` whether the directory is a
+                        durable claim a failed move could have written (the marker),
+                        or the checkpoint fallback for a pre-checkpoint transcript,
+                        which has no marker to doubt.
+                        """
+                        if not path.is_dir() or not is_user_session(path):
+                            raise KeyError("Unknown session")
+                        # Through the TOLERANT reader, not ``json.loads``: a marker this
+                        # code cannot parse (a hand edit, an interrupted write, a
+                        # directory where the document should be) is a document with no
+                        # cwd, and a session whose marker has no readable cwd still opens
+                        # here — on the checkpoint fallback below — instead of failing the
+                        # open with a 409/404 raised out of a parse error. Round 1 of
+                        # #1110 wrote the coverage for a malformed marker and found the
+                        # strict read behind it (R3).
+                        stored = read_desktop_marker(path)
+                        marker_cwd = (stored or {}).get("cwd")
+                        if isinstance(marker_cwd, str) and marker_cwd:
+                            return marker_cwd, marker_cwd
+                        # The cold facade restores cwd from the durable canonical
+                        # checkpoint. This fallback is only used by pre-checkpoint
+                        # transcripts, whose historical launch directory is unknown.
+                        from local_operator.session.frontend_state import (
+                            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                        )
 
-                    # A ONE-ROW read, not a ``Transcript(path)``: constructing the
-                    # transcript JSON-decodes the whole journal (2492.9 ms on the
-                    # operator's 261 MB conversation), and this branch runs on
-                    # every bridge creation for a session that carries no
-                    # ``desktop.json`` marker. The reader answers from the tail
-                    # backward and never creates the directory.
-                    checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-                    return (
-                        str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
-                        None,
-                    )
+                        # A ONE-ROW read, not a ``Transcript(path)``: constructing the
+                        # transcript JSON-decodes the whole journal (2059.5 ms on the
+                        # operator's 261 MB conversation — the A/B table in
+                        # ``docs/evidence/session-load-central-cache``), and this branch
+                        # runs on every bridge creation for a session that carries no
+                        # ``desktop.json`` marker. The reader answers from the tail
+                        # backward and never creates the directory.
+                        checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+                        return (
+                            str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
+                            None,
+                        )
 
-                # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
-                # daemon too: that is what lets "the 503 is the LATCH answering" be
-                # read as a control in the evidence rather than as an artefact of
-                # routing. It is also the read that parses the journal when the
-                # session has no marker, so it is SHARED rather than repeated: a
-                # second request for the same cold session awaits this one read
-                # instead of paying a second full parse, and one session therefore
-                # cannot be built twice.
-                flight = self._locate_flight(session_id, locate)
-            else:
-                # Asked on the WARM path too, and that is not redundancy: the cache
-                # is a cache of the same door, so without this a refusal would be
-                # one a client could walk past by never having gone cold.
-                self.assert_admitting()
+                    # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
+                    # daemon too: that is what lets "the 503 is the LATCH answering" be
+                    # read as a control in the evidence rather than as an artefact of
+                    # routing. It is also the read that parses the journal when the
+                    # session has no marker, so it is SHARED rather than repeated: a
+                    # second request for the same cold session awaits this one read
+                    # instead of paying a second full parse, and one session therefore
+                    # cannot be built twice.
+                    flight = self._locate_flight(session_id, locate)
+                else:
+                    # Asked on the WARM path too, and that is not redundancy: the cache
+                    # is a cache of the same door, so without this a refusal would be
+                    # one a client could walk past by never having gone cold.
+                    self.assert_admitting()
             if flight is not None:
                 # THE SLOW HALVES, BOTH OUTSIDE THE POOL LOCK. This is the change
                 # that stops one conversation's open from being every other
