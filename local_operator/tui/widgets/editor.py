@@ -1961,6 +1961,14 @@ class Editor(TextArea):
     #: two-command editor-local exception. Both spellings, because the alias is
     #: itself a runnable command — same reason ``MODEL_COMMANDS`` lists
     #: ``models``.
+    #:
+    #: It mirrors the registry's ``SlashCommand.name_argument`` flag, which is what
+    #: `set_commands` derives ``_name_prompt_commands`` from: the flag exists
+    #: because "has a name slot" and "has a value list" stopped being the same
+    #: question once `/goal` and `/loop` gained a flag row. This tuple stays the
+    #: editor's own vocabulary for the completion and highlight paths, and
+    #: ``test_slash_goal_loop_flags`` pins the two to each other so the mirror
+    #: cannot drift.
     NAME_ARGUMENT_COMMANDS = ("team", "teams", "agent", "agents")
 
     #: The discoverability hint shown the moment a NAME+message name is completed
@@ -2575,13 +2583,16 @@ class Editor(TextArea):
             if command.consumes_prompt
             for name in command.names
         )
-        # Those of the above that also offer a NAME list, so the `$` floor knows
-        # a name slot has to be passed first. Derived from the registry, not
-        # spelled out, so it cannot drift from `NAME_ARGUMENT_COMMANDS`.
+        # Those of the above whose argument list is a NAME slot, so the `$` floor
+        # knows a name has to be passed first. Read from the registry's
+        # ``name_argument`` flag rather than inferred from "has a value list":
+        # `/goal` and `/loop` now offer a flag row too, and neither has a name
+        # slot, so the proxy would have made `/goal $skill` refuse a `$` that
+        # belongs to the goal text the user is writing (see the flag's own note).
         self._name_prompt_commands = frozenset(
             name.lower()
             for command in commands
-            if command.consumes_prompt and command.arguments is not ArgumentMode.NONE
+            if command.consumes_prompt and command.name_argument
             for name in command.names
         )
         # Lower-cased vocabulary (primaries AND aliases), shared by the
@@ -7762,6 +7773,18 @@ class Editor(TextArea):
             return True
         if query.strip().lower() == name.strip().lower():
             return True
+        # A FLAG row is named with its dashes (`--clear`, `--stop`) while the same
+        # action has a BARE spelling these commands have always honoured and
+        # still do (`clear`, `stop`). Spelled either way the user named the
+        # action, so both count as "typed in full" — they are the same word, and
+        # the bare one is what a user most often types. Without this the flag ROW
+        # would have turned `/goal clear` + Enter, one keystroke before the row
+        # existed, into a completion needing a second Enter, i.e. the gate would
+        # have cost the documented bare forms a keystroke instead of only gating
+        # the IMPLICIT one (round 1: the designer's D1 fix, and the two
+        # pre-existing tests its first cut broke).
+        if query.strip().lower().lstrip("-") == name.strip().lower().lstrip("-"):
+            return True
         return not self._argument_is_destructive() and len(self._picker.suggestions()) <= 1
 
     def _argument_is_destructive(self) -> bool:
@@ -8210,15 +8233,21 @@ class Editor(TextArea):
         word, _, typed_argument = command_text[1:].partition(" ")
         word = word.lower()
         if word in self._prompt_commands:
-            # A prompt command with an ARGUMENT LIST (``/team``/``/agent``) and no
+            # A prompt command with a NAME slot (``/team``/``/agent``) and no
             # name chosen yet does not reassemble on the word alone — the name is
             # picked from the autofill first. `_apply_command` already completed
             # the word to ``/team `` and opened that list; leaving it open is the
             # whole interaction. Reassembly happens when the NAME row is chosen
-            # (see :meth:`_resolve_argument`). A prompt command with no list
+            # (see :meth:`_resolve_argument`). A prompt command with no name slot
             # (``/goal``/``/loop``/``/btw``) reassembles now: the draft is its
             # argument directly.
-            if word in self._argument_commands and not typed_argument.strip():
+            #
+            # Asked of the NAME SLOT, not of "has a value list" (the old
+            # `word in self._argument_commands` test, which read the two as the
+            # same thing): `/goal` and `/loop` now open a flag row at the space
+            # and still reassemble on the bare word, because there is no name to
+            # wait for. See :attr:`NAME_ARGUMENT_COMMANDS`.
+            if self._is_name_argument_command(word) and not typed_argument.strip():
                 return
             self._reassemble_prompt_command(token_start, token_end)
             return

@@ -54,6 +54,12 @@ from local_operator.mobile.types import (
     SessionProjection,
     ask_pending_request,
 )
+
+# The `/loop` argument vocabulary, imported rather than spelled out: `--stop` and
+# `--clear` have to mean the same thing in this dispatcher as in the TUI's two
+# handlers, and a second copy of the words is how `--stop` would cancel a loop in
+# one window and start one toward the literal goal `--stop` in another.
+from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
@@ -3832,16 +3838,59 @@ class ServingSessionHandle(SessionHandle):
         if command == "wake":
             return await self._wake_slash(session, args, SlashResult)
         if command == "loop":
+            from local_operator.slash_commands import unknown_flag_refusal
+
             driver = self._loop_driver()
-            if args.lower() in ("stop", "cancel", "abort"):
+            # Strip ONCE, here, mirroring `_goal_slash`: `Command.args` is a plain
+            # `str` on the wire with no strip validator, so a trailing space
+            # arrives verbatim — and every comparison below is a whole-string
+            # match. Unstripped, `/loop --stop ` silently no-opped with `loop_busy`
+            # while the loop kept running, and `/loop --clear ` on an idle driver
+            # STARTED an unbounded goal-mode loop toward the literal goal
+            # `--clear` (round 1, reviewer MAJOR-2). The TUI strips the same
+            # argument before its handler, so leaving this unstripped was also a
+            # host disagreement about what one word means.
+            args = args.strip()
+            if args.lower() in LOOP_STOP_ARGS:
                 await driver.cancel()
+            elif args.lower() in LOOP_CLEAR_ARGS:
+                # Refused while a loop RUNS, and the refusal names the way out.
+                # Clearing a running loop's snapshot would leave the driver
+                # pushing turns with no surface saying so, and silently
+                # cancelling on `--clear` would make an ambiguous word destroy
+                # real work — the two things this branch must not do.
+                #
+                # A code of its own rather than `loop_busy`: that one is the
+                # START refusal (`a loop is already running`). This is a different
+                # condition with a different remedy, and the desktop route maps
+                # BOTH to a 409 (`desktop_sessions.py`, the `loop_running` arm) —
+                # so a client that only reads the status can already tell this
+                # refusal from a success, and the sentence it carries is what
+                # names the remedy `/loop --stop`. Round 2 review, NIT-4: this
+                # paragraph said "rides the ordinary error receipt", which the
+                # 409 mapping added in the same round had made false.
+                if not await driver.clear():
+                    return SlashResult(
+                        kind="error",
+                        text="a loop is running — /loop --stop to stop it first",
+                        data={"code": "loop_running"},
+                    )
             elif args.lower() != "status":
                 if driver.running:
                     return SlashResult(
                         kind="error", text="A loop is already running", data={"code": "loop_busy"}
                     )
+                # A bare `--token` that names no flag: without this the fall-through
+                # starts a paid goal-mode loop toward the literal flag text
+                # (`/loop --stopx`), which is the same defect the TUI refuses on
+                # (round 1, UX U6 / reviewer NIT-5). `loop_invalid` is the mapped
+                # client-error code, so the refusal reaches the caller as a 422
+                # rather than a 200 that only a rendered receipt explains.
+                refusal = unknown_flag_refusal("loop", args)
+                if refusal is not None:
+                    return SlashResult(kind="error", text=refusal, data={"code": "loop_invalid"})
                 try:
-                    driver.start(args.strip(), str(getattr(session, "goal", "")))
+                    driver.start(args, str(getattr(session, "goal", "")))
                 except ValueError as error:
                     return SlashResult(kind="error", text=str(error), data={"code": "loop_invalid"})
             return SlashResult(kind="block", data={"type": "loop", **driver.state})
@@ -3862,6 +3911,13 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        from local_operator.session.goal import (
+            GOAL_CLEAR_ARGS,
+            MAX_GOAL_CHARS,
+            cleared_goal_receipt,
+        )
+        from local_operator.slash_commands import unknown_flag_refusal
+
         arg = arg.strip()
         if not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
@@ -3869,13 +3925,25 @@ class ServingSessionHandle(SessionHandle):
             current = getattr(session, "goal", "")
             text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
             return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in ("clear", "none", "reset"):
+        # The clear forms are matched as the WHOLE argument, so `--clear` can
+        # never be stored as the goal body: nothing below runs for it, and no
+        # turn is started (`goal_set` is what the viewer submits).
+        if arg.lower() in GOAL_CLEAR_ARGS:
+            # Name what went: the receipt is rendered by a viewer that may have no
+            # other way to see the goal (design D4/U3), so the echo is built by
+            # the same shared helper every other host uses.
+            receipt = cleared_goal_receipt(session.goal)
             session.set_goal("")
             self._notify()
-            return SlashResult(kind="notice", text="goal cleared", style="info")
+            return SlashResult(kind="notice", text=receipt, style="info")
+        refusal = unknown_flag_refusal("goal", arg)
+        if refusal is not None:
+            # One refusal string for every host: a runtime that stored `--stop` as
+            # the goal while the TUI refused it is the host-disagreement class the
+            # shared vocabularies in this module exist to remove (UX U6).
+            return SlashResult(kind="notice", text=refusal, style="warning")
         stored = session.set_goal(arg)
         self._notify()
-        from local_operator.session.goal import MAX_GOAL_CHARS
 
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
