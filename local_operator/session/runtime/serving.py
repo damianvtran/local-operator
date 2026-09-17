@@ -3850,10 +3850,14 @@ class ServingSessionHandle(SessionHandle):
                 # real work — the two things this branch must not do.
                 #
                 # A code of its own rather than `loop_busy`: that one is the
-                # START refusal (`a loop is already running`), and the desktop
-                # route turns it into a 409. This is a different condition with a
-                # different remedy, so it rides the ordinary error receipt and
-                # the renderer shows the sentence that names `/loop --stop`.
+                # START refusal (`a loop is already running`). This is a different
+                # condition with a different remedy, and the desktop route maps
+                # BOTH to a 409 (`desktop_sessions.py`, the `loop_running` arm) —
+                # so a client that only reads the status can already tell this
+                # refusal from a success, and the sentence it carries is what
+                # names the remedy `/loop --stop`. Round 2 review, NIT-4: this
+                # paragraph said "rides the ordinary error receipt", which the
+                # 409 mapping added in the same round had made false.
                 if not await driver.clear():
                     return SlashResult(
                         kind="error",

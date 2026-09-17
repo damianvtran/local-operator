@@ -359,8 +359,13 @@ async def test_a_trailing_space_does_not_turn_a_flag_into_a_loop_start(arg: str)
 @pytest.mark.parametrize(
     ("command", "arg", "supported"),
     [
-        ("goal", "--stop", "/goal --clear"),
-        ("goal", "--cli", "/goal <text> sets a goal"),
+        # The `supported` cell pins the form the refusal TEACHES, which is the
+        # flag spelled in its own command form. The goal pair asserts the verb
+        # too (`clears it`), because that is the property round 2's D5/U7/NIT-5
+        # turned on and the old loose prefix ("sets a goal") passed while the
+        # sentence still said "unsets it".
+        ("goal", "--stop", "/goal --clear clears it"),
+        ("goal", "--cli", "/goal <text> sets it"),
         ("loop", "--clearx", "/loop <n> runs n turns"),
         ("loop", "--stopx", "/loop --stop cancels"),
     ],

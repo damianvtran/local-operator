@@ -41,12 +41,24 @@ GOAL_CLEAR_ARGS = frozenset({"clear", "none", "reset", "--clear"})
 #: How much of a cleared goal the receipt echoes.
 #:
 #: ``MAX_GOAL_CHARS`` is a spec-sized bound no single receipt should carry: the
-#: echo exists so a mistaken clear is visible and can be retyped by eye, and a
-#: goal longer than a terminal row defeats exactly that. 96 is the same bound the
-#: ``goal restored`` notice already clips to, so the two lines the app prints
-#: about the same value read alike. Characters rather than cells because this
-#: module is the shared, non-UI half of the app — the surfaces that paint the
-#: string own its cell clipping.
+#: echo exists so a mistaken clear is visible and can be retyped by eye, and an
+#: echo long enough to bury the transcript defeats exactly that. 96 is the same
+#: bound the ``goal restored`` notice already clips to, so the two lines the app
+#: prints about the same value read alike.
+#:
+#: CHARACTERS, not cells, because this module is the shared, non-UI half of the
+#: app and the surfaces that paint the string own its cell clipping. The two
+#: bounds are not the same number and it is worth knowing which one is quoted
+#: here: the 14-cell ``goal cleared: `` prefix plus 96 ASCII characters plus the
+#: clip's ``…`` is 111 cells, and the same 96 characters in CJK glyphs is 207.
+#: So a maximum-length receipt WRAPS, and that is intended: measured as a
+#: painted notice, a 96-character goal with no spaces fills 3 rows at both 80 and
+#: 100 columns (Rich drops the unbreakable word to its own rows) and its CJK twin
+#: fills 4 — the continuation indents under the text column and reads as one
+#: notice, which is how a long objective stays legible at all. What the clip
+#: guarantees is a bounded length and one LOGICAL line. This comment and the
+#: helper below used to claim a single terminal ROW, which the code has never
+#: held (round 2: reviewer NIT-6, UX U8).
 CLEARED_GOAL_ECHO_CHARS = 96
 
 
@@ -59,8 +71,12 @@ def cleared_goal_receipt(cleared: str) -> str:
     mistaken clear took away and type it back, which is why it names the goal
     rather than reporting the event (design D4 / UX U3, round 1).
 
-    Flattened to ONE line: a receipt is a single terminal row, and a goal is
-    free text a user may have pasted newlines into.
+    Flattened to ONE line — one LOGICAL line, which is all the flattening
+    promises: a goal is free text a user may have pasted newlines into, and a
+    multi-row payload dump in the transcript is what that must not become. The
+    clip below is a CHARACTER bound, so a long receipt does wrap onto more than
+    one painted row; :data:`CLEARED_GOAL_ECHO_CHARS` carries the measurements
+    and why it is characters rather than cells.
     """
     text = " ".join((cleared or "").split())
     if not text:
