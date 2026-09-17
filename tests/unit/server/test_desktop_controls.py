@@ -220,6 +220,114 @@ def _dependency_names(route: APIRoute) -> set[str]:
     return found
 
 
+def _control_surface_routes() -> list[tuple[str, frozenset[str]]]:
+    """Every route the tenant's CONTROL-SURFACE routers publish, templates included.
+
+    The same walk the gate uses for the prefix families, applied to the routers
+    themselves. That is the point of it: a route can be published by one of these
+    modules and still sit outside every gated prefix -- the hyphen in
+    ``/v1/agent-name-availability`` is not a segment boundary, so the prefix test
+    never saw it -- and the prefix-scoped test above cannot fail for a route it
+    never enumerates.
+    """
+    from local_operator.server.app import _iter_routes
+    from local_operator.server.routes import agents as agents_module
+    from local_operator.server.routes import jobs as jobs_module
+    from local_operator.server.routes import schedules as schedules_module
+
+    routes: list[tuple[str, frozenset[str]]] = []
+    for router in (agents_module.router, jobs_module.router, schedules_module.router):
+        routes.extend(_iter_routes(router.routes))
+    return routes
+
+
+def test_managed_gate_covers_every_control_surface_route() -> None:
+    """Every route the agents/jobs/schedules ROUTERS publish is gated, or excused.
+
+    The prefix families are covered by the test above; this one covers the same
+    modules' routes that fall OUTSIDE those prefixes, which is how
+    ``/v1/agent-name-availability`` shipped ungated while the file's
+    deny-by-default comment said a new route could not. A route published by one
+    of these three modules is the tenant's data, its agent inventory or an egress
+    this machine makes on a caller's behalf, so the gate must see it or a reviewer
+    must write down why it does not.
+    """
+    from local_operator.server.app import _LEGACY_GATE_EXCEPTIONS, _legacy_desktop_gated
+
+    routes = _control_surface_routes()
+    # Guards the walk itself: an empty router list would pass vacuously.
+    assert len(routes) >= 15, f"the search found only {len(routes)} routes; the walk is wrong"
+
+    sample = {
+        "{agent_id}": "11111111-2222-3333-4444-555555555555",
+        "{job_id}": "job-1",
+        "{schedule_id}": "schedule-1",
+        "{variable_key}": "some-key",
+    }
+    ungated: list[str] = []
+    for path, methods in routes:
+        concrete = path
+        for token, value in sample.items():
+            concrete = concrete.replace(token, value)
+        for method in methods:
+            key = f"{method} {path}"
+            if not _legacy_desktop_gated(concrete, method) and key not in _LEGACY_GATE_EXCEPTIONS:
+                ungated.append(key)
+
+    assert not ungated, (
+        "these routes of the control-surface routers answer without the desktop "
+        "bearer in managed mode:\n  "
+        + "\n  ".join(sorted(ungated))
+        + "\nGate them (add the path to `_LEGACY_CONTROL_PATHS` when it is a flat "
+        "singleton), or add an entry to `_LEGACY_GATE_EXCEPTIONS` stating why the "
+        "route is safe to leave open."
+    )
+
+
+def test_managed_gate_control_paths_are_live_and_gated_on_every_method() -> None:
+    """Every ``_LEGACY_CONTROL_PATHS`` entry names a live route and is gated.
+
+    The exception list has a staleness check; the singleton set had none, and an
+    entry that rots (a route renamed away, a typo) would leave the boundary
+    quietly wider than the comment claims. Gating is asserted for every method,
+    because that set is method-agnostic on purpose: a control path does not become
+    safe by being reached with a verb its route happens not to register.
+    """
+    from local_operator.server.app import (
+        _LEGACY_CONTROL_PATHS,
+        _iter_routes,
+        _legacy_desktop_gated,
+    )
+    from local_operator.server.app import app as application
+
+    live = {path for path, _methods in _iter_routes(application.routes)}
+    stale = sorted(path for path in _LEGACY_CONTROL_PATHS if path not in live)
+
+    assert not stale, f"control-path entries name routes that do not exist: {stale}"
+    for path in sorted(_LEGACY_CONTROL_PATHS):
+        for method in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"):
+            assert _legacy_desktop_gated(path, method), f"{method} {path} is not gated"
+
+
+async def test_agent_name_availability_requires_the_desktop_bearer(desktop) -> None:
+    """The availability route is behind the boundary, not beside it.
+
+    Read-only, credential-free and hub-side, but it is EGRESS this machine makes
+    when a page asks it to, on an app whose CORS policy allows every origin, so an
+    unauthenticated caller must not be able to drive it. The request is refused by
+    the middleware, before any hub client is built -- which is why this test needs
+    no stub: nothing outbound happens.
+    """
+    client, _ = desktop
+
+    gated = await client.get(
+        "/v1/agent-name-availability?name=coder", headers={"Authorization": ""}
+    )
+
+    assert gated.status_code == 401
+    assert gated.json()["detail"] == "Desktop authorization is required."
+
+
 def test_managed_gate_covers_every_desktop_route() -> None:
     """Every ``/v1/desktop/*`` route carries ``require_desktop``, but one.
 
