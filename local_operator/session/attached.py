@@ -3552,11 +3552,13 @@ class AttachedSession:
     async def _await_late_sync(self, pending_sync: asyncio.Future[FrontendSync]) -> None:
         """Adopt a retained dial's sync if it lands, or give the socket back.
 
-        Mirrors :meth:`_bind_to`'s tail exactly, because a late sync is not a
-        second kind of attachment: the state has to be installed, the durable
-        history cut loaded, and the rollover published (`publish=True`), which is
-        the frame the renderer consumes to move from ``cold``/``attaching`` to a
-        live paint.
+        Mirrors :meth:`_bind_to`'s tail, because a late sync is not a second kind
+        of attachment: the state has to be installed, the durable history cut
+        loaded, and the rollover published — the frame the renderer consumes to
+        move from ``cold``/``attaching`` to a live paint. The publish is ordered
+        AFTER ``_finish_sync`` rather than riding ``_install_frontend`` the way
+        an ordinary bind's does, so that frame cannot announce a live state the
+        facade would still report itself cold in.
 
         The deadline is not optional. An attach socket is a RESIDENCY term of the
         runtime's own exit predicate, so a viewer that will never get its sync —
