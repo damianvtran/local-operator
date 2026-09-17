@@ -21,6 +21,11 @@ from local_operator.mobile.tui_handle import (
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
+#: The generated formatter fixture, one directory up from the bundle it pins.
+FORMATTER_PARITY = (
+    Path(__file__).resolve().parents[3] / "local_operator/mobile/web/src/lib/format.parity.json"
+)
+
 
 @pytest.mark.asyncio
 async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
@@ -350,3 +355,29 @@ async def test_the_attach_seeds_a_live_calls_duration_from_the_owner() -> None:
     assert row.elapsed_s == pytest.approx(
         180.0, abs=2.0
     ), "a call that began before the phone attached must not be measured from the attach"
+
+
+def test_the_phone_formatter_fixture_still_matches_the_tuis_formatter() -> None:
+    """The other half of the formatter bridge (review round 2, MINOR 4).
+
+    `local_operator/mobile/web/src/lib/format.ts::formatElapsed` is a port of
+    `tui/widgets/tool_card.py::format_duration`, and the phone's band, its tool
+    rows and its subagent rows all print its output. The two are pinned by ONE
+    generated artifact — `local_operator/mobile/web/src/lib/format.parity.json`,
+    written by `scripts/generate_clock_format_parity.py` — which the vitest suite
+    asserts `formatElapsed` against and this test asserts `format_duration`
+    against. So a change to either formatter fails a suite in its own tree, and
+    re-aligning them means regenerating the fixture and then making the other
+    side agree; neither can drift in silence while both suites stay green.
+
+    The fixture lives under the web bundle on purpose: that path is the
+    mobile-web workflow's own filter, so regenerating it is what makes the vitest
+    half run in CI.
+    """
+    from local_operator.tui.widgets.tool_card import format_duration
+
+    fixture = json.loads(FORMATTER_PARITY.read_text())
+    cases = fixture["cases"]
+    assert len(cases) > 40, "the fixture must keep covering every branch and crossing"
+    for seconds, expected in cases:
+        assert format_duration(float(seconds)) == expected, seconds
