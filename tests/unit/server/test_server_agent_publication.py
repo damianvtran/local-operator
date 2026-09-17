@@ -216,6 +216,35 @@ async def test_publish_body_carries_the_instruction_set_and_nothing_else(
 
 
 @pytest.mark.asyncio
+async def test_publish_sends_a_spaced_name_rather_than_refusing_it(
+    test_app_client, dummy_registry: AgentRegistry
+) -> None:
+    """A name with ordinary spaces is the hub's to accept or normalise.
+
+    agents the user publishes can be named the way they read ("Product Manager"),
+    and the hub is the authority on the stored spelling. Refusing it here would be
+    a client bound stricter than the server — the one direction the contract calls
+    a bug report — so the override reaches the document untouched.
+    """
+    agent = _new_agent(dummy_registry)
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.return_value = {
+            "agent_id": "hub-9",
+            "name": "Product Manager",
+        }
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish",
+            json={"document": {"name": "  Product  Manager  "}},
+        )
+
+    assert response.status_code == 200, response.text
+    document = mock_client.return_value.publish_agent_instruction_set.call_args.args[0]
+    assert document["name"] == "Product  Manager"
+
+
+@pytest.mark.asyncio
 async def test_publish_returns_the_hub_result(test_app_client, dummy_registry: AgentRegistry):
     """A published agent's identity comes from the hub, not from the request."""
     agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
@@ -400,6 +429,10 @@ async def test_publish_local_failure_is_a_local_500(
     "code,status,details",
     [
         ("name_taken", 409, {"existing_agent_id": "hub-9", "owned_by_caller": False}),
+        # The ninth code, and the one whose next step differs from name_taken's:
+        # no row holds the name, a concurrent write does, and the caller retries.
+        # `retryable` is what says so mechanically.
+        ("name_claim_in_flight", 409, {"owned_by_caller": False, "retryable": True}),
         ("name_reserved_builtin", 409, {"builtin_name": "reviewer"}),
         ("moderation_rejected", 422, {"categories": ["fraud_or_deception"]}),
         ("invalid_instruction_set", 422, {"field": "kind"}),

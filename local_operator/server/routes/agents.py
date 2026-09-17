@@ -637,11 +637,20 @@ async def download_agent_from_radient(
 #: surface switches on (contract §2.4, §6.2). The hub's own status travels through
 #: unchanged; these are the fallback when a code arrives without one, and they are
 #: the mapping the tests pin per code.
+#:
+#: ``name_claim_in_flight`` is the ninth code and the newest (agent-server #31): no
+#: row holds the name, but a concurrent write holds it transiently. It is a 409
+#: like ``name_taken`` and it needs a different next step — the caller RETRIES,
+#: where a taken name is answered by choosing another — which is why the hub gives
+#: it a code of its own and carries ``details.retryable``. It is listed here so the
+#: status is right even if a hub ever sends it without one; the payload itself is
+#: passed through untouched, which is what tells the renderer what to do.
 PUBLICATION_STATUS_BY_CODE: Dict[str, int] = {
     "invalid_instruction_set": 422,
     "moderation_rejected": 422,
     "payload_too_large": 413,
     "name_taken": 409,
+    "name_claim_in_flight": 409,
     "name_reserved_builtin": 409,
     "not_owner": 403,
     "agent_not_found": 404,
