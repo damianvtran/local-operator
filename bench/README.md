@@ -360,3 +360,115 @@ What the rows say, in order:
   calmer windows), and two of the five blocks cannot overlap anyway because
   `process` and `agents` are built from the sessions block's output. That is why
   the read is still serial.
+## analytics-rollup-before.json / analytics-rollup-after.json
+
+Two reads, each with its own before/after: the `/analytics` aggregate
+(`AnalyticsStore.aggregate()`, the read `/v1/desktop/analytics` makes for the
+panel and the TUI makes for its tables) and the `/session` report
+(`AnalyticsStore.session_report`, the read behind
+`/v1/desktop/sessions/{id}/report`). `scripts/bench_panel_latency.py` calls the
+store exactly as those routes do, against a **copy** of the operator's live
+ledger, and records which path each arm took, so a "fast" number cannot come
+from the wrong code. It also re-checks the `/session` equivalence against the
+frozen pre-change statements and records the result in the JSON.
+
+```sh
+PYTHONPATH=. .venv/bin/python scripts/bench_panel_latency.py \
+  --ledger ~/.local-operator/analytics.db --label after --json out.json
+```
+
+Both JSONs come from that one command against the *same* snapshot copy
+(`/tmp/bench-live/analytics.db`, 342.8 MB, 1,155,845 calls, 7,241 sessions,
+2026-08-22 → 2026-09-16): `before` from a worktree at `f8111eecc`, `after` from
+the change's worktree, sequentially in ONE session on a 14-core host under a
+heavy RAM hold — recorded load **280 / 246 / 221** before and **227 / 234 / 215**
+after (`host.loadavg` in each file).
+
+**Both arms MUST come from one session, and this is not a nicety.** CPU is more
+portable than wall but it is not immune to this host's memory pressure: the SAME
+fast path measured **121 ms of CPU at load 38** and **166 ms at load 237**, a 37 %
+swing with no code change, because page-fault work is charged to the thread. So
+the committed pair is meaningful only read as a pair, with its load; quoting one
+arm from one session against the other from another is how the earlier pair at
+load 34-42 became misleading, and both it and the load 334-463 pair in the PR
+thread are superseded by this one. The `min` of a sample set is the
+least-contended estimate of the real cost, wall is inflated by load, and both are
+reported beside the CPU everywhere.
+
+### `/analytics`: raw ledger → maintained day rollup
+
+| arm (1.16 M calls, 342.8 MB) | before: raw ledger | after: rollup | ratio |
+| --- | --- | --- | --- |
+| panel's 30-day window, wall p50 | 4,868 ms | **187 ms** | 26x |
+| panel's 30-day window, CPU p50 | 3,179 ms | **166 ms** | 19x |
+| TUI all-time (no bounds), wall p50 | 2,634 ms | **168 ms** | 16x |
+| TUI all-time, CPU p50 | 2,178 ms | **146 ms** | 15x |
+| last 7 days, wall p50 / CPU p50 | 2,360 / 1,662 ms | **141 / 117 ms** | 17x / 14x |
+| **first** read of a fresh copy (cold stand-in) | 2,764 ms / 2,134 ms CPU | **247 ms / 176 ms CPU** | 11x / 12x |
+| route payload (`asdict` + `json.dumps`, 3.74 MB) | 37.2 ms CPU | 52.4 ms CPU | — |
+| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.07 / 0.22 / 0.49 ms (ledger + calendar rollups) | 0.12 / 0.35 / 0.71 ms (with the session rollup) | +0.05 / +0.13 / +0.22 ms |
+| backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 27 days, 2,206 ms wall / 1,789 ms CPU (9,060 buckets) | 64 ms/day p50 |
+| per-day verify pass (the R3 fix) | n/a | **66.5 ms** over 27 labels, ~2.5 ms/label | once per launch |
+
+Reading it:
+
+- **The windowed read is the more expensive shape, and it is the one the panel
+  asks for.** A bounded window makes SQLite use `idx_calls_ts` for random table
+  lookups where the unbounded query falls back to a sequential scan, so the panel
+  (day-aligned bounds) used to be *slower* than the TUI (no bounds) despite
+  touching the same rows. Both now come from the rollup, because both real
+  callers are day-aligned or unbounded — which is exactly the assumption the gate
+  enforces.
+- **The first-touch row is what a warm A/B cannot see.** A fresh copy each run is
+  the stand-in for an evicted page cache (`sudo purge` is unavailable here), and
+  the durable part of the claim is bytes touched: 1.1 MB of buckets against
+  ~300 MB of table and index. 6.1 s → 407 ms is the difference between a panel
+  that looks broken on a cold morning and one that does not.
+- **The write row is an interleaved A/B inside one interpreter**, so host drift
+  lands on both arms: the control is the same `record_batch` transaction with the
+  new upsert disabled, which is precisely what the parent tree runs. The cost is
+  +0.08 to +0.20 ms of CPU per batch on the recorder's background thread — none of
+  it on a session's event loop. (The after arm's `p99` deltas are negative at the
+  larger batch sizes, which is the honest shape of a sub-millisecond difference:
+  the measurement is at the resolution of the timer.)
+- **The sweep is the upgrade path, not the steady state**: once per launch, on
+  the store-maintenance thread, newest-first, one bounded transaction per day,
+  and a read touching a day it has not reached is answered by the ledger (the
+  before column) rather than by a partial total.
+
+### `/session`: five scans of a session's rows → two
+
+The report's fields come from three statements now, not nine: one flat totals
+scan that also carries the timing summaries and the missing/unknown/span
+figures, ONE combined `GROUP BY purpose, outcome, provider, model_id` that the
+three breakdowns are re-derived from by integer addition, and the recent-rows
+tail. Measured on the three busiest real sessions:
+
+| session | calls | before wall p50 | after wall p50 | before CPU p50 | after CPU p50 |
+| --- | --- | --- | --- | --- | --- |
+| `835fbcafdc27` | 27,974 | 604 ms | **210 ms** | 272.3 ms | **150.6 ms** |
+| `29435655756c` | 25,445 | 374 ms | **213 ms** | 152.5 ms | **90.7 ms** |
+| `13669a0d7af1` | 21,927 | 252 ms | **196 ms** | 123.3 ms | **73.9 ms** |
+
+- **Equivalence is recorded, not asserted in prose**: the JSON carries
+  `session_report_equivalence` — `{"equal": true, "fields": 15}` for each of the
+  three sessions — produced by running the frozen pre-change statements against
+  the same copy and comparing `dataclasses.asdict` field for field. The unit
+  suite runs the same oracle on synthetic edges (two providers in one session, a
+  purpose under two outcomes, absent timing samples, an older ledger with none of
+  the optional columns) and on the operator's ledger when it is readable.
+- **The largest session is the worst case that exists on this ledger.** QA
+  measured it end to end through the app at load ~400 as 1.69 s for the
+  27,969-call session (0.79 s and 0.98 s for the next two), with the app's own
+  share at 31-55 ms — i.e. that panel's latency was this read. It now costs
+  ~139 ms of CPU (165 ms wall at load ~38, 788 ms wall at load ~400), so it is
+  inside the one-second target at both loads.
+- **The `/session` cut is smaller than the `/analytics` one on purpose.** The
+  read had nine statements over a session's own rows and now has three; the two
+  that remain heavy are the subtree walk (`_descendant_usage`) and the recent-rows
+  tail, and folding the subtree walk's two per-level statements into one was
+  measured as a wash — only an index on the parent-edge expression changes it,
+  at ~30 MB and a first-open build, which is not this change.
+- **Nothing here is a test assertion.** The suite asserts which path ran and
+  which fields agree, never a duration (AGENTS.md §Timing); these files are where
+  a duration is a measurement.
