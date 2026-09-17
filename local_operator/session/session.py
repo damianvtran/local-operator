@@ -6511,6 +6511,20 @@ class Session:
         The ``cut_off``/``cut_off_cause`` fields ride along so a NEW viewer can
         name the cause precisely without re-deriving it from the vocabulary.
 
+        THE EVENT MUST SAY IT WAS ABORTED. A run that reports itself as ended
+        normally cannot have been cut off by the exit that is unwinding right
+        now, and the note is armed for a TURN rather than for a run: the latches
+        that commit a runtime to leaving run while the session may still be
+        working, so an armed cause can outlive the run it was meant for. The
+        guard is ``aborted``, which every involuntary end carries — the loop's
+        own abort and the teardown's synthesised one
+        (``Session.dispose``) both set it — and a normally-completed end keeps
+        its ``aborted=False`` and is left exactly as it was. Without it a
+        completed turn's outcome was rewritten to an error the moment any
+        retirement latch had run, which is how a backend update put a
+        "Stopped with an error" row under a turn that had finished
+        (2026-09-17; the durable error rows live in ``attention.db``).
+
         A turn that ALREADY ended with a real provider/tool error is left alone:
         that error is a more specific diagnosis than "the runtime went away",
         and overwriting it would throw away the only text that names the actual
@@ -6526,6 +6540,8 @@ class Session:
         """
         cause = self._cut_off_cause
         if not cause:
+            return event
+        if not event.aborted:
             return event
         if event.error:
             return event
@@ -13164,14 +13180,26 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
-        # In-process disposal is a cut-off for whatever turn is running: this
+        # In-process disposal is a cut-off for whatever turn is RUNNING: this
         # path is reached by a host tearing a session down directly (the
         # runtime's own handle disposes through ``ServingSessionHandle``, which
-        # notes its more specific cause FIRST, and first-wins keeps that one).
-        # Harmless when nothing is in flight — the cause is consumed only by the
-        # running turn's end event — and suppressed outright after a deliberate
-        # stop, so a user's own cancel is never relabelled.
-        self.note_cut_off("disposed")
+        # notes its more specific cause FIRST, and first-wins keeps that one),
+        # and suppressed outright after a deliberate stop, so a user's own
+        # cancel is never relabelled.
+        #
+        # A TURN MUST ACTUALLY BE RUNNING, and the evidence is the same one the
+        # abort below keys on: a live ``_turn_task``. The note used to be written
+        # unconditionally on the grounds that it is "consumed only by the running
+        # turn's end event" and therefore harmless when nothing is in flight —
+        # which is exactly what stops being true when a run is left UNSETTLED:
+        # the synthesis further down fabricates an end for it, so an unconditional
+        # note branded a run whose turn had already ended. Measured on the
+        # reporting host as durable ``error`` rows against runs whose last turn
+        # row preceded them by minutes (six with the retirement label, more with
+        # this one), each rendered as a cut-off of work that had finished
+        # (2026-09-17).
+        if self._turn_task is not None and not self._turn_task.done():
+            self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
