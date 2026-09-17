@@ -373,7 +373,17 @@ def backfill_analytics_session_daily(
     day, contiguous from the newest end, so an interrupted pass leaves a
     consistent table and a monotone frontier, and the next launch resumes at the
     same place. A crash mid-transaction rolls that day back entirely (one day,
-    one transaction).
+    one transaction). An interrupted ZONE re-label is inert by construction: the
+    new zone is published only by a pass that re-labelled the whole span, so a
+    partial one leaves the old zone recorded and every read on the ledger path —
+    the next launch redoes it.
+
+    WHAT IT ALSO HEALS (review R3): a ``lop`` still running the pre-rollup binary
+    stamps ``ts_ms`` when it records, so the rows it adds without maintaining the
+    rollup can only land on days from the previous pass's top onward. The pass
+    therefore re-derives from that top rather than from a fixed newest-three, so
+    a stale writer's hole is repaired on the next launch instead of being served
+    as exact for the life of the table.
 
     Best-effort in the strongest sense, like every other maintenance pass: it
     may fail in any way at all without disturbing the session that triggered it.
@@ -392,13 +402,14 @@ def backfill_analytics_session_daily(
     store = store if store is not None else AnalyticsStore(db_path)
     try:
         try:
-            days = store.session_daily_worklist(max_days=max_days)
+            plan = store.session_daily_worklist(max_days=max_days)
         except Exception:  # noqa: BLE001 — an unreadable store is a no-op sweep
             logger.debug("analytics: could not read the rollup worklist", exc_info=True)
             return 0
+        rebucket = plan.mode == "rebucket"
         derived = 0
-        for day in days:
-            written = store.rederive_session_daily_day(day)
+        for day in plan.days:
+            written = store.rederive_session_daily_day(day, rebucket=rebucket)
             if written is None:
                 # A failed day STOPS the walk rather than skipping it: the
                 # watermark is "every day at or after this is complete", and
@@ -406,7 +417,43 @@ def backfill_analytics_session_daily(
                 # one. Next launch resumes here.
                 break
             derived += 1
-        return derived
+        if rebucket:
+            # Publish the new zone ONLY if this pass re-labelled the entire span
+            # the worklist handed us. A short pass (a failure above) leaves the
+            # recorded zone untouched, so the gate keeps refusing and the next
+            # launch starts over — never a table holding two zones while the meta
+            # names one.
+            if plan.days and derived == len(plan.days):
+                store.commit_session_daily_rebucket(oldest_day=plan.days[-1])
+            return derived
+        if plan.days and derived >= plan.recent_count:
+            # The recent window — the whole range a stale writer could have added
+            # to since the previous pass — was derived in full, so the next pass
+            # may start from this top. A pass that did not get through it must
+            # leave the old frontier, or the days it skipped would never be
+            # looked at again.
+            try:
+                store.mark_session_daily_swept(plan.days[0])
+            except Exception:  # noqa: BLE001 — a lost frontier costs a re-derive
+                logger.debug("analytics: could not record the sweep frontier", exc_info=True)
+        # THE VERIFY HALF. The walk above never looks back at a day it has already
+        # swept, and a pre-rollup writer's rows can land in exactly such a day,
+        # where the newest-row tail check cannot see them — that hole was served
+        # as exact, permanently. Comparing each day's bucket total against the
+        # ledger's row count finds it wherever it is and re-deriving removes it,
+        # so the gate's refusal lasts until the next launch instead of forever.
+        # Budgeted from what the walk above left, so one pass stays one pass.
+        healed = 0
+        try:
+            for day in store.session_daily_mismatched_days(max_days=max(0, max_days - derived)):
+                if store.rederive_session_daily_day(day) is None:
+                    break
+                healed += 1
+            if healed:
+                logger.debug("analytics: session_daily repaired %s day(s)", healed)
+        except Exception:  # noqa: BLE001 — a verify pass that cannot run heals nothing
+            logger.debug("analytics: session_daily verify pass failed", exc_info=True)
+        return derived + healed
     finally:
         if owned:
             store.close()

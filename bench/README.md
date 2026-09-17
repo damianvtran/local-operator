@@ -380,25 +380,29 @@ PYTHONPATH=. .venv/bin/python scripts/bench_panel_latency.py \
 Both JSONs come from that one command against the *same* snapshot copy
 (`/tmp/bench-live/analytics.db`, 342.8 MB, 1,155,845 calls, 7,241 sessions,
 2026-08-22 → 2026-09-16): `before` from a worktree at `f8111eecc`, `after` from
-the change's worktree, sequentially, on a 14-core host at load **334-463** from
-sibling agent worktrees. Wall time is inflated by that load and moves 2-3x
-between runs of the same code; **CPU is the portable column**, the `min` of a
-sample set is the least-contended estimate of the real cost, and both are
-reported beside the wall everywhere.
+the change's worktree, sequentially, on a 14-core host under a heavy RAM hold —
+recorded load **33.5-42.2** before and **37.8-44.5** after (`host.loadavg` in
+each file), which is why this pair is the committed one: the arms have to be
+measured at comparable load or the table is a comparison of the machine, not the
+code. An earlier pair taken at load 334-463 exists in the PR thread and is
+superseded. Wall time still moves 2-3x between runs of the same code at the same
+load; **CPU is the portable column**, the `min` of a sample set is the
+least-contended estimate of the real cost, and both are reported beside the wall
+everywhere.
 
 ### `/analytics`: raw ledger → maintained day rollup
 
 | arm (1.16 M calls, 342.8 MB) | before: raw ledger | after: rollup | ratio |
 | --- | --- | --- | --- |
-| panel's 30-day window, wall p50 | 14,857 ms | **611 ms** | 24x |
-| panel's 30-day window, CPU p50 | 3,014 ms | **110 ms** | 27x |
-| TUI all-time (no bounds), wall p50 | 8,976 ms | **375 ms** | 24x |
-| TUI all-time, CPU p50 | 2,069 ms | **105 ms** | 20x |
-| last 7 days, wall p50 / CPU p50 | 7,039 / 1,446 ms | **418 / 91 ms** | 17x / 16x |
-| **first** read of a fresh copy (cold stand-in) | 6,061 ms / 2,011 ms CPU | **407 ms / 108 ms CPU** | 15x / 19x |
-| route payload (`asdict` + `json.dumps`, 3.74 MB) | 42.1 ms CPU | 59.3 ms CPU | — |
-| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.14 / 0.18 / 0.55 ms | 0.14 / 0.37 / 0.70 ms | +0.00 / +0.19 / +0.19 ms |
-| backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 26 days, 6,753 ms wall / 1,651 ms CPU (9,060 buckets) | 156 ms/day p50 |
+| panel's 30-day window, wall p50 | 6,166 ms | **123 ms** | 50x |
+| panel's 30-day window, CPU p50 | 3,191 ms | **121 ms** | 26x |
+| TUI all-time (no bounds), wall p50 | 1,755 ms | **116 ms** | 15x |
+| TUI all-time, CPU p50 | 1,680 ms | **114 ms** | 15x |
+| last 7 days, wall p50 / CPU p50 | 2,506 / 1,596 ms | **90 / 88 ms** | 28x / 18x |
+| **first** read of a fresh copy (cold stand-in) | 1,802 ms / 1,705 ms CPU | **111 ms / 110 ms CPU** | 16x / 15x |
+| route payload (`asdict` + `json.dumps`, 3.74 MB) | 37.2 ms CPU | 52.4 ms CPU | — |
+| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.17 / 0.38 / 0.63 ms | 0.20 / 0.29 / 0.48 ms (+session_daily 0.28 / 0.49 / 0.68) | +0.08 / +0.20 / +0.20 ms |
+| backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 26 days, 2,142 ms wall / 1,740 ms CPU (9,060 buckets) | 70 ms/day p50 |
 
 Reading it:
 
@@ -417,8 +421,10 @@ Reading it:
 - **The write row is an interleaved A/B inside one interpreter**, so host drift
   lands on both arms: the control is the same `record_batch` transaction with the
   new upsert disabled, which is precisely what the parent tree runs. The cost is
-  +0.19 ms of CPU per batch on the recorder's background thread — none of it on a
-  session's event loop.
+  +0.08 to +0.20 ms of CPU per batch on the recorder's background thread — none of
+  it on a session's event loop. (The after arm's `p99` deltas are negative at the
+  larger batch sizes, which is the honest shape of a sub-millisecond difference:
+  the measurement is at the resolution of the timer.)
 - **The sweep is the upgrade path, not the steady state**: once per launch, on
   the store-maintenance thread, newest-first, one bounded transaction per day,
   and a read touching a day it has not reached is answered by the ledger (the
@@ -434,9 +440,9 @@ tail. Measured on the three busiest real sessions:
 
 | session | calls | before wall p50 (min) | after wall p50 (min) | before CPU p50 | after CPU p50 |
 | --- | --- | --- | --- | --- | --- |
-| `835fbcafdc27` | 27,974 | 1,043 ms (465) | **788 ms (235)** | 238.4 ms | **152.4 ms** |
-| `29435655756c` | 25,445 | 352 ms (179) | **238 ms (86)** | 133.5 ms | **79.6 ms** |
-| `13669a0d7af1` | 21,927 | 308 ms (162) | **103 ms (90)** | 108.5 ms | **67.9 ms** |
+| `835fbcafdc27` | 27,974 | 212 ms (203 in min run) | **165 ms (139)** | 203.0 ms | **139.2 ms** |
+| `29435655756c` | 25,445 | 127 ms (117) | **87 ms (78)** | 117.5 ms | **77.7 ms** |
+| `13669a0d7af1` | 21,927 | 94 ms (92) | **73 ms (67)** | 92.2 ms | **67.3 ms** |
 
 - **Equivalence is recorded, not asserted in prose**: the JSON carries
   `session_report_equivalence` — `{"equal": true, "fields": 15}` for each of the
@@ -445,10 +451,18 @@ tail. Measured on the three busiest real sessions:
   suite runs the same oracle on synthetic edges (two providers in one session, a
   purpose under two outcomes, absent timing samples, an older ledger with none of
   the optional columns) and on the operator's ledger when it is readable.
-- **The largest session is the worst case that exists on this ledger**, and it
-  now sits under the one-second target on a host at load ~400 (235 ms in the
-  least-contended sample) — with 152 ms of CPU, which is what it costs on an idle
-  machine.
+- **The largest session is the worst case that exists on this ledger.** QA
+  measured it end to end through the app at load ~400 as 1.69 s for the
+  27,969-call session (0.79 s and 0.98 s for the next two), with the app's own
+  share at 31-55 ms — i.e. that panel's latency was this read. It now costs
+  ~139 ms of CPU (165 ms wall at load ~38, 788 ms wall at load ~400), so it is
+  inside the one-second target at both loads.
+- **The `/session` cut is smaller than the `/analytics` one on purpose.** The
+  read had nine statements over a session's own rows and now has three; the two
+  that remain heavy are the subtree walk (`_descendant_usage`) and the recent-rows
+  tail, and folding the subtree walk's two per-level statements into one was
+  measured as a wash — only an index on the parent-edge expression changes it,
+  at ~30 MB and a first-open build, which is not this change.
 - **Nothing here is a test assertion.** The suite asserts which path ran and
   which fields agree, never a duration (AGENTS.md §Timing); these files are where
   a duration is a measurement.

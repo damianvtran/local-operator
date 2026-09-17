@@ -19,14 +19,19 @@ mean a read-modify-write on every call and a lock contended by every session.
 Instead each call is an append (no contention beyond the WAL) and the
 ``/analytics`` screen reads a GROUP BY when it opens. That GROUP BY is over the
 maintained ``session_daily`` rollup rather than the raw ledger, because the
-ledger stopped being bounded in practice: on the operator's 342.8 MB, 1 155 845
-call ledger the panel's 30-day window costs 4.8 s wall / 2 765 ms CPU on the raw
-ledger and 6.4 s for the first read of a fresh copy, against the 30 s client
-timeout it already hits — while the rollup answers the same window in 334 ms
-wall / 110 ms CPU (``bench/analytics-rollup-before.json`` and ``-after.json``,
-reproduced by ``scripts/bench_panel_latency.py``). The raw-ledger query is still
-there, unchanged, behind a fail-closed gate that answers whenever the rollup
-cannot prove the same numbers (``aggregate()``'s docstring has the account).
+ledger stopped being bounded in practice. THE NUMBERS BELOW ARE THE COMMITTED
+ONES — ``bench/analytics-rollup-before.json`` / ``-after.json``, produced by
+``scripts/bench_panel_latency.py`` against a copy of that ledger, p50 — and they
+are the only set any comment or document should quote; a second, uncommitted
+sample of the same code is not a second opinion, it is a second measurement. On
+the operator's 342.8 MB, 1 155 845 call ledger the panel's 30-day window costs
+6 166 ms wall / 3 191 ms CPU on the raw ledger (1 802 ms / 1 705 ms CPU for the
+first read of a fresh copy), while the rollup answers the same window in 123 ms
+wall / 121 ms CPU. Those wall figures were taken at load ~34-42 on a shared
+14-core host under a RAM hold and are still not portable between machines — the
+CPU column is, and it is the one to compare. The raw-ledger query is still there,
+unchanged, behind a fail-closed gate that answers whenever the rollup cannot prove
+the same numbers (``aggregate()``'s docstring has the account).
 
 Failures never interrupt a session: a store that cannot open is a no-op
 recorder. Aggregate reads retain their empty fallback; the current-session
@@ -42,7 +47,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
@@ -297,12 +302,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 --
 -- WHY THIS EXISTS. ``aggregate()`` used to be three full scans of ``calls`` with
 -- a non-covering index range scan, so every one of the ledger's 1.16 M rows cost
--- a random table lookup: measured 4.8 s wall / 2 765 ms CPU for the desktop
--- panel's 30-day window on the operator's 342.8 MB ledger, and 6.4 s for the
--- FIRST touch of a fresh copy, which is what a cold start feels like. The rollup
--- answers the same window in 334 ms wall / 110 ms CPU, reads 1.1 MB instead of
--- the ledger's hundreds, and its cost stops tracking ledger growth.
--- See ``bench/analytics-rollup-before.json`` / ``-after.json``.
+-- a random table lookup: the committed measurement is 6 166 ms wall / 3 191 ms CPU
+-- for the desktop panel's 30-day window on the operator's 342.8 MB ledger, and
+-- 1 802 ms / 1 705 ms CPU for the FIRST touch of a fresh copy, which is what a
+-- cold start feels like. The rollup answers the same window in 123 ms wall /
+-- 121 ms CPU, reads 1.1 MB instead of the ledger's hundreds, and its cost stops
+-- tracking ledger growth. Every number here comes from the ONE committed pair —
+-- ``bench/analytics-rollup-before.json`` / ``-after.json``, both arms at load
+-- ~34-44 — and no other sample belongs in a comment.
 --
 -- ``day`` is the LOCAL calendar date (YYYY-MM-DD), from the same
 -- ``_local_day_month`` the write path already uses for ``usage_daily``, so there
@@ -376,6 +383,22 @@ CREATE INDEX IF NOT EXISTS idx_session_daily_provider ON session_daily(provider)
 --                        window whose zone differs would misattribute rows near
 --                        each day boundary, so the gate refuses and the ledger
 --                        path (today's behaviour, never a wrong number) runs.
+--                        The mismatch is RECOVERABLE, not a latch: the backfill
+--                        sees it, re-labels every day the ledger can still
+--                        answer (``rebucket``), and publishes this key only when
+--                        that whole span is done — so a run under ``TZ=`` costs
+--                        one sweep, not the feature (review R2).
+-- ``last_sweep_day``    the newest day the last COMPLETED sweep pass went
+--                        through. The next pass re-derives from here forward,
+--                        which is exactly the range a pre-rollup writer can have
+--                        added rows to (it stamps ``ts_ms`` when it records), so
+--                        a hole it left is healed instead of assumed complete
+--                        (review R3).
+--
+-- The read path also requires this table's SHAPE, not just its presence: see
+-- ``_migrate`` — a ``session_daily`` missing a measure column is treated as no
+-- rollup at all, because rollup tables have no ``ALTER`` path and a batch that
+-- cannot write its buckets must not lose the ledger row with it (review R1).
 CREATE TABLE IF NOT EXISTS session_daily_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -560,6 +583,24 @@ def _rollup_upsert_sql(table: str, key: str) -> str:
     )
 
 
+class SessionDailyPlan(NamedTuple):
+    """What one backfill pass should derive, and in which mode.
+
+    ``days`` is newest-first and already capped by ``max_days``. ``mode`` is
+    ``"rebucket"`` when the rollup's buckets were labelled in a zone the process
+    is no longer in, which is a different job: every day the ledger can still
+    answer is re-labelled, and the pass may only publish the new zone once the
+    WHOLE span is re-derived (a partial re-label would leave one table holding
+    buckets from two zones while the meta named one). ``recent_count`` is how
+    many leading days exist to heal a stale writer's hole, so a pass that did not
+    get through them must not record the frontier as covered.
+    """
+
+    days: list[str]
+    mode: str
+    recent_count: int
+
+
 _DAILY_UPSERT_SQL = _rollup_upsert_sql("usage_daily", "day")
 _MONTHLY_UPSERT_SQL = _rollup_upsert_sql("usage_monthly", "month")
 
@@ -615,6 +656,10 @@ _SESSION_DAILY_UPSERT_SQL = (
 _SESSION_DAILY_META_COVERED = "covered_from_day"
 _SESSION_DAILY_META_LEDGER_WHOLE = "ledger_whole_from_day"
 _SESSION_DAILY_META_ZONE = "zone"
+#: The newest day the last completed pass looked at. The next pass re-derives
+#: everything from here forward, which is the whole range a stale (pre-rollup)
+#: writer can have added rows to — see ``session_daily_worklist``.
+_SESSION_DAILY_META_LAST_SWEEP = "last_sweep_day"
 
 #: Monotone (downwards) coverage write, used by the backfill after each committed
 #: day. ``MIN`` is what makes a pass resumable and a re-run harmless: a pass that
@@ -638,6 +683,40 @@ _SESSION_DAILY_RAISE_SQL = (
     "INSERT INTO session_daily_meta(key, value) VALUES(?, ?) "
     "ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)"
 )
+
+#: Unconditional meta write, for the state a caller has just recomputed and must
+#: be able to move in EITHER direction: the zone re-label publishes both the new
+#: zone name and the new coverage floor in one transaction.
+_SESSION_DAILY_SET_META_SQL = (
+    "INSERT INTO session_daily_meta(key, value) VALUES(?, ?) "
+    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+)
+
+
+#: The upper bound for an unbounded window's ledger count: an index range the
+#: SQLite planner treats as "everything", without making the comparison
+#: asymmetric (both sides must cover the same rows for the check to mean
+#: anything).
+_UNBOUNDED_MS = 2**63 - 1
+
+
+def _days_descending(floor: str, top: str, *, only: Sequence[str] | None = None) -> list[str]:
+    """Local days from ``top`` down to ``floor`` inclusive, newest first.
+
+    An empty list when the range is inverted (a clock that moved backwards leaves
+    a recorded frontier newer than today), and ``only`` filters to a given set
+    while keeping this function's order, which is what lets the worklist build
+    "the recent window, then the walk below it" and still hand back one sorted
+    list.
+    """
+    wanted = None if only is None else set(only)
+    out: list[str] = []
+    day = top
+    while day >= floor:
+        if wanted is None or day in wanted:
+            out.append(day)
+        day = _day_shift(day, -1)
+    return out
 
 
 def _session_daily_rederive_sql() -> str:
@@ -1040,6 +1119,11 @@ class AnalyticsStore:
         #: also logged at ``debug`` with its reason, so a permanent fallback on a
         #: real machine is diagnosable rather than invisible.
         self._last_aggregate_source = ""
+        #: WHY the last ``aggregate()`` left the fast path, empty when it did not.
+        #: Paired with ``_last_aggregate_source`` because "the ledger ran" is not
+        #: diagnosable on its own: a permanent refusal and a cold backfill look
+        #: identical from the outside, and only the reason says which to fix.
+        self._last_aggregate_refusal = ""
         #: Which OPTIONAL columns (``_MIGRATION_COLUMNS``) actually exist on this
         #: DB. A fresh DB has all of them (the ``CREATE TABLE`` includes them); an
         #: old one gets them from ``_migrate``. If a migration ALTER genuinely
@@ -1230,21 +1314,37 @@ class AnalyticsStore:
         self._present_optional = frozenset(
             name for name, _ in _MIGRATION_COLUMNS if name in existing
         )
-        # Whether the per-session day rollup table is actually there. It is
-        # created in ``_SCHEMA`` (it has no migrated column, so it needs none of
-        # ``_OPTIONAL_INDEXES``' machinery), but ``executescript`` aborts the
-        # rest of that script on the first raising statement — so a ledger that
-        # lost the tail of the script, or one whose file went read-only mid-open,
-        # is detected here and degrades to "no rollup": the ledger keeps
-        # recording and every read takes the ledger path, rather than every
-        # batch failing on a missing table.
+        # Whether the per-session day rollup table is there AND has the shape
+        # this code inserts into. Existence alone is not enough, and assuming it
+        # is was a real defect (review R1): rollup tables have NO ``ALTER`` path
+        # (``CREATE TABLE IF NOT EXISTS`` cannot add a column), while
+        # ``_SESSION_DAILY_UPSERT_SQL`` names every measure column
+        # unconditionally — so a future release that adds a ``COMPONENT_KEY`` or
+        # any other measure column (AGENTS.md's documented process routes the new
+        # column to ``calls`` via ``_MIGRATION_COLUMNS``) leaves an existing
+        # ledger with a table the code cannot insert into. The whole batch then
+        # fails its transaction and is DROPPED, ledger row included, silently
+        # zeroing analytics recording for the life of that binary. Requiring the
+        # full column set here is the same discipline ``_present_optional``
+        # applies to ``calls``: a shape this code cannot write to reads as "no
+        # rollup", so the ledger keeps recording and every read takes the ledger
+        # path — slower, never a hole.
         try:
-            self._has_session_daily = (
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(session_daily)")}
+            meta_present = (
                 conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_daily'"
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'session_daily_meta'"
                 ).fetchone()
                 is not None
             )
+            self._has_session_daily = meta_present and set(_SESSION_DAILY_INSERT_COLUMNS) <= present
+            if present and not self._has_session_daily:
+                missing = sorted(set(_SESSION_DAILY_INSERT_COLUMNS) - present)
+                logger.debug(
+                    "analytics: session_daily is missing %s, so the rollup write path is off",
+                    missing or "its meta table",
+                )
         except Exception:  # noqa: BLE001 — no rollup table means no fast path
             logger.debug("analytics: could not inspect for session_daily", exc_info=True)
             self._has_session_daily = False
@@ -1647,13 +1747,19 @@ class AnalyticsStore:
           (not 365 rows — each day holds one row per model), so the daily bar
           can look back a year regardless of how many models ran. The subquery
           finds the 365th-newest distinct day and deletes everything older.
-        - ``session_daily`` keeps the SAME 365 distinct days, for the same
-          "newest N buckets that exist" reason. It is not read by
-          ``daily_series``; it is what ``aggregate()`` reads, and it deliberately
-          outlives the ledger's 90 days so the day-grain history does not
-          evaporate with the per-call rows. Serving a window the ledger has
-          already dropped is a separate decision, and the gate makes it a
-          refusal rather than an over-count.
+        - ``session_daily`` keeps the SAME ``retention_days`` window as the raw
+          ledger, by the stored ``day`` STRING (so a machine idle for weeks does
+          not drop a recent bucket). It is not read by ``daily_series``; it is
+          what ``aggregate()`` reads. WHY NOT LONGER, unlike ``usage_daily``:
+          the read gate clamps every window's low end up to the ledger's oldest
+          surviving day and refuses outright when the prune cut inside that day
+          (``ledger_whole_from_day``), because a rollup day is whole while a
+          pruned ledger day is only a remainder — so a day the ledger has
+          dropped can never be SERVED, and keeping more of them would be storage
+          no read can reach. The reach of this table is therefore the ledger's
+          reach, and this constant tracks it on purpose (review R6; the
+          follow-up that would serve all-time from the rollup is what would
+          raise it, together with the label that change needs).
         - ``usage_monthly`` keeps the most recent 120 DISTINCT months — a
           10-year safety cap on an effectively-unbounded table (12 rows/year ×
           models is negligible), so the monthly arc survives far beyond the
@@ -1722,7 +1828,12 @@ class AnalyticsStore:
         except Exception:  # noqa: BLE001 — a tool-call prune failure is non-fatal
             logger.debug("analytics: tool-call prune failed", exc_info=True)
         # Rollup prunes are best-effort and independent of the ledger prune
-        # above: a failure here must not undo the ledger delete or raise.
+        # above: a failure here must not undo the ledger delete or raise. The
+        # ledger's own window in DAYS is derived here from the SAME retention
+        # the delete above used, so the rollup's reach cannot drift away from
+        # the ledger's — see the ``session_daily`` block below for why that
+        # equality is load-bearing rather than cosmetic.
+        retention_days = max(1, self._retention_ms // 86_400_000)
         try:
             conn.execute(
                 "DELETE FROM usage_daily WHERE day < ("
@@ -1740,22 +1851,30 @@ class AnalyticsStore:
                 ")",
                 (MONTHLY_ROLLUP_RETENTION_MONTHS,),
             )
-            # The per-session day rollup keeps the SAME reach as the daily
-            # calendar rollup (365 distinct days), and it is the same subquery
-            # shape, so one constant governs both. It deliberately SURVIVES the
-            # ledger's 90-day prune: its rows are day-grain aggregates, not
-            # per-call ones, and the whole point of a rollup is to outlive the
-            # rows it summarises. The read gate is what keeps that from moving a
-            # number — a window the ledger can no longer answer is refused and
-            # answered from the ledger, so `aggregate()` never reports history
-            # the audit trail has dropped (see ``_session_daily_window``).
+            # The per-session day rollup keeps the SAME reach as the raw ledger
+            # (``retention_days``, the same constant the ``calls`` delete above
+            # uses), and that equality is load-bearing rather than incidental:
+            # the rollup holds exactly the days the ledger holds, so the ledger's
+            # whole 90-day reach stays servable from a 1 MB table, and the two
+            # windows can never disagree about which days exist. It is a rollup,
+            # so it is not a copy of the ledger's rows — but it does not
+            # outlive them, and it must not: the read gate clamps every window up
+            # to the ledger's oldest surviving day and refuses when the prune cut
+            # inside that day, so a day the ledger has dropped is unservable, and
+            # a longer reach would be storage no read can reach (review R6).
+            # Raising this is part of the deferred change that would serve
+            # all-time from the rollup — it needs that clamp relaxed and the
+            # panel's window labelled, both of which are user-visible.
+            #
+            # A rollup prune failure must not roll back the ledger delete, so it
+            # rides the ledger's own commit and is guarded above.
             conn.execute(
                 "DELETE FROM session_daily WHERE day < ("
                 "  SELECT MIN(day) FROM ("
                 "    SELECT DISTINCT day FROM session_daily ORDER BY day DESC LIMIT ?"
                 "  )"
                 ")",
-                (DAILY_ROLLUP_RETENTION_DAYS,),
+                (retention_days,),
             )
             conn.commit()
         except Exception:  # noqa: BLE001 — a rollup prune failure is non-fatal
@@ -1811,53 +1930,173 @@ class AnalyticsStore:
             except Exception:  # noqa: BLE001
                 pass
 
-    def session_daily_worklist(self, *, max_days: int) -> list[str]:
+    def session_daily_worklist(self, *, max_days: int) -> SessionDailyPlan:
         """The local days one backfill pass should re-derive, newest first.
 
-        Two jobs, one mechanism (they are the same ``DELETE day + INSERT from
-        ledger`` sweep):
+        Two modes, because there are two different jobs:
 
-        - **the recent window** — the newest three local days, every pass. This
-          is what heals a hole left by a ``lop`` still running the pre-rollup
-          binary, and the mid-day boundary an upgrade leaves in today's bucket
-          (the writer only ever adds the calls it saw, so today is the one day
-          that can start out half-recorded).
-        - **the historical hole** — every day below the frontier down to the
-          ledger's oldest day. Newest-first is what lets the watermark advance
-          per committed day, so a read that only needs the last few days becomes
-          fast after a few transactions instead of after the whole sweep.
+        - a normal pass heals a HOLE and fills the FRONTIER. The hole is every
+          day since the previous pass recorded its own top
+          (``last_sweep_day``), because that is exactly the range a ``lop`` still
+          running the pre-rollup binary can have written into: it stamps
+          ``ts_ms`` at record time, so it can only ever add rows to days from the
+          last launch onward. Pinning that range is what makes the healing cover
+          it — before this, only the newest three days were re-derived, so a
+          stale row one launch older than that was served as exact forever
+          (review R3). The frontier is the walk below ``covered_from_day`` down
+          to the oldest day the ledger still holds, so a read that only needs the
+          last few days becomes fast after a few transactions rather than after
+          the whole sweep.
+        - ``rebucket`` re-labels every day when the machine's zone has changed
+          (travel, a ``TZ=``-prefixed one-off run). It is the recovery for the
+          zone latch (review R2): the alternative was refusing the fast path
+          forever, which loses the feature silently for a cause the user cannot
+          see or undo.
 
         Bounded by the LEDGER, not by a constant: the walk stops at the oldest
         day the ledger still holds, because going below it would delete rollup
-        history that survived the prune (the retention rule is that the rollup
-        outlives the ledger, not that the ledger bounds it). ``max_days`` only
-        caps how much of that bounded work ONE pass takes on; whatever is left
-        is picked up next launch, since every pass re-derives its worklist.
+        history the ledger can no longer confirm. ``max_days`` only caps how much
+        of that bounded work ONE pass takes on.
+        """
+        span = self.ledger_day_span()
+        if span is None:
+            return SessionDailyPlan([], "pass", 0)
+        oldest_day, newest_day = span
+        today = _local_day_month(self._now_ms())[0]
+        top = max(today, newest_day)
+        state = self.session_daily_state()
+        if max_days <= 0:
+            return SessionDailyPlan([], "pass", 0)
+        if state.get(_SESSION_DAILY_META_ZONE, "") not in ("", _local_zone_key()):
+            return SessionDailyPlan(_days_descending(oldest_day, top)[:max_days], "rebucket", 0)
+        covered = state.get(_SESSION_DAILY_META_COVERED, "")
+        last_sweep = state.get(_SESSION_DAILY_META_LAST_SWEEP, "")
+        # Newest-first, and the hole range is pinned to the previous pass: with
+        # no recorded pass (a ledger meeting this table for the first time) the
+        # newest three days are the bootstrap window, which is what the upgrade
+        # needs for today's half-recorded bucket.
+        recent_floor = min(top, last_sweep) if last_sweep else _day_shift(top, -2)
+        recent = _days_descending(recent_floor, top)
+        days = recent[:max_days]
+        frontier = min(recent) if not covered else min(min(recent), covered)
+        day = _day_shift(frontier, -1)
+        while day >= oldest_day and len(days) < max_days:
+            days.append(day)
+            day = _day_shift(day, -1)
+        ordered = _days_descending(oldest_day, top, only=days)
+        return SessionDailyPlan(ordered, "pass", min(len(recent), len(ordered)))
+
+    def mark_session_daily_swept(self, day: str) -> None:
+        """Record the newest day this pass has been through, for the NEXT pass.
+
+        This is the frontier that keeps a stale writer's hole bounded: the next
+        pass re-derives everything from here forward, so a hole it left is healed
+        rather than assumed complete. Written only by a pass that actually got
+        through its whole recent window — a truncated pass must leave the old
+        value, or the days it skipped would never be looked at again.
+        """
+        conn = self._connect()
+        if conn is None:
+            return
+        try:
+            conn.execute(_SESSION_DAILY_INSERT_META_SQL, (_SESSION_DAILY_META_LAST_SWEEP, day))
+            conn.commit()
+        except Exception:  # noqa: BLE001 — a missing frontier costs a re-derive
+            logger.debug("analytics: could not record the swept day", exc_info=True)
+
+    def commit_session_daily_rebucket(self, *, oldest_day: str) -> bool:
+        """Publish a completed zone re-label, in ONE transaction.
+
+        THE POINT OF THE SEPARATE COMMIT: while the sweep is re-labelling, the
+        recorded zone is still the OLD one, so the gate's zone check refuses and
+        no read can observe a table whose buckets come from two zones. This flips
+        the table to the new zone only after every day the ledger can answer has
+        been re-derived, so after it commits the fast path works again and before
+        it commits nothing is served — fail-closed in both directions.
+
+        Days the ledger can no longer answer are DROPPED here rather than left
+        behind: they are labelled with the old rule and nothing can confirm them
+        against the ledger, so keeping them would only be dead bytes the gate may
+        never reach.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            conn.execute("DELETE FROM session_daily WHERE day < ?", (oldest_day,))
+            # SET, not INSERT-OR-DO-NOTHING: the recorded zone is the OLD one
+            # throughout the re-label (that is what keeps reads refusing while
+            # it runs), so publishing the new one is exactly what DO NOTHING
+            # would refuse to do — and the fast path would stay refused forever.
+            conn.execute(_SESSION_DAILY_SET_META_SQL, (_SESSION_DAILY_META_ZONE, _local_zone_key()))
+            conn.execute(_SESSION_DAILY_SET_META_SQL, (_SESSION_DAILY_META_COVERED, oldest_day))
+            conn.execute(_SESSION_DAILY_SET_META_SQL, (_SESSION_DAILY_META_LAST_SWEEP, oldest_day))
+            conn.commit()
+            return True
+        except Exception:  # noqa: BLE001 — an unpublished rebucket stays refused
+            logger.debug("analytics: could not publish the rebucket", exc_info=True)
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+    def session_daily_mismatched_days(self, *, max_days: int) -> list[str]:
+        """Days whose bucket total disagrees with the ledger's own row count.
+
+        THE VERIFY HALF of the sweep, and the reason a hole is not permanent.
+        A ``lop`` running the pre-rollup binary writes ``calls`` rows without
+        maintaining the rollup, and it stamps ``ts_ms`` when it records, so the
+        rows it adds can land on any day from the day it started — including a
+        day this table was already swept for. The tail check cannot see those
+        (it pins only the newest row) and a fixed "newest three days" window
+        never reaches them, so they were served as exact for the life of the
+        table. Comparing per day finds them wherever they are, and re-deriving
+        the day is what removes them.
+
+        Cost: two index-only queries per day — tens of milliseconds for a
+        ledger's whole 90-day reach, once per process, on the maintenance
+        thread. Cheaper than one of the reads it protects.
+
+        Bounded twice on purpose: bounded by ``max_days`` so one pass stays one
+        pass, and bounded below by ``ledger_whole_from_day`` so a day the prune
+        has left partial is never "corrected" down to its remainder — the gate
+        refuses windows reaching it, and truncating the bucket would throw away
+        the whole-day history the rollup keeps for exactly those windows.
         """
         span = self.ledger_day_span()
         if span is None:
             return []
         oldest_day, newest_day = span
+        whole_from = self.session_daily_state().get(_SESSION_DAILY_META_LEDGER_WHOLE, "")
+        if whole_from:
+            oldest_day = max(oldest_day, whole_from)
         today = _local_day_month(self._now_ms())[0]
         top = max(today, newest_day)
-        covered = self.session_daily_state().get(_SESSION_DAILY_META_COVERED, "")
-        days: list[str] = [top, _day_shift(top, -1), _day_shift(top, -2)]
-        # ``covered`` present => every day at or after it is complete, so the
-        # sweep resumes one day below it; absent => nothing is proven, so it
-        # starts just under the recent window.
-        day = _day_shift(covered, -1) if covered else _day_shift(top, -3)
-        while day >= oldest_day and len(days) < max_days:
-            days.append(day)
-            day = _day_shift(day, -1)
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for day in sorted((d for d in days if oldest_day <= d <= top), reverse=True):
-            if day not in seen:
-                seen.add(day)
-                ordered.append(day)
-        return ordered[:max_days] if max_days > 0 else []
+        conn = self._connect()
+        if conn is None or max_days <= 0:
+            return []
+        mismatched: list[str] = []
+        try:
+            for day in _days_descending(oldest_day, top):
+                if len(mismatched) >= max_days:
+                    break
+                start_ms = _local_day_bounds_ms(day)[0]
+                end_ms = _local_day_bounds_ms(day)[1]
+                ledger = conn.execute(
+                    "SELECT COUNT(*) FROM calls WHERE ts_ms >= ? AND ts_ms < ?",
+                    (start_ms, end_ms),
+                ).fetchone()
+                rolled = conn.execute(
+                    "SELECT COALESCE(SUM(calls), 0) FROM session_daily WHERE day = ?", (day,)
+                ).fetchone()
+                if int(ledger[0] or 0) != int(rolled[0] or 0):
+                    mismatched.append(day)
+        except Exception:  # noqa: BLE001 — a verify pass that cannot run heals nothing
+            logger.debug("analytics: could not verify session_daily days", exc_info=True)
+        return mismatched
 
-    def rederive_session_daily_day(self, day: str) -> int | None:
+    def rederive_session_daily_day(self, day: str, *, rebucket: bool = False) -> int | None:
         """Rebuild one local day's buckets from the ledger. ``None`` = not committed.
 
         Returns the number of buckets written (0 is a legitimate answer: a day
@@ -1888,21 +2127,19 @@ class AnalyticsStore:
             if conn.in_transaction:
                 conn.commit()
             conn.execute("BEGIN IMMEDIATE")
-            # The bucketing zone is recorded by the FIRST write to this table and
-            # never rewritten, and a sweep REFUSES to run under a different zone
-            # than the one already recorded. Both halves are load-bearing: the
-            # zone is what makes a changed zone a refusal rather than a wrong
-            # number at every day boundary, and without the refusal a re-derive
-            # under a new zone would leave the table holding buckets labelled by
-            # TWO different rules while the meta still named the old one — the
-            # one state in which the gate could be talked into serving a mixed
-            # table. Re-bucketing after a move is a separate, deliberate sweep.
             recorded = conn.execute(
                 "SELECT value FROM session_daily_meta WHERE key = ?",
                 (_SESSION_DAILY_META_ZONE,),
             ).fetchone()
             current_zone = _local_zone_key()
-            if recorded is not None and str(recorded[0]) != current_zone:
+            if recorded is not None and str(recorded[0]) != current_zone and not rebucket:
+                # A normal pass must not re-label under a new zone: days derived
+                # by the old rule would sit beside days derived by the new one
+                # while the meta still named a single zone. Recovery is
+                # ``rebucket=True``, which the worklist selects for the whole
+                # span and which withholds the new zone until the span is done —
+                # so the gate refuses (stale zone) for the entire re-label and
+                # nothing can observe a mixed table.
                 conn.rollback()
                 logger.debug(
                     "analytics: not re-deriving %s: buckets are in zone %s, process is in %s",
@@ -2001,6 +2238,7 @@ class AnalyticsStore:
             if window is not None:
                 try:
                     self._last_aggregate_source = "rollup"
+                    self._last_aggregate_refusal = ""
                     return self._session_daily_aggregate(conn, window, session_id)
                 except Exception:  # noqa: BLE001 — a fast path that fails is a slow path
                     logger.debug(
@@ -2008,6 +2246,7 @@ class AnalyticsStore:
                     )
                     refusal = "rollup-read-failed"
             self._last_aggregate_source = "ledger"
+            self._last_aggregate_refusal = refusal
             # Named, not silent: a refusal that never expires is a feature that
             # silently stopped working, and the only way to see that on a real
             # machine is to say which precondition failed.
@@ -2031,6 +2270,19 @@ class AnalyticsStore:
         a test asserts the path, never a duration.
         """
         return self._last_aggregate_source
+
+    @property
+    def last_aggregate_refusal(self) -> str:
+        """WHY the last :meth:`aggregate` left the fast path, or ``""`` if it did not.
+
+        The companion to :attr:`last_aggregate_source`, and the reason it exists:
+        on a real machine "the panel is slow" is the same symptom whether the
+        sweep has not finished (``no-coverage``, self-clearing) or the zone was
+        poisoned (``zone-changed``, cleared by the next rebucket) or the table is
+        the wrong shape (``no-rollup-table``, a bug). Only the reason separates
+        them, and a refusal nobody can name is a refusal nobody can debug.
+        """
+        return self._last_aggregate_refusal
 
     def _ledger_aggregate(
         self,
@@ -2143,12 +2395,25 @@ class AnalyticsStore:
             (travel, a laptop moved across a zone, a re-run under ``TZ=``).
             Historic buckets are then labelled by the old rule while the read
             derives local midnights by the new one, which misattributes rows
-            near every day boundary by up to the offset delta.
+            near every day boundary by up to the offset delta. This is a
+            refusal the sweep is expected to CLEAR, not one it lives with: the
+            worklist sees the mismatch and re-labels every day the ledger can
+            still answer, publishing the new zone only once the whole span is
+            done (``commit_session_daily_rebucket``). Until that commits, the
+            recorded zone is the old one and reads keep refusing — so the state
+            is fail-closed while it is being repaired, which is why this reason
+            must never be treated as a permanent condition (review R2).
         ``no-coverage``      the backfill has not swept far enough down yet: days
             at or after ``covered_from_day`` are complete, anything older is a
             hole. Also the state of every existing ledger on the upgrade launch,
             which is why the panel's first read after upgrading is still the
             ledger's.
+        ``empty-window``     the day range is empty (``until_ms`` is not after
+            ``since_ms`` once both are day-aligned). Not an error, but the
+            ledger answers it exactly, so there is nothing to gain here.
+        ``unreadable: <T>``  a rollup or meta read raised — a schema script that
+            lost its tail, a file that went read-only mid-open. Nothing can be
+            proven about the table, so nothing is served from it.
         ``ledger-bottom-partial``  the retention prune cut INSIDE the ledger's
             oldest surviving day. The rollup holds that day whole while the
             ledger holds only its remainder, so a window including it would
@@ -2159,7 +2424,29 @@ class AnalyticsStore:
             ``calls`` WITHOUT maintaining the rollup — a ``lop`` still running
             the pre-rollup binary. Cheap to check (both sides are an indexed
             MAX) and it is the difference between "the rollup is current" and
-            "the rollup is current as of whenever it was last written".
+            "the rollup is current as of whenever it was last written". An
+            EMPTY rollup arrives here too (0 != the ledger's newest), which is
+            why there is no separate empty-rollup branch: the outcome is the
+            same refusal for the same reason (review R7).
+
+        ``count-mismatch``   the window's own row count is not the ledger's. The
+            other checks each pin a boundary — the tail pins the newest row,
+            coverage the oldest day, the zone the labelling rule — so a hole in
+            the MIDDLE of a window is invisible to all of them, and a pre-rollup
+            writer leaves exactly that as soon as a maintained process writes a
+            newer row. Compared directly (~5 ms: two index-only counts) rather
+            than inferred, because this is the one that decides whether a total
+            is right. It is also the check that makes a hole SELF-CLEARING
+            rather than permanent: the sweep verifies day by day and re-derives
+            the days that disagree (``session_daily_mismatched_days``), so the
+            refusal lasts until the next launch instead of for the life of the
+            table (review R3).
+
+        ``rollup-read-failed`` is the one post-hoc reason, not returned here: it
+        is set by :meth:`aggregate` when the gate said yes and the rollup query
+        then raised. A fast path that cannot answer is a slow path, so that is a
+        fallback rather than an error — but it is logged, because a fast path
+        that always throws is a bug dressed as correctness.
 
         The window is returned as a half-open ``day`` string range for
         ``day >= lo AND day < hi``, built from ``_local_day_month`` — the same
@@ -2193,8 +2480,6 @@ class AnalyticsStore:
         except Exception as exc:  # noqa: BLE001 — an unreadable rollup has no fast path
             logger.debug("analytics: session_daily gate could not read state", exc_info=True)
             return None, f"unreadable: {type(exc).__name__}"
-        if rollup_span is None:
-            return None, "no-coverage"
         if meta.get(_SESSION_DAILY_META_ZONE, "") != _local_zone_key():
             return None, "zone-changed"
         covered = meta.get(_SESSION_DAILY_META_COVERED, "")
@@ -2222,6 +2507,44 @@ class AnalyticsStore:
         whole_from = meta.get(_SESSION_DAILY_META_LEDGER_WHOLE)
         if whole_from and day_lo < whole_from:
             return None, "ledger-bottom-partial"
+        # THE LAST PRECONDITION, and the only one that checks the CONTENT rather
+        # than the bookkeeping: the served window's row count must be the
+        # ledger's row count. ~5 ms on a 1.15 M-row ledger (``COUNT(*)`` rides
+        # ``idx_calls_ts``; both sides are index-only), against a fast path two
+        # orders of magnitude slower than that, so it is affordable on every
+        # read rather than only in the sweep.
+        #
+        # WHY IT IS WORTH THE 5 ms: every other check pins a boundary. The tail
+        # check pins the NEWEST row, coverage pins the OLDEST day, the zone pins
+        # the labelling rule — so a hole in the MIDDLE of the window is invisible
+        # to all of them, and a ``lop`` on the pre-rollup binary writes exactly
+        # that whenever a maintained process then writes a newer row. A count
+        # mismatch is that hole: rows the ledger has and the buckets do not.
+        # Refusing costs latency; serving costs a total the ledger disagrees with.
+        try:
+            start_ms = _local_day_bounds_ms(day_lo)[0]
+            end_ms = None if day_hi is None else _local_day_bounds_ms(day_hi)[0]
+            counts = conn.execute(
+                "SELECT (SELECT COUNT(*) FROM calls WHERE ts_ms >= ? AND ts_ms < ?), "
+                "(SELECT COALESCE(SUM(calls), 0) FROM session_daily "
+                " WHERE day >= ? AND day < ?)",
+                (
+                    start_ms,
+                    _UNBOUNDED_MS if end_ms is None else end_ms,
+                    day_lo,
+                    "9999-99-99" if day_hi is None else day_hi,
+                ),
+            ).fetchone()
+            if counts is None or int(counts[0] or 0) != int(counts[1] or 0):
+                logger.debug(
+                    "analytics: session_daily window count %s != ledger %s",
+                    None if counts is None else counts[1],
+                    None if counts is None else counts[0],
+                )
+                return None, "count-mismatch"
+        except Exception as exc:  # noqa: BLE001 — an unverifiable window is not servable
+            logger.debug("analytics: session_daily count check failed", exc_info=True)
+            return None, f"unreadable: {type(exc).__name__}"
         return (day_lo, day_hi), ""
 
     def _session_daily_aggregate(

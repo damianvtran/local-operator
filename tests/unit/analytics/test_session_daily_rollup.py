@@ -40,6 +40,7 @@ from local_operator.analytics.store import (
     _day_shift,
     _local_day_bounds_ms,
     _local_day_month,
+    _local_zone_key,
     _parent_edge_for,
 )
 from tests.unit.analytics.test_store import _snap
@@ -347,10 +348,25 @@ def test_parent_rule_combines_the_same_way_the_ledger_aggregates(tmp_path):
         ("no-coverage", "partial-sweep", "seven-day"),
         ("zone-changed", "zone", "today"),
         ("tail-unsynced", "stale-writer", "today"),
-        ("no-rollup-table", "drop-table", "today"),
+        # NOTE on these two labels, which round 1 found to be wrong: dropping
+        # the table and reopening it leaves it RE-CREATED empty (``_SCHEMA`` runs
+        # ``IF NOT EXISTS`` on every connect), so the refusal is the tail check,
+        # not the missing table. The state the ``no-rollup-table`` label
+        # describes is the flag being false while the file is otherwise intact —
+        # the schema script that lost its tail — which is what the second case
+        # forces. Both refuse, which is the guarantee under test.
+        ("tail-unsynced", "drop-table", "today"),
+        ("no-rollup-table", "no-table-flag", "today"),
         ("empty-ledger", "no-rows", "all-time"),
         ("ledger-bottom-partial", "prune", "all-time"),
         ("no-parent-column", "drop-parent-column", "today"),
+        # The two the round-1 review found untested while the docs claimed every
+        # refusal had one: the day-range arithmetic, and a rollup whose schema
+        # cannot be read. Both are the "gate silently stops gating" class, so
+        # they get a case like the rest — and the assertion below checks the
+        # REASON, not just the path, which is what makes the claim mean anything.
+        ("empty-window", None, "empty"),
+        ("unreadable: OperationalError", "drop-meta-table", "today"),
     ],
 )
 def test_the_gate_refuses_and_the_ledger_answers(tmp_path, monkeypatch, reason, perturb, window):
@@ -374,28 +390,56 @@ def test_the_gate_refuses_and_the_ledger_answers(tmp_path, monkeypatch, reason, 
         "seven-day": (_local_day_bounds_ms(_day_shift(_today(), -6))[0], None, None),
         "all-time": (None, None, None),
         "unaligned": (_local_day_bounds_ms(_today())[0] + 5000, None, None),
+        # An empty half-open range: alike bounds, so ``day_hi <= day_lo``.
+        "empty": (
+            _local_day_bounds_ms(_today())[0],
+            _local_day_bounds_ms(_today())[0],
+            None,
+        ),
     }[window]
 
     if perturb == "zone":
         monkeypatch.setattr(store_module, "_local_zone_key", lambda: "Elsewhere/Nowhere")
     elif perturb == "stale-writer":
         # A ``lop`` on the pre-rollup binary: a row in the ledger the rollup
-        # never saw, newer than everything the rollup holds.
+        # never saw, newer than everything the rollup holds. Placed relative to
+        # the LEDGER rather than the wall clock, because the fixture's newest row
+        # is 04:00 local: a row at ``now + 60 s`` before 04:00 is OLDER than the
+        # fixture itself and the tail check then legitimately passes, which is
+        # what made this case pass locally and fail on a UTC runner at 03:19.
         with sqlite3.connect(tmp_path / "analytics.db") as conn:
+            newest = conn.execute("SELECT MAX(ts_ms) FROM calls").fetchone()[0]
             conn.execute(
                 "INSERT INTO calls (ts_ms, session_id, provider, model_id) VALUES (?, ?, ?, ?)",
-                (int(time.time() * 1000) + 60_000, PARENT, "anthropic", "claude"),
+                (max(int(newest), int(time.time() * 1000)) + 1, PARENT, "anthropic", "claude"),
             )
     elif perturb == "drop-table":
         with sqlite3.connect(tmp_path / "analytics.db") as conn:
             conn.execute("DROP TABLE session_daily")
         store = AnalyticsStore(tmp_path / "analytics.db")
+    elif perturb == "no-table-flag":
+        with sqlite3.connect(tmp_path / "analytics.db") as conn:
+            conn.execute("DROP TABLE session_daily")
+        store._has_session_daily = False
+    elif perturb == "drop-meta-table":
+        # The gate's own meta read raises, with the store still believing the
+        # table is there: the migrate-time shape check below normally catches a
+        # schema that lost its tail, so this forces the read-time failure too.
+        with sqlite3.connect(tmp_path / "analytics.db") as conn:
+            conn.execute("DROP TABLE session_daily_meta")
+        store._has_session_daily = True
     elif perturb == "no-rows":
         for path in tmp_path.iterdir():
             path.unlink()
         store = AnalyticsStore(tmp_path / "analytics.db")
     elif perturb == "prune":
-        store.prune(now_ms=int(time.time() * 1000))
+        # An explicit ``now_ms`` INSIDE the fixture's span, never the wall clock:
+        # the fixture's oldest day is two days back at 09:00, so a cutoff taken
+        # at 03:19 (the hour CI happened to run) deletes nothing and the prune
+        # records no frontier — which is exactly why this case was green locally
+        # and red on the runner. Noon always lands between the fixture's oldest
+        # day and the days after it.
+        store.prune(now_ms=_at(_today(), 12))
         store = AnalyticsStore(tmp_path / "analytics.db")
     elif perturb == "drop-parent-column":
         monkeypatch.setattr(store, "_has_parent_column", lambda: False)
@@ -411,6 +455,10 @@ def test_the_gate_refuses_and_the_ledger_answers(tmp_path, monkeypatch, reason, 
     store.aggregate(since_ms=since, until_ms=until, session_id=session)
     assert calls == ["ledger"], f"{reason}: the ledger path did not run"
     assert store.last_aggregate_source == "ledger"
+    # The reason, not just the path: two different refusals that both fall back
+    # are still two different states to fix, and a test that cannot tell them
+    # apart cannot tell a cold sweep from a broken schema.
+    assert store.last_aggregate_refusal == reason
 
 
 def test_the_gate_serves_the_panels_own_window(tmp_path, monkeypatch):
@@ -444,11 +492,11 @@ def test_the_sweep_is_bounded_by_the_ledger_and_never_deletes_older_history(tmp_
     then the surviving rows are asserted after a prune + sweep.
     """
     store = _seeded_store(tmp_path, retention_days=2)
-    store.prune(now_ms=int(time.time() * 1000))
+    store.prune(now_ms=_at(_today(), 12))
     store = AnalyticsStore(tmp_path / "analytics.db", retention_days=2)
     span = store.ledger_day_span()
     assert span is not None
-    worklist = store.session_daily_worklist(max_days=90)
+    worklist = store.session_daily_worklist(max_days=90).days
     assert worklist == sorted(worklist, reverse=True)
     assert all(day >= span[0] for day in worklist)
 
@@ -462,7 +510,12 @@ def test_a_pruned_bottom_is_recorded_and_the_gate_refuses_windows_reaching_it(tm
     """
     store = _seeded_store(tmp_path, retention_days=2)
     assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
-    store.prune(now_ms=int(time.time() * 1000))
+    # ``now_ms`` is explicit and INSIDE the fixture's span. With the wall clock
+    # the cutoff lands two days back at the current hour, and the fixture's
+    # oldest day is 09:00 two days back — so before 09:00 local nothing was
+    # deleted and no frontier was recorded, which made this test fail for the
+    # first nine hours of every UTC day.
+    store.prune(now_ms=_at(_today(), 12))
     store = AnalyticsStore(tmp_path / "analytics.db", retention_days=2)
     whole_from = store.session_daily_state().get("ledger_whole_from_day")
     assert whole_from, "the prune did not record where the ledger became whole"
@@ -471,7 +524,12 @@ def test_a_pruned_bottom_is_recorded_and_the_gate_refuses_windows_reaching_it(tm
     assert span is not None and span[0] < whole_from
     with sqlite3.connect(tmp_path / "analytics.db") as conn:
         surviving = {str(row[0]) for row in conn.execute("SELECT DISTINCT day FROM session_daily")}
-    assert span[0] in surviving, "the sweep deleted rollup history the prune had already dropped"
+    # The rollup keeps the LEDGER's reach now (``retention_days``), so it never
+    # holds a day older than the ledger's oldest — the old, longer reach was
+    # storage no window can be served from, because the gate refuses below the
+    # cut anyway (review R6). What must not happen is that the partial day is
+    # silently SERVED, and that is the next assertion.
+    assert surviving and min(surviving) >= span[0], surviving
 
     # A window reaching the cut day is answered by the ledger; one starting at or
     # after it is served by the rollup.
@@ -484,15 +542,15 @@ def test_a_pruned_bottom_is_recorded_and_the_gate_refuses_windows_reaching_it(tm
 def test_the_sweep_stops_at_the_first_day_it_cannot_commit(tmp_path, monkeypatch):
     """Interruption leaves a monotone frontier rather than a claimed hole."""
     store = _seeded_store(tmp_path)
-    days = store.session_daily_worklist(max_days=90)
+    days = store.session_daily_worklist(max_days=90).days
     assert len(days) >= 3
     failed = days[1]
     real = store.rederive_session_daily_day
 
-    def flaky(day):
+    def flaky(day, *, rebucket=False):
         if day == failed:
             return None
-        return real(day)
+        return real(day, rebucket=rebucket)
 
     monkeypatch.setattr(store, "rederive_session_daily_day", flaky)
     assert backfill_analytics_session_daily(tmp_path, store=store) == 1
@@ -530,8 +588,15 @@ def test_the_sweep_records_the_bucketing_zone_and_refuses_another(tmp_path, monk
     assert store.last_aggregate_source == "ledger"
 
 
-def test_two_writers_on_one_bucket_lose_nothing(tmp_path):
-    """Several ``lop`` processes write one file; the accumulate must be lossless.
+def test_four_connections_on_one_bucket_lose_nothing(tmp_path):
+    """Four connections on ONE bucket: the accumulate must be lossless.
+
+    The name says what this exercises — four STORES, i.e. four connections, in
+    one process, all writing the same bucket. It is deliberately not called a
+    cross-PROCESS test: the cross-process case is its neighbour
+    (``test_parallel_processes_write_atomically``, four real processes), and
+    nothing here records a BUSY or a retry, so this does not exercise the
+    busy-timeout path — it exercises the accumulate.
 
     Each thread here owns its own ``AnalyticsStore``, which is what a second
     PROCESS looks like to SQLite: two connections, WAL, ``busy_timeout``, one
@@ -662,3 +727,145 @@ def test_the_route_payload_serialises_identically_from_both_paths(tmp_path):
     after = payload()
     assert store.last_aggregate_source == "rollup"
     assert before == after
+
+
+def test_recording_survives_a_rollup_table_missing_a_measure_column(tmp_path):
+    """A rollup whose shape the code cannot write to must not stop the LEDGER.
+
+    Review R1, reproduced: rollup tables have no ``ALTER`` path, so a future
+    release that adds a measure column (or a ``COMPONENT_KEY``) leaves every
+    existing ledger with a ``session_daily`` the upsert cannot insert into. The
+    batch then fails its transaction and is dropped WITH the ledger row —
+    analytics recording dies silently and completely for the life of that
+    binary, which is the failure ``_present_optional`` exists to prevent for
+    ``calls``. The guard is a shape check, not an existence check, and the
+    assertion that matters is that the row is still written.
+    """
+    _seeded_store(tmp_path)
+    with sqlite3.connect(tmp_path / "analytics.db") as conn:
+        conn.execute("ALTER TABLE session_daily DROP COLUMN c_images")
+    reopened = AnalyticsStore(tmp_path / "analytics.db")
+    # The batch comes first on purpose: it is what used to be lost, and it is
+    # also what opens the connection the flag is computed on (the store connects
+    # lazily, so reading the flag before any use reports the optimistic
+    # default).
+    assert reopened.record_batch([_call(session_id=PARENT, ts_ms=_at(_today(), 9))]) == 1
+    assert reopened._has_session_daily is False, "a short table must read as 'no rollup'"
+
+    with sqlite3.connect(tmp_path / "analytics.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0] == len(_fixture_calls()) + 1
+    assert reopened.aggregate().calls == len(_fixture_calls()) + 1
+    assert reopened.last_aggregate_source == "ledger"
+
+
+def test_a_stale_writers_mid_history_rows_refuse_then_heal(tmp_path):
+    """A hole in the MIDDLE of a window is refused, and the sweep repairs it.
+
+    Review R3. Every boundary check misses this: the tail check pins the newest
+    row, coverage the oldest day, so three ledger-only rows on a day four days
+    back were served as exact — and the fixed newest-three healing window could
+    never reach them, which made the hole permanent. Three things are asserted:
+    the window count check REFUSES it, the sweep's per-day verification FINDS
+    it wherever it is, and the next read serves the ledger's numbers again.
+    """
+    store = _seeded_store(tmp_path)
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+    total_before = store.aggregate().calls
+    assert store.last_aggregate_source == "rollup"
+
+    # A row the rollup never saw, on a day the previous pass had already swept.
+    hole_day = _day_shift(_today(), -2)
+    with sqlite3.connect(tmp_path / "analytics.db") as conn:
+        conn.execute(
+            "INSERT INTO calls (ts_ms, session_id, provider, model_id) VALUES (?, ?, ?, ?)",
+            (_at(hole_day, 20), PARENT, "anthropic", "claude"),
+        )
+
+    store.aggregate()
+    assert store.last_aggregate_source == "ledger"
+    assert store.last_aggregate_refusal == "count-mismatch"
+
+    # The repair is the sweep's own verification, not a re-read: one more pass
+    # and the fast path answers the ledger's numbers again. A permanent refusal
+    # would be the same feature loss as the zone latch, so this is the half that
+    # makes the refusal acceptable.
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+    healed = store.aggregate()
+    assert store.last_aggregate_source == "rollup"
+    assert healed.calls == total_before + 1
+
+
+def test_a_failing_fast_path_read_falls_back_to_the_ledger(tmp_path, monkeypatch):
+    """The one refusal a precondition cannot produce: the rollup query raising.
+
+    Deliberately not an error path that hides: the refusal is recorded, and the
+    numbers still come from the ledger.
+    """
+    store = _seeded_store(tmp_path)
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+    real = store._session_daily_aggregate
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("no such column: c_images")
+
+    monkeypatch.setattr(store, "_session_daily_aggregate", boom)
+    failed = store.aggregate()
+    assert store.last_aggregate_source == "ledger"
+    assert store.last_aggregate_refusal == "rollup-read-failed"
+    monkeypatch.setattr(store, "_session_daily_aggregate", real)
+    assert failed.calls == store.aggregate().calls
+
+
+def test_a_zone_change_is_recovered_by_the_rebucket_pass(tmp_path, monkeypatch):
+    """A differently-zoned run costs a sweep, not the feature (review R2).
+
+    The zone is recorded first-writer-wins and the sweep used to refuse to
+    re-derive under a different one, so a single ``TZ=``-prefixed run — or a
+    laptop that moved — disabled the fast path permanently, with a ``debug``
+    line as its only trace. The recovery is a re-label pass, and the invariant
+    that makes it safe is asserted here too: while it is running, the recorded
+    zone is still the old one, so reads keep refusing rather than seeing a
+    table holding buckets from two zones.
+    """
+    store = _seeded_store(tmp_path)
+    assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+    recorded = store.session_daily_state()["zone"]
+    assert recorded
+    store.aggregate()
+    assert store.last_aggregate_source == "rollup"
+
+    # The environment, not a monkeypatched helper: TZ plus tzset is what a
+    # ``TZ=``-prefixed command actually does to this process.
+    monkeypatch.setenv("TZ", "America/Denver")
+    time.tzset()
+    try:
+        assert _local_zone_key() != recorded
+        store.aggregate()
+        assert store.last_aggregate_source == "ledger"
+        assert store.last_aggregate_refusal == "zone-changed"
+
+        assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
+        healed = store.aggregate()
+        assert store.last_aggregate_source == "rollup"
+        assert store.session_daily_state()["zone"] == _local_zone_key()
+
+        # And the numbers are the LEDGER's, measured in the same (new) zone —
+        # a zone change legitimately moves which day a call belongs to, so this
+        # is not a comparison against the pre-change answer. The copy is made
+        # through SQLite's backup API rather than ``cp`` because the file is in
+        # WAL mode and its newest commits live in the -wal sidecar.
+        ledger_only = tmp_path / "ledger-only.db"
+        with sqlite3.connect(tmp_path / "analytics.db") as src, sqlite3.connect(ledger_only) as dst:
+            src.backup(dst)
+        with sqlite3.connect(ledger_only) as conn:
+            conn.execute("DROP TABLE session_daily")
+            conn.execute("DROP TABLE session_daily_meta")
+        plain = AnalyticsStore(ledger_only)
+        from_ledger = plain.aggregate()
+        assert plain.last_aggregate_source == "ledger"
+        assert _result_key(from_ledger) == _result_key(healed)
+    finally:
+        # Process-global state: put the zone back before the next test in this
+        # worker runs, whatever happened above.
+        monkeypatch.undo()
+        time.tzset()

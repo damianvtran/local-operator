@@ -2314,17 +2314,34 @@ Things that will bite you if you forget them:
   rollup as new as the ledger's newest row, and a ledger bottom the prune has
   not cut inside), and otherwise runs the original three ledger scans
   unchanged, naming the refusal in a `debug` log. Measured on the operator's
-  341 MB ledger (1.16 M calls): the panel's 30-day window goes from 13.5 s wall
-  / 3 339 ms CPU to 0.43 s / 63 ms CPU — `scripts/bench_panel_latency.py`,
-  `bench/analytics-rollup-*.json`. Two properties matter more than the
-  mechanism: the gate FAILS CLOSED (a wrong fast-path number is far worse than
-  a slow one; `store.last_aggregate_source` says which path ran and every
-  refusal has a test), and the equivalence is STRUCTURAL (`_assemble_aggregate`
-  builds the result for both paths, so only the table differs). The sweep that
-  fills an existing ledger is `backfill_analytics_session_daily`, on the
-  store-maintenance thread, newest-first in bounded per-day transactions;
+  342.8 MB ledger (1 155 845 calls), p50, both arms at load ~34-44: the panel's
+  30-day window goes from 6 166 ms wall / 3 191 ms CPU to 123 ms / 121 ms CPU —
+  `scripts/bench_panel_latency.py`, `bench/analytics-rollup-*.json`, and THOSE
+  committed numbers are the canonical ones; wall is not portable between hosts,
+  the CPU column is. Three properties matter more than the mechanism:
+  - the gate FAILS CLOSED (a wrong fast-path number is far worse than a slow
+    one; `store.last_aggregate_source` says which path ran and every refusal
+    reason has a test, including the two that guard the day arithmetic and an
+    unreadable schema);
+  - the equivalence is STRUCTURAL (`_assemble_aggregate` builds the result for
+    both paths, so only the table differs);
+  - the gate's two recoverable refusals are RECOVERED FROM, not lived with. A
+    zone change (`TZ=`, travel) re-labels every day the ledger can still answer
+    and publishes the new zone only when that whole span is done; a stale
+    pre-rollup writer's rows land only on days from the previous pass's top
+    onward (`last_sweep_day`), so the pass re-derives from there. Neither is a
+    latch: treating `zone-changed` as permanent was a defect (it cost the
+    feature silently, forever), and a fixed newest-three healing window left a
+    mid-window hole served as exact.
+  The sweep that fills an existing ledger is `backfill_analytics_session_daily`,
+  on the store-maintenance thread, newest-first in bounded per-day transactions;
   until it reaches a day, reads touching it stay on the ledger, so an upgrade
-  can cost latency but never a number.
+  can cost latency but never a number. **The rollup keeps the SAME window as the
+  ledger** (`retention_days`, 90) and does not outlive it: a day the ledger has
+  dropped cannot be served, because the rollup's copy of it is whole while the
+  ledger holds only the pruned remainder. Raising that reach is the deferred
+  change that would serve all-time from the rollup — it needs the clamp relaxed
+  and the panel's window labelled.
 - **Session parentage has exactly ONE rule: `store._PARENT_EDGE_SQL`.** Both
   the `/analytics` per-session rollup and the `/session` subtree walk resolve a
   session's parent through that constant. They used to derive it separately —

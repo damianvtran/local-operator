@@ -352,7 +352,8 @@ def _prep_rollup(ledger: Path) -> dict[str, Any] | None:
     if not hasattr(store, "session_daily_worklist"):
         store.close()
         return None
-    days = store.session_daily_worklist(max_days=3650)
+    plan = store.session_daily_worklist(max_days=3650)
+    days = plan.days
     per_day: list[float] = []
     wall_start = time.perf_counter()
     cpu_start = time.thread_time()
