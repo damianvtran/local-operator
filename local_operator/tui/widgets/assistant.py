@@ -46,6 +46,7 @@ from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.markdown_theme import brand_markdown_theme
+from local_operator.tui.settings import settings_get
 from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
 
@@ -111,6 +112,9 @@ RAIL_TOKEN = "label"
 #: cells the rail leaves turns a sentence into a column of single characters,
 #: so the rows are built wider than the frame and Rich clips them instead.
 MIN_BODY = 8
+#: Default for ``display.rail``. Lives beside the rail it governs so the
+#: registry entry and the render edge can be pinned to ONE constant by test.
+DEFAULT_RAIL = True
 
 
 def rail_rows(text: Text) -> Text:
@@ -467,6 +471,24 @@ class AssistantBlock(TranscriptBlock):
             self._frozen_epoch = epoch
         self._apply_rows(self._flat_rows(self._flat_width()))
 
+    def _rail_cols(self) -> int:
+        """:data:`RAIL_COLS` when the rail is on, 0 when it is off.
+
+        The block-level gutter width, read at the same rate as the paint in
+        :meth:`_apply_rows` so a flip cannot leave the fold and the paint
+        disagreeing about how many cells the gutter owns.
+
+        This is what makes OFF mean pre-rail rendering rather than pre-rail
+        rendering minus two columns: an ungated subtraction folds the prose two
+        cells narrower than the box while nothing is painted in the space it
+        left, which is an indent the reader did not ask for and cannot explain.
+
+        Read per call rather than cached on the instance, the same argument
+        :func:`rail_rows` makes about resolving colour at paint time — it is
+        what makes a mid-session flip apply to mounted blocks for free.
+        """
+        return RAIL_COLS if settings_get("display.rail", DEFAULT_RAIL) else 0
+
     def _flat_width(self) -> int:
         """The width the rows are built at — the block's own once laid out.
 
@@ -489,7 +511,7 @@ class AssistantBlock(TranscriptBlock):
         ``UserBlock`` records — wrapping into the last two or three cells is
         worse than letting Rich clip.
         """
-        return max(self.fold_width(FALLBACK_WIDTH) - RAIL_COLS, MIN_BODY)
+        return max(self.fold_width(FALLBACK_WIDTH) - self._rail_cols(), MIN_BODY)
 
     def authored_width(self, lane: int) -> int:
         """The lane, less the rail — this block's box is not the whole lane.
@@ -506,7 +528,7 @@ class AssistantBlock(TranscriptBlock):
         Same subtraction and same floor as :meth:`_flat_width`, so whichever
         trigger fires first the rows are folded at one number.
         """
-        return max(super().authored_width(lane) - RAIL_COLS, MIN_BODY)
+        return max(super().authored_width(lane) - self._rail_cols(), MIN_BODY)
 
     def _flat_console(self) -> Console | None:
         """The app's console, or ``None`` when this block is detached.
@@ -556,7 +578,8 @@ class AssistantBlock(TranscriptBlock):
         is impossible by construction rather than by a guard.
         """
         self._built_width = self._flat_width()
-        text = rail_rows(text)
+        if settings_get("display.rail", DEFAULT_RAIL):
+            text = rail_rows(text)
         # Counted from the RAILED text, because that is what gets painted. The
         # gutter adds no rows, but the pin must describe the frame it reserves
         # space for rather than the one before the gutter went on.
@@ -814,8 +837,11 @@ class AssistantBlock(TranscriptBlock):
         aligns against railed rows is exactly the shape of the bug this block's
         copy path was fixed for — the constant is necessary and nowhere near
         sufficient.
+
+        Zero when ``display.rail`` is off: there is no gutter to strip, and
+        reporting two would take two cells of real content off the clipboard.
         """
-        return RAIL_COLS
+        return self._rail_cols()
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The selected text as MARKDOWN, so it pastes cleanly anywhere.
@@ -950,7 +976,13 @@ class AssistantBlock(TranscriptBlock):
         #    after it read as a list opener — would never skip anything,
         #    flipping ``opens_line`` after every paragraph break and
         #    re-introducing the issue #395 mismeasurement class.
-        bare = [row[RAIL_COLS:] for row in rows]
+        #
+        # Bound ONCE here and used for every compensation below, because with
+        # ``display.rail`` off no gutter is painted: slicing a constant two
+        # would eat the first two characters of real content and every
+        # ``+ RAIL_COLS`` comparison would be off by the same two.
+        rail_cols = self._rail_cols()
+        bare = [row[rail_cols:] for row in rows]
         mapping = _copy_markdown.align(self._full_text, bare)
 
         # The same ``Selection.get_span`` the band paints with, chrome rows
@@ -1019,10 +1051,10 @@ class AssistantBlock(TranscriptBlock):
                 # the rail is exactly the difference. ``rstrip`` on the bare row
                 # rather than the painted one for reason 2 — a railed blank row
                 # rstrips to ``▌``, a length of 1 where the honest answer is 0.
-                starts_full = first_start <= RAIL_COLS + self._furniture_width(
+                starts_full = first_start <= rail_cols + self._furniture_width(
                     bare, mapping, first_index
                 )
-                ends_full = last_end == -1 or last_end >= RAIL_COLS + len(bare[last_index].rstrip())
+                ends_full = last_end == -1 or last_end >= rail_cols + len(bare[last_index].rstrip())
                 sub_line = not (starts_full and ends_full)
 
         if sub_line:
@@ -1049,7 +1081,7 @@ class AssistantBlock(TranscriptBlock):
             # when the reader's drag began on it.
             glyphs = [
                 rows[index][
-                    max(start, RAIL_COLS + self._furniture_width(bare, mapping, index)) : (
+                    max(start, rail_cols + self._furniture_width(bare, mapping, index)) : (
                         None if end == -1 else end
                     )
                 ]
