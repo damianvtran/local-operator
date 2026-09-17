@@ -86,7 +86,7 @@ def registries(request: Request) -> tuple[AgentRegistry, TeamRegistry]:
 
 @router.get("/v1/desktop/profiles", response_model=CRUDResponse)
 async def profiles(request: Request):
-    async with errors():
+    async with errors(request):
         return reply(
             {"profiles": await asyncio.to_thread(lambda: profile_catalogue(registries(request)[0]))}
         )
@@ -94,7 +94,7 @@ async def profiles(request: Request):
 
 @router.get("/v1/desktop/profiles/{name}", response_model=CRUDResponse)
 async def profile(name: str, request: Request):
-    async with errors():
+    async with errors(request):
         return reply(await asyncio.to_thread(lambda: profile_detail(registries(request)[0], name)))
 
 
@@ -119,7 +119,7 @@ async def install(body: NamedMutation, request: Request):
         # and reports a count that is simply wrong (contract §5.6).
         return profile_detail(agents, installed[0].name, already_installed=installed[1])
 
-    async with errors():
+    async with errors(request):
         return reply(
             await receipts(request).run(
                 "profile-install:" + body.request_id,
@@ -155,19 +155,19 @@ async def save_profile(
 
 @router.post("/v1/desktop/profiles", response_model=CRUDResponse)
 async def create_profile(body: ProfileCreate, request: Request):
-    async with errors():
+    async with errors(request):
         return await save_profile(body.name, body, request, creating=True)
 
 
 @router.patch("/v1/desktop/profiles/{name}", response_model=CRUDResponse)
 async def update_profile(name: str, body: ProfileEdit, request: Request):
-    async with errors():
+    async with errors(request):
         return await save_profile(name, body, request, creating=False)
 
 
 @router.get("/v1/desktop/teams", response_model=CRUDResponse)
 async def teams(request: Request):
-    async with errors():
+    async with errors(request):
         return reply(
             {"teams": await asyncio.to_thread(lambda: team_catalogue(registries(request)[1]))}
         )
@@ -181,7 +181,7 @@ async def team(name: str, request: Request):
             raise KeyError(name)
         return found.model_dump(mode="json")
 
-    async with errors():
+    async with errors(request):
         return reply(await asyncio.to_thread(read))
 
 
@@ -212,11 +212,11 @@ async def save_team(name: str, body: TeamEdit | TeamCreate, request: Request, *,
 
 @router.post("/v1/desktop/teams", response_model=CRUDResponse)
 async def create_team(body: TeamCreate, request: Request):
-    async with errors():
+    async with errors(request):
         return await save_team(body.name, body, request, creating=True)
 
 
 @router.patch("/v1/desktop/teams/{name}", response_model=CRUDResponse)
 async def update_team(name: str, body: TeamEdit, request: Request):
-    async with errors():
+    async with errors(request):
         return await save_team(name, body, request, creating=False)
