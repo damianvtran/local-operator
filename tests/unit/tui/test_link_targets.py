@@ -145,6 +145,105 @@ def test_balanced_parentheses_stay_in_the_url() -> None:
     ]
 
 
+def _nested_path(depth: int) -> str:
+    """``a_(b)_e`` for ``depth`` 1, ``a_(b_(c))_e`` for 2, and so on.
+
+    Built from the inside out, because that is the only way to write a nesting
+    depth that is a parameter rather than a case: the shape the defect lived in
+    was a property of the DEPTH, so a fix has to be checked at depths nobody
+    wrote a literal for.
+    """
+    inner = "b"
+    for offset in range(1, depth):
+        inner = f"{chr(ord('b') + offset)}({inner})"
+    return f"a_({inner})_e"
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 4, 8])
+def test_a_url_is_whole_at_every_nesting_depth(depth: int) -> None:
+    """Review round 2, BLOCKER — the round-1 fix's one-level paren pattern.
+
+    That fix spelled the balance as ``\\([^\\s()]*\\)`` inside the body, which
+    matches ONE flat run, so a URL nested one level deeper was not refused: the
+    capture stopped and the truncated string — still a legal ``https://`` URL —
+    was painted as a row and opened by ``enter``. The text in the round-2 report
+    was ``https://a.test/a_(b_(c))_d``, which the PREVIOUS head got right.
+
+    Depths 1 through 8 are asserted, on both the bare and the markdown path,
+    because the failure arrived exactly one level past whatever bound was
+    written: a fix checked only at the reported depth is the same fix again.
+    """
+    path = _nested_path(depth)
+    url = f"https://a.test/{path}"
+    assert extract_links(url) == [url]
+    assert extract_links(f"see {url} in prose") == [url]
+    assert extract_links(f"[docs]({url})") == [url]
+    assert extract_links(f"see [docs]({url}) now") == [url]
+
+
+def test_an_unclosed_parenthesis_is_not_part_of_the_url() -> None:
+    """Balance cuts the run, and the run is what the prose owns.
+
+    ``…/x_(y`` is a URL followed by an opening bracket the text never closes,
+    so the bracket is prose — not a target truncated mid-run, and not a row
+    that ends on a ``(`` for ``enter`` to open as a 404.
+    """
+    assert extract_links("see https://a.test/x_(y") == ["https://a.test/x_"]
+    assert extract_links("see https://a.test/x_(y_(z)") == ["https://a.test/x_"]
+    assert extract_links("see [t](https://a.test/x_(y") == ["https://a.test/x_"]
+
+
+def test_a_closer_that_closes_nothing_ends_the_url() -> None:
+    """The prose's own closer is not the URL's, at depth 0.
+
+    This is the rule ``[label](url)`` depends on: its terminator IS a ``)``, so
+    a body that kept every closer would swallow the link. The same rule then
+    decides the ambiguous case the round-2 sweep asked about — a ``)`` inside a
+    query or a fragment — and decides it toward the closer, which is why the
+    trailing punctuation trimmer does NOT carry a ``)``.
+    """
+    assert extract_links("see (https://a.test/x) done") == ["https://a.test/x"]
+    assert extract_links("see ((https://a.test/x)) done") == ["https://a.test/x"]
+    assert extract_links("https://a.test/x?q=1)") == ["https://a.test/x?q=1"]
+    assert extract_links("https://a.test/x#frag)") == ["https://a.test/x#frag"]
+    assert extract_links("https://a.test/x?a=(b)") == ["https://a.test/x?a=(b)"]
+
+
+def test_a_stop_character_inside_a_parenthesised_run_ends_the_url() -> None:
+    """ONE character set for the body, inside a run and outside it.
+
+    The round-2 head's parenthesised alternative used ``[^\\s()]``, so a run
+    could hold the ``<>``/quote characters its own bare alternative forbade:
+    ``…/x_(a<b)`` came back with the ``<`` in it — a target no browser resolves
+    and nothing on screen explains. The scan applies :data:`_BODY_STOP`
+    wherever it is, which is the smaller behaviour change of the two.
+    """
+    assert extract_links("https://a.test/x_(a<b)") == ["https://a.test/x_"]
+    assert extract_links("https://a.test/x_(a`b)") == ["https://a.test/x_"]
+    assert extract_links('https://a.test/x_(a"b)') == ["https://a.test/x_"]
+    assert extract_links("https://a.test/x_(a'b)") == ["https://a.test/x_"]
+
+
+def test_the_body_is_scanned_not_backtracked() -> None:
+    """The round-2 head's body pattern was a nested quantifier.
+
+    ``(?:[^\\s()<>"'`]+|\\([^\\s()]*\\))+`` repeats a repetition, so the
+    characters of one run can be split between iterations of the outer ``+`` in
+    exponentially many ways — and the markdown head forces that whole search to
+    FAIL whenever the link's own ``)`` is absent. Measured on this 52-character
+    text, the round-2 head had run for **over 5 s** when the probe gave up,
+    where the scan returns in ~30 µs; a 1,215-character text of runs took 6.5 ms
+    against 0.07 ms.
+
+    The text is a SHAPE, not prose: an unterminated markdown head whose target
+    holds a second ``http://``. It is here as the guard for the pattern, and its
+    failure mode is a HANG rather than a red assertion — so if this test hangs,
+    the body has gone back to a repetition of a repetition.
+    """
+    text = "**[Foo (bar)](https://a.test/a_#fraghttp://b.test/**"
+    assert extract_links(text) == ["https://a.test/a_#fraghttp://b.test/"]
+
+
 def test_text_without_a_link_yields_nothing() -> None:
     assert extract_links("nothing to see here") == []
 

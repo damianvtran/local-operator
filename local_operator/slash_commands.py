@@ -123,6 +123,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # that already has `/move` and `/resume`. 48 cells, inside the ~55 the
     # description column wraps past (see `/model` and `/theme`, where a wrapping
     # row renders a phantom command name in `/help`).
+    #
+    # NOT offered on the desktop: `desktop_destination` is deliberately unset,
+    # which keeps it out of `command_catalogue()` and therefore out of the
+    # command palette and the slash popup — the rule `/mobile` states in full.
+    # The reason is this command's own reason read the other way: what the
+    # terminal cannot do is run the CLICK, and a desktop browser renders the
+    # same markdown with real, clickable links, so a picker proxied over the
+    # transcript would add nothing the frame does not already offer. Stated on
+    # the entry rather than only in `test_desktop_controls.py`'s comment,
+    # because this is where an editor looks when they wonder why no destination
+    # is set; that test asserts the withheld set, so an entry arriving in it
+    # without a decision still fails there.
     SlashCommand("links", "Open a link from this conversation in a browser"),
     # Replaces the transcript; a row describing the old one would not survive.
     SlashCommand(
