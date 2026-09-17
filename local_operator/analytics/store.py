@@ -599,6 +599,12 @@ class SessionDailyPlan(NamedTuple):
     days: list[str]
     mode: str
     recent_count: int
+    #: A ``rebucket`` plan may only publish its new zone when it re-labelled the
+    #: LEDGER'S WHOLE SPAN: a partial re-label published as complete would leave
+    #: days still labelled by the old rule while the meta named the new one, and
+    #: the gate would then stop refusing. False for a ``pass`` plan, which has
+    #: nothing to publish.
+    span_complete: bool = False
 
 
 _DAILY_UPSERT_SQL = _rollup_upsert_sql("usage_daily", "day")
@@ -1968,7 +1974,8 @@ class AnalyticsStore:
         if max_days <= 0:
             return SessionDailyPlan([], "pass", 0)
         if state.get(_SESSION_DAILY_META_ZONE, "") not in ("", _local_zone_key()):
-            return SessionDailyPlan(_days_descending(oldest_day, top)[:max_days], "rebucket", 0)
+            whole = _days_descending(oldest_day, top)
+            return SessionDailyPlan(whole[:max_days], "rebucket", 0, len(whole) <= max_days)
         covered = state.get(_SESSION_DAILY_META_COVERED, "")
         last_sweep = state.get(_SESSION_DAILY_META_LAST_SWEEP, "")
         # Newest-first, and the hole range is pinned to the previous pass: with
@@ -2004,7 +2011,7 @@ class AnalyticsStore:
         except Exception:  # noqa: BLE001 — a missing frontier costs a re-derive
             logger.debug("analytics: could not record the swept day", exc_info=True)
 
-    def commit_session_daily_rebucket(self, *, oldest_day: str) -> bool:
+    def commit_session_daily_rebucket(self, *, oldest_day: str, top_day: str) -> bool:
         """Publish a completed zone re-label, in ONE transaction.
 
         THE POINT OF THE SEPARATE COMMIT: while the sweep is re-labelling, the
@@ -2014,16 +2021,21 @@ class AnalyticsStore:
         been re-derived, so after it commits the fast path works again and before
         it commits nothing is served — fail-closed in both directions.
 
-        Days the ledger can no longer answer are DROPPED here rather than left
-        behind: they are labelled with the old rule and nothing can confirm them
-        against the ledger, so keeping them would only be dead bytes the gate may
-        never reach.
+        Everything outside ``[oldest_day, top_day]`` is DELETED, on both ends.
+        Below, because a day the ledger can no longer answer is labelled with the
+        old rule and nothing can confirm it; above, because moving west (say) can
+        push every local day label one date EARLIER, which strands the buckets the
+        old labels produced for the newest date above the new span — a day that
+        survives the delete-below and then makes the window count disagree with
+        the ledger, i.e. a permanent ``count-mismatch`` out of a repaired table.
         """
         conn = self._connect()
         if conn is None:
             return False
         try:
-            conn.execute("DELETE FROM session_daily WHERE day < ?", (oldest_day,))
+            conn.execute(
+                "DELETE FROM session_daily WHERE day < ? OR day > ?", (oldest_day, top_day)
+            )
             # SET, not INSERT-OR-DO-NOTHING: the recorded zone is the OLD one
             # throughout the re-label (that is what keeps reads refusing while
             # it runs), so publishing the new one is exactly what DO NOTHING
