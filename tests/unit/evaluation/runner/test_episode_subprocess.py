@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ RELEASE_DIGEST = "b" * 64
 # grades trivially. Everything it returns has to satisfy the parent's verifier,
 # so the observation identity is recomputed the same way the protocol does.
 _ADAPTER_SOURCE = """
+import asyncio
 from importlib.metadata import distribution
 
 from local_operator.evaluation.adapters.api import (
@@ -395,6 +397,21 @@ class TinyAdapter:
 
     async def execute(self, params):
         self._maybe_die("execute")
+        # A ``wait`` action is the model asking the environment to sit still,
+        # and the real adapter implements it as an ``asyncio.sleep`` INSIDE the
+        # worker (adapter.py's execute), which is why a cancel cannot shorten
+        # it and why the parent's own deadline is the only thing that decides
+        # whether such a batch finishes. The fake honours the declaration for
+        # the same reason: a test that declares waiting expects it to elapse.
+        if not params.resume_observation:
+            await asyncio.sleep(
+                sum(
+                    action.duration_ms
+                    for action in params.action_batch.actions
+                    if action.kind == "wait"
+                )
+                / 1000.0
+            )
         # The MUTATION. Recorded so a test can prove a resumed call did not
         # apply the batch a second time -- the safety property the whole
         # observation-phase contract rests on.
@@ -905,6 +922,55 @@ async def test_real_worker_completes_a_scored_episode(
     assert report.valid, [issue.code for issue in report.issues]
     assert report.counters is not None
     assert report.counters.environment_step_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_batch_declaring_more_waiting_than_step_timeout_still_completes(
+    tmp_path: Path,
+    episode_id: str,
+    real_selector: AdapterSelector,
+    adapter_site: Path,
+) -> None:
+    """A legal batch is funded to finish, through the REAL assembled path.
+
+    The recorded defect, at a smaller scale than the campaign's: the configured
+    ``step_timeout`` is SMALLER than what the batch's own actions declare, so a
+    fixed per-call budget kills work the harness had already admitted. Episode
+    ``ep-fca426e92c42`` died exactly here -- ``key enter`` plus 4 x
+    ``wait 60000`` (240 s declared) under a 180 s budget -- at 186.3 s, after
+    130 steps and 1.7 h, with a non-retryable ``TimeoutError``.
+
+    Scaled to seconds because the assertion is about WHICH number governs the
+    call, not about either magnitude; the campaign's own figures are pinned in
+    ``tests/unit/evaluation/test_deadlines.py``. On the tree without the
+    derivation this episode seals unscored: the call is cut off at 1 s, the
+    channel is poisoned, and the run is forfeited.
+    """
+
+    _arm_cutpoint(adapter_site, None)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        _subprocess_config(tmp_path, step_timeout=1.0),
+        selector=real_selector,
+        model=ScriptedModel(["wait:3000", "finish"]),
+        launch=AdapterSupervisor.launch,
+    )
+
+    started = time.monotonic()
+    outcome = await runner.run()
+    elapsed = time.monotonic() - started
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    # The worker really did the declared work, past the configured budget: a
+    # sleep never returns early, so this is a lower bound and cannot flake.
+    assert elapsed >= 3.0
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert report.counters is not None
+    assert report.counters.environment_step_count == 1
 
 
 @pytest.mark.parametrize(
