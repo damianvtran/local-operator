@@ -88,7 +88,17 @@ from local_operator.evaluation.adapters.discovery import (
 
 _DISTRIBUTION = "lop-osworld-v2-adapter"
 _ADAPTER_ID = "osworld-v2"
-_VERSION = "0.1.2"
+# This literal is HALF of the adapter's version and must move with
+# ``pyproject.toml``'s ``version`` in the same change. It is what
+# ``AdapterMetadata.version`` reports, and ``Handshake._repeat_exact_pins``
+# compares that against the selector's ``version``, which the selector script
+# reads from the installed wheel's metadata -- so a wheel built from a bumped
+# pyproject with this literal left behind reports the OLD version and every
+# launch dies at hello with "handshake does not repeat the exact adapter
+# selection", naming no field. (schema_version below is tracked from the
+# harness constant for the same reason; this one cannot be, because the adapter
+# declares its own distribution version.)
+_VERSION = "0.1.3"
 _ENTRY_POINT = "lop_osworld_v2_adapter:create"
 
 
