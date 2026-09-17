@@ -2057,7 +2057,7 @@ class TestQwenCloudConsoleRoute:
         resolved = sorted(
             definition.id
             for definition in PROVIDER_REGISTRY
-            if controller._qwencloud_console_creds(definition.id) is not None
+            if controller._qwencloud_console_creds(definition.id)[0] is not None
         )
         assert resolved == ["alibaba-token-plan", "alibaba-token-plan-oauth"]
 
@@ -2091,7 +2091,7 @@ class TestQwenCloudConsoleRoute:
         assert "qwencloud-console" not in asked, "the ticket namespace is QwenCloud's alone"
         assert calls == [], "anthropic's dead grant must not reach the console route"
         assert [r.identity for r in reports] == ["other@example.test"]
-        assert controller._qwencloud_console_creds("anthropic") is None
+        assert controller._qwencloud_console_creds("anthropic") == (None, None)
 
     @pytest.mark.asyncio
     async def test_the_console_report_merges_into_one_credits_row(
@@ -2237,7 +2237,7 @@ class TestQwenCloudConsoleRoute:
         """
         self._ticket(store)
 
-        assert controller._qwencloud_console_creds("alibaba-token-plan-oauth") is not None
+        assert controller._qwencloud_console_creds("alibaba-token-plan-oauth")[0] is not None
         assert controller._qwencloud_console_creds(
             "alibaba-token-plan-oauth"
         ) == controller._qwencloud_console_creds("alibaba-token-plan")
@@ -2253,7 +2253,501 @@ class TestQwenCloudConsoleRoute:
         """
         store.upsert_credential("qwencloud-console", {"ticket": "", "project_id": "p"})
 
-        assert controller._qwencloud_console_creds("alibaba-token-plan") is None
+        assert controller._qwencloud_console_creds("alibaba-token-plan") == (None, None)
+
+
+class TestQwenCloudTicketFromSecretStore:
+    """The ticket VALUE now lives in the encrypted store, not in ``auth.db``.
+
+    The defect these pin is not "the value moved" — it is that the read path
+    used to answer every failure with the same silent ``None``. A locked
+    hardened store then rendered identically to "this provider has no quota
+    endpoint": the window vanished and the panel showed its generic empty
+    string, which is the "bug that dresses itself as a plausible degraded
+    state" failure ``controller.py``'s own 268-278 names. Four outcomes, four
+    distinguishable results, and the two the user can act on carry the command
+    that fixes them.
+    """
+
+    #: A placeholder value. The real credential is a full-account console
+    #: ticket and never appears in this repository.
+    TICKET = "fake-console-ticket"
+
+    def _dead_grant(self, store) -> str:
+        email = "fake@example.test"
+        store.upsert_credential(
+            "alibaba-token-plan",
+            {
+                "type": "oauth",
+                "access": "fake-mgmt",
+                "email": email,
+                "expires": 1,
+                "account_id": "fake-acct",
+            },
+        )
+        return email
+
+    def _migrated_row(self, store) -> None:
+        """The post-migration metadata row: a POINTER, never the value.
+
+        Mirrors ``store_ticket``'s write exactly — no ``ticket`` key, ever.
+        """
+        store.upsert_credential(
+            "qwencloud-console",
+            {
+                "project_id": "qwencloud-console:personal",
+                "captured_at": 1,
+                "secret_name": "QWENCLOUD_CONSOLE_TICKET",
+                "length": len(self.TICKET),
+            },
+        )
+
+    @staticmethod
+    def _store_exists(monkeypatch, exists: bool = True) -> None:
+        """Pin ``store_path(...).exists()`` without building a real store."""
+
+        class _Path:
+            def exists(self) -> bool:
+                return exists
+
+        monkeypatch.setattr("local_operator.secrets.keys.store_path", lambda base: _Path())
+
+    @staticmethod
+    def _retrieval(monkeypatch, result):
+        """Point ``access.retrieve_secret`` at ``result``; record every call."""
+        from local_operator.secrets import access
+
+        calls: list[str] = []
+
+        def _retrieve(name, base=None):
+            calls.append(name)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        monkeypatch.setattr(access, "retrieve_secret", _retrieve)
+        return calls
+
+    @staticmethod
+    def _spy(monkeypatch, controller, report=None):
+        calls: list[dict[str, Any]] = []
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append({"provider": provider, "access": access, "extra_creds": extra_creds})
+            return report
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+        return calls
+
+    # -- the value ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_the_value_reaches_the_fetcher_unchanged(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """C2. The decrypted value arrives in the shape ``usage.py`` expects.
+
+        Asserting the report came back would pass on a fetcher that never saw
+        the cookie, so this pins ``extra_creds`` itself — and pins that the
+        metadata keys (``secret_name``, ``length``) do NOT ride along into a
+        dict the fetcher interpolates into a header.
+        """
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+        self._retrieval(monkeypatch, self.TICKET.encode())
+        calls = self._spy(
+            monkeypatch, controller, report=UsageReport(provider="alibaba-token-plan", limits=[])
+        )
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1
+        creds = calls[0]["extra_creds"]
+        assert creds is not None
+        assert creds["ticket"] == self.TICKET
+        assert "secret_name" not in creds
+        assert "length" not in creds
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_plaintext_row_still_works(self, controller, store, monkeypatch) -> None:
+        """C7. A user who has not migrated keeps a working ``/usage``.
+
+        And reaches it WITHOUT the secret store: the legacy branch returns
+        before the import, so an un-migrated user on a host with no store
+        still never spawns a daemon.
+        """
+        self._dead_grant(store)
+        store.upsert_credential(
+            "qwencloud-console",
+            {"ticket": self.TICKET, "project_id": "qwencloud-console:personal"},
+        )
+        retrievals = self._retrieval(monkeypatch, self.TICKET.encode())
+        calls = self._spy(
+            monkeypatch, controller, report=UsageReport(provider="alibaba-token-plan", limits=[])
+        )
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert calls[0]["extra_creds"]["ticket"] == self.TICKET
+        assert retrievals == [], "a legacy row must not touch the secret store at all"
+
+    # -- the four outcomes -------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_a_locked_store_paints_a_note_not_an_empty_panel(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """C3. The whole point: a locked store is VISIBLE and ACTIONABLE.
+
+        Pins three separate things, because each fails independently: a report
+        survives at all (without it the block vanishes), the note names the
+        remedy, and the store's raw wire text — which says nothing a user can
+        act on — never reaches the panel.
+        """
+        from local_operator.secrets.client import BrokerDenied
+
+        email = self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+        self._retrieval(monkeypatch, BrokerDenied("no lop session is registered with the broker"))
+        self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(reports) == 1, "a locked store must not make the block disappear"
+        report = reports[0]
+        assert report.identity == email
+        assert report.notes is not None
+        assert "lop secret unlock" in report.notes
+        assert "registered with the broker" not in report.notes
+
+    @pytest.mark.asyncio
+    async def test_a_locked_store_never_crashes_the_gather(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """C4. ``fetch_usage`` fans out under ``asyncio.gather``.
+
+        A raise here would take out every OTHER provider in the same fan-out,
+        turning one locked ticket into a blank panel. Driven through the real
+        ``fetch_usage`` rather than the helper for exactly that reason.
+        """
+        from local_operator.secrets.client import BrokerLocked
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        store.upsert_credential("deepseek", {"key": "fake-deepseek-key", "type": "api_key"})
+        self._store_exists(monkeypatch)
+        self._retrieval(monkeypatch, BrokerLocked("locked"))
+        self._spy(monkeypatch, controller, report=UsageReport(provider="deepseek", limits=[]))
+
+        reports = await controller.fetch_usage(["alibaba-token-plan", "deepseek"])
+
+        assert {r.provider for r in reports} >= {"alibaba-token-plan", "deepseek"}
+
+    @pytest.mark.asyncio
+    async def test_a_missing_secret_names_the_repair(self, controller, store, monkeypatch) -> None:
+        """C5. Metadata present, value gone — a real state with its own fix.
+
+        Distinct from locked: unlocking cannot help, the ticket has to be
+        re-captured, so the note must name a DIFFERENT command.
+        """
+        from local_operator.secrets.errors import SecretNotFound
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+        self._retrieval(monkeypatch, SecretNotFound("QWENCLOUD_CONSOLE_TICKET"))
+        self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(reports) == 1
+        assert reports[0].notes is not None
+        assert "qwencloud-ticket set" in reports[0].notes
+        assert "secret unlock" not in reports[0].notes
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_store_stays_silent(self, controller, store, monkeypatch) -> None:
+        """The fourth outcome, and the one that must NOT paint a note.
+
+        A note is a promise that the user can act. A corrupt store offers no
+        command that fixes it, so inventing one would send them at a remedy
+        that cannot work — the opposite failure to the silent None.
+        """
+        from local_operator.secrets.errors import SecretStoreError
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+        self._retrieval(monkeypatch, SecretStoreError("db is corrupt"))
+        self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert [r.notes for r in reports] == [] or all(r.notes is None for r in reports)
+
+    # -- the note fits the panel -------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_the_note_survives_truncation_at_60_columns(self) -> None:
+        """C6. The REMEDY survives the panel's own truncation, not the length.
+
+        Two things this deliberately does NOT do, both of which produce a
+        green test over a note the user cannot act on:
+
+        1. It does not assert ``len(note) <= N``. That pins the wrong
+           quantity — it passes on a note that still loses its trailing
+           command, which is the only part that carries the fix.
+        2. It does not RE-DERIVE the width from the ``PANEL_*`` constants.
+           That chain yields 49 cells at a 60-column terminal and the real
+           panel yields 47: ``overlay.screen_size`` reports the app's CONTENT
+           box (58 for a 60-column terminal), so a derived budget overflows by
+           two. The derived version of this test went green against a note
+           that visibly truncated in a rendered frame.
+
+        So it renders the real panel at 60 columns and reads the painted line
+        back — the only check that cannot drift from what ships.
+        """
+        from local_operator.providers.controller import (
+            QWENCLOUD_TICKET_LOCKED_NOTE,
+            QWENCLOUD_TICKET_ORPHAN_NOTE,
+        )
+        from local_operator.tui.app import OperatorApp
+        from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+        for note, remedy in (
+            (QWENCLOUD_TICKET_LOCKED_NOTE, "lop secret unlock"),
+            (QWENCLOUD_TICKET_ORPHAN_NOTE, "lop qwencloud-ticket set"),
+        ):
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(60, 30)) as pilot:
+                await pilot.pause()
+                panel = app._usage_panel()
+                assert panel is not None
+                panel.start_fetch()
+                panel.show_reports(
+                    [UsageReport(provider="alibaba-token-plan", limits=[], notes=note)]
+                )
+                await pilot.pause()
+                painted = [
+                    line.plain
+                    for line in panel._body().lines
+                    if "ticket" in getattr(line, "plain", "")
+                ]
+
+            assert painted, "the note never reached the panel at all"
+            assert remedy in painted[0], f"the remedy is truncated at 60 columns: {painted[0]!r}"
+            assert "…" not in painted[0]
+
+    # -- the guards --------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_no_secret_store_spawns_no_daemon(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
+        """C1. The store-less host — the common case — starts no daemon.
+
+        ``retrieve_secret`` against a base with no store SPAWNS A BROKER and
+        leaves it behind before failing, so ``/usage`` would start one on every
+        refresh for a user who has never run ``lop secret set``. Checked by
+        ARTIFACT and by SPY: a test that only asserted the return value passes
+        with the guard deleted, because the failure still returns None.
+        """
+        import local_operator.secrets.client as client_mod
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+        spawned: list[Any] = []
+        monkeypatch.setattr(client_mod, "_spawn_broker", lambda base: spawned.append(base))
+        self._spy(monkeypatch, controller)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert spawned == [], "a host with no secret store must never spawn a broker"
+        assert not (tmp_path / "secrets").exists()
+        assert not (tmp_path / "secrets" / "broker.sock").exists()
+        assert not (tmp_path / "secrets" / "broker.lock").exists()
+
+    @pytest.mark.asyncio
+    async def test_no_other_provider_reaches_the_secret_store(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """C9. The storage-id guard, asserted by EXECUTION over the registry.
+
+        Without it every provider's refresh would try to retrieve a QwenCloud
+        credential — and the value is a full-account console ticket, so the
+        blast radius of widening this guard is the whole account.
+        """
+        from local_operator.providers.registry import PROVIDER_REGISTRY
+
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+        retrievals = self._retrieval(monkeypatch, self.TICKET.encode())
+
+        reached = sorted(
+            definition.id
+            for definition in PROVIDER_REGISTRY
+            if controller._qwencloud_console_creds(definition.id)[0] is not None
+        )
+
+        assert reached == ["alibaba-token-plan", "alibaba-token-plan-oauth"]
+        assert len(retrievals) == len(reached), "no other provider may query the namespace"
+
+    @pytest.mark.asyncio
+    async def test_the_ticket_is_spent_at_most_once_per_cycle(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """C10. One ticket, one retrieval, however many dead grants.
+
+        The flag is set on the ATTEMPT, not on success, and this is the test
+        that pins the difference. A locked store returns no creds, so a flag
+        set only on the success path leaves every later identity re-running
+        the retrieval — and on a broker-down store that is a measured 10 s of
+        blocked event loop EACH, inside the ``asyncio.gather`` that paints the
+        panel. Three dead grants froze the TUI for 30 s.
+        """
+        from local_operator.secrets.client import BrokerDenied
+
+        for index in range(3):
+            store.upsert_credential(
+                "alibaba-token-plan",
+                {
+                    "type": "oauth",
+                    "access": "fake-mgmt",
+                    "email": f"fake{index}@example.test",
+                    "expires": 1,
+                    "account_id": f"fake-acct-{index}",
+                },
+            )
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+        retrievals = self._retrieval(
+            monkeypatch, BrokerDenied("no lop session is registered with the broker")
+        )
+        self._spy(monkeypatch, controller)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(retrievals) == 1, (
+            "a failed retrieval is a property of the TICKET, not of the identity: "
+            "re-attempting it per identity multiplies a 10 s broker stall"
+        )
+
+    # -- the note clears itself --------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_unlocking_clears_the_note_without_a_manual_refresh(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The note must not outlive the remedy the user just ran.
+
+        A locked report is non-empty, so it is CACHED. With no scheduled
+        re-probe the payload expires on the full jittered 5-minute TTL, and
+        ``lop secret unlock`` — run in another terminal, as the note instructs
+        — left the panel insisting the store was locked until the TTL lapsed
+        or the user pressed ``r``. That is the "permanent message the user
+        cannot act their way out of" polarity defect ``_account_in_backoff``
+        documents this codebase having already paid for once.
+
+        Measured before the fix: the note survived a non-forced refresh.
+        """
+        import time as time_mod
+
+        from local_operator.secrets.client import BrokerDenied
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch)
+
+        locked = {"value": True}
+        from local_operator.secrets import access
+
+        def _retrieve(name, base=None):
+            if locked["value"]:
+                raise BrokerDenied("no lop session is registered with the broker")
+            return self.TICKET.encode()
+
+        monkeypatch.setattr(access, "retrieve_secret", _retrieve)
+        self._spy(
+            monkeypatch, controller, report=UsageReport(provider="alibaba-token-plan", limits=[])
+        )
+
+        locked_reports = await controller.fetch_usage(["alibaba-token-plan"])
+        assert "lop secret unlock" in (locked_reports[0].notes or "")
+        assert (
+            locked_reports[0].next_probe_at_ms is not None
+        ), "the note has to schedule its own re-probe or it cannot clear itself"
+
+        # The user runs the remedy, then the panel auto-refreshes -- NOT `r`.
+        locked["value"] = False
+        real_time = time_mod.time
+        monkeypatch.setattr(time_mod, "time", lambda: real_time() + 15)
+
+        cleared = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert [r.notes for r in cleared] == [
+            None
+        ], "the locked note outlived `lop secret unlock` on a non-forced refresh"
+
+    # -- the import graph --------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("module", "forbidden"),
+        [
+            # `qwencloud_console` is stdlib-only: `providers.usage` is a leak
+            # there too, because the fetcher must never reach a credential
+            # store.
+            (
+                "local_operator.providers.qwencloud_console",
+                ("local_operator.secrets", "local_operator.tui", "local_operator.providers.usage"),
+            ),
+            # `controller` legitimately imports `providers.usage` at module
+            # scope — it constructs `UsageReport`, and has since before this
+            # slice. Only the SECRET/TUI stack is forbidden here.
+            (
+                "local_operator.providers.controller",
+                ("local_operator.secrets", "local_operator.tui"),
+            ),
+        ],
+    )
+    def test_the_secret_stack_stays_off_the_import_graph(
+        self, module: str, forbidden: tuple[str, ...]
+    ) -> None:
+        """C11. Neither module may drag the secret stack in at import time.
+
+        ``qwencloud_console`` is stdlib-only precisely so ``controller.py`` can
+        import it at module scope without a cycle; ``access.py`` pulls in
+        ``cryptography`` and the client pulls in ``socket``/``fcntl``, which is
+        why THIS module's four secret-store imports sit inside
+        ``_qwencloud_console_creds`` rather than at the top of the file.
+
+        ``controller`` is parametrized in deliberately: a probe of
+        ``qwencloud_console`` alone cannot see a module-scope import added
+        here, so the brief's single-module version went green against the very
+        regression it was written to catch. Verified by moving one import to
+        module scope — that turns the ``controller`` case red and leaves the
+        ``qwencloud_console`` case green.
+
+        Run in a FRESH interpreter: a same-process check passes trivially
+        because this file's other tests already loaded the modules.
+        """
+        import subprocess
+        import sys
+
+        probe = (
+            f"import sys; import {module}; "
+            f"print(sorted(m for m in sys.modules if m.startswith({forbidden!r})))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+        )
+
+        assert (
+            result.stdout.strip() == "[]"
+        ), f"{module} leaks a forbidden module at import: {result.stdout.strip()}"
 
 
 # ---------------------------------------------------------------------------
