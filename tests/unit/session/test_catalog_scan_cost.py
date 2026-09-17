@@ -60,6 +60,7 @@ from typing import Any, Callable
 import local_operator.session.retention as retention
 from local_operator.resume import _recent_sessions_with_origin
 from local_operator.session.catalog import load_catalog
+from local_operator.session.creation import ensure_session_created_at
 from local_operator.session.retention import session_activity, session_activity_path
 
 
@@ -71,10 +72,22 @@ def _session(
     inbox: str | None = None,
     origin: str | None = None,
     stamp: float | None = None,
+    created: float | None = None,
 ) -> Path:
-    """One session directory in whichever awkward shape a test needs."""
+    """One session directory in whichever awkward shape a test needs.
+
+    ``created`` PINS ``created_at`` through the store's own writer, and any test
+    that asserts an ORDER must pass it. ``session_created_at`` reads the stored
+    sidecar first and falls back to ``st_birthtime``, which macOS has and Linux
+    does not — measured, not assumed: with the birthtime fallback removed (which
+    is CI's filesystem), the ranking of these fixtures collapses to the id
+    tie-break and order-dependent assertions pass locally and fail in CI. A
+    sidecar makes the order the same number on every platform.
+    """
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
+    if created is not None:
+        ensure_session_created_at(directory, created)
     if transcript is not None:
         (directory / "transcript.jsonl").write_text(transcript, encoding="utf-8")
     if inbox is not None:
@@ -1243,7 +1256,7 @@ class TestAPinnedConversationSurvivesThePage:
         from local_operator.resume import write_session_title
 
         for index in range(4):
-            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
         oldest = "user00000000"
         write_session_title(
             tmp_path / "sessions" / oldest, "Older pin", user_set=False, past_names=[]
@@ -1261,7 +1274,7 @@ class TestAPinnedConversationSurvivesThePage:
         """The unpinned case, so the assertion above is about the parameter
         rather than about the ranking happening to include it."""
         for index in range(4):
-            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
 
         entries = load_catalog(tmp_path, limit=2)
 
@@ -1279,7 +1292,7 @@ class TestAPinnedConversationSurvivesThePage:
         caller-driven or pin-recency order would take — the assertion fails.
         """
         for index in range(5):
-            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
 
         entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000002", "user00000000"])
 
@@ -1294,7 +1307,7 @@ class TestAPinnedConversationSurvivesThePage:
         """A pin on a conversation the page already carries must not buy it a
         second row: the extras are ``ranked[limit:]``, not "everything pinned"."""
         for index in range(4):
-            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
 
         entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000003"])
         ids = [entry.id for entry in entries]
@@ -1309,8 +1322,8 @@ class TestAPinnedConversationSurvivesThePage:
         not for a promise this store cannot keep, and a pin on a delegated run
         deliberately has no row here (design §9.2)."""
         for index in range(3):
-            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
-        _session(tmp_path, "sub000000001", origin="subagent", stamp=500.0)
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
+        _session(tmp_path, "sub000000001", origin="subagent", stamp=500.0, created=500.0)
 
         entries = load_catalog(
             tmp_path,
@@ -1335,7 +1348,13 @@ class TestAPinnedConversationSurvivesThePage:
         from local_operator.session.catalog import _ROW_CACHE
 
         for index in range(4):
-            _session(tmp_path, f"user{index:08x}", transcript="{}\n", stamp=1000.0 + index)
+            _session(
+                tmp_path,
+                f"user{index:08x}",
+                transcript="{}\n",
+                stamp=1000.0 + index,
+                created=1000.0 + index,
+            )
 
         entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000000"])
 
