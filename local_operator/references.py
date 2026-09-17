@@ -636,6 +636,17 @@ def reference_block_spans(text: str) -> list[tuple[int, int]]:
     the cost of removing text on its say-so is the unanchored-``find`` bug that
     silently showed less than the operator typed (``harness/rows.py``).
 
+    "Reports nothing" means the OPENER contributes no span — it does NOT mean
+    the scan stops there. An unclosed opener used to pair with the NEXT block's
+    closer, forging one span that swallowed the opener, everything between the
+    two, and that whole block; the strip then deleted the operator's own prose,
+    silently, which is precisely the R4 failure this function exists to prevent
+    and the one branch the sentence above claimed was protected (review round 2,
+    MINOR-1). The forged span needs a LATER complete block to exist at all, so
+    the tell is an open marker between this opener and the closer a bare
+    ``find`` would take: that closer belongs to the later block, not to this
+    opener. Skip the opener and rescan from the next one.
+
     EVERY block, not just the last one. A message that was expanded twice —
     pass 2 adding a token to text that already carried a block, which is the
     ordinary FORWARDING shape — holds two, and a row painter that strips only
@@ -654,8 +665,18 @@ def reference_block_spans(text: str) -> list[tuple[int, int]]:
         if start == -1:
             return spans
         close = text.find(REFERENCE_BLOCK_CLOSE, start + len(opener))
-        if close == -1:
-            return spans
+        # An OPEN MARKER between this opener and that closer means this opener is
+        # UNCLOSED and the closer belongs to the block that marker starts: a
+        # bare `find` would forge ONE span across both, and the strip would
+        # delete the operator's prose between them (review round 2, MINOR-1).
+        # A body can never spell an open marker — `_defuse` neutralises it — so
+        # this cannot fire on a well-formed block. Rescanning FROM the next
+        # opener (not past it) is what lets that later block keep its own span,
+        # and `start + len(REFERENCE_BLOCK_OPEN)` cannot re-find this one.
+        nested = text.find(REFERENCE_BLOCK_OPEN, start + len(REFERENCE_BLOCK_OPEN))
+        if close == -1 or (nested != -1 and nested < close):
+            cursor = start + len(REFERENCE_BLOCK_OPEN)
+            continue
         end = close + len(REFERENCE_BLOCK_CLOSE)
         spans.append((start, end))
         cursor = end
@@ -805,6 +826,15 @@ def _shaped_text(path: Path, text: str, shown: str) -> tuple[str, dict[str, str]
     # footer's promise is what the model navigates by, so the count is of
     # terminators: a line is shown when its newline came along.
     head_lines = head.count("\n")
+    # The head is a CHARACTER slice, so it normally ends MID-LINE, and counting
+    # terminators alone then understates what the model actually holds: a
+    # 20,000-character single-line file reported "the first 0 of 1 lines" while
+    # 6,144 characters of that line were in the prompt (review round 2,
+    # MINOR-3), which sends the model into a pointless re-`read`. Naming the
+    # partial line is the honest form — it neither claims a complete line the
+    # cap cut in half (the defect the count of terminators fixed) nor denies the
+    # fragment that is really there.
+    partial = bool(head) and not head.endswith("\n") and head_lines < len(lines)
     rows = [
         f"  - L{max(heading.start, head_lines + 1)}-{heading.end}: {heading.text}"
         for heading in _collect_headings(lines)
@@ -819,8 +849,11 @@ def _shaped_text(path: Path, text: str, shown: str) -> tuple[str, dict[str, str]
     # ``test_the_read_pointer_in_a_shaped_file_still_resolves``, because a
     # footer pointing at a path ``read`` cannot resolve is a dead pointer the
     # model will follow.
+    shown_lines = f"the first {head_lines} of {len(lines)} lines"
+    if partial:
+        shown_lines += f", plus part of line {head_lines + 1}"
     footer = (
-        f"\n\n[shown: the first {head_lines} of {len(lines)} lines. "
+        f"\n\n[shown: {shown_lines}. "
         f"Read any section with read(path={shown!r}, range='start-end').]"
     )
     if outline:

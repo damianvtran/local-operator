@@ -1211,25 +1211,57 @@ def argument_suggestions(
 def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[str, ArgumentChoice]]:
     """``(display_name, choice)`` suggestions for an ``@path`` token.
 
-    A DELEGATION, and that is the whole implementation. A path is ranked by the
-    very scorer that ranks commands, providers and skills, so ``@ap`` finds
-    ``app.py`` by the rule the user already learned from ``/lgt`` finding
-    ``logout``.
+    Ranked by the very scorer that ranks commands, providers and skills, so
+    ``@ap`` finds ``app.py`` by the rule the user already learned from ``/lgt``
+    finding ``logout`` — and then FILTERED to PREFIX matches, which is the one
+    rule a path list has of its own.
 
-    It carries NO gate of its own, deliberately. :func:`skill_suggestions` has
-    one because four classes of non-invocation must never reach a row, and every
-    part of that gate is wrong for a path: it demands a lowercase letter as
-    evidence (``README.md`` has none) and case-sensitive prefix matching (a
-    user typing ``@read`` means ``README.md``). The empty-query case is likewise
-    a real answer here — a bare ``@`` lists the directory — which is exactly
-    what :func:`argument_suggestions` already does with an empty query.
+    THE PREFIX FILTER IS THE FIX FOR A MEASURED DRAFT-MUTATION (QA round 1,
+    Q-2). Rows are produced by ``match_choices``, a SUBSEQUENCE scorer that
+    returns the name for any query its characters can be found inside — so in a
+    directory holding ``README.md``, ``@me`` reached a row. That is the same
+    trap :func:`skill_suggestions` documents for the inline ``$``, one sigil
+    over and with the same consequence: a non-empty match set keeps the list
+    OPEN, an open FILE list owns Enter, and the draft is then REWRITTEN with
+    nothing sent and no notice. Measured on the base: ``run glab mr create
+    --assignee @me`` + Enter became ``…--assignee @README.md``, ``requests=0``,
+    and the second Enter sent nothing either. The resolver's governing rule
+    (``references.py``: a token that does not resolve to an existing path is
+    prose, and ``@me`` is its named example) says that sentence is not a
+    reference at all, so the list was offering a rewrite of prose — the one
+    thing a composer must never do silently.
 
-    Kept as a named seam rather than calling :func:`argument_suggestions`
-    directly at the two call sites, so that if paths ever do need a rule of
-    their own there is one place to put it, and so the call sites read in the
-    same shape as their ``skill``/``argument`` siblings.
+    The evidence required is therefore the same SHAPE of evidence
+    :func:`skill_suggestions` demands, adapted to what a path can show. A skill
+    name has case to testify with; a path does not, so the test is the one a
+    shell user already has in their fingers: the typed segment must be a
+    case-INSENSITIVE PREFIX of the entry. ``@ap`` keeps ``app.py``, ``@read``
+    keeps ``README.md`` (the case-insensitive half is what makes that work, and
+    is why the letter-for-letter rule below it is NOT reused here), ``@src/su``
+    keeps ``sub/``, and a bare ``@`` — an explicit "what is here" — still lists
+    the whole directory.
+
+    What it costs, stated at its true width: a query with a typo in it no
+    longer reaches its near-miss row, so ``@appp.py`` offers nothing to correct
+    it to. That direction is deliberate. The two outcomes are not symmetric —
+    a list that stays shut leaves the operator's prose exactly as typed, while
+    a list that opens on a subsequence can silently turn `--assignee @me` into
+    a file the model will then read. Fail closed.
+
+    Kept as a named seam rather than inlined at the two call sites, so that if
+    paths ever do need a rule of their own there is one place to put it, and so
+    the call sites read in the same shape as their ``skill``/``argument``
+    siblings.
     """
-    return argument_suggestions(query, choices)
+    if not query:
+        return [(choice.name, choice) for choice in choices]
+    lowered = query.lower()
+    # ``match_choices`` for the RANKING (it is the shared scorer, and its order
+    # is what makes the top row the one Tab takes), then the prefix test as a
+    # filter on top. Case-folded with ``.lower()`` rather than ``casefold()``,
+    # matching ``argument_suggestions`` above: the fold only ever has to
+    # agree with itself on both sides of the comparison.
+    return [pair for pair in match_choices(query, choices) if pair[0].lower().startswith(lowered)]
 
 
 def _pad_to(row: Text, width: int, style: Style) -> Text:
@@ -1418,12 +1450,18 @@ class CommandPicker(Static):
             # after the keystroke that opened the list, so reaching for
             # ``argument_suggestions`` here would restore the fuzzy rows
             # ``sync_skills`` had just excluded and hand an inline ``$LANG``
-            # back the open list that makes Enter rewrite the draft.
-            matches = (
-                skill_suggestions(self._query, self._choices, self._skill_inline)
-                if self._mode is PickerMode.SKILL
-                else argument_suggestions(self._query, self._choices)
-            )
+            # back the open list that makes Enter rewrite the draft. FILE is the
+            # same drift a second time, and it was measured rather than assumed:
+            # routing only ``sync_files`` through :func:`file_suggestions` left
+            # ``@me`` closed on the keystroke and REOPENED one tick later when
+            # the app answered ``FileQueryOpened``, so the prose rewrite Q-2
+            # names came back on a path no test of the keystroke could see.
+            if self._mode is PickerMode.SKILL:
+                matches = skill_suggestions(self._query, self._choices, self._skill_inline)
+            elif self._mode is PickerMode.FILE:
+                matches = file_suggestions(self._query, self._choices)
+            else:
+                matches = argument_suggestions(self._query, self._choices)
             seeding = highlight is not None and not self._query and not self._chosen_by_hand
             if seeding:
                 # Silence `_apply`'s own report: it fires for row 0 before the

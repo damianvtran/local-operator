@@ -3263,14 +3263,38 @@ class Editor(TextArea):
                     # exact match) and submit unconditionally.
                     unambiguous = self._picker_choice_is_unambiguous(name)
                     if self._picker.mode is PickerMode.FILE:
-                        # NEITHER key ever submits on a file row, ambiguous or
-                        # not — the same rule SKILL gets below, for a stronger
-                        # reason. A completed `@src/` is very often MID-PATH:
-                        # the user is one segment into naming a file and the
-                        # next keystroke continues it. Submitting on the
-                        # one-match case would send a reference to a directory
-                        # nobody meant to send, and there is no undo for a
-                        # turn already dispatched.
+                        # NO trailing space is inserted, unlike SKILL below, so
+                        # a completed token stays OPEN under the caret and the
+                        # list re-opens on the very name it just completed —
+                        # that is the mid-path rule, and it is what makes
+                        # `@src/` one keystroke from `@src/app.py`.
+                        #
+                        # It also means Enter alone can never terminate the
+                        # token, so the escape hatch is: ENTER SENDS WHEN THERE
+                        # IS NOTHING LEFT TO ACCEPT. A row that is already what
+                        # the buffer holds changes nothing, so the keystroke
+                        # means what Enter means everywhere else in the app. A
+                        # row that would APPEND anything still completes, which
+                        # leaves the mid-path case above exactly as it was — and
+                        # submitting a `@src/` the user is still typing is the
+                        # mis-send the no-submit rule exists to prevent.
+                        #
+                        # Without this the two rules composed into a keyboard
+                        # trap rather than a preference: `summarise @README.md`
+                        # + Enter ×3 sent nothing at all, forever (QA round 1,
+                        # Q-1), and every ordinary submission in this feature's
+                        # own test file had to press Escape first — which is
+                        # exactly how a green suite missed the headline flow.
+                        if key == "enter" and self._file_row_is_already_in_the_buffer(name):
+                            # Submitted HERE rather than left to fall out of the
+                            # picker block: the ctrl+c/super+c branch below ends
+                            # in an unconditional `event.stop()` + return, so
+                            # bubbling out would SWALLOW the press instead of
+                            # submitting it.
+                            self._submit()
+                            event.stop()
+                            event.prevent_default()
+                            return
                         self._complete_file(name)
                     elif self._picker.mode is PickerMode.SKILL:
                         # NEITHER key ever submits here, ambiguous or not. A
@@ -8246,6 +8270,26 @@ class Editor(TextArea):
             return
         self._set_text_and_caret(*completed)
 
+    def _file_row_is_already_in_the_buffer(self, name: str) -> bool:
+        """Whether accepting file row ``name`` would leave the buffer unchanged.
+
+        The FILE list's Enter rule needs this because a FILE completion inserts
+        no trailing space: the token stays open, the list re-opens on the name
+        it just completed, and without a termination condition the next Enter
+        completes it again — measured, `summarise @README.md` + Enter ×3 kept
+        the buffer byte-identical and sent nothing (QA round 1, Q-1). A row the
+        buffer already holds has nothing left to accept, so Enter sends.
+
+        Compared on the TEXT the completion would produce, never on the row
+        name, because the two deliberately differ in two shapes: the directory
+        part survives (`@src/` + `app.py` is `@src/app.py`) and a name with a
+        space is emitted quoted (`@"my file.txt"`). A name comparison would
+        therefore report "not yet accepted" forever for exactly the rows a
+        path list is most useful for.
+        """
+        completed = self._completion_for(CompletionMode.FILE, name)
+        return completed is not None and completed[0] == self.text
+
     def _complete_file(self, name: str) -> None:
         """Put ``@name`` in the buffer, leaving the caret at the token's end.
 
@@ -8262,8 +8306,10 @@ class Editor(TextArea):
         replacement is the entire edit and the user's draft is never reordered
         around it.
 
-        Nothing submits here, on either key or a click — see the key routing and
-        :meth:`_apply_command`.
+        Nothing submits here, on either key or a click. Enter SENDS instead of
+        completing only when the row is already what the buffer holds — see
+        :meth:`_file_row_is_already_in_the_buffer` — and a click never reaches
+        the submit path at all.
         """
         completed = self._completion_for(CompletionMode.FILE, name)
         if completed is None:

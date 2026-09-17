@@ -124,27 +124,37 @@ async def test_at_glued_to_a_word_never_opens_the_picker(workspace) -> None:
 
 
 @pytest.mark.asyncio
-async def test_at_me_closes_when_nothing_in_the_directory_matches(workspace) -> None:
-    """Design R1's case, asserted against what the MATCHER actually does.
+async def test_at_me_never_opens_the_picker_at_all(workspace) -> None:
+    """``@me`` in a POPULATED directory: no list, no rewrite, prose intact.
 
-    ``@me`` is a boundary ``@``, so the list opens; whether it then closes is a
-    question about the fuzzy scorer, not about the ``@`` grammar. The picker
-    routes through ``argument_suggestions``, whose documented short-query rule
-    is ``prefixed or matches`` — so a SUBSEQUENCE hit keeps the list open when
-    no prefix matches. In a directory holding ``README.md``, ``@me`` is such a
-    hit (m…e), and the list staying open is the ranking behaviour every other
-    list in the app has, not a failure of the ``@`` mitigation.
+    This used to assert only the empty-directory case, on the reasoning that
+    whether the list closes is a question about the fuzzy scorer, not about the
+    ``@`` grammar — ``argument_suggestions``' ``prefixed or matches`` kept a
+    SUBSEQUENCE hit open (m…e against ``README.md``) and that was accepted as
+    "the ranking behaviour every other list has".
 
-    What R1 actually promises is that the list closes when the directory holds
-    nothing the query can reach, which is asserted here against a directory
-    that does. The prose-safety property that matters — ``@me`` never inserting
-    anything or submitting on its own — is covered by the tests above and by
-    the no-submit test below.
+    It is not: the resolver's governing rule calls that token prose
+    (``@me — no such path; sent as written``), and an open FILE list OWNS Enter,
+    so the accepted behaviour was a silent rewrite of prose into a filename the
+    operator never typed, with the message never sent (QA round 1, Q-2,
+    measured against the real composer). ``file_suggestions`` now requires
+    prefix evidence, which is what makes the populated case behave like the
+    empty one. Both are asserted here because the harm was always in the
+    populated one.
+
+    The negative is the point of this file: an ``@`` is an ordinary character
+    in ``--assignee @me``, so this is the assertion that keeps prose prose.
     """
     empty = workspace / "empty"
     empty.mkdir()
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        populated = await _draft(app, pilot, "glab mr create --assignee @me")
+        assert (
+            not populated.picker.is_open()
+        ), "a subsequence row opened for a token the resolver calls prose"
+        assert populated.text == "glab mr create --assignee @me"
+
         editor = await _draft(app, pilot, "glab mr create --assignee @empty/me")
         assert not editor.picker.is_open()
 
@@ -389,20 +399,38 @@ async def test_a_quoted_path_in_a_subdirectory_round_trips(workspace) -> None:
 
 
 @pytest.mark.asyncio
-async def test_neither_tab_nor_enter_submits_on_a_file_row(workspace) -> None:
-    """A completed ``@src/`` is very often mid-path.
+async def test_enter_completes_an_unfinished_row_and_a_second_enter_sends(workspace) -> None:
+    """A completed ``@src/`` is very often mid-path — so the FIRST Enter completes.
 
     Submitting on the one-match case would send a reference to a directory the
-    user was still typing past, and a dispatched turn has no undo.
+    user was still typing past, and a dispatched turn has no undo. That is the
+    rule this test has always pinned, and it still holds: ``@READ`` is not what
+    the row says, so Enter inserts the row and nothing is submitted.
+
+    What the rule needed was a TERMINATION CONDITION, because the FILE list
+    inserts no trailing space and therefore re-opens on the very name it just
+    completed. Without one, Enter completed the same row forever: a draft
+    ending in a reference could never be sent at all (QA round 1, Q-1). So the
+    SECOND Enter — by which point the row IS what the buffer holds and there is
+    nothing left to accept — submits, which is the assertion the old version of
+    this test could not make and the reason its name claimed "neither key ever
+    submits".
     """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "@READ")
+        assert editor.picker.is_open(), "fixture never reached an open file list"
         await pilot.press("enter")
         await pilot.pause()
-        assert session.prompts == [], "Enter on a file row submitted the turn"
-        assert "@README.md" in editor.text
+        assert session.prompts == [], "Enter on an unfinished file row submitted the turn"
+        assert editor.text == "@README.md"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(session.prompts) == 1, (
+            "the token never terminated: Enter on a row the buffer already holds "
+            "must send, or the draft is unsendable"
+        )
 
 
 @pytest.mark.asyncio
@@ -491,16 +519,40 @@ async def test_every_picker_mode_has_a_live_phase(workspace) -> None:
 # --- Pure units --------------------------------------------------------------
 
 
-def test_file_suggestions_rank_without_a_skill_style_gate() -> None:
-    """An uppercase name and a bare query both survive.
+def test_file_suggestions_offer_a_path_only_on_prefix_evidence() -> None:
+    """The one rule a path list has of its own: a typed segment must PREFIX it.
 
-    ``skill_suggestions``' gate would reject both — it demands a lowercase
-    letter as evidence and case-sensitive prefix matching — and a path list
-    needs neither. This pins that ``file_suggestions`` did not inherit it.
+    Everything the catalogue behaviour was argued for survives — ``@ap`` still
+    reaches ``app.py``, and the comparison is case-INSENSITIVE so ``@read``
+    still reaches ``README.md`` (a letter-for-letter rule would drop every
+    uppercase name). What does not survive is a SUBSEQUENCE match, which is what
+    ``argument_suggestions`` would have returned: ``@me`` in a directory holding
+    ``README.md`` reached a row, the resolver calls that token prose, and an
+    open FILE list owns Enter — so the row was an offer to rewrite prose
+    silently (QA round 1, Q-2).
+
+    The empty query is still a real answer here: a bare ``@`` is an explicit
+    "what is here", so the whole directory lists.
     """
-    choices = [ArgumentChoice("README.md"), ArgumentChoice("src/")]
-    assert [name for name, _ in file_suggestions("", choices)] == ["README.md", "src/"]
+    choices = [ArgumentChoice("README.md"), ArgumentChoice("src/"), ArgumentChoice("app.py")]
+    assert [name for name, _ in file_suggestions("", choices)] == [
+        "README.md",
+        "src/",
+        "app.py",
+    ]
     assert [name for name, _ in file_suggestions("read", choices)] == ["README.md"]
+    assert [name for name, _ in file_suggestions("READ", choices)] == [
+        "README.md"
+    ], "a case-sensitive prefix rule would reject every uppercase entry name"
+    assert [name for name, _ in file_suggestions("ap", choices)] == ["app.py"]
+    assert [
+        name for name, _ in file_suggestions("me", choices)
+    ] == [], "a subsequence hit reached a row for a token the resolver leaves as prose"
+    # The cost of the gate, pinned rather than discovered later: a typo no
+    # longer reaches its near-miss row. Fail-closed is the deliberate direction
+    # — a shut list leaves the draft as typed, an open one can silently change
+    # it into a file the model will then read.
+    assert [name for name, _ in file_suggestions("appp.py", choices)] == []
 
 
 def test_the_ghost_is_an_append_for_a_file_row() -> None:
