@@ -498,19 +498,24 @@ def _tree_is_replaceable() -> bool:
 
 
 def _drain_reasons(poll: _BuildPoll) -> tuple[str, ...]:
-    """WHY NOW, as the phrases the retirement parenthetical carries.
+    """WHY NOW, as the phrases the retirement's why-now carries.
 
     Split out of :func:`_drain_detail` because the reason it names is a fact
     about the LATCH — this runtime was declining a settled newer build, or its
     tree was gone — and it stays true of the exit however long the work in
     between took. The build PAIR is the half that can go stale, so the two are
     composed separately (see :func:`_drain_detail_at_exit`).
+
+    EACH PHRASE NAMES ITS SUBJECT. ``declined 3x`` was read against the build
+    it followed ("a newer build ... declined", i.e. refused) when the runtime
+    was the party declining to hand over — and it was read by the operator, so
+    the ambiguity cost something (design round 1, D2).
     """
     reasons: list[str] = []
     if poll.files_gone:
         reasons.append("the loaded module tree is gone")
     if poll.declines:
-        reasons.append(f"declined {poll.declines}x")
+        reasons.append(f"the runtime declined to hand over {poll.declines}x")
     if not reasons:
         reasons.append("hard-stale")
     return tuple(reasons)
@@ -519,7 +524,7 @@ def _drain_reasons(poll: _BuildPoll) -> tuple[str, ...]:
 def _drain_detail(
     reasons: "tuple[str, ...]", boot: "BuildStamp | None", newer: "BuildStamp | None"
 ) -> str:
-    """The parenthetical riding with the retirement cause.
+    """The why-now riding with the retirement, for the runtime LOG.
 
     Names WHICH build the runtime left for and WHY NOW, because "the runtime
     retired" alone is not actionable to whoever reads the log later, and the
@@ -527,34 +532,48 @@ def _drain_detail(
     build pair says what changed, the trigger says whether this runtime was
     still working or had lost its tree.
 
+    IT IS NOT A TURN'S REASON, and that is the round-1 correction: a retirement
+    that latched through :meth:`ServingSessionHandle.begin_retire` proved nothing
+    was in flight, so there is no cut for it to label — the string is logged at
+    the exit (``serving.ServingSessionHandle.begin_retire``) and nowhere else.
+    See ``process._drain_detail_at_exit`` for the pair's own re-read.
+
     ``newer`` is the build on disk at the moment the pair is being read, so a
     caller that has one in hand from a poll and a caller re-reading the disk at
     its exit both come through here — one spelling of the pair, and therefore
     one sentence shape, whichever moment it describes.
     """
     pair = _build_pair(boot, newer) if newer is not None else ""
-    return f"{', '.join(reasons) or 'hard-stale'}{pair}"
+    return f"{', '.join(reasons)}{pair}"
 
 
 def _drain_detail_at_exit(drain: "_Drain") -> str:
-    """The parenthetical the EXIT records, with its build pair RE-READ.
+    """The why-now the EXIT logs, with its build pair RE-READ.
 
     WHY NOT ``drain.detail``. That string was composed at the latch, and the
     gap between the latch and the exit is exactly the wait this runtime's work
     buys — hours, on a busy session. Two ``lop-update`` runs fit in that gap,
     and replaying the latch's pair then asserts a transition the process has
     already left: measured on the reporting host, five latches at 01:58 named
-    ``(0.56.2 → 0.56.6)`` and the incident that replayed one of them at 09:56
-    named that same pair while 0.56.9 was the install on disk (2026-09-17). The
-    operator's request was to stop backend updates from producing error traces,
-    and a reason naming a build that has not been on disk for hours is its own
-    false report.
+    ``(0.56.2 → 0.56.6)`` and the record that replayed one of them at 09:56
+    named that same pair while 0.56.9 was the install on disk (2026-09-17). A
+    log line naming a build that has not been on disk for hours is its own
+    false report, and the operator's request was to stop backend updates from
+    producing false traces.
 
     The honest pair at the exit is boot → whatever the install names NOW, which
     is what :func:`local_operator.buildwatch.handover_build` answers. ``None``
-    from it — the install is back to the boot stamp (a rolled-back update), or
-    unreadable — asserts no transition at all, which is the same rule the drain
-    already follows before it acts on a move.
+    from it asserts no transition at all — the install is back to the boot
+    stamp, the stamp cannot be resolved into a build, or there is no install to
+    compare against (:func:`handover_build`'s own three shapes, one of which is
+    a build strictly OLDER than the boot stamp) — and that is the same rule the
+    drain already follows before it acts on a move. ANSWERING THE ROLLBACK EDGE
+    (QA round 1, Q3): with the pair dropped, the exit keeps only the reasons,
+    which is a statement about what this runtime declined and not a promise
+    that a newer build is on disk; the exit's own log line carries it, and the
+    durable row this used to feed no longer exists (a retirement that proved
+    nothing was in flight brands no turn — see
+    ``ServingSessionHandle._note_retirement_cut_off``).
 
     The REASONS are deliberately still the latch's: this runtime was declining
     three settled builds, or its tree was gone, and neither fact expires. See
@@ -898,24 +917,26 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         # checks it, so from here the admissions REFUSE and the claim is true by
         # construction (design §5.1).
         begin_retire = getattr(handle, "begin_retire", None)
-        # ``owes_cut_off=False``: THIS RUNG PROVES NOTHING WAS IN FLIGHT, so it
-        # owes the session no cut-off note. The grace loop above only falls
-        # through with the whole residency predicate holding — no turn, no job,
-        # no gate parked on the user — and the latch refuses admissions from the
-        # same instant, so no turn can appear between them either. Arming a cause
-        # here claimed the opposite, and the claim was not free: the note is
-        # consumed by whichever run end comes next, and the teardown synthesises
-        # one (`Session.dispose`) for a run whose outcome was never published —
-        # so a quiet update that caught nothing published a durable "error" row
-        # for a run that had already ended, rendered as an unexplained cut-off
-        # because ``idle-exit`` is a retirement label and not a cause in
+        # THIS RUNG PROVES NOTHING WAS IN FLIGHT, and the cut-off note now says
+        # so by construction rather than by an argument here: the note is
+        # written only for a turn the disposal is about to ABORT
+        # (``ServingSessionHandle._note_retirement_cut_off``), and the grace
+        # loop above only falls through with the whole residency predicate
+        # holding — no turn, no job, no gate parked on the user — while the
+        # latch refuses admissions from the same instant, so no turn can appear
+        # between them either. Arming a cause at the LATCH (what this branch did
+        # until 2026-09-17) claimed the opposite, and the claim was not free:
+        # the note is consumed by whichever run end comes next, and the teardown
+        # synthesises one for a run whose outcome was never published — so a
+        # quiet update that caught nothing published a durable "error" row for a
+        # run that had already ended, rendered as an unexplained cut-off because
+        # ``idle-exit`` is a retirement label and not a cause in
         # ``incidents.CUT_OFF_CAUSES``. Six such rows on the reporting host
         # (2026-09-17); the one read in full is session ``1ee642a5a098``, whose
         # last turn row is 09:57:24 and whose ``error`` row was published at
         # 09:59:31 against the run that had already ended. The retirement is
-        # still latched — the refusal and the log line need it — but it is not a
-        # cut-off.
-        if callable(begin_retire) and not begin_retire("idle-exit", owes_cut_off=False):
+        # still latched — the refusal and the log line need it.
+        if callable(begin_retire) and not begin_retire("idle-exit"):
             logger.info("session runtime: work arrived as the idle drain closed; keeping")
             continue
         logger.info(

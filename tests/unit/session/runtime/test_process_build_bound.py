@@ -118,7 +118,7 @@ class FakeHandle:
         self.drain_detail = detail
         return True
 
-    def begin_retire(self, cause: str, detail: str = "", *, owes_cut_off: bool = True) -> bool:
+    def begin_retire(self, cause: str, detail: str = "") -> bool:
         if self.may_refresh():
             return False
         self.retired = True
@@ -208,11 +208,11 @@ async def test_the_exit_names_the_pair_on_disk_NOW_not_the_one_the_latch_saw(
     """A reason may only assert a transition the install still has.
 
     THE STALE-PAIR BUG, measured on the reporting host (2026-09-17): five
-    latches at 01:58 named ``declined 3x (0.56.2 → 0.56.6)``, those runtimes
-    went on working, and the incident one of them replayed at 09:56 still named
-    that pair — while 0.56.9 was what a next engage would have run. The reason
-    is durable and user-visible (the sidebar, the phone, the next turn's card),
-    so a pair two generations old is a false report rather than a stale log.
+    latches at 01:58 named ``the runtime declined to hand over 3x (0.56.2 →
+    0.56.6)``, those runtimes went on working, and the record that replayed one
+    of them at 09:56 still named that pair — while 0.56.9 was what a next engage
+    would have run. A why-now naming a build that has not been on disk for hours
+    is a false report rather than a stale log.
 
     The REASONS half must survive the wait — this runtime really did decline
     three settled builds, and that is still why it is leaving — so both halves
@@ -292,7 +292,10 @@ async def test_the_age_bound_catches_a_stamp_that_keeps_moving(disk, monkeypatch
     # The count never got past its first observation — every check saw a
     # DIFFERENT stamp, which is exactly what a per-stamp counter cannot bound —
     # and the clock tripped anyway. That is the shape the age bound exists for.
-    assert "declined 1x" in handle.drain_detail, handle.drain_detail
+    # The phrase names its SUBJECT (design round 1, D2): "declined" beside a
+    # build read as the build being refused, when the runtime is the party
+    # declining to hand over.
+    assert "the runtime declined to hand over 1x" in handle.drain_detail, handle.drain_detail
     assert counter["n"] >= 2, "the stamp really did keep moving under the counter"
     assert not stop.is_set() and not handle.disposed
     stop.set()
@@ -343,7 +346,10 @@ async def test_the_age_bound_survives_the_settle_windows_of_its_own_installs(
     assert await _wait_for(lambda: handle.drained), "the belt never tripped across settle windows"
     # The count cannot be what tripped it: every decline was a DIFFERENT stamp,
     # so it never got past one.
-    assert "declined 1x" in handle.drain_detail, handle.drain_detail
+    # The phrase names its SUBJECT (design round 1, D2): "declined" beside a
+    # build read as the build being refused, when the runtime is the party
+    # declining to hand over.
+    assert "the runtime declined to hand over 1x" in handle.drain_detail, handle.drain_detail
     assert counter["n"] >= 4, "the install really did keep moving under the counter"
     assert not stop.is_set() and not handle.disposed, "in-flight work must never be aborted"
     stop.set()
