@@ -482,6 +482,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "status", help="Whether a cookie is stored and how old it is; never the value"
     )
     qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
+    qwencloud_actions.add_parser(
+        "migrate", help="Move a plaintext ticket into the encrypted secret store"
+    )
 
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
@@ -5888,6 +5891,8 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
     from local_operator.providers.qwencloud_console import (
         QWENCLOUD_TICKET_STALE_MS,
         TicketStoreError,
+        TicketStoreLocked,
+        _secret_is_present,
         delete_ticket,
         read_ticket_record,
         store_ticket,
@@ -5937,6 +5942,30 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         # file.
         try:
             record = read_ticket_record(store)
+            # The ROW is not the whole answer, and this is the other half of the
+            # fix `rm` already needed. `store_ticket` writes the VALUE first and
+            # the row second, on purpose, so a crash, a kill or an older
+            # `auth.db` restored from a backup leaves a SECRET ORPHAN: a live
+            # value with nothing pointing at it (see `delete_ticket`'s
+            # docstring for the same state from the revoking side).
+            # `read_ticket_record` reads rows and reports None for it, so
+            # without this probe `status` answers "no ticket stored" over a live
+            # full-account cookie -- hiding the exposure AND pointing away from
+            # `rm`, the only verb that revokes it.
+            #
+            # INSIDE this `try`, deliberately: `_secret_is_present` raises the
+            # same `TicketStoreError` family (`TicketStoreLocked`,
+            # `TicketStoreUnreadable`), and a store that cannot be read must
+            # reach the UNKNOWN branch below rather than fall through to the
+            # no-ticket receipt.
+            unreferenced_value = record is None and _secret_is_present(None)
+        # No separate `TicketStoreLocked` clause here, unlike `rm`. The remedy
+        # ("Run `lop secret unlock`") lives in the EXCEPTION MESSAGE that Slice
+        # A raises, and this clause interpolates it, so a locked store already
+        # exits 1 naming the remedy. A specific clause would need a body
+        # identical to this one -- measured: deleting it changed neither the
+        # exit code nor a byte of stderr. `rm` earns its second clause because
+        # its two bodies genuinely differ.
         except TicketStoreError as exc:
             print(
                 f"lop qwencloud-ticket status: {exc}\n"
@@ -5946,6 +5975,26 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
             )
             return 1
         if record is None:
+            if unreferenced_value:
+                # Exit 0, not 1: unlike the UNKNOWN branch above, the question
+                # WAS answered -- something is stored, and the answer is
+                # "stored with no metadata row". The metadata-orphan WARNING
+                # below also rides exit 0, and 1 is this verb's dedicated code
+                # for "could not be read at all".
+                #
+                # No length and no age: both live in the row that is missing,
+                # and reading them would mean retrieving the value, which is
+                # the one thing this verb promises never to do. `/usage` does
+                # not read the value either -- with no row there is nothing for
+                # the controller to find -- so this state is present AND
+                # unusable, and the honest receipt says both.
+                print(
+                    "A QwenCloud console ticket VALUE is stored, but no metadata "
+                    "row records it, so /usage does not read it and its age and "
+                    "length are unknown."
+                )
+                print('  Run "lop qwencloud-ticket rm" to revoke it.')
+                return 0
             print("No QwenCloud console ticket stored.")
             print("  printf %s '<TICKET>' | lop qwencloud-ticket set")
             return 0
@@ -5958,6 +6007,16 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         else:
             age = "age unknown"
         print(f"QwenCloud console ticket stored ({record['length']} characters, {age}).")
+        # A METADATA ORPHAN: the row in `auth.db` says a ticket was stored but
+        # its encrypted value is gone, so `/usage` has nothing to read. The
+        # default is True so a pre-migration row, whose value still lives in
+        # `auth.db` itself, does not trip the warning.
+        if not record.get("secret_present", True):
+            print(
+                "  WARNING: the ticket's metadata is stored but its ENCRYPTED VALUE "
+                "is missing, so /usage cannot read it. Re-run "
+                "\"printf %s '<TICKET>' | lop qwencloud-ticket set\" to restore it."
+            )
         if captured and age_ms > QWENCLOUD_TICKET_STALE_MS:
             print(
                 "  This is older than a console session usually lasts. If /usage has "
@@ -6010,10 +6069,22 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         # give: it would remove the mitigation and say it had worked.
         try:
             removed = delete_ticket(store)
+        except TicketStoreLocked as exc:
+            # First, for the same reason as `status`: caught by the clause
+            # below it, the one failure with a remedy reads as one without.
+            print(
+                f"lop qwencloud-ticket rm: {exc}\n"
+                "  The ticket MAY STILL BE STORED. Unlock the secret store and "
+                "re-run, and revoke the session in the QwenCloud console to "
+                "be certain.",
+                file=sys.stderr,
+            )
+            return 1
         except TicketStoreError as exc:
             print(
                 f"lop qwencloud-ticket rm: {exc}\n"
-                "  The ticket MAY STILL BE STORED. Re-run once the store is "
+                "  The ticket MAY STILL BE STORED, in the credential store, the "
+                "encrypted secret store, or both. Re-run once they are "
                 "readable, and revoke the session in the QwenCloud console to "
                 "be certain.",
                 file=sys.stderr,
@@ -6040,12 +6111,287 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         )
         return 0
 
+    if command == "migrate":
+        return _qwencloud_ticket_migrate(store)
+
     print(
-        "usage: lop qwencloud-ticket {set,status,rm}\n"
+        "usage: lop qwencloud-ticket {set,status,rm,migrate}\n"
         "  printf %s '<TICKET>' | lop qwencloud-ticket set",
         file=sys.stderr,
     )
     return 2
+
+
+def _qwencloud_ticket_migrate(store: Any) -> int:
+    """Move a plaintext ticket out of `auth.db` and into the encrypted store.
+
+    VALUE-ONLY: the row is REWRITTEN, never deleted. Dropping it would lose
+    `captured_at` (the clock `status`'s staleness warning measures) and
+    `project_id` (what makes `_identity_key_for` upsert in place instead of
+    INSERTing a duplicate on the next `set`).
+
+    The secret is written and CONFIRMED before the plaintext is touched, so
+    every interruption point leaves the value in BOTH stores rather than in
+    neither, and re-running repairs it. A duplicate is recoverable; a loss is
+    not.
+
+    No redaction sink is registered here, unlike `mcp/credentials.py`. That
+    path is HANDED a session and a manager to register against; a bare CLI
+    invocation has neither, and there is no process-wide registry to fall back
+    to -- `variables.register_redaction` is a method on a session's store. The
+    guarantee this function makes instead is the stronger one, and the tests
+    pin it on every branch: the value never reaches stdout, stderr, a file, or
+    an exception message.
+    """
+    import json
+
+    from local_operator.providers.auth_cli import _invalidate_cached_usage
+    from local_operator.providers.qwencloud_console import (
+        QWENCLOUD_CONSOLE_PROJECT_ID,
+        QWENCLOUD_CONSOLE_PROVIDER,
+        QWENCLOUD_TICKET_SECRET_NAME,
+        TicketStoreError,
+        TicketStoreLocked,
+        _secret_is_present,
+        _store_secret_value,
+    )
+
+    def _compact() -> tuple[bool, bool]:
+        """`VACUUM` + a TRUNCATE checkpoint. Returns (compacted, blocked).
+
+        One spelling for both callers -- the migrating path and the
+        already-migrated no-op -- because they need the identical thing.
+
+        `VACUUM` ALONE IS NOT ENOUGH. `AuthStore._connect` sets
+        `journal_mode=WAL`, so the rebuild is itself written through the WAL
+        and the freed plaintext stays readable in `auth.db` until a
+        checkpoint lands. Measured on this branch: VACUUM only -> plaintext
+        still found; VACUUM + checkpoint -> gone from all three files.
+        """
+        try:
+            # `VACUUM` raises `cannot VACUUM from within a transaction` if one
+            # is armed. Nothing above arms one today -- sqlite3 begins only
+            # for DML and `upsert_credential` commits -- so this is a guard
+            # against a later step adding DML here, at no measurable cost.
+            store._conn.commit()
+            store._conn.execute("VACUUM")
+            store._conn.commit()
+            row = store._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.OperationalError as exc:
+            # An `in_transaction` failure is a DEFECT IN THIS CODE, not a busy
+            # database. Folding it into the "another process is reading"
+            # warning would name the wrong cause in an honest-looking
+            # sentence, which is the failure this module's comments already
+            # warn about.
+            if "within a transaction" in str(exc):
+                print(
+                    "lop qwencloud-ticket migrate: internal error — VACUUM ran "
+                    "inside an open transaction. The value is encrypted, but the "
+                    "old plaintext was NOT cleared. Please report this.",
+                    file=sys.stderr,
+                )
+            return False, False
+        except sqlite3.Error:
+            return False, False
+        # A checkpoint BLOCKED by another connection's read snapshot reports
+        # itself in the FIRST COLUMN of this row and RAISES NOTHING: measured
+        # `(1, 10, 1)` with the plaintext still readable in `auth.db-wal`.
+        # Discarding the row and catching only `sqlite3.Error` is how this
+        # command would claim success over a cookie that is still on disk.
+        if row is not None and row[0] == 1:
+            return False, True
+        return True, False
+
+    def _warn_not_compacted(blocked: bool) -> None:
+        # Printed on BOTH paths, including the already-migrated no-op. On that
+        # path we cannot know whether an earlier run left plaintext behind --
+        # and that path exists precisely FOR the run that did. Over-warning
+        # costs a line; staying silent loses the only signal the user has that
+        # the credential is still readable.
+        print(
+            "  WARNING: the old plaintext could NOT be cleared from auth.db"
+            + (" (another process is reading the database)" if blocked else "")
+            + ". It remains readable on disk until a later VACUUM. Re-run "
+            "`lop qwencloud-ticket migrate` when nothing else is using "
+            "local-operator; re-running clears it."
+        )
+
+    def _both_copies(reason: str) -> int:
+        """The one failure mode after the secret is confirmed: a duplicate."""
+        print(
+            f"lop qwencloud-ticket migrate: {reason}.\n"
+            "  BOTH COPIES EXIST: the value is in the encrypted store AND still "
+            "in auth.db, so nothing is lost. Re-run migrate.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # `include_disabled=True` for the reason `read_ticket_record` documents: a
+    # soft-deleted row is still ON DISK, and skipping it would leave plaintext
+    # behind while reporting success. Clause order is load-bearing --
+    # `ProgrammingError` is a caller bug and must keep propagating.
+    try:
+        rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError, json.JSONDecodeError) as exc:
+        print(
+            f"lop qwencloud-ticket migrate: the credential store could not be read "
+            f"({type(exc).__name__}); nothing was changed.",
+            file=sys.stderr,
+        )
+        return 1
+
+    value = ""
+    captured_at: Any = None
+    already_migrated = False
+    for row in rows:
+        row_data = getattr(row, "data", None)
+        if not isinstance(row_data, dict):
+            continue
+        if row_data.get("ticket"):
+            value = str(row_data["ticket"])
+            captured_at = row_data.get("captured_at")
+            break
+        if row_data.get("secret_name"):
+            already_migrated = True
+
+    if not value:
+        if already_migrated:
+            # THE NO-OP STILL COMPACTS, and that is the whole repair story.
+            # `_warn_not_compacted` tells the user to re-run; the second run
+            # lands HERE. An early return would make that advice a lie -- the
+            # plaintext would stay readable forever while `status` reported
+            # success (it sees no `ticket` key) and `rm` removed both stores
+            # without ever checkpointing. Unrepairable by the tool.
+            compacted, blocked = _compact()
+            if not compacted:
+                _warn_not_compacted(blocked)
+            print("The QwenCloud console ticket is already in the encrypted secret store.")
+            return 0
+        # Returns WITHOUT touching `store._conn`: there is nothing to clear,
+        # and this is the one path a caller with no live connection can drive.
+        print("No QwenCloud console ticket stored; nothing to migrate.")
+        return 0
+
+    # Named before the write: C measured `ensure_broker` polling to
+    # STARTUP_TIMEOUT_S twice when no broker is running, so a silent 10 s stall
+    # here reads as a crash. Flushed so it lands before the stall, not after.
+    print(
+        "Encrypting the ticket (this may take a moment if the secret broker is starting)…",
+        flush=True,
+    )
+
+    # THE SECRET IS WRITTEN FIRST. A crash between here and the rewrite below
+    # leaves the value in both stores -- recoverable, and `/usage` keeps
+    # working off the legacy row. The reverse order risks losing it entirely.
+    #
+    # `TicketStoreLocked` BEFORE `TicketStoreError`: it is a subclass, and a
+    # broad clause above it swallows the one remedy the user can act on. A's
+    # helper already puts `lop secret unlock` in the message; it is
+    # interpolated, never re-spelled.
+    try:
+        _store_secret_value(value, None)
+    except TicketStoreLocked as exc:
+        print(
+            f"lop qwencloud-ticket migrate: {exc}\n"
+            "  NOTHING WAS CHANGED. The plaintext ticket is still in auth.db. "
+            "Run `lop secret unlock`, then re-run migrate.",
+            file=sys.stderr,
+        )
+        return 1
+    except TicketStoreError as exc:
+        print(
+            f"lop qwencloud-ticket migrate: {exc}\n"
+            "  NOTHING WAS CHANGED. The plaintext ticket is still in auth.db, so "
+            "nothing is lost. If this persists, capture a fresh cookie and use "
+            "\"printf %s '<TICKET>' | lop qwencloud-ticket set\" instead.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # CONFIRMED, never inferred from the write returning -- the same rule
+    # `delete_ticket` applies to the other direction, and the whole safety
+    # property of this command. `describe`, not `get`, so the confirmation
+    # costs no audit `get` event and does not stamp `last_used_at`.
+    #
+    # The raise is caught for the same reason the rest of this module catches:
+    # a store that locked between the write and this check gives the SAME
+    # answer (we cannot confirm, so nothing may be removed) and must report it
+    # rather than surfacing a traceback carrying absolute local paths.
+    try:
+        confirmed = _secret_is_present(None)
+    except TicketStoreError as exc:
+        confirmed = False
+        detail = f" ({exc})"
+    else:
+        detail = ""
+    if not confirmed:
+        print(
+            f"lop qwencloud-ticket migrate: the encrypted value could not be "
+            f"confirmed after writing it{detail}.\n"
+            "  NOTHING WAS REMOVED. The plaintext ticket is still in auth.db, so "
+            "nothing is lost. Re-run migrate.",
+            file=sys.stderr,
+        )
+        return 1
+
+    payload = {
+        # The ORIGINAL `captured_at`, not `time.time()`: it is CAPTURE time,
+        # which is what the ~7-day staleness warning measures. Re-stamping it
+        # would tell the user a week-old cookie is fresh.
+        "project_id": QWENCLOUD_CONSOLE_PROJECT_ID,
+        "captured_at": captured_at,
+        "secret_name": QWENCLOUD_TICKET_SECRET_NAME,
+        "length": len(value),
+    }
+    # No `ticket` key -- that is the point. No `type` and no `source="login"`
+    # either: each short-circuits `_identity_key_for` to None, and the next
+    # `set` would INSERT a duplicate row instead of updating this one.
+    try:
+        store.upsert_credential(QWENCLOUD_CONSOLE_PROVIDER, payload)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        return _both_copies(f"the metadata row could not be rewritten ({type(exc).__name__})")
+
+    # Confirmed by RE-READING, for the reason `delete_ticket` states: the
+    # write returning is not evidence the plaintext is out of the API's view.
+    try:
+        remaining = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError, json.JSONDecodeError) as exc:
+        return _both_copies(
+            f"the rewritten row could not be re-read to confirm it ({type(exc).__name__})"
+        )
+    for row in remaining:
+        row_data = getattr(row, "data", None)
+        if isinstance(row_data, dict) and row_data.get("ticket"):
+            return _both_copies("a row still carries a plaintext ticket after the rewrite")
+
+    compacted, blocked = _compact()
+    if not compacted:
+        _warn_not_compacted(blocked)
+
+    # Required, not belt-and-braces: C proved a cached note survives the full
+    # ~5 min TTL, so a panel painted before the migration would keep rendering
+    # stale state. Same call, same position as `set` and `rm` -- after the
+    # write succeeded, before the receipt. Called regardless of `compacted`:
+    # the value moved either way, so the cached row is stale either way.
+    _invalidate_cached_usage(_QWENCLOUD_TICKET_AUGMENTS, store)
+    print(
+        f"Migrated the QwenCloud console ticket ({len(value)} characters) into the "
+        f"encrypted secret store as {QWENCLOUD_TICKET_SECRET_NAME}."
+    )
+    # CONDITIONAL, and that is mandatory. This is the sentence that would
+    # otherwise be false in exactly the blocked-checkpoint case: the value
+    # encrypted, the plaintext still readable in `auth.db-wal`. The warning
+    # above is the honest account there, and printing both would contradict
+    # one with the other in a single command's output.
+    if compacted:
+        print("  The plaintext row in auth.db has been replaced with metadata only.")
+    return 0
 
 
 _MCP_INTERACTIVE_LOGIN_TIMEOUT_MS = 10 * 60_000

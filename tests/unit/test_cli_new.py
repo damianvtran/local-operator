@@ -19,6 +19,7 @@ import contextlib
 import socket
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -2282,3 +2283,520 @@ def test_agents_list_hides_the_seed_provenance_marker(capsys) -> None:
     output = capsys.readouterr().out
     assert "seed:reviewer" not in output
     assert "Tags: role, tools:read,grep" in output, "the tags a human set still show"
+
+
+# --- qwencloud-ticket: the two-store surface (PR 2, slice B) -----------------
+#
+# The value never appears here. `FAKE_QWEN_TICKET` is the only ticket-shaped
+# literal in this block, and several tests assert it is ABSENT from the output.
+
+#: Never a real cookie.
+FAKE_QWEN_TICKET = "fake-console-ticket"
+
+
+class _QwenRowStore:
+    """The `AuthStore` surface `_qwencloud_ticket_action` actually uses.
+
+    `read_ticket_record`/`store_ticket`/`delete_ticket` are monkeypatched per
+    test, so the only method that has to behave is `list_credentials` — which
+    `_qwencloud_credential_row_exists` calls to decide whether the
+    "no alibaba-token-plan credential" warning prints.
+    """
+
+    def __init__(self, augment_rows: list[Any] | None = None) -> None:
+        self.augment_rows = augment_rows if augment_rows is not None else []
+
+    def list_credentials(self, provider: str, **kwargs: Any) -> list[Any]:
+        if provider == cli._QWENCLOUD_TICKET_AUGMENTS:
+            return self.augment_rows
+        return []
+
+
+def _patch_qwen(monkeypatch: pytest.MonkeyPatch, **fns: Any) -> None:
+    """Patch the qwencloud_console seam the CLI imports at point of use.
+
+    The import inside `_qwencloud_ticket_action` is `from ... import name`, so
+    the binding resolved at call time is the module attribute — patching the
+    module is what the CLI sees.
+    """
+    from local_operator.providers import qwencloud_console
+
+    for name, fn in fns.items():
+        monkeypatch.setattr(qwencloud_console, name, fn)
+
+
+def _locked_exc() -> Exception:
+    from local_operator.providers.qwencloud_console import TicketStoreLocked
+
+    return TicketStoreLocked(
+        "the secret store is hardened and locked, so whether the ticket's "
+        "value is present is UNKNOWN. Run `lop secret unlock`, then retry"
+    )
+
+
+def _qwen_audit_events(base: Path) -> dict[str, int]:
+    """Audit rows by event name, read from the store's SQLite file directly.
+
+    Read below the API on purpose: the property is what the STORE recorded, so
+    asking the same API that might be skipping the record would prove nothing.
+    """
+    import sqlite3 as _sqlite3
+
+    from local_operator.secrets.keys import store_path
+
+    path = store_path(base)
+    if not path.exists():
+        return {}
+    connection = _sqlite3.connect(path)
+    try:
+        rows = connection.execute("select event, count(*) from audit group by event").fetchall()
+    finally:
+        connection.close()
+    return dict(rows)
+
+
+def test_status_reports_length_and_age_without_retrieving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B1: length and age come from the `auth.db` metadata row, never a `get`.
+
+    Driven against a REAL secret store, because the property is about what the
+    store records. The assertion is "no `get` event, and `last_used_at` stays
+    None" rather than "no audit row at all": `open_store()` legitimately
+    appends a broker `key`/`deny:key` row per call, so a total-delta assertion
+    would fail on correct code. The second half — one real `get` moving both —
+    proves the pin discriminates instead of passing vacuously.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.qwencloud_console import (
+        QWENCLOUD_TICKET_SECRET_NAME,
+        store_ticket,
+    )
+    from local_operator.secrets import access
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    base = tmp_path / "secretbase"
+    base.mkdir()
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        store_ticket(opened, FAKE_QWEN_TICKET, base=base)
+
+        # `_qwencloud_ticket_action` calls `read_ticket_record(store)` with no
+        # `base`, so bind this test's throwaway base onto the seam the CLI uses.
+        from local_operator.providers import qwencloud_console as _qc
+
+        real_read = _qc.read_ticket_record
+        monkeypatch.setattr(
+            _qc, "read_ticket_record", lambda store, **kw: real_read(store, base=base)
+        )
+
+        before = _qwen_audit_events(base)
+        assert cli._qwencloud_ticket_action("status", opened) == 0
+        after = _qwen_audit_events(base)
+
+        out = capsys.readouterr()
+        assert f"{len(FAKE_QWEN_TICKET)} characters" in out.out
+        assert "old" in out.out
+        assert FAKE_QWEN_TICKET not in out.out and FAKE_QWEN_TICKET not in out.err
+
+        assert after.get("get", 0) == before.get("get", 0), "status retrieved the value"
+        assert access.open_store(base).describe(QWENCLOUD_TICKET_SECRET_NAME).last_used_at is None
+
+        # The pin discriminates: one real retrieval moves BOTH observables.
+        access.open_store(base).get(QWENCLOUD_TICKET_SECRET_NAME)
+        assert _qwen_audit_events(base).get("get", 0) > before.get("get", 0)
+        assert (
+            access.open_store(base).describe(QWENCLOUD_TICKET_SECRET_NAME).last_used_at is not None
+        )
+    finally:
+        opened.close()
+
+
+def test_status_names_the_repair_for_a_metadata_orphan(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B2: metadata row present, encrypted value gone — say so and name the fix."""
+    _patch_qwen(
+        monkeypatch,
+        read_ticket_record=lambda store, **kw: {
+            "credential_id": 1,
+            "captured_at": int(time.time() * 1000),
+            "length": len(FAKE_QWEN_TICKET),
+            "secret_present": False,
+        },
+    )
+
+    assert cli._qwencloud_ticket_action("status", _QwenRowStore([object()])) == 0
+    out = capsys.readouterr().out
+    assert "ENCRYPTED VALUE" in out
+    assert "qwencloud-ticket set" in out
+
+
+def test_status_on_a_legacy_row_does_not_warn_about_a_missing_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B2b: `.get(..., True)` — a pre-migration row has no `secret_present`
+    key and its value lives in `auth.db`, so the orphan warning must stay
+    silent. Without the default it would fire on every un-migrated install."""
+    _patch_qwen(
+        monkeypatch,
+        read_ticket_record=lambda store, **kw: {
+            "credential_id": 1,
+            "captured_at": int(time.time() * 1000),
+            "length": len(FAKE_QWEN_TICKET),
+        },
+    )
+
+    assert cli._qwencloud_ticket_action("status", _QwenRowStore([object()])) == 0
+    assert "ENCRYPTED VALUE" not in capsys.readouterr().out
+
+
+def test_status_on_a_locked_store_names_the_remedy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B3: a locked hardened store exits non-zero and names `lop secret unlock`.
+
+    This pins the OUTCOME, not a clause. `status` has no dedicated
+    `TicketStoreLocked` clause — the remedy travels in the exception message
+    Slice A raises, and the generic `TicketStoreError` clause interpolates it.
+    The mutation that discriminates is therefore dropping that clause's
+    `return 1` (see the report's mutation table), not reordering clauses.
+    """
+
+    def locked(store: Any, **kwargs: Any) -> Any:
+        raise _locked_exc()
+
+    _patch_qwen(monkeypatch, read_ticket_record=locked)
+
+    assert cli._qwencloud_ticket_action("status", _QwenRowStore()) == 1
+    err = capsys.readouterr().err
+    assert "lop secret unlock" in err
+    assert "UNKNOWN" in err
+
+
+def test_status_on_a_locked_store_is_not_no_ticket_stored(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B4: "unknown" must never be reported as "none stored".
+
+    That collapse is the false success this PR exists to prevent: it tells the
+    user their full-account cookie is gone while it sits on disk.
+    """
+
+    def locked(store: Any, **kwargs: Any) -> Any:
+        raise _locked_exc()
+
+    _patch_qwen(monkeypatch, read_ticket_record=locked)
+
+    assert cli._qwencloud_ticket_action("status", _QwenRowStore()) == 1
+    assert "No QwenCloud console ticket stored" not in capsys.readouterr().out
+
+
+def test_status_reports_a_secret_orphan_rather_than_nothing_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """MAJOR-1: `status` answered "nothing stored" over a LIVE value.
+
+    A SECRET ORPHAN -- value present, no metadata row -- is a state this
+    feature can actually reach: `store_ticket` writes the value first and the
+    row second, on purpose, so a crash, a kill or an `auth.db` restored from an
+    older backup leaves the value with nothing pointing at it. `status` read
+    the row and stopped, so it printed the no-ticket receipt over a live
+    full-account cookie -- hiding the exposure AND pointing the user away from
+    `rm`, the only verb that revokes it. `rm` was already fixed for this state
+    (`test_rm_revokes_a_secret_orphan_rather_than_reporting_nothing_stored`);
+    this is the same fix one verb over.
+
+    Driven against a REAL secret store with no seam patched, because the
+    property is about what is on disk: the base the CLI resolves is
+    `config_dir()/secrets`, so the env var points at that base itself.
+
+    Fails AGAINST the faithful single-site revert of the fix -- deleting the
+    `_secret_is_present` probe and restoring `if record is None: print("No
+    QwenCloud console ticket stored.")` -- and against nothing else. The two
+    tests below assert receipts the pre-fix code either already printed or
+    could not reach, so they stay green under that revert; this one is the
+    only pin on the probe itself.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.qwencloud_console import QWENCLOUD_TICKET_SECRET_NAME
+    from local_operator.secrets import access
+    from local_operator.secrets.keys import store_path
+
+    base = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(base))
+    secret_store = access.open_store(base, create=True)
+    secret_store.initialize()
+    secret_store.set(QWENCLOUD_TICKET_SECRET_NAME, FAKE_QWEN_TICKET.encode())
+
+    # Preconditions: the value really is on disk and no row points at it, so
+    # the receipt under test is about a live credential rather than an empty
+    # store -- and so a later "nothing stored" would be a lie, not a fact.
+    assert store_path(base).exists()
+    assert access.open_store(base).describe(QWENCLOUD_TICKET_SECRET_NAME) is not None
+
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        assert cli._qwencloud_ticket_action("status", opened) == 0
+        captured = capsys.readouterr()
+    finally:
+        opened.close()
+
+    assert (
+        "No QwenCloud console ticket stored" not in captured.out
+    ), "status reported nothing stored while the value was live in the encrypted store"
+    assert "VALUE is stored" in captured.out
+    assert (
+        "lop qwencloud-ticket rm" in captured.out
+    ), "the receipt must name the only verb that revokes the orphan"
+    assert FAKE_QWEN_TICKET not in captured.out and FAKE_QWEN_TICKET not in captured.err
+
+
+def test_status_on_a_store_with_no_ticket_still_says_nothing_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Arms-length: a store that EXISTS without this ticket is still empty.
+
+    The ordinary host for anyone who has used `lop secret` for anything else:
+    the `store_path(base).exists()` guard does not short-circuit, the store is
+    opened, and the probe must still return False. Without this, a fix that
+    took the orphan branch whenever any store existed would pass the test above
+    while telling every such user that a cookie they never stored is sitting on
+    disk.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.secrets import access
+
+    base = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(base))
+    # A store with SOMETHING in it -- so the probe reaches `describe` and meets
+    # `SecretNotFound` rather than returning at the existence guard.
+    other = access.open_store(base, create=True)
+    other.initialize()
+    other.set("SOME_OTHER_KEY", b"unrelated-value")
+
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        assert cli._qwencloud_ticket_action("status", opened) == 0
+        captured = capsys.readouterr()
+    finally:
+        opened.close()
+
+    assert "No QwenCloud console ticket stored." in captured.out
+    assert "VALUE is stored" not in captured.out
+
+
+def test_status_on_a_locked_store_does_not_call_a_secret_orphan_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The probe belongs INSIDE `status`'s `TicketStoreError` clause.
+
+    `_secret_is_present` raises `TicketStoreLocked`/`TicketStoreUnreadable` for
+    a store it cannot read, and both subclass `TicketStoreError`. Called
+    outside the `try`, a locked store would surface a traceback out of the verb
+    instead of the UNKNOWN receipt and its exit code -- the same false success
+    `test_status_on_a_locked_store_is_not_no_ticket_stored` guards, reached from
+    the branch this fix adds.
+
+    Fails against TWO shapes: the pre-fix code (no probe, so the no-ticket
+    receipt and exit 0), and the probe hoisted out of the `try` (an uncaught
+    `TicketStoreLocked`). The `describe` refusal is stubbed rather than hardened
+    for real because a genuinely locked store needs a broker daemon and a
+    passphrase; the store FILE exists either way, which is what the probe's
+    existence guard reads.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.secrets import access
+
+    base = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(base))
+    access.open_store(base, create=True).initialize()
+
+    class _Denied:
+        """Every operation refused the way a hardened, locked store refuses."""
+
+        def describe(self, name: str) -> Any:
+            from local_operator.secrets.client import BrokerDenied
+
+            raise BrokerDenied("no lop session is registered with the broker")
+
+    monkeypatch.setattr(access, "open_store", lambda *a, **k: _Denied())
+
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        assert cli._qwencloud_ticket_action("status", opened) == 1
+        captured = capsys.readouterr()
+    finally:
+        opened.close()
+
+    assert "UNKNOWN" in captured.err
+    assert "lop secret unlock" in captured.err
+    assert "No QwenCloud console ticket stored" not in captured.out
+
+
+def test_rm_failure_names_both_stores(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B5: a generic unreadable store — the ticket may be in either store."""
+    from local_operator.providers.qwencloud_console import TicketStoreError
+
+    def unreadable(store: Any, **kwargs: Any) -> Any:
+        raise TicketStoreError("the credential store could not be read (OSError)")
+
+    _patch_qwen(monkeypatch, delete_ticket=unreadable)
+
+    assert cli._qwencloud_ticket_action("rm", _QwenRowStore()) == 1
+    err = capsys.readouterr().err
+    assert "MAY STILL BE STORED" in err
+    assert "secret store" in err
+
+
+def test_rm_on_a_locked_store_says_unlock_and_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B6: `rm`'s locked clause DOES discriminate — its body differs from the
+    generic one ("Unlock the secret store and re-run" appears nowhere else),
+    which is why `rm` carries a clause `status` does not."""
+
+    def locked(store: Any, **kwargs: Any) -> Any:
+        raise _locked_exc()
+
+    _patch_qwen(monkeypatch, delete_ticket=locked)
+
+    assert cli._qwencloud_ticket_action("rm", _QwenRowStore()) == 1
+    err = capsys.readouterr().err
+    assert "Unlock the secret store" in err
+    assert "MAY STILL BE STORED" in err
+
+
+def test_rm_success_still_warns_about_the_browser_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B7: deleting the local copy does not end the server-side session."""
+    _patch_qwen(monkeypatch, delete_ticket=lambda store, **kw: True)
+    monkeypatch.setattr(
+        "local_operator.providers.auth_cli._invalidate_cached_usage",
+        lambda *a, **k: None,
+    )
+
+    assert cli._qwencloud_ticket_action("rm", _QwenRowStore()) == 0
+    out = capsys.readouterr().out
+    assert "Removed the stored QwenCloud console ticket." in out
+    assert "still valid until you sign it out" in out
+
+
+def test_set_refuses_a_tty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B8: argv is readable by any process running as you, so an interactive
+    `set` must refuse rather than invite the value onto a command line."""
+    writes: list[str] = []
+
+    def must_not_write(store: Any, ticket: str, **kwargs: Any) -> None:
+        writes.append(ticket)
+
+    _patch_qwen(monkeypatch, store_ticket=must_not_write)
+
+    fake_stdin = MagicMock()
+    fake_stdin.isatty.return_value = True
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    assert cli._qwencloud_ticket_action("set", _QwenRowStore()) == 2
+    assert "printf %s '<TICKET>' | lop qwencloud-ticket set" in capsys.readouterr().err
+    assert writes == [], "a refused set must store nothing"
+
+
+def test_set_on_a_locked_store_prints_the_remedy_and_exits_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B9: `set` needs no locked clause of its own — `TicketStoreLocked`
+    subclasses `TicketStoreError`, so the existing clause catches it and
+    interpolates the message carrying the remedy."""
+
+    def locked(store: Any, ticket: str, **kwargs: Any) -> None:
+        raise _locked_exc()
+
+    _patch_qwen(monkeypatch, store_ticket=locked)
+
+    fake_stdin = MagicMock()
+    fake_stdin.isatty.return_value = False
+    fake_stdin.read.return_value = FAKE_QWEN_TICKET
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    assert cli._qwencloud_ticket_action("set", _QwenRowStore()) == 1
+    assert "lop secret unlock" in capsys.readouterr().err
+
+
+def test_set_never_echoes_the_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """B10: the receipt reports a LENGTH. The value reaching stdout would put
+    it in the terminal scrollback and every session transcript on disk."""
+    _patch_qwen(
+        monkeypatch,
+        store_ticket=lambda store, ticket, **kw: None,
+        read_ticket_record=lambda store, **kw: {
+            "credential_id": 1,
+            "captured_at": int(time.time() * 1000),
+            "length": len(FAKE_QWEN_TICKET),
+            "secret_present": True,
+        },
+    )
+    monkeypatch.setattr(
+        "local_operator.providers.auth_cli._invalidate_cached_usage",
+        lambda *a, **k: None,
+    )
+
+    fake_stdin = MagicMock()
+    fake_stdin.isatty.return_value = False
+    fake_stdin.read.return_value = FAKE_QWEN_TICKET
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+
+    assert cli._qwencloud_ticket_action("set", _QwenRowStore()) == 0
+    out = capsys.readouterr()
+    assert FAKE_QWEN_TICKET not in out.out
+    assert FAKE_QWEN_TICKET not in out.err
+    assert f"({len(FAKE_QWEN_TICKET)} characters)" in out.out
+
+
+def test_unknown_verb_lists_migrate(capsys: pytest.CaptureFixture[str]) -> None:
+    """B11: the usage footer is the discovery surface for the new verb."""
+    assert cli._qwencloud_ticket_action(None, _QwenRowStore()) == 2
+    assert "{set,status,rm,migrate}" in capsys.readouterr().err
+
+
+def test_migrate_is_dispatched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B12: the verb reaches its handler rather than falling through to usage."""
+    seen: list[Any] = []
+    monkeypatch.setattr(cli, "_qwencloud_ticket_migrate", lambda store: seen.append(store) or 7)
+
+    store = _QwenRowStore()
+    assert cli._qwencloud_ticket_action("migrate", store) == 7
+    assert seen == [store]
+
+
+def test_migrate_with_no_ticket_is_a_quiet_no_op(capsys: pytest.CaptureFixture[str]) -> None:
+    """E1: nothing stored is a SUCCESS, not the stub's honest failure.
+
+    Replaces `test_migrate_stub_fails_honestly` (slice B), which asserted the
+    stub's exit 2 / "not yet available" and which slice E breaks by design.
+
+    `_QwenRowStore` is reused rather than widened: it defines `list_credentials`
+    and nothing else — no `_conn` — so it can only drive the one path that
+    returns before the VACUUM step, which is exactly this one. Every other
+    migrate test uses a real `AuthStore` in `tests/unit/test_cli_migrate.py`.
+
+    The last two assertions are what discriminate against the stub: an exit
+    code alone would not, since both a no-op and a refusal can be non-zero.
+    """
+    assert cli._qwencloud_ticket_migrate(_QwenRowStore()) == 0
+    out = capsys.readouterr()
+    assert "nothing to migrate" in out.out
+    assert "not yet available" not in out.err
+
+
+def test_migrate_is_registered_in_the_parser() -> None:
+    """B14: parser wiring, so `lop qwencloud-ticket migrate` parses rather
+    than erroring out at argparse."""
+    parsed = cli.build_cli_parser().parse_args(["qwencloud-ticket", "migrate"])
+    assert parsed.qwencloud_command == "migrate"
