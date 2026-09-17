@@ -473,8 +473,36 @@ def active_of(row: SessionRow, attention: Mapping[str, Any] | None) -> bool:
     session that finishes goes from "Previous chats" to "Active chats", and
     placement is carried by a LIST read, so the feed owes its client an
     invalidation when that happens (finding 8).
+
+    THE SECTION MOVE IS THE SUBSUMED CASE of :func:`order_key_of`: membership is
+    a fact about the row, the position is a fact about the ORDER, and a section
+    move always changes the key's first term while the converse is false. This
+    stays because the section is what the sidebar SHOWS ("Previous chats"
+    collapsed by default), so a reader asking "where is this row filed" wants
+    this, and a reader asking "did the row move" wants the key.
     """
     return entry_for(row, attention).active
+
+
+def order_key_of(
+    row: SessionRow, attention: Mapping[str, Any] | None
+) -> tuple[int, int, float, str]:
+    """``CatalogEntry.rank`` for one row — WHERE the sidebar files it, not only which section.
+
+    A second CALLER of the same home, for the same reason :func:`active_of` is
+    one. ``active`` is section MEMBERSHIP (a boolean); the position is the key
+    :func:`rank_entries` sorts by, whose first term is the ordering CATEGORY. A
+    row can change category without leaving its section — a busy session that
+    finishes is 4 -> 1 and stays Active — and placement travels on a LIST read,
+    so the feed owes its client an invalidation for that too (finding 8's class,
+    of which the section move is the subsumed case).
+
+    The full key, including ``wake_rank``, and not just the category: the two are
+    equivalent for every ACTIVE row (``wake_rank`` is the constant there) and the
+    full key is the key the sort actually uses, so "changed" cannot drift from
+    "the client's next list read places it differently".
+    """
+    return entry_for(row, attention).rank
 
 
 def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
