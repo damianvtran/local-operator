@@ -9,7 +9,12 @@ import requests
 from pydantic import SecretStr
 
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
-from local_operator.clients._http import NO_RESPONSE_BODY, APIError, response_body
+from local_operator.clients._http import (
+    NO_RESPONSE_BODY,
+    APIError,
+    redact_secrets,
+    response_body,
+)
 from local_operator.clients.radient import (
     INSTRUCTION_SET_DOCUMENT_TYPE,
     INSTRUCTION_SET_FIELDS,
@@ -1350,3 +1355,70 @@ def test_response_body_survives_a_body_that_is_not_utf8() -> None:
     response.content = b"\xff\xfe not utf-8 \xff"
 
     assert "not utf-8" in response_body(requests.exceptions.HTTPError("boom", response=response))
+
+
+# --- credentials in a surfaced upstream body ----------------------------------
+#
+# An upstream is free to reflect the request it received -- the Authorization
+# header included -- into its error body, and the error body is exactly what a
+# legacy failure message quotes. The e2e suite pins this against a fake upstream
+# that does exactly that (tests/e2e/test_desktop_legacy_radient.py); these are the
+# unit-level half, and they are what says which layer holds the property.
+
+
+def test_an_upstream_body_that_reflects_the_key_is_redacted(
+    radient_client: RadientClient, tmp_path: Path
+) -> None:
+    """A reflected credential never reaches the message a user or the log sees."""
+    zip_path = tmp_path / "agent.zip"
+    zip_path.write_bytes(b"dummy zip content")
+    mock_response = MagicMock()
+    mock_response.status_code = 400
+    # The fake upstream's shape: the body quotes the credential back at us.
+    mock_response.content = json.dumps({"error": "test_api_key"}).encode()
+
+    with patch(
+        "requests.post",
+        side_effect=requests.exceptions.HTTPError("refused", response=mock_response),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            radient_client.upload_agent_to_marketplace(zip_path)
+
+    message = str(exc_info.value)
+    assert "test_api_key" not in message
+    assert "[redacted]" in message
+
+
+def test_publish_prose_that_reflects_the_key_is_redacted(
+    radient_client: RadientClient,
+) -> None:
+    """The hub's own `error` prose is filtered too, because it is rendered."""
+    mock_response = MagicMock()
+    mock_response.status_code = 409
+    mock_response.content = json.dumps(
+        {
+            "error": 'The name "test_api_key" is already published on the hub.',
+            "code": "name_taken",
+            "details": {"existing_agent_id": "hub-9", "owned_by_caller": False},
+        }
+    ).encode()
+
+    with patch(
+        "requests.post",
+        side_effect=requests.exceptions.HTTPError("refused", response=mock_response),
+    ):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.publish_agent_instruction_set({"name": "Coder"})
+
+    assert "test_api_key" not in str(exc_info.value)
+    assert "[redacted]" in str(exc_info.value)
+    # The machine-readable half is the hub's, unchanged: the renderer switches on
+    # these values and they are not prose.
+    assert exc_info.value.code == "name_taken"
+    assert exc_info.value.details == {"existing_agent_id": "hub-9", "owned_by_caller": False}
+
+
+def test_redact_secrets_leaves_text_alone_without_a_secret() -> None:
+    """A client with no credential configured changes nothing it surfaces."""
+    assert redact_secrets("plain body", [None, ""]) == "plain body"
+    assert redact_secrets("plain body", ["key"]) == "plain body"

@@ -12,6 +12,7 @@ from local_operator.clients._http import (
     NO_RESPONSE_BODY,
     APIError,
     api_error_from_response,
+    redact_secrets,
     response_body,
 )
 
@@ -457,6 +458,34 @@ class RadientClient:
             headers["Content-Type"] = content_type
         return headers
 
+    def _credential_values(self) -> List[str]:
+        """This client's credential values, for removal from anything surfaced.
+
+        One accessor so a second credential this client might hold is added in one
+        place rather than at every message that quotes an upstream failure.
+        """
+
+        return [self.api_key.get_secret_value()] if self.api_key else []
+
+    def _surfaceable_body(self, body: str) -> str:
+        """An upstream error body with this client's credential removed.
+
+        An upstream is free to reflect the request it received -- the Authorization
+        header included -- into its error body, and an error body is exactly what a
+        useful failure message quotes. Quoting it verbatim would put the operator's
+        credential into a message the desktop app renders and the log keeps, so
+        anything about to be surfaced goes through here first. The body is kept
+        otherwise: it is the only thing that says WHY a legacy call failed.
+
+        Args:
+            body: The decoded body about to be interpolated into a message.
+
+        Returns:
+            The body with this client's API key replaced by a marker.
+        """
+
+        return redact_secrets(body, self._credential_values())
+
     def upload_agent_to_marketplace(self, zip_path: Path) -> str:
         """
         Upload a new agent to the Radient Agent Hub.
@@ -484,7 +513,7 @@ class RadientClient:
             # Return the first value (agent ID)
             return next(iter(data.values()))
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to upload agent to Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
@@ -510,7 +539,7 @@ class RadientClient:
             response = requests.put(url, headers=headers, files=files)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to overwrite agent in Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
@@ -540,7 +569,7 @@ class RadientClient:
                     if chunk:
                         f.write(chunk)
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to download agent from Radient Agent Hub: {str(e)},"
                 f"Response Body: {error_body}"
@@ -580,7 +609,7 @@ class RadientClient:
             if error_response.status_code == 404:
                 return None  # Agent not found
             # For other HTTP errors, raise a runtime error
-            error_body = (
+            error_body = self._surfaceable_body(
                 error_response.content.decode() if error_response.content else NO_RESPONSE_BODY
             )
             raise RuntimeError(
@@ -636,6 +665,7 @@ class RadientClient:
             raise api_error_from_response(
                 e.response,
                 fallback_message="Could not publish the agent to the Radient Agent Hub",
+                secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="publish the agent")
 
@@ -670,6 +700,7 @@ class RadientClient:
             raise api_error_from_response(
                 e.response,
                 fallback_message="Could not update the agent on the Radient Agent Hub",
+                secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="update the agent")
 
@@ -704,6 +735,7 @@ class RadientClient:
             raise api_error_from_response(
                 e.response,
                 fallback_message="Could not check the agent name on the Radient Agent Hub",
+                secrets=self._credential_values(),
             ) from e
         return self._publication_result(response, action="check the agent name")
 
@@ -758,7 +790,7 @@ class RadientClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Failed to fetch Radient models due to a requests error: {str(e)},"
-                f"Response Body: {response_body(e)}"
+                f"Response Body: {self._surfaceable_body(response_body(e))}"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to fetch Radient models: {str(e)}") from e
@@ -861,7 +893,7 @@ class RadientClient:
             )
 
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to generate image: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -897,7 +929,7 @@ class RadientClient:
             data = response.json()
             return RadientImageGenerationResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to get image generation status: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -922,7 +954,7 @@ class RadientClient:
             data = response.json()
             return RadientImageGenerationProvidersResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to list image generation providers: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -983,7 +1015,7 @@ class RadientClient:
             data = response.json()
             return RadientSearchResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to execute search: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1008,7 +1040,7 @@ class RadientClient:
             data = response.json()
             return RadientSearchProvidersResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to list search providers: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1032,13 +1064,15 @@ class RadientClient:
             if response.status_code == 204:
                 return
             # If not 204, try to extract error details
-            error_body = response.content.decode() if response.content else NO_RESPONSE_BODY
+            error_body = self._surfaceable_body(
+                response.content.decode() if response.content else NO_RESPONSE_BODY
+            )
             raise RuntimeError(
                 f"Failed to delete agent from Radient Agent Hub: HTTP {response.status_code}, "
                 f"Response Body: {error_body}"
             )
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to delete agent from Radient Agent Hub: {str(e)}, "
                 f"Response Body: {error_body}"
@@ -1075,7 +1109,7 @@ class RadientClient:
                 raise RuntimeError("Failed to send email: No result data in response.")
             return api_response.result
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to send email: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1121,7 +1155,7 @@ class RadientClient:
             # The actual token data is in api_response.result
             return api_response.result
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to refresh token: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1210,7 +1244,7 @@ class RadientClient:
         except FileNotFoundError:
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to create transcription: {str(e)}, Response Body: {error_body}"
             ) from e
@@ -1269,7 +1303,7 @@ class RadientClient:
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
+            error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
                 f"Failed to generate speech: {str(e)}, Response Body: {error_body}"
             ) from e
