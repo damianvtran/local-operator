@@ -103,6 +103,31 @@ async def test_a_due_wake_on_a_cold_session_starts_a_runtime(
 
 
 @pytest.mark.asyncio
+async def test_the_real_clock_default_still_fires(
+    tmp_path: Path, engagements, no_live_runtimes
+) -> None:
+    """Review round 3's NIT: passing the clock everywhere took the default away.
+
+    ``fire_due_wakes(now_ms=None)`` reads the real clock, and after the flaky-test
+    fix above no cell drove it any more — a default is exactly the kind of path
+    that rots unwatched. This one is built from the real clock ON PURPOSE (a due
+    time a minute in the past relative to ``time.time()``, not to the module's
+    frozen ``NOW_MS``), so what it asserts is the default's own behaviour: a
+    future occurrence is left alone, a past one fires, and the count follows.
+    """
+    now = int(time.time() * 1000)
+    _make_session(tmp_path, "realclocknoon")
+    write_entry(
+        tmp_path, "realclocknoon", cwd=str(tmp_path), schedules=[_schedule(now + 3_600_000)]
+    )
+    _make_session(tmp_path, "realclockdue1")
+    write_entry(tmp_path, "realclockdue1", cwd=str(tmp_path), schedules=[_schedule(now - 60_000)])
+
+    assert await fire_due_wakes(tmp_path) == 1
+    assert [call["session_id"] for call in engagements] == ["realclockdue1"]
+
+
+@pytest.mark.asyncio
 async def test_the_errand_delivers_nothing(tmp_path: Path, engagements, no_live_runtimes) -> None:
     """The correction that supersedes the spec's ``wake_fire`` op.
 

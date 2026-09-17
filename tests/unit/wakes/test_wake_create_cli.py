@@ -470,5 +470,13 @@ def test_a_live_owner_is_refused_with_a_sentence_that_says_what_to_do(
     (session / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
 
     assert _wake_create(_args()) == 1
-    assert "Retry in a moment" in capsys.readouterr().err
+    # A pid mirror with no usable record gets the sentence that is TRUE in that
+    # state (review round 3, R6's minor): an owner this build can see but not
+    # dial, with both explanations named and the marker a user can act on —
+    # rather than "open in a running session", which is false when the marker is
+    # all that is left of it.
+    message = capsys.readouterr().err
+    assert "does not answer as a runtime" in message
+    assert "stale owner marker" in message
+    assert "Nothing was written" in message
     assert _persisted_wakes(session) == []

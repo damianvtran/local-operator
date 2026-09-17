@@ -595,7 +595,21 @@ async def test_an_owner_holding_the_session_is_refused_without_needing_a_record(
 
     assert refused.value.status == 503
     assert refused.value.code == "wake_owner_present"
-    assert "Retry in a moment" in str(refused.value)
+    if owner == "dialable-record":
+        # An owner this build could DIAL: the common sentence, which is true here.
+        assert "open in a running session" in str(refused.value)
+        assert "change them from that session" in str(refused.value)
+    else:
+        # A pid mirror with no usable record (review round 3, R6's minor): the
+        # common sentence is FALSE in this state — there may be no session to
+        # change anything from, and "retry in a moment" promises a retry that
+        # cannot help while that pid lives — so the copy names both honest
+        # explanations and the marker a user can act on instead.
+        assert "open in a running session" not in str(refused.value)
+        assert f"claimed by process {os.getpid()}" in str(refused.value)
+        assert "does not answer as a runtime" in str(refused.value)
+        assert "stale owner marker" in str(refused.value)
+        assert "Nothing was written" in str(refused.value)
     # NOTHING was written: the live row the session already had is untouched,
     # which is the point — the refusal happens before the append.
     assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
@@ -647,3 +661,63 @@ async def test_a_contended_lock_refuses_rather_than_writing_unlocked(
     assert refused.value.code == "wake_write_busy"
     assert "Retry in a moment" in str(refused.value)
     assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
+
+
+def _snapshot_count(directory: Path) -> int:
+    """How many ``wake_schedules`` entries a transcript holds — the write log."""
+    return sum(
+        1
+        for line in (directory / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        and (json.loads(line).get("payload") or {}).get("custom_type") == "wake_schedules"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rebase_on_a_base_that_already_carries_the_row_does_not_append_twice(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 3, R8: the same request must not add its row a second time.
+
+    The window is real and needs no second writer: attempt 0 appends, a writer
+    that read the transcript AFTER that append lands a snapshot on top (for a
+    live session, its own persist — which is why that snapshot CARRIES our row),
+    and the verify check then sees a mismatch. Rebasing on that base and
+    re-applying the mutation is what appended the row twice inside ONE request.
+
+    Driven with the peer's snapshot as a real transcript entry (a copy of ours,
+    the shape a persist that had already read it produces). The assertions that
+    catch the old behaviour are the ROW's identity — the old rebase allocated a
+    fresh id because it re-ran the mutation against the newer base (`w3` where
+    the absorbed row is `w2`) — and the SNAPSHOT count: exactly two entries (ours
+    and the peer's copy), because a third would be the row appended again.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    session_dir = _session(root, "absorbed01", [_row("w1")])
+    original_append = arm_module._append
+    appends: list[int] = []
+
+    async def append_with_a_peer_copy(directory: Path, rows: list[WakeSchedule]) -> str:
+        appends.append(len(rows))
+        entry = await original_append(directory, rows)
+        if len(appends) == 1:
+            # The writer that overtook us: it took our snapshot as its base, so
+            # its entry carries our row. Same list, new entry id.
+            await original_append(directory, rows)
+        return entry
+
+    monkeypatch.setattr(arm_module, "_append", append_with_a_peer_copy)
+    before = _snapshot_count(session_dir)
+
+    outcome = await arm_wake(root, "absorbed01", {"message": "must land once", "in": "30m"})
+
+    assert outcome.wake_id == "w2"
+    rows = _rows_from_transcript(session_dir)
+    assert [row["id"] for row in rows] == ["w1", "w2"], rows
+    # The delta, not the total: the fixture writes a snapshot of its own.
+    assert _snapshot_count(session_dir) - before == 2, (
+        "the request wrote a snapshot beyond its own and the peer's copy, which is "
+        "the row appended a second time"
+    )
+    assert len(appends) == 1, f"the mutation re-appended instead of finding its own base: {appends}"

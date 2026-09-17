@@ -60,19 +60,19 @@ from pathlib import Path
 WAKE_LOCK_NAME = ".wake-write.lock"
 
 #: How long an external writer waits for a peer before refusing. Generous on
-#: purpose: the write it serialises is a read plus an append, and the append
-#: parses the whole journal, so the hold scales with the transcript's ENTRY
-#: COUNT rather than its bytes. MEASURED on the reference host (review round 2):
-#: 0.030 s warm on an ordinary transcript, 1.40 s at 25 MB, 1.43 s at a 103 MB
-#: one with large entries, and **7.45 s at a 103 MB one with 415k small
-#: entries** — the worst shape measured, because that write is ~3 whole-journal
-#: parses (read, verify, and the append's own construction). This bound is the
-#: flat value it is on purpose: it is ~2x the worst measured hold, an ordinary
-#: double-press is answered in ~0.02 s and cannot reach it (reaching it needs a
-#: peer already inside a multi-second write, i.e. a ~500 MB conversation), and a
-#: bound that scaled with the transcript would make a client wait minutes for an
-#: answer that writes nothing anyway. A refusal here is safe and retryable; the
-#: number is stated rather than assumed so a future change can re-measure it.
+#: purpose: the write it serialises is a read plus an append, and the append parses
+#: the whole journal, so the hold scales with the transcript's ENTRY COUNT rather
+#: than its bytes. MEASURED, two independent passes on the reference host: 0.030 s
+#: warm on an ordinary transcript (0.13-0.43 s for a whole arm); 1.40 s at 25 MB;
+#: 1.43 s at 103 MB with large entries; and **7.45 s at 103 MB / 415k small
+#: entries** (round 2), then **12.63 / 20.7 / 25.2 s on 103 MB / 48k entries
+#: (median 20.7 s) and 135.94 / 146.27 s at 415k entries under load (round 3 QA)**.
+#: The scaling law is the stable part — 48k→415k entries is ~8.6x the entries and
+#: ~8x the duration — and the absolute numbers are not: they move with the host,
+#: which is why this bound is flat and why the refusal's copy names the possibility
+#: instead of a duration. A refusal here is safe (it writes nothing) and retryable
+#: (see ``wakes/arm.py``), and a bound proportional to the transcript would make a
+#: client wait minutes for an answer that changes nothing.
 LOCK_WAIT_S = 15.0
 _LOCK_RETRY_SLEEP_S = 0.02
 _LOCK_RETRY_SLEEP_MAX_S = 0.1
@@ -208,8 +208,8 @@ class WakeWriteLock:
                 if time.monotonic() >= deadline:
                     raise WakeLockBusy(
                         "Another writer is applying a change to this conversation's wakes. "
-                        "Retry in a moment — on a very large conversation a single write "
-                        "holds the lock for several seconds."
+                        "Retry in a moment — on a very large conversation this can take a "
+                        "while, and a later retry will succeed."
                     )
                 time.sleep(sleep_s)
                 sleep_s = min(sleep_s * 1.5, _LOCK_RETRY_SLEEP_MAX_S)

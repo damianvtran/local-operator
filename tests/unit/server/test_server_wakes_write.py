@@ -90,6 +90,73 @@ def _request_id(n: int) -> str:
     return f"00000000-0000-4000-8000-{n:012d}"
 
 
+def _snapshot_count(directory: Path) -> int:
+    """How many ``wake_schedules`` entries the transcript holds — the write log.
+
+    Needed where the QUESTION is "did the request run again?", which the rows alone
+    cannot answer: re-running the same mutation against the same base writes an
+    identical list under a new entry.
+    """
+    return sum(
+        1
+        for line in (directory / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        and (json.loads(line).get("payload") or {}).get("custom_type") == "wake_schedules"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_may_have_written_is_recorded_and_replayed(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8's other half: a refusal the write sequence could NOT roll back is kept.
+
+    The verify loop raises ``wake_write_conflict`` with both attempts overtaken —
+    one of them may be in effect in the base a peer carried — so this refusal is
+    RECORDED rather than released, and the retry replays it instead of running the
+    mutation a third time. That is the structural half of R8: the release rule is
+    decided per REQUEST (did this request write?), not per refusal code, and the
+    assertion that pins it is the transcript's write log standing still.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    client, root = desktop
+    session_dir = _session(root, "aaaaaaaaaaaa")
+    original_append = arm_module._append
+
+    async def append_and_be_overtaken_every_time(directory: Path, rows: list[Any]) -> str:
+        """Our write, then the list a writer that had NOT read it put back.
+
+        Always: so the verify check fails on BOTH attempts, which is the conflict
+        the loop can no longer resolve by rebasing — and the base attempt 1 rebases
+        on never carries our row, so the idempotence check cannot short-circuit it
+        into "already applied".
+        """
+        entry = await original_append(directory, rows)
+        await original_append(directory, [])
+        return entry
+
+    monkeypatch.setattr(arm_module, "_append", append_and_be_overtaken_every_time)
+
+    body = {
+        "request_id": _request_id(73),
+        "session_id": "aaaaaaaaaaaa",
+        "message": "always overtaken",
+        "in": "30m",
+    }
+    first = await client.post("/v1/desktop/wakes", json=body)
+
+    assert first.status_code == 409, first.text
+    assert first.json()["detail"]["code"] == "wake_write_conflict"
+    writes = _snapshot_count(session_dir)
+
+    second = await client.post("/v1/desktop/wakes", json=body)
+
+    assert second.status_code == 409, second.text
+    assert second.json() == first.json(), "the recorded refusal must replay verbatim"
+    assert _snapshot_count(session_dir) == writes, "the replayed refusal re-ran the write"
+
+
 @pytest.mark.asyncio
 async def test_arming_a_cold_session_writes_the_transcript_and_the_index(desktop) -> None:
     """The arm path for an existing conversation with nobody home."""
@@ -754,7 +821,12 @@ async def test_an_owner_appearing_at_the_append_is_refused_through_the_route(
     assert response.status_code == 503, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "wake_owner_present"
-    assert "Retry in a moment" in detail["message"]
+    # The mirror-only sentence: this fixture's owner is a pid with no discovery
+    # record, which is a state the "open in a running session" wording describes
+    # falsely (review round 3, R6's minor).
+    assert "does not answer as a runtime" in detail["message"]
+    assert f"process {os.getpid()}" in detail["message"]
+    assert "Nothing was written" in detail["message"]
     assert _rows_on_disk(session_dir) == []
     assert read_entry(root, "aaaaaaaaaaaa") is None
 
@@ -870,6 +942,83 @@ async def test_a_session_directory_that_takes_no_lock_file_is_a_typed_refusal(
     assert "Internal Server Error" not in response.text
     assert "nothing was written" in detail["message"]
     assert read_entry(root, "aaaaaaaaaaaa") is None
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_after_its_own_append_leaves_no_row_and_the_retry_makes_one(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8's surface: a refusal from a request that has ALREADY appended.
+
+    Round 3's R8 — the guard is asked before each of the loop's two appends, so an
+    attempt-1 refusal comes from a request whose attempt-0 snapshot is on disk.
+    The route released it on the premise "nothing durable is made on this shape",
+    which is false there, and the retry re-ran: ONE request id, TWO rows. Two
+    things have to hold now, and both are asserted: the refusal rolls its own
+    write back (so the premise is true again and the release is honest), and the
+    retry with the SAME id lands exactly one row.
+
+    The owner is planted inside the verify window on purpose — after attempt 0's
+    post-append guard has already passed — because that is the only way to reach
+    the attempt-1 refusal this cell exists for. The sibling cell above plants its
+    owner before the request, which only ever exercises attempt 0.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    client, root = desktop
+    session_dir = _session(root, "aaaaaaaaaaaa")
+    original_append, original_latest = arm_module._append, arm_module._latest_entry_id
+    appended: list[int] = []
+    planted: list[int] = []
+
+    async def append_and_let_a_peer_overwrite_it(directory: Path, rows: list[Any]) -> str:
+        """Our append, then the list a writer that had NOT read it put back.
+
+        That is the shape a live session's stale persist produces, and it is the
+        base attempt 1 rebases on — WITHOUT this request's row in it, which is
+        what separates the attempt-1 refusal from the benign overtake the sibling
+        cell covers.
+        """
+        entry = await original_append(directory, rows)
+        if not appended:
+            appended.append(1)
+            await original_append(directory, [])
+        return entry
+
+    def plant_the_owner_after_the_append_happened(directory: Path) -> str | None:
+        if not planted:
+            planted.append(1)
+            (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+        return original_latest(directory)
+
+    monkeypatch.setattr(arm_module, "_append", append_and_let_a_peer_overwrite_it)
+    monkeypatch.setattr(arm_module, "_latest_entry_id", plant_the_owner_after_the_append_happened)
+
+    body = {
+        "request_id": _request_id(72),
+        "session_id": "aaaaaaaaaaaa",
+        "message": "raced",
+        "in": "30m",
+    }
+    first = await client.post("/v1/desktop/wakes", json=body)
+
+    assert first.status_code == 503, first.text
+    assert first.json()["detail"]["code"] == "wake_owner_present"
+    # The rollback: the attempt-0 snapshot was superseded by one WITHOUT the row,
+    # so nothing this request wrote is in effect — which is what makes releasing
+    # its claim safe.
+    assert _rows_on_disk(session_dir) == [], _rows_on_disk(session_dir)
+    assert read_entry(root, "aaaaaaaaaaaa") is None
+
+    # The owner goes away; the SAME request id re-runs (released, not replayed) and
+    # lands exactly one row. The old behaviour left two.
+    (session_dir / ".session.pid").unlink()
+    monkeypatch.setattr(arm_module, "_append", original_append)
+    monkeypatch.setattr(arm_module, "_latest_entry_id", original_latest)
+    second = await client.post("/v1/desktop/wakes", json=body)
+
+    assert second.status_code == 200, second.text
+    assert [row["id"] for row in _rows_on_disk(session_dir)] == ["w1"]
 
 
 @pytest.mark.asyncio

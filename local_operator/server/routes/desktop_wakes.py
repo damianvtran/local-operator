@@ -106,13 +106,23 @@ class WakeRefusal(Exception):
     """
 
     def __init__(
-        self, status: int, code: str, message: str, *, session_id: str = "", bare: bool = False
+        self,
+        status: int,
+        code: str,
+        message: str,
+        *,
+        session_id: str = "",
+        bare: bool = False,
+        wrote: bool = False,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.session_id = session_id
         self.bare = bare
+        #: Whether this request had already appended a snapshot when it refused.
+        #: Decides RECORD vs RELEASE on its own; see ``_WRITTEN_BEFORE_REFUSAL``.
+        self.wrote = wrote
 
 
 router = APIRouter(tags=["Desktop wakes"], dependencies=[Depends(require_desktop)])
@@ -160,12 +170,15 @@ _STATUS_FOR_CODE = {
     "wake_write_unavailable": 409,
 }
 
-#: The one refusal whose FIRST attempt may already have written a snapshot, and
+#: The one refusal whose own attempt may already have written a snapshot, and
 #: therefore the one whose claim on its request id is kept rather than released.
-#: The verify loop appends, is overtaken, retries and is overtaken again, so
-#: attempt 1's list — carrying the row — can be in the transcript; re-running
-#: that would apply the row twice. Every other refusal is raised before any
-#: write, which is what makes releasing the claim safe (see ``_refused``).
+#: The verify loop appends, is overtaken, retries and is overtaken again, so its
+#: list — or the base a peer carried — can hold the row; re-running that would
+#: apply the row twice. Every OTHER refusal is raised with its own appends already
+#: rolled back (``arm._roll_back``), which is what makes releasing them safe, and
+#: ``WakeRefusal.wrote`` is the same rule applied structurally: a refusal that
+#: ever does escape an unrolled-back write is KEPT whatever its code says (review
+#: round 3, R8).
 _WRITTEN_BEFORE_REFUSAL = frozenset({"wake_write_conflict"})
 
 
@@ -283,9 +296,12 @@ async def create_wake(body: WakeCreate, request: Request):
             # Q4). It used to raise, so its receipt row stayed NULL and a retry of
             # the same request_id answered the journal's "outcome is
             # indeterminate" — for a mistyped duration, for the cap, and for the
-            # two 503s whose own sentences say to retry. Nothing durable is made
-            # on this shape, so its refusals are RELEASED and the retry re-runs;
-            # see ``_refused`` for the one case that is recorded instead.
+            # two 503s whose own sentences say to retry. WHETHER THIS SHAPE MADE
+            # SOMETHING DURABLE IS NOT ASSUMED HERE ANY MORE (review round 3, R8:
+            # the write loop's SECOND guard call comes from a request that has
+            # already appended): the writer rolls its own append back before it
+            # refuses and reports whether it had one (``WakeWriteError.wrote``),
+            # and ``_refused`` keeps any refusal that still carries that flag.
             return _refused(refusal, session_id=refusal.session_id or str(body.session_id or ""))
 
         session_id, cwd = await _create_session(request, body)
@@ -784,12 +800,16 @@ def _refused(refusal: WakeRefusal, *, session_id: str = "", keep: bool = False) 
 
     ``keep=False`` ⇒ RELEASED, so a retry re-runs and can genuinely succeed. That
     is what a sentence like "retry in a moment" promises, and re-running is safe
-    BY CONSTRUCTION here: the refusal was raised before any write, which is the
-    same reason at-most-once is not needed for it. Failing the other way would be
-    the visible bug: a transient contention answer that a retry can never get
-    past.
+    because the refusal left nothing durable behind — which is now a fact the
+    writer ENGINEERS rather than a premise this module assumes: its write loop
+    rolls its own appends back before refusing (``arm._roll_back``), and
+    ``refusal.wrote`` is the residue of that (a refusal that ever escapes an
+    unrolled-back write is kept regardless of its code). Failing the other way is
+    the visible bug: a transient contention answer that a retry can never get past
+    — or, worse, a released retry that appends a second row beside the first
+    (review round 3, R8).
     """
-    if keep or refusal.code in _WRITTEN_BEFORE_REFUSAL:
+    if keep or refusal.wrote or refusal.code in _WRITTEN_BEFORE_REFUSAL:
         return {
             "refused": True,
             "code": refusal.code,
@@ -818,7 +838,11 @@ def _refusal_of(error: WakeWriteError, *, session_id: str = "") -> WakeRefusal:
     answer differently for the same mistake.
     """
     return WakeRefusal(
-        _refusal_status(error.code, error.status), error.code, str(error), session_id=session_id
+        _refusal_status(error.code, error.status),
+        error.code,
+        str(error),
+        session_id=session_id,
+        wrote=error.wrote,
     )
 
 

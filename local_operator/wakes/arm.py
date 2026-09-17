@@ -96,6 +96,22 @@ WEDGED_MESSAGE = (
     "This conversation's runtime is not responding. Retry in a moment, or stop that conversation."
 )
 
+#: The refusal for an owner the server can SEE but cannot DIAL — a live pid in
+#: ``.session.pid`` with no usable discovery record. A separate sentence because
+#: the common one is FALSE in this state (review round 3, R6's minor): there may be
+#: no session to change anything from, and "retry in a moment" promises a retry
+#: that will not help while that pid lives. Both honest explanations are named,
+#: because the code cannot tell them apart and the user can: an older build's
+#: runtime (which will answer that session's own UI) or a marker left behind by a
+#: pid the OS has since recycled onto an unrelated process.
+OWNER_UNKNOWN_MESSAGE = (
+    "This conversation's schedule file is claimed by process {pid}, which does not "
+    "answer as a runtime — either a conversation open in an older build, or a stale "
+    "owner marker left by a pid the system has since reused. Nothing was written. "
+    "If nothing has this conversation open, the marker at {marker} is stale and can "
+    "be removed; otherwise change its schedules from that session."
+)
+
 
 class WakeWriteError(Exception):
     """A refusal the caller can render verbatim.
@@ -103,12 +119,21 @@ class WakeWriteError(Exception):
     ``message`` is always the user-facing sentence — for a validation failure
     it is the SAME text ``build_wake_schedule`` returns to the agent's tool, so
     one wording exists for "you cannot arm a 17th wake" across every surface.
+
+    ``wrote`` says whether THIS request had already appended a snapshot when the
+    refusal was raised — the fact the receipt journal's release rule needs and
+    cannot infer (review round 3, R8). The write sequence rolls its own appends
+    back before refusing, so today every raise here carries ``False``; the flag
+    is what makes that structural rather than a promise in a comment, and a
+    refusal that ever does escape an unrolled-back write is recorded by the
+    journal instead of being released for a retry that would duplicate it.
     """
 
-    def __init__(self, message: str, *, status: int, code: str) -> None:
+    def __init__(self, message: str, *, status: int, code: str, wrote: bool = False) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+        self.wrote = wrote
 
 
 @dataclass(frozen=True)
@@ -330,18 +355,77 @@ async def _mutate_locked(
     mutate: Mutation,
     now: int,
 ) -> tuple[list[WakeSchedule], str, int | None]:
-    """read -> mutate -> guard -> append -> verify, under the caller's lock.
+    """read -> mutate -> guard -> append -> verify -> guard, under the caller's lock.
+
+    THE LOCK SPANS THE WHOLE SEQUENCE, and saying so is not incidental: the read
+    that produces the base, the owner guard, the append, the re-read that verifies
+    it, and the rollback below all happen while the per-session lock is held (the
+    caller takes it in :func:`_apply` and releases it after the index write), so no
+    second EXTERNAL writer can interleave with any of it. What the lock cannot
+    exclude is a live session's own ``_persist_wake_schedules``, which is not a
+    party to it — the runtime is not, and taking the session lease to change that
+    would refuse every attach and paint this server's pid into ``.session.pid`` for
+    the duration of a write. The owner guards below are therefore the answer to
+    that writer, not a substitute for the lock.
 
     Returns the full new list, the row's id and its due instant.
     """
     rows: list[WakeSchedule] = []
     wake_id = ""
     due: int | None = None
+    before: list[WakeSchedule] = []
+    #: The `(base, appended)` pair of the last snapshot this request actually
+    #: wrote — the material a rollback needs. NOT the current iteration's pair:
+    #: on attempt 1 they describe a write that has not happened yet.
+    written: tuple[list[WakeSchedule], list[WakeSchedule]] | None = None
     for attempt in (0, 1):
         existing = await asyncio.to_thread(_read_rows, session_dir)
+        if attempt and _absorbed(before, rows, existing):
+            # OUR OWN WRITE IS ALREADY IN THIS BASE (review round 3, R8). The
+            # writer that overtook us took our snapshot as its base — a live
+            # session's persist that had already read the transcript after our
+            # append, which is what its entry carries. Re-applying the mutation
+            # here is what appended the row a SECOND time inside one request; the
+            # change is already in effect, so the base IS the answer.
+            logger.info(
+                "wake write for %s was overtaken by a base that already carries it", session_id
+            )
+            return existing, wake_id, due
+        before = existing
         wake_id, rows, due = mutate(existing, now)
-        await _refuse_if_owned(config_dir, session_id)
+        try:
+            await _refuse_if_owned(config_dir, session_id)
+        except WakeWriteError:
+            # A refusal on the SECOND attempt comes from a request that has
+            # already appended — attempt 0's snapshot is on disk, whatever the
+            # guard's reason is now. Roll our own write back before refusing, so
+            # that every refusal this module raises really does leave nothing
+            # durable behind (which is what lets the journal release its claim
+            # and let a retry run — see ``WakeWriteError.wrote``).
+            if written is not None:
+                await _roll_back(session_dir, before=written[0], after=written[1])
+            raise
         entry = await _append(session_dir, rows)
+        written = (existing, rows)
+        try:
+            # THE POST-APPEND GUARD (review rounds 2-3, Q3). The pre-append one
+            # is a moment before the write, and a runtime that claims the session
+            # inside the append loads its schedule list before our row exists and
+            # republishes that stale list on its next persist — deleting the row
+            # from the transcript AND the index while the supervisor skips any
+            # session with a live owner. Measured: ``200 index_written:true``, then
+            # an empty snapshot and a removed index entry. Asking again HERE,
+            # after the append and inside the same critical section, is what makes
+            # that refusal instead of a silent loss: the window in which an owner
+            # can appear and still be detected is now "before this check" rather
+            # than "before the append".
+            await _refuse_if_owned(config_dir, session_id)
+        except WakeWriteError:
+            # The append is undone, so the refusal leaves no lasting state for the
+            # owner to delete — and the retry that follows routes through the
+            # owner's own command instead of re-writing behind it.
+            await _roll_back(session_dir, before=existing, after=rows)
+            raise
         if await asyncio.to_thread(_latest_entry_id, session_dir) == entry:
             break
         # STILL REACHED, but no longer by a peer using this module: the lock
@@ -351,13 +435,100 @@ async def _mutate_locked(
         # mutation is re-applied to the newer base, so the row is added once
         # against that base rather than appended again on top of our own write.
         if attempt:
+            # ``wrote=True``: attempt 0's snapshot is on disk and this refusal does
+            # NOT roll it back (the row may be in effect, in the base a peer
+            # carried), so the journal must record this one rather than release it
+            # — a retry would otherwise append the row a second time. The copy says
+            # reconcile rather than retry blind, because that is what works here.
             raise WakeWriteError(
-                "The session changed while your change was being applied — retry.",
+                "The conversation changed while your change was being applied. "
+                "Reconcile its wake list before retrying.",
                 status=STATUS_CONFLICT,
                 code="wake_write_conflict",
+                wrote=True,
             )
         logger.info("wake write for %s was overtaken by another writer; retrying", session_id)
     return rows, wake_id, due
+
+
+def _absorbed(
+    before: list[WakeSchedule], after: list[WakeSchedule], latest: list[WakeSchedule]
+) -> bool:
+    """Whether ``latest`` already carries every change ``before -> after`` made.
+
+    The idempotence that stops a rebase duplicating a row, and it is deliberately
+    mutation-agnostic: a create adds a row, an edit changes one and a cancel
+    removes one, and all three are "satisfied" by the same question — is the
+    intended state already this base's state?
+
+    Compared by IDENTITY (id plus fields), never by content alone: a user may
+    legitimately arm the same message twice, so "a row that looks like ours"
+    would merge two real schedules into one. The base only carries our id if a
+    writer that read our snapshot produced it — which is precisely the case this
+    exists for.
+
+    WHY "ALREADY THERE" IS TREATED AS APPLIED RATHER THAN AS A FRESH RACE. The
+    only writer that can put our row into a NEW snapshot is one that read the
+    transcript after our append, which means it holds our row in its own state —
+    for a live session that is its in-memory list, so the wake is armed and will
+    fire, and refusing it would be a false negative that the owner's next persist
+    would undo anyway. The residual is therefore not this path but the one that
+    needs TWO other writers at once: an owner that loaded its list BEFORE our
+    append (so its memory lacks the row) plus a non-owner writer that ignored the
+    per-session lock and carried our row onto the top in between. Nothing this
+    module can see distinguishes that from the benign case above; it is narrower
+    than the band the guards close, and the guards' rollback means the refusal
+    half of the same window never leaves a row the owner will delete.
+    """
+    latest_by_id = {row.id: row for row in latest}
+    for row in after:
+        later = latest_by_id.get(row.id)
+        if later is None or later != row:
+            return False
+    for row in before:
+        if row.id in {changed.id for changed in after}:
+            continue
+        if row.id in latest_by_id:
+            return False
+    return True
+
+
+async def _roll_back(
+    session_dir: Path, *, before: list[WakeSchedule], after: list[WakeSchedule]
+) -> None:
+    """Append a snapshot that undoes THIS write's rows, preserving everyone else's.
+
+    ``before`` is the base this write read and ``after`` the list it appended, so
+    the difference between them is exactly this write's effect: rows it added or
+    changed (undo them) and rows it removed (put them back). Everything the latest
+    snapshot holds that is not this write's effect is kept as it stands — an owner
+    that persisted a DIFFERENT change meanwhile must not have it reverted by a
+    rollback that only ever meant to withdraw one arm.
+
+    An APPEND rather than an edit of the file: the transcript is append-only, and
+    rewriting it would delete a row a writer that does not take this lock appended
+    between our two moments. A no-op (nothing of ours is on top) writes nothing.
+    """
+    latest = await asyncio.to_thread(_read_rows, session_dir)
+    ours = {row.id: row for row in after}
+    before_by_id = {row.id: row for row in before}
+    restored: list[WakeSchedule] = []
+    kept: set[str] = set()
+    for row in latest:
+        kept.add(row.id)
+        if ours.get(row.id) != row:
+            restored.append(row)
+            continue
+        previous = before_by_id.get(row.id)
+        if previous is not None:
+            restored.append(previous)
+    for row in before:
+        if row.id in ours or row.id in kept:
+            continue
+        restored.append(row)
+    if restored == latest:
+        return
+    await _append(session_dir, restored)
 
 
 async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
@@ -374,15 +545,28 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     with ``index_written: true``, then an empty transcript snapshot and a removed
     index entry once the owner persisted.
 
-    THE WINDOW THIS LEAVES, stated rather than implied: the check is a moment
-    before the append, so an owner that starts between the two still wins. The
-    window is now the append itself (sub-millisecond on an ordinary transcript;
-    seconds on a very large one) rather than the route's whole read-merge-write,
-    and it cannot be closed from this side: the runtime is not a party to the
-    lock above (see ``wakes/lock.py`` for why adding it would not save the row —
-    the owner's in-memory list is stale regardless of ordering) and taking the
-    session lease would refuse every attach and paint this server's pid into
-    ``.session.pid`` for the duration of a write.
+    THE WINDOW THIS LEAVES, stated rather than implied, and it is NOT the one
+    round 2 described. The guard is called twice — before the append and again
+    after it, both inside the per-session lock (see
+    :func:`_mutate_locked`) — and an owner seen by the second call has the append
+    rolled back before the refusal is raised. So the loss needs an owner that
+    claims the session *after* the second call, and such an owner cannot have
+    loaded a stale list: ``session_factory`` acquires the lease (which is what
+    writes ``.session.pid``, the marker this predicate reads) "at the shared
+    construction boundary, **before transcript creation**"
+    (``session_factory.py:1951-1968``), and the session loads its schedules from
+    that transcript afterwards (``session.py:2418``). Claiming after our check
+    therefore means loading after our append, which means seeing the row we
+    wrote. **The reasoning rests on that ordering and no other**: a future
+    change that lets a runtime read its transcript before it claims would put a
+    stale list on the far side of both checks and reopen this.
+
+    WHY ``_persist_wake_schedules`` IS NOT ALSO PUT UNDER THE LOCK. It would not
+    help: the owner's list is stale from the moment it loaded, so serialising the
+    two writers cannot reveal that, and the loss is a CONTENT fact rather than a
+    timing one (round 1's review says the same). What closes it is the pair of
+    guard calls plus the rollback above, which is what makes the live session's
+    own persist a writer whose effects we can always detect and undo.
 
     OWNED MEANS ANY LIVE PROCESS, NOT ONLY A DIALABLE ONE, and that distinction
     is the whole of review round 2's R6. Asking ``_has_live_runtime`` asks "does a
@@ -398,8 +582,16 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     one appended the row behind such an owner and answered 200 with
     ``index_written: true`` — the lost-reminder leak this guard exists to
     prevent, one layer down. So the test is the owner PID
-    (``find_runtime_record(...)[1]``, which is ``None`` only when nothing holds
-    the session) and the record is not part of it.
+    (``find_runtime_record(...)[1]``), and the record is not part of it.
+
+    ``[1]`` IS NOT "nothing else holds this pid", and round 3's minor is that
+    claim: a marker left by a crash keeps naming a number the OS may since have
+    recycled onto an unrelated process, and that stranger answers this guard
+    forever. There is no bound to give it — a lease-style deadline exists to hand
+    ownership to a COMPETITOR, and this writer competes with nobody (it has no
+    claim to take) — so the honest fix is the copy, which is why the two states
+    below get different sentences instead of one sentence that is false in one of
+    them.
 
     BOTH OWNER STATES ARE REFUSED, and the order below is load-bearing: a WEDGED
     owner (alive, heartbeat stale, lease held so no engage can succeed) is asked
@@ -407,7 +599,10 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     the wedged answer with the generic one and lose the sentence that names the
     next step.
     """
-    from local_operator.mobile.attach_client import find_runtime_record
+    from local_operator.mobile.attach_client import (
+        dialable_record_exists,
+        find_runtime_record,
+    )
     from local_operator.wakes.supervisor import wedged_runtime
 
     wedged = await asyncio.to_thread(wedged_runtime, Path(config_dir), session_id)
@@ -417,13 +612,30 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     # ``ps`` — the same probe the attach paths use, so this guard and the process
     # that would take the session agree about who is holding it.
     _record, owner = await asyncio.to_thread(find_runtime_record, Path(config_dir), session_id)
-    if owner is not None:
+    if owner is None:
+        return
+    # TWO STATES, ONE PREDICATE, DIFFERENT SENTENCES (review round 3, R6 minor).
+    # The pid mirror is the authority on "someone holds this transcript", and it
+    # outlives the process that wrote it: a crash plus pid reuse leaves a live
+    # number pointing at a stranger, which no amount of retrying will resolve and
+    # which the "open in a running session" sentence describes falsely. A
+    # dialable record is the difference the client can act on, and
+    # ``dialable_record_exists`` is the tree's own answer for it.
+    dialable = await asyncio.to_thread(dialable_record_exists, Path(config_dir), owner)
+    if dialable:
         raise WakeWriteError(
             "This conversation is open in a running session, which owns its schedules. "
             "Retry in a moment, or change them from that session.",
             status=STATUS_OWNER_BUSY,
             code="wake_owner_present",
         )
+    raise WakeWriteError(
+        OWNER_UNKNOWN_MESSAGE.format(
+            pid=owner, marker=Path(config_dir) / "sessions" / session_id / ".session.pid"
+        ),
+        status=STATUS_OWNER_BUSY,
+        code="wake_owner_present",
+    )
 
 
 def _refusal(outcome: Mapping[str, Any]) -> WakeWriteError:
