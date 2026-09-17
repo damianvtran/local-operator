@@ -719,3 +719,5 @@ but nothing ties them to the specific file that was uploaded. This gap is
 exactly what the fields above exist to prevent — note that even a recorded
 SHA-256 would only have identified the uploaded artifact, not enabled a
 hash-comparable rebuild, until `build:zip` is made deterministic.
+
+QA probe 1245: docs-only touch, reverted after the run.
