@@ -350,8 +350,9 @@ class DesktopFeed:
         #: THE CATALOGUE REVISION A CLIENT SEES, and it is a monotone COUNTER
         #: rather than the membership token it started as (finding 8). The row
         #: SET can be invalidated by two causes — a session entering or leaving
-        #: the catalogue, and a row's derived ACTIVITY changing, which moves it
-        #: between "Active chats" and "Previous chats" — and the client's refetch
+        #: the catalogue, and a row's derived ORDER KEY changing, which moves it
+        #: between "Active chats" and "Previous chats" or to another slot inside
+        #: one — and the client's refetch
         #: effect re-runs only on a value it has never seen. A token that is a
         #: hash of the directory can repeat, and cannot express the second cause
         #: at all; a counter that only ever rises cannot do either. The ``open``
@@ -365,7 +366,7 @@ class DesktopFeed:
         #: the counter answers "has the client seen this state".
         self._catalogue_token: int | None = None
         #: Set when something OTHER than a membership move invalidates the row
-        #: set — an ACTIVITY transition (finding 8) — and cleared when the frame
+        #: set — an ORDER-KEY transition (finding 8) — and cleared when the frame
         #: carrying it is published.
         self._catalogue_invalidated = False
         #: The tick the counter last published in, so a burst of simultaneous
@@ -433,17 +434,35 @@ class DesktopFeed:
         #: Active and finishes goes tier 4 -> 1 with ``active`` True -> True, so a
         #: section comparison publishes nothing for it — measured on the real
         #: backend as ZERO catalogue frames across ~100 accelerated ticks while the
-        #: client's next list read led with the completed row. Comparing the key is
-        #: complete by construction (it fires iff ``rank_entries``' sort key moved)
-        #: and it subsumes the section rule, since a section move always changes the
-        #: key's first term.
+        #: client's next list read led with the completed row. Comparing the key
+        #: fires iff ``rank_entries``' sort key moved and it subsumes the section
+        #: rule, since a section move always changes the key's first term.
+        #:
+        #: COMPARED FOR EVERY CANDIDATE, NOT ONLY THE PAIR-CHANGED ONES (review
+        #: round 1, M1). The dedupe pair is NOT a superset of this key, which is why
+        #: the comparison cannot sit behind the pair gate: a reachable collision
+        #: spans ``('scheduled', 'Scheduled (N wakes)')`` at rank ``(6, 0, …)`` (a
+        #: cold row with an armed wake, ``active`` False) and rank ``(5, 2, …)``
+        #: (that row live and detached with the same wake still armed, ``active``
+        #: True) — a SECTION move whose pair is byte-identical, reproduced through
+        #: the real writers with the comparison gated and ZERO frames published. So
+        #: the key is derived for every candidate the tick sees, before the gate: one
+        #: ``entry_for`` build per candidate per tick (~1 µs, against a catalogue
+        #: probe measured at 5-9 ms over a real store), never per row per frame, and
+        #: the once-per-tick coalescing below is unchanged.
         #:
         #: THE DIAL, if a flapping wake index ever makes this too eager: compare
         #: ``key[0]`` (the category) only. For Active rows that is exactly
         #: equivalent — Active's ``wake_rank`` is the constant — and it removes the
-        #: one new churn vector (a transient ``read_index`` failure flips a COLD
-        #: row's armed/dormant band), at the price of leaving an intra-Previous
-        #: wake reorder to the client's own 30 s safety poll.
+        #: one new churn vector, at the price of leaving an intra-Previous wake
+        #: reorder to the client's own 30 s safety poll. That churn is REAL, not
+        #: theoretical (qa round 1, Q1): a genuine ``PermissionError`` on the wake
+        #: index makes ``read_index`` return ``{}``, a COLD armed row's band flips
+        #: armed -> plain and back, and each flip costs one invalidation (measured
+        #: 1 + 1 frames against the base's 0 + 0), self-healing in one probe. It is
+        #: accepted rather than dialled down because in that same degraded state the
+        #: row's scheduled GLYPH already flaps, so the position agreeing with the
+        #: glyph is consistent rather than a new class of lie.
         self._position_seen: dict[str, tuple[int, int, float, str]] = {}
         #: ``session_id -> monotone counter``, bumped only when a frame is
         #: actually published and travelled to the list route (``status_stamps``)
@@ -707,8 +726,8 @@ class DesktopFeed:
         rule for this channel. A session whose status was already ``approval``
         when the client connected produces no frame until the pair CHANGES,
         which is the same rule ``_take_baseline`` applies to the attention
-        revision and the attention baseline. Its ACTIVITY is primed beside it for
-        the same reason (finding 8): a section move is a catalogue invalidation,
+        revision and the attention baseline. Its ORDER KEY is primed beside it for
+        the same reason (finding 8): a position change is a catalogue invalidation,
         and a baseline that did not record where each row already was would fire
         one on the first edge for every row.
 
@@ -1501,13 +1520,15 @@ class DesktopFeed:
           a file's mtime, which is what lets "status changed" mean exactly that
           rather than "a wedged row's age ticked"; the frame still carries the
           pair, age and all;
-        * a pair change that also moves the row's ORDER KEY publishes a catalogue
-          invalidation, in the same tick, so the client's list read re-files it
-          instead of leaving it in the wrong slot until the 30 s safety poll
-          (finding 8). A SECTION move is the subsumed case: the reported symptom is
-          a row that reorders INSIDE "Active chats" — a session that is already
-          Active and finishes is tier 4 -> 1 with ``active`` True -> True — which a
-          section comparison cannot see at all;
+        * a change to the row's ORDER KEY publishes a catalogue invalidation, in the
+          same tick, so the client's list read re-files it instead of leaving it in
+          the wrong slot until the 30 s safety poll (finding 8). This comparison is
+          NOT inside the pair gate above: the pair is not a superset of the key
+          (see the ``_position_seen`` field comment for the collision and the cost),
+          so it is made for every candidate this tick derived. A SECTION move is the
+          subsumed case: the reported symptom is a row that reorders INSIDE "Active
+          chats" — a session that is already Active and finishes is tier 4 -> 1 with
+          ``active`` True -> True — which a section comparison cannot see at all;
         * COMMIT LAST: ``_status_seen`` and the revisions advance only after every
           frame has been fanned out, so a failure mid-way costs a retry of the
           whole set rather than a half-published edge — the same rule
@@ -1544,21 +1565,18 @@ class DesktopFeed:
             if row is None:
                 continue
             attention = self._attention.get(session_id)
-            key = catalog.status_dedupe_key(row, attention)
-            if self._status_seen.get(session_id) == key:
-                continue
-            pair = catalog.status_of(row, attention)
-            revision = revisions.get(session_id, 0) + 1
-            revisions[session_id] = revision
-            pending.append((session_id, pair, revision))
-            published_keys[session_id] = key
             # POSITION — where the sidebar files the row: the ORDER KEY
             # (``catalog.order_key_of``, the key ``rank_entries`` sorts by), not
-            # merely its section. It is derived from the same inputs the pair's arms
-            # are ordered by, so an edge that moves a row always arrives here as a
-            # pair change; the cost is one entry build per EDGE, never per tick. The
-            # client cannot express this itself: placement travels on a list read,
-            # so a row that reorders keeps its old slot until the next one —
+            # merely its section. DERIVED AND COMPARED FOR EVERY CANDIDATE, ahead of
+            # the pair gate below, because the pair is not a superset of this key: a
+            # row moving out of "Previous chats" into "Active chats" can keep a
+            # byte-identical pair (``('scheduled', 'Scheduled (N wakes)')`` spans
+            # ``(6, 0, …)`` cold-and-armed and ``(5, 2, …)`` live-detached-and-armed),
+            # and a gated comparison published nothing for it (review round 1, M1).
+            # The row is already built above, so the added cost is one entry build
+            # per CANDIDATE per tick, ~1 µs — not per row per frame.
+            # The client cannot express this itself: placement travels on a list
+            # read, so a row that reorders keeps its old slot until the next one —
             # measured at 7.5-8.9 s for a section move, and NEVER for a move inside a
             # section, which is the reported bug (a completed row kept its place in
             # "Active chats" while the backend's own list had already led with it).
@@ -1567,6 +1585,14 @@ class DesktopFeed:
             position = catalog.order_key_of(row, attention)
             if self._position_seen.get(session_id) != position:
                 moved_positions[session_id] = position
+            key = catalog.status_dedupe_key(row, attention)
+            if self._status_seen.get(session_id) == key:
+                continue
+            pair = catalog.status_of(row, attention)
+            revision = revisions.get(session_id, 0) + 1
+            revisions[session_id] = revision
+            pending.append((session_id, pair, revision))
+            published_keys[session_id] = key
         for session_id, pair, revision in pending:
             self._publish(
                 "session_status",
