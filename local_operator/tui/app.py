@@ -7217,16 +7217,33 @@ class OperatorApp(App[None]):
         because the answer is state the owner keeps, not a value this side
         reads back -- awaiting it would put an owner round trip on the switch
         path, which is the interaction the sidebar exists to keep instant.
+
+        THE FAILURE IS SWALLOWED INSIDE THE COROUTINE, not merely around the
+        spawn. ``run_worker`` defaults to ``exit_on_error=True``, so a raise
+        from the awaited body arrives as ``WorkerFailed`` at the app's
+        exception handler and takes the TUI down -- a ``try`` around the
+        synchronous call cannot see it, because the call only schedules. Both
+        triggers here are ordinary rather than exotic: an owner too old to know
+        the op answers with an error frame, and a connection dropped mid-switch
+        raises on the write. ``exit_on_error=False`` is belt-and-braces for the
+        same reason the surrounding method is best-effort at all.
         """
         session = getattr(source, "session", None)
         client = getattr(session, "_client", None)
         watch = getattr(client, "viewer_watch", None)
         if watch is None:
             return
+
+        async def _signal() -> None:
+            try:
+                await watch(displaying=displaying)
+            except Exception:  # noqa: BLE001 -- routing chrome never breaks a switch
+                logger.debug("viewer watch signal failed", exc_info=True)
+
         try:
-            self.run_worker(watch(displaying=displaying), exclusive=False)
-        except Exception:  # noqa: BLE001 -- routing chrome never breaks a switch
-            logger.debug("viewer watch signal failed", exc_info=True)
+            self.run_worker(_signal(), exclusive=False, exit_on_error=False)
+        except Exception:  # noqa: BLE001 -- nor does failing to schedule it
+            logger.debug("viewer watch signal could not be scheduled", exc_info=True)
 
     def _commit_sidebar_session(
         self,
