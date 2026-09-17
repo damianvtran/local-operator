@@ -840,7 +840,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "when",
         help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
     )
-    wake_create.add_argument("message", help="the self-prompt delivered when it fires")
+    # Lazy, like every other harness import in this module (see the module
+    # docstring): the flag's help names the SHARED cap rather than a second
+    # number that could drift from it.
+    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+
+    wake_create.add_argument(
+        "message",
+        # The cap is the SHARED one (``MAX_WAKE_MESSAGE_CHARS``, enforced by
+        # ``build_wake_schedule``), and this command used to build the model
+        # directly so it had no cap at all. Said here rather than leaving the
+        # limit to be discovered by being refused (review round 1, R5).
+        help=(
+            "the self-prompt delivered when it fires "
+            f"(at most {MAX_WAKE_MESSAGE_CHARS} characters)"
+        ),
+    )
     wake_create.add_argument(
         "--every",
         default="",
@@ -3578,6 +3593,13 @@ def _cell_len(text: str) -> int:
 
 
 def _wake_create(args: argparse.Namespace) -> int:
+    # THE READ IS THE WRITER'S NOW. Upstream built a ``Transcript`` here so the
+    # append could reuse it rather than parse the journal twice; this command no
+    # longer builds a list at all — ``arm_wake`` reads the transcript's latest
+    # ``wake_schedules`` entry with the one-row reader and appends through the
+    # object the write already needs — so that double parse is not reachable
+    # from here, and the note it carried is answered rather than dropped.
+
     """``lop wake create <session> "<when>" "<message>"``.
 
     Persists through the TRANSCRIPT first, exactly like the in-session wake
@@ -3594,23 +3616,22 @@ def _wake_create(args: argparse.Namespace) -> int:
     """
     import time as _time
 
-    from local_operator.harness.wake import (
-        MIN_WAKE_INTERVAL_MS,
-        WakeSchedule,
-        parse_wake_at,
-        parse_wake_duration,
-    )
+    from local_operator.harness.wake import parse_wake_at, parse_wake_duration
     from local_operator.paths import config_dir
-    from local_operator.wakes.store import read_entry, write_entry
+    from local_operator.wakes.arm import WakeWriteError, arm_wake
 
     root = config_dir()
     session_id = str(args.session)
-    session_dir = root / "sessions" / session_id
-    if not session_dir.is_dir():
-        print(f"no session {session_id!r}", file=sys.stderr)
-        return 1
-
     now_ms = int(_time.time() * 1000)
+
+    # The scheduling request, in the SHARED vocabulary the one validator reads
+    # (``message``/``in``/``at``/``every``/``until``/``limit``). The flags and
+    # their prepositions are translated here because that spelling is this
+    # command's, not the schedule's. What the values MEAN — the 16-schedule
+    # cap, the first FREE id slot, the interval floor, the bound-on-a-one-shot
+    # rule — is decided once, by ``build_wake_schedule`` inside
+    # ``wakes/arm.py``, which is also the writer the desktop arm route uses.
+    request: dict[str, Any] = {"message": str(args.message)}
     raw = str(args.when).strip()
     # "in 2m" is the phrasing the help text advertises and the one a person
     # reaches for; the parsers below take the bare duration, so the leading
@@ -3618,61 +3639,39 @@ def _wake_create(args: argparse.Namespace) -> int:
     body = raw[3:].strip() if raw.lower().startswith("in ") else raw
     if raw.lower().startswith("at "):
         due_at = parse_wake_at(raw[3:].strip(), now_ms)
+        request["at"] = raw[3:].strip()
     else:
         duration = parse_wake_duration(body)
         due_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
+        # A bare token is a duration when one parses and an absolute clock or
+        # an ISO instant otherwise — the same precedence ``parse_wake_at``
+        # applies to a leading ``+``.
+        request["in" if duration is not None else "at"] = body
     if due_at is None:
         print(f"could not read a time from {raw!r} (try 'in 2m' or 'at 09:30')", file=sys.stderr)
         return 1
 
-    entry = read_entry(root, session_id) or {}
-
-    # Existing schedules come from the TRANSCRIPT, not the index: the index
-    # is derived and may lag (or be absent), and the append below REPLACES
-    # the session's schedule list, so reading a stale source would silently
-    # cancel live reminders — the same hazard the in-session persist guards.
-    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
-    from local_operator.session.transcript import Transcript
-
-    # NOT converted to the one-row reader, deliberately: this command WRITES
-    # through the same object a few lines below (``transcript.append_custom``),
-    # and an append needs a materialised ``_entries`` — reconstructing it after
-    # the read would pay the same whole-journal parse twice. There is no parse
-    # to save here, so the read rides the object the write already needs.
-    transcript = Transcript(session_dir)
-    latest = transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
-    existing: list[dict[str, Any]] = []
-    if latest is not None:
-        details = dict(latest.payload.get("details", {}))
-        existing = [dict(s) for s in details.get("schedules", []) if isinstance(s, dict)]
-    # Per-session handles (``w1``…), matching the in-session numbering so the
-    # id a user sees here is the id `/wake` would have given it.
-    every_ms: int | None = None
+    # WHAT THIS COMMAND CHECKS, AND WHAT IT DOES NOT. Everything here that
+    # prints and returns is FLAG TRANSLATION: turning ``"in 2m"``/``"at 09:30"``
+    # into the request's own vocabulary, choosing which key carries it, and
+    # telling the user when a flag's value cannot be read as that flag's kind at
+    # all. Every RULE — the 16-schedule cap, the first free id slot, the interval
+    # floor, the bound-on-a-one-shot rule, the message length — is decided once,
+    # by ``build_wake_schedule`` inside ``wakes/arm.py``, and reaches this command
+    # as the SAME sentence the desktop route and the agent's tool print. This
+    # command used to re-word the floor and the bound for itself, which made "one
+    # rule, one place" half true; the ONLY check kept locally is that a repeat
+    # interval is parseable as a duration, because "which of these two kinds is
+    # this flag" is this command's question and nobody else's (review round 1,
+    # R4).
     every_raw = str(getattr(args, "every", "") or "").strip()
-    if every_raw:
-        every_ms = parse_wake_duration(every_raw)
-        if every_ms is None:
-            # The same refusal the tool path gives, for the same reason: a
-            # bare number is ambiguous between seconds and milliseconds, and
-            # guessing wrong is a runaway loop.
-            print(
-                f"could not read a repeat interval from {every_raw!r} "
-                "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
-                file=sys.stderr,
-            )
-            return 1
-        if every_ms < MIN_WAKE_INTERVAL_MS:
-            # Caught HERE rather than at the model validator so the user gets
-            # a sentence instead of a pydantic traceback. The floor is
-            # deliberate: a wake starts a full turn, so a sub-minute repeat
-            # starves the session it is meant to serve.
-            print(
-                f"repeat interval {every_raw!r} is too short — "
-                f"the minimum is {MIN_WAKE_INTERVAL_MS // 1000}s, "
-                "because each wake starts a full turn",
-                file=sys.stderr,
-            )
-            return 1
+    if every_raw and parse_wake_duration(every_raw) is None:
+        print(
+            f"could not read a repeat interval from {every_raw!r} "
+            "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
+            file=sys.stderr,
+        )
+        return 1
 
     until_at: int | None = None
     until_raw = str(getattr(args, "until", "") or "").strip()
@@ -3696,82 +3695,61 @@ def _wake_create(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        # ``until`` is read by ``parse_wake_at`` — where a leading ``+`` marks a
+        # duration — while the flag promises the ``in 7d`` spelling, so the
+        # same translation ``when`` does above happens here.
+        request["until"] = "+" + body if duration is not None else body
 
     limit = getattr(args, "limit", None)
-    if limit is not None and limit < 1:
-        print("--limit must be at least 1", file=sys.stderr)
-        return 1
+    if every_raw:
+        request["every"] = every_raw
+    if limit is not None:
+        request["limit"] = limit
 
-    # Both bounds only mean something for a repeat: a one-shot already fires
-    # exactly once, so silently accepting them would promise a behaviour the
-    # schedule does not have.
-    if every_ms is None and (until_at is not None or limit is not None):
-        print("--until and --limit bound a repeat — add --every", file=sys.stderr)
-        return 1
-
-    schedule = WakeSchedule(
-        id=f"w{len(existing) + 1}",
-        message=str(args.message),
-        next_due_at=due_at,
-        created_at=now_ms,
-        every_ms=every_ms,
-        until_at=until_at,
-        limit=limit,
-    )
-    combined = [*existing, schedule.model_dump()]
-
-    # TRANSCRIPT FIRST, then the derived index — the same order as
-    # ``Session._persist_wake_schedules``. The append is the only step allowed
-    # to fail the command: an index written without it is a wake the next
-    # open deletes, which is exactly the round-2 defect.
+    # ONE writer. ``arm_wake`` appends the transcript entry first (the source of
+    # truth) and then rewrites the derived index CARRYING the keys it does not
+    # own — ``stopped_at``, and the ``last_fired_at``/``last_attempt_at``
+    # lateness stamps — which this command used to drop, so arming a wake on a
+    # session the user had stopped silently un-parked the whole session. It also
+    # verifies after the append that no other writer landed on top of it, since
+    # nothing prevents a second process appending to the same transcript.
     import asyncio as _asyncio
 
-    async def _append() -> None:
-        await transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": combined})
-
-    _asyncio.run(_append())
-
-    written = write_entry(
-        root,
-        session_id,
-        cwd=str(entry.get("cwd") or session_dir),
-        schedules=combined,
-    )
-
-    installed_reason = ""
     try:
-        from local_operator.wakes.install import ensure_supervisor_installed
-
-        installed_reason = ensure_supervisor_installed(root).reason
-    except Exception:  # noqa: BLE001
-        # A wake that is scheduled but unsupervised still fires whenever the
-        # session is open, so a failed install must not fail the command —
-        # `lop wake status` is where that gap is reported, in one place.
-        import logging as _logging
-
-        _logging.getLogger(__name__).debug("wake supervisor install failed", exc_info=True)
+        outcome = _asyncio.run(arm_wake(root, session_id, request, now_ms=now_ms))
+    except WakeWriteError as error:
+        # The refusal sentence comes from the shared validator, so the CLI, the
+        # desktop route and the agent's tool say the same thing about the same
+        # mistake.
+        print(str(error), file=sys.stderr)
+        return 1
 
     if getattr(args, "json", False):
         print(
             _json_dumps(
                 {
-                    "session_id": session_id,
-                    "wake_id": schedule.id,
-                    "next_due_at": due_at,
-                    "entry": str(written) if written else "",
-                    "supervisor": installed_reason,
+                    "session_id": outcome.session_id,
+                    "wake_id": outcome.wake_id,
+                    "next_due_at": outcome.next_due_at,
+                    "entry": outcome.index_path,
+                    "supervisor": outcome.supervisor,
                 }
             )
         )
         return 0
     from local_operator.wakes.display import format_wake_time
 
+    # The row as PERSISTED (the message the validator stripped), not the flag
+    # as typed: what the listing will show must be what was printed here.
+    row = next((s for s in outcome.schedules if s.id == outcome.wake_id), None)
+    assert outcome.next_due_at is not None  # a create always resolves a due time
     print(
-        f"{schedule.id}  {format_wake_time(due_at)} "
-        f"({_format_due((due_at - now_ms) / 1000.0)})  {schedule.message}"
+        f"{outcome.wake_id}  {format_wake_time(outcome.next_due_at)} "
+        f"({_format_due((outcome.next_due_at - now_ms) / 1000.0)})  "
+        f"{row.message if row else request['message']}"
     )
-    if installed_reason:
-        print(f"supervisor: {installed_reason}")
+    if outcome.supervisor:
+        print(f"supervisor: {outcome.supervisor}")
     return 0
 
 

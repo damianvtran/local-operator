@@ -3829,6 +3829,8 @@ class ServingSessionHandle(SessionHandle):
             return self._approvals_slash(session, args, SlashResult)
         if command == "compact":
             return self._compact_slash(session, SlashResult)
+        if command == "wake":
+            return await self._wake_slash(session, args, SlashResult)
         if command == "loop":
             driver = self._loop_driver()
             if args.lower() in ("stop", "cancel", "abort"):
@@ -3891,6 +3893,121 @@ class ServingSessionHandle(SessionHandle):
             style="info",
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
+
+    async def _wake_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one wake mutation INSIDE the session that owns the schedules.
+
+        Reached from the desktop by ``POST/PATCH/DELETE /v1/desktop/wakes``
+        when a live runtime holds the session (see ``routes/desktop_wakes``),
+        never by a user typing ``/wake``: the name is a routed-command word in
+        the ladder above, not a registry entry, so no palette row exists for
+        it and no terminal offers it. ``desktop_mcp`` and ``fork`` are the
+        same shape of internal word.
+
+        WHY THIS PATH EXISTS AT ALL. ``Session._persist_wake_schedules`` is
+        the one writer of schedule state, and a live session republishes its
+        WHOLE in-memory list on any change. An external write that appended a
+        transcript row would therefore be overwritten by the session's next
+        persist — while the supervisor, which skips any session with a live
+        record, never fired it either. That is a silently dead reminder with a
+        200 response, so the mutation has to happen in this process.
+
+        The three helpers below are the SAME ones the agent's ``wake`` tool
+        runs (``tools/builtin``), so a wake armed here and a wake armed by the
+        model are validated and allocated identically; they end in
+        ``scheduler.update`` -> ``_persist_wake_schedules``, which appends the
+        transcript, rewrites the derived index and re-arms the timer. Edit has
+        no twin on the tool because the tool's vocabulary is create/list/
+        cancel — ``_wake_edit`` is that missing helper, and what an edit MEANS
+        lives in ``build_wake_edit``, shared with the route-less arm path.
+        """
+        import json
+
+        from local_operator.tools.builtin import (
+            FAULT_INVALID_ARGUMENTS,
+            FAULT_KEY,
+            WakeParams,
+            _wake_cancel,
+            _wake_create,
+            _wake_edit,
+        )
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("wake payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._wake_failure(
+                SlashResult, "The wake request could not be read.", "wake_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        request = payload.get("request") or {}
+        if not isinstance(request, dict):
+            return self._wake_failure(
+                SlashResult, "The wake request could not be read.", "wake_invalid"
+            )
+        wake_id = str(payload.get("wake_id") or "")
+        scheduler = getattr(session, "wake_scheduler", None)
+        if scheduler is None:
+            return self._wake_failure(
+                SlashResult,
+                "Wake scheduling is not available in this session (no scheduler attached).",
+                "wake_unavailable",
+            )
+        known_ids = {row.id for row in scheduler.schedules}
+
+        # A synthetic tool-call id: these helpers build a ToolResult, whose id
+        # is a transcript correlation handle. Nothing here is written to a
+        # transcript as a tool call — the result is read for its status and
+        # its details and discarded — so the id exists only to satisfy the
+        # constructor, and it is deliberately not shaped like a real one.
+        tool_call_id = "desktop-wake"
+        if op == "create":
+            try:
+                params = WakeParams.model_validate({**request, "op": "create"})
+            except Exception:  # noqa: BLE001 — a malformed body, refused below
+                return self._wake_failure(
+                    SlashResult, "The wake request was not a valid create.", "wake_invalid"
+                )
+            result = await _wake_create(tool_call_id, params, scheduler, int(time.time() * 1000))
+        elif op == "edit":
+            result = await _wake_edit(
+                tool_call_id, wake_id, dict(request), scheduler, int(time.time() * 1000)
+            )
+        elif op == "cancel":
+            params = WakeParams.model_validate({"op": "cancel", "id": wake_id})
+            result = await _wake_cancel(tool_call_id, params, scheduler)
+        else:
+            return self._wake_failure(
+                SlashResult, f"Unknown wake operation {op!r}.", "wake_invalid"
+            )
+
+        if result.is_error:
+            details = result.details or {}
+            malformed = details.get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
+            code = "wake_invalid" if malformed else "wake_refused"
+            # A refused cancel/edit may be refused because the handle does not
+            # exist, which the route answers 404 for. Asked of the scheduler
+            # rather than matched out of the helper's sentence: the sentence is
+            # shared prose that may be reworded, and a status decided by prose
+            # is a status that silently changes meaning one edit later.
+            if op in ("cancel", "edit") and wake_id and wake_id not in known_ids:
+                code = "wake_not_found"
+            return self._wake_failure(SlashResult, result.text, code)
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(kind="notice", text=result.text, data=dict(result.details or {}))
+
+    @staticmethod
+    def _wake_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
 
     async def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """``/title`` on a detached runtime: report, set, or refresh.
