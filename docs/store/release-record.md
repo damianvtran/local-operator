@@ -211,7 +211,7 @@ tree with the range/guard work of #1038, #1095 and #1104 underneath it.
 | Promotion route | **Not dispatched** |
 | Store state | Not submitted. `v0.1.12` was still `PENDING_REVIEW` when this number was taken |
 | State last checked | 2026-09-14 |
-| Approval timestamp | *not applicable* |
+| Approval timestamp | ***Not directly observable — no run in our history records it.*** The store's own fields bound it instead, and the publication **date is 2026-09-15** on both our UTC log-line base and the store's own Pacific day: promote run [35032253219](https://github.com/damianvtran/local-operator/actions/runs/35032253219) read the store at 2026-09-15T22:42:34Z with 0.1.15 already approved (`submitted state=STAGED …[crxVersion=0.1.15 deployPercentage=100]`) and 0.1.12 still live, and run [35035927938](https://github.com/damianvtran/local-operator/actions/runs/35035927938) — dispatched for 0.1.15 — read it at 2026-09-15T23:31:02Z with 0.1.15 live and nothing left submitted (`submitted <absent>; published state=PUBLISHED …[crxVersion=0.1.15 deployPercentage=100]`). The approval **instant** itself appears in no run we hold, so it is recorded as a bound rather than a timestamp, and no time is inferred: our promote route did not publish this version — the dispatch aimed at 0.1.15 was refused (`only an approved STAGED revision can be promoted`) because it was already live — and the public listing reports a date, not a timestamp. See the addendum below. |
 | Previously published | v0.1.10 (0.1.12 in review) |
 
 **Why the bump is in this commit rather than the one that changed behaviour.**
