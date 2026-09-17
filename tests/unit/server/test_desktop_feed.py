@@ -72,6 +72,7 @@ from local_operator.session.catalog import (
     status_dedupe_key,
     status_of,
 )
+from local_operator.session.creation import CREATED_AT_NAME
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     desktop_attending_session,
@@ -1796,11 +1797,15 @@ def test_a_row_that_changes_section_invalidates_the_catalogue(tmp_path):
     so it ships what it does ship: an invalidation the client's own (tested)
     refetch effect re-runs on.
 
+    The section move is the case the feed's comparison SUBSUMES: a section move
+    always changes the ORDER KEY's first term, and the tests after this one cover
+    the moves that do not cross a section at all (see "FINDING 8'S CLASS" below).
+
     Two properties, and the client is what makes them load-bearing: the revision
     must be a number the client has NEVER seen (React re-runs an effect on a
     changed dependency value, so a repeated revision is no invalidation at all),
-    and it must be monotone across BOTH causes — a membership move and an
-    activity transition.
+    and it must be monotone across BOTH causes — a membership move and a position
+    transition.
     """
     root = tmp_path
     session_id = "ed" * 6
@@ -1816,10 +1821,11 @@ def test_a_row_that_changes_section_invalidates_the_catalogue(tmp_path):
     opened = asyncio.run(feed._open_frame(subscription))
     start = opened["payload"]["catalogue_revision"]
 
-    # No runtime, nothing owed: ``recent``, i.e. "Previous chats".
+    # No runtime, nothing owed: ``recent``, i.e. "Previous chats" — the section is
+    # False and the key's first term is the cold tier.
     _tick(feed)
     assert _queued(subscription) == []
-    assert feed._activity_seen[session_id] is False
+    assert _rank(root, session_id) == (6, 2)
 
     # It finishes: the pair and the SECTION both move.
     _publish(root, session_id, kind="complete")
@@ -1828,22 +1834,26 @@ def test_a_row_that_changes_section_invalidates_the_catalogue(tmp_path):
     kinds = [frame["type"] for frame in frames]
     assert kinds.count("catalogue") == 1, kinds
     assert kinds.index("catalogue") > kinds.index("session_status"), kinds
-    assert feed._activity_seen[session_id] is True
+    assert _rank(root, session_id) == (1, 2)
     revision = frames[kinds.index("catalogue")]["payload"]["revision"]
     assert revision > start, "the client has seen this revision and would not refetch"
 
-    # An edge that moves the PAIR but not the section is not an invalidation: the
-    # same completion re-spelled as an error changes the code and leaves the row
-    # where it is, so there is nothing for a refetch to re-file.
+    # AN EDGE THAT MOVES THE PAIR AND THE POSITION INSIDE ONE SECTION. The same
+    # completion re-spelled as an error changes the code AND the ordering category
+    # — complete/error/interrupted are categories 1/2/3 — so the row moves within
+    # the completed block. This assertion previously said the opposite ("leaves the
+    # row where it is"): that was true of a SECTION comparison and false of the row,
+    # which was moving while the client was never told.
     _publish(root, session_id, kind="error")
     _tick(feed)
-    assert "catalogue" not in [frame["type"] for frame in _queued(subscription)]
+    respelled = [frame for frame in _queued(subscription) if frame["type"] == "catalogue"]
+    assert len(respelled) == 1, respelled
+    assert _rank(root, session_id) == (2, 2)
+    revision = respelled[0]["payload"]["revision"]
 
     # THE SNAPSHOT AGREES WITH THE COUNTER: a client connecting now is told the
-    # same number, and the next invalidation — a SECOND session moving section —
-    # is a value it has never seen. (The second completion is on a different
-    # session on purpose: an edge that changes a pair without changing its row's
-    # SECTION is not an invalidation, which is the other half of the rule.)
+    # same number, and the next invalidation — a SECOND session moving from
+    # "Previous chats" into the completed block — is a value it has never seen.
     late = feed.subscribe()
     assert asyncio.run(feed._open_frame(late))["payload"]["catalogue_revision"] == revision
     _publish(root, other, kind="complete")
@@ -1882,6 +1892,476 @@ def test_a_burst_of_transitions_costs_one_invalidation(tmp_path):
         frame for frame in _queued(subscription) if frame["type"] in ("catalogue", "session_status")
     ] == []
     asyncio.run(feed.close())
+
+
+# ---------------------------------------------------------------------------
+# FINDING 8'S CLASS, not its one case: A ROW THAT REORDERS INSIDE ITS SECTION
+#
+# ``CatalogEntry.active`` is section MEMBERSHIP (a boolean: ``pending or unseen
+# or live_state``); ``CatalogEntry.rank`` is the order the sidebar RENDERS — the
+# key ``rank_entries`` sorts by, whose first term is the ordering CATEGORY. A row
+# can change category without leaving its section, and placement travels on a
+# LIST read, so the feed owes its client an invalidation for that too. Every test
+# below pins one clause of the key comparison the feed now performs.
+# ---------------------------------------------------------------------------
+
+#: The completion token the drift worlds publish and acknowledge, so the two
+#: halves of the acknowledgement case can be built without threading a value
+#: through the state builders. A real UUID, because the store parses tokens.
+_DRIFT_TOKEN = "d1f7a000-0000-4000-8000-000000000001"
+
+
+def _birth(root: Path, session_id: str, at: float) -> None:
+    """Pin a session's canonical birth, which is the ORDER KEY's third term.
+
+    Written through the same file ``session_created_at`` reads rather than left to
+    the filesystem's ``st_birthtime``: two directories created microseconds apart
+    would otherwise make an ordering assertion a statement about the fixture's
+    timing rather than about the rule under test.
+    """
+    (root / "sessions" / session_id / CREATED_AT_NAME).write_text(json.dumps(at), encoding="utf-8")
+
+
+def _rank(root: Path, session_id: str) -> tuple[int, int]:
+    """The row's position in the CATALOGUE's own answer: the two mutable key terms.
+
+    Read the way the LIST reads them rather than out of the feed's internals, so an
+    assertion cannot pass on a map that has stopped matching the sort. The third
+    term is birth and the fourth is the id: both immutable, and the feed cannot
+    derive birth at all, so neither can ever produce an edge.
+    """
+    entry = {row.id: row for row in load_catalog(root)}[session_id]
+    return entry.rank[0], entry.rank[1]
+
+
+def test_a_row_that_completes_inside_active_invalidates_the_catalogue(tmp_path):
+    """THE REPORTED CASE: the position moved, the SECTION did not.
+
+    A session showing a spinner inside "Active chats" (tier 4, ``active`` True)
+    finishes: its category becomes 1 (an unread completion) while ``active`` stays
+    True, so the row is in the SAME section in a different slot. Comparing
+    ``active`` publishes nothing at all — measured on the real backend as zero
+    catalogue frames in 15 s, and still zero across ~100 ticks with the probes
+    accelerated 20x, while the client's next list read already led with the
+    completed row. The checkmark was prompt (the ``session_status`` frame lands in
+    ~100 ms); the POSITION is what stayed stale, and only a list read can carry it.
+    """
+    root = tmp_path
+    completer, elder = "a1" * 6, "a2" * 6
+    _listable_session(root, elder)
+    _listable_session(root, completer)
+    _birth(root, elder, 1_700_000_000.0)
+    _birth(root, completer, 1_700_000_600.0)
+    _publish(root, elder)  # an older unread completion: tier 1, Active
+    _record_publish(root, completer, busy=True)  # working: tier 4, Active
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    opened = asyncio.run(feed._open_frame(subscription))
+    start = opened["payload"]["catalogue_revision"]
+    _tick(feed)
+    assert _queued(subscription) == []
+    before = feed._position_seen[completer]
+    assert _rank(root, completer) == (4, 2)
+    assert [entry.id for entry in load_catalog(root)] == [elder, completer]
+
+    # It finishes: the PAIR moves busy -> complete AND the POSITION moves 4 -> 1.
+    _record_publish(root, completer)
+    _publish(root, completer)
+    _tick(feed)
+    frames = _queued(subscription)
+    kinds = [frame["type"] for frame in frames]
+    assert kinds.count("catalogue") == 1, kinds
+    # AFTER the status frame, so the client paints the checkmark and then re-reads
+    # a list that already agrees with it.
+    assert kinds.index("catalogue") > kinds.index("session_status"), kinds
+    assert feed._position_seen[completer] != before, "the key was never advanced"
+    assert _rank(root, completer) == (1, 2)
+    revision = frames[kinds.index("catalogue")]["payload"]["revision"]
+    assert revision > start, "the client has seen this revision and would not refetch"
+    # ...and the list that refetch reads is the one that leads with the completed
+    # row: the invalidation is only worth publishing if the backend agrees.
+    assert [entry.id for entry in load_catalog(root)] == [completer, elder]
+    asyncio.run(feed.close())
+
+
+def test_an_acknowledgement_with_a_record_invalidates_the_catalogue(tmp_path):
+    """1 -> 5 with ``active`` unchanged: reading a completion re-files the row.
+
+    A RECORD keeps the row resident (``live_state`` attached), so acknowledging its
+    completion moves it out of the completed block (tier 1) into the live band
+    (tier 5) while staying in "Active chats" — the same class as the report, and
+    the second row of the design's transition table. Without the record the row
+    would go Active -> Previous, a SECTION move the old comparison already caught,
+    which is exactly why the fixture has one.
+    """
+    root = tmp_path
+    sid, neighbour = "a3" * 6, "a4" * 6
+    _listable_session(root, neighbour)
+    _listable_session(root, sid)
+    _birth(root, neighbour, 1_700_000_000.0)
+    _birth(root, sid, 1_700_000_600.0)
+    _record_publish(root, sid)
+    token = _publish(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick(feed)
+    assert _queued(subscription) == []
+    before = feed._position_seen[sid]
+    assert _rank(root, sid) == (1, 2)
+
+    AttentionStore(root / "attention.db").acknowledge(f"session/{sid}", token)
+    _tick(feed)
+    frames = _queued(subscription)
+    kinds = [frame["type"] for frame in frames]
+    assert kinds.count("catalogue") == 1, kinds
+    after = feed._position_seen[sid]
+    assert after != before, "the acknowledgement moved the row and nobody was told"
+    assert _rank(root, sid) == (5, 2)
+    entry = {row.id: row for row in load_catalog(root)}[sid]
+    # Only the two MUTABLE terms are compared: the feed builds its row from the
+    # registry rather than from the session directory, so it never reads the birth
+    # file and its third term is 0.0 where the catalogue's is the real birth. Birth
+    # and id cannot move, so every EDGE — which is all the comparison is for — is
+    # unaffected by the difference.
+    assert (entry.rank[0], entry.rank[1], entry.active) == (after[0], after[1], True)
+    asyncio.run(feed.close())
+
+
+def test_a_resumed_completion_invalidates_the_catalogue(tmp_path):
+    """1 -> 4: a turn starting on a row that was sitting in the completed block.
+
+    The operator resumed it, so the runtime publishes a busy record. The row is
+    Active before and after (``unseen`` before, ``live_state`` after), the tier
+    moves 1 -> 4, and the client needs the list read to move the row back down.
+    """
+    root = tmp_path
+    sid, neighbour = "a5" * 6, "a6" * 6
+    _listable_session(root, neighbour)
+    _listable_session(root, sid)
+    _birth(root, neighbour, 1_700_000_000.0)
+    _birth(root, sid, 1_700_000_600.0)
+    _publish(root, sid)  # an unread completion with no runtime: tier 1, Active
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick(feed)
+    assert _queued(subscription) == []
+    before = feed._position_seen[sid]
+    assert _rank(root, sid) == (1, 2)
+
+    _record_publish(root, sid, busy=True)
+    _tick(feed)
+    frames = _queued(subscription)
+    kinds = [frame["type"] for frame in frames]
+    assert kinds.count("catalogue") == 1, kinds
+    after = feed._position_seen[sid]
+    assert after != before
+    assert _rank(root, sid) == (4, 2)
+    assert {row.id: row for row in load_catalog(root)}[sid].active is True
+    asyncio.run(feed.close())
+
+
+def test_a_pair_change_that_keeps_the_position_invalidates_nothing(tmp_path):
+    """The rule stays NARROW: a gate answered inside the SAME ordering category.
+
+    ``pending: approval -> answer`` changes the derived PAIR (so the frame is
+    published — asserted, so this test cannot pass on a dead feed) and leaves the
+    row in tier 0, in the same slot, with the same birth and id. Comparing the
+    ORDER KEY keeps "the pair changed" from being sufficient on its own: the client
+    only re-reads the whole catalogue when the row would land somewhere else.
+    """
+    root = tmp_path
+    sid = "a7" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    # The gate arrives over the DOORBELL (the 10 Hz path), so the 1 s probe is
+    # gated shut and the pair frames below cannot come from the slow clock.
+    feed._status_probed_at = time.monotonic()
+    _record_publish(root, sid, pending="approval")
+    _tick(feed)
+    assert [frame["payload"]["code"] for frame in _statuses(_queued(subscription))] == ["approval"]
+
+    before = feed._position_seen[sid]
+    _record_publish(root, sid, pending="answer")
+    _tick(feed)
+    frames = _queued(subscription)
+    assert [frame["payload"]["code"] for frame in _statuses(frames)] == ["answer"], frames
+    assert "catalogue" not in [frame["type"] for frame in frames], frames
+    assert feed._position_seen[sid] == before
+    asyncio.run(feed.close())
+
+
+def test_a_client_connecting_mid_flight_gets_no_invalidation_for_its_first_edge(tmp_path):
+    """The PRIME: a fresh connection must not owe one refetch per row.
+
+    ``_prime_status`` seeds the position map from the same derivation the list uses
+    for every candidate the connection can see. An ABSENT entry reads as "changed"
+    on that row's first edge, so without the prime a client connecting to a machine
+    that already had sessions working would be told to re-read the whole catalogue
+    once per row — an invalidation for a move that never happened.
+
+    The edge below is the discriminating one: the PAIR moves (busy -> wedged, a
+    stale beat) while the POSITION does not (both are tier 4 with the constant
+    ``wake_rank``). The status frame is asserted too, so a silent feed cannot make
+    this pass.
+    """
+    root = tmp_path
+    working, finished, armed = "a8" * 6, "a9" * 6, "aa" * 6
+    for session_id, at in (
+        (working, 1_700_000_000.0),
+        (finished, 1_700_000_600.0),
+        (armed, 1_700_001_200.0),
+    ):
+        _listable_session(root, session_id)
+        _birth(root, session_id, at)
+    path = _record_publish(root, working, busy=True)
+    _publish(root, finished)
+    _wake(root, armed)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick(feed)
+    assert _queued(subscription) == [], "connecting was treated as an invalidation"
+
+    # The beat goes quiet. Ageing the beat is the test's way of moving the clock;
+    # the caches are then refreshed to the file as it is on disk, which is the
+    # state the feed is already in when time alone crosses the timeout.
+    aged = _record(working, busy=True)
+    aged.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 30.0
+    path.write_text(json.dumps(aged.to_json()), encoding="utf-8")
+    feed._registry_fingerprint = _fingerprint(feed._registry_dir)
+    feed._record_fingerprints[working] = _fingerprint(path)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    assert [frame["payload"]["code"] for frame in _statuses(frames)] == ["wedged"], frames
+    assert "catalogue" not in [frame["type"] for frame in frames], frames
+    assert _rank(root, working) == (4, 2)
+    asyncio.run(feed.close())
+
+
+def test_a_burst_of_completions_inside_active_costs_one_invalidation(tmp_path):
+    """Intra-section burst: N reorders in one tick cost ONE refetch, none deferred.
+
+    The extension of the existing burst test to the new cause, because the
+    coalescing is the property that keeps this from resurrecting the retired 5 s
+    poll: same flag, same once-per-tick guard, so a fleet finishing together still
+    buys one whole-catalogue read (~100 ms later) rather than one per row.
+
+    The two rows use two pids on purpose: discovery records are keyed by pid
+    (``record_path``), so one pid for both would leave the second row with no
+    record at all — and then the burst edge would be its FIRST edge, which is a
+    different cause that invalidates for a different reason.
+    """
+    root = tmp_path
+    completer, re_spelled = "ab" * 6, "ac" * 6
+    for session_id in (completer, re_spelled):
+        _listable_session(root, session_id)
+    with _extra_live_pid() as spare:
+        _record_publish(root, completer, pid=_FOREIGN_LIVE_PID, busy=True)
+        _record_publish(root, re_spelled, pid=spare)
+        _publish(root, re_spelled)  # an unread completion on a RESIDENT row: tier 1
+        feed = _feed(root)
+        feed._take_baseline()
+        subscription = feed.subscribe()
+        _tick(feed)
+        assert _queued(subscription) == []
+
+        # Both move inside Active in the same tick: 4 -> 1 (finishing) and
+        # 1 -> 2 (the same completion re-spelled as an error).
+        _record_publish(root, completer, pid=_FOREIGN_LIVE_PID)
+        _publish(root, completer)
+        _publish(root, re_spelled, kind="error")
+        _tick(feed)
+        frames = _queued(subscription)
+        assert len(_statuses(frames)) == 2, frames
+        assert [frame["type"] for frame in frames].count("catalogue") == 1, frames
+        assert _rank(root, completer) == (1, 2)
+        assert _rank(root, re_spelled) == (2, 2)
+        # Consumed, not deferred: nothing waits for the next tick.
+        assert feed._catalogue_invalidated is False
+        assert [
+            frame
+            for frame in _queued(subscription)
+            if frame["type"] in ("catalogue", "session_status")
+        ] == []
+    asyncio.run(feed.close())
+
+
+def _state_cold(root: Path, sid: str, pid: int) -> None:
+    """A directory with nothing behind it: tier 6, "Previous chats"."""
+
+
+def _state_busy(root: Path, sid: str, pid: int) -> None:
+    """Working: a live record with ``busy`` set — tier 4, Active."""
+    _record_publish(root, sid, pid=pid, busy=True)
+
+
+def _state_finished(root: Path, sid: str, pid: int) -> None:
+    """The reported transition: the turn ended, the record is quiet, a completion landed."""
+    _record_publish(root, sid, pid=pid)
+    _publish(root, sid, kind="complete")
+
+
+def _state_wedged(root: Path, sid: str, pid: int) -> None:
+    """A stale beat: tier 4 like ``busy``, a different PAIR (the age sentence)."""
+    path = _record_publish(root, sid, pid=pid, busy=True)
+    aged = _record(sid, pid=pid, busy=True)
+    aged.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 40.0
+    path.write_text(json.dumps(aged.to_json()), encoding="utf-8")
+
+
+def _state_unread(root: Path, sid: str, pid: int) -> None:
+    """An unread completion with no runtime: tier 1, Active."""
+    _publish(root, sid, kind="complete")
+
+
+def _state_unread_error(root: Path, sid: str, pid: int) -> None:
+    """The same completion re-spelled as an error: tier 2 — a different slot."""
+    _publish(root, sid, kind="error")
+
+
+def _state_resident_unread(root: Path, sid: str, pid: int) -> None:
+    """An unread completion on a RESIDENT row (a record): tier 1, Active."""
+    _record_publish(root, sid, pid=pid)
+    AttentionStore(root / "attention.db").publish(f"session/{sid}", _DRIFT_TOKEN, "a1", "complete")
+
+
+def _state_resident_acked(root: Path, sid: str, pid: int) -> None:
+    """The same row, read: tier 5 — Active either way, a different slot."""
+    _state_resident_unread(root, sid, pid)
+    AttentionStore(root / "attention.db").acknowledge(f"session/{sid}", _DRIFT_TOKEN)
+
+
+def _state_attached(root: Path, sid: str, pid: int) -> None:
+    """A live, unoccupied row: tier 5, Active."""
+    _record_publish(root, sid, pid=pid)
+
+
+def _state_idle(root: Path, sid: str, pid: int) -> None:
+    """The same live row, detached: tier 5, Active — the SAME position."""
+    _record_publish(root, sid, pid=pid, detached=True)
+
+
+def _state_armed(root: Path, sid: str, pid: int) -> None:
+    """A cold row with a wake that will fire: tier 6, wake band 0."""
+    _wake(root, sid)
+
+
+def _state_dormant(root: Path, sid: str, pid: int) -> None:
+    """A cold row whose wake is strictly stopped: tier 6, wake band 1."""
+    _wake(root, sid, dormant=True)
+
+
+#: The drift matrix: ``(name, state before, state after)``. Both halves of every
+#: transition are materialised through the REAL writers, on a fresh store, so the
+#: comparison is the feed's rule against ``load_catalog``'s own sort.
+_DriftState = Callable[[Path, str, int], None]
+_DRIFT_CASES: tuple[tuple[str, _DriftState, _DriftState], ...] = (
+    ("a working row's heartbeat rewrite", _state_busy, _state_busy),
+    ("a working row finishing inside Active", _state_busy, _state_finished),
+    ("a working row going quiet inside its tier", _state_busy, _state_wedged),
+    ("a completion re-spelled as an error", _state_unread, _state_unread_error),
+    ("an acknowledgement of a resident completion", _state_resident_unread, _state_resident_acked),
+    ("a resume of an unread completion", _state_unread, _state_busy),
+    ("a live row going idle inside its tier", _state_attached, _state_idle),
+    ("a cold row starting a turn", _state_cold, _state_busy),
+    ("a cold row being armed", _state_cold, _state_armed),
+    ("an armed wake going dormant", _state_armed, _state_dormant),
+)
+
+
+def _mutable_key(root: Path, session_id: str) -> tuple[int, int]:
+    """The two terms of the ORDER KEY a transition can move: category + wake band.
+
+    ``-created_at`` and ``id`` are immutable, so they can never produce an edge;
+    they are also the two terms the feed cannot derive from the registry alone (a
+    row with no session directory reads birth as 0.0). Comparing the mutable terms
+    is therefore the complete statement of "did this row move" for both homes.
+    """
+    entry = {row.id: row for row in load_catalog(root)}[session_id]
+    return entry.rank[0], entry.rank[1]
+
+
+def test_the_key_and_the_sort_cannot_drift(tmp_path):
+    """THE GUARD: an invalidation IFF the row's SORT KEY moved.
+
+    ``rank`` IS the key ``rank_entries`` sorts by, so this is the one test that
+    fails if a future author widens or narrows the comparison without touching the
+    sort — comparing the whole entry (silent cases start publishing), only the
+    category (the armed-wake band case stops publishing), or the section again
+    (every intra-section case stops publishing).
+
+    WHY THE ROW'S KEY AND NOT THE ID ORDER, which is how the design words it: the
+    id order is that key applied to the WHOLE current row set, so a key that moves
+    without crossing a neighbour leaves the order it computes unchanged (an armed
+    wake going dormant behind a row that is already dormant). The feed holds no
+    list — it compares rows one at a time — so the key is the only criterion that
+    is a property of the row. Both readings are asserted from the same run: the key
+    decides, and the id order before/after is required to have MOVED in at least
+    one case and stayed in at least one, so the matrix demonstrably spans both
+    sides of what the client can see.
+    """
+    root = tmp_path
+    neighbour, target = "d1" * 6, "d2" * 6
+    moved: list[str] = []
+    still: list[str] = []
+    order_moved: list[str] = []
+    with _extra_live_pid() as spare:
+        for index, (name, before_state, after_state) in enumerate(_DRIFT_CASES):
+            case = root / f"case{index}"
+            _listable_session(case, neighbour)
+            _listable_session(case, target)
+            # The neighbour is a COLD row born LATER than the target, so it starts
+            # ABOVE it in "Previous chats" and a target that climbs out of the cold
+            # band visibly crosses it. That is what makes the id order below a
+            # reading of the client-visible effect rather than a second copy of the
+            # key comparison.
+            _birth(case, neighbour, 1_700_000_600.0)
+            _birth(case, target, 1_700_000_000.0)
+            before_state(case, target, spare)
+            feed = _feed(case)
+            feed._take_baseline()
+            subscription = feed.subscribe()
+            _tick(feed)
+            _queued(subscription)
+            key_before = _mutable_key(case, target)
+            order_before = [entry.id for entry in load_catalog(case)]
+
+            after_state(case, target, spare)
+            # The wake index rides its own probe clock; forcing it is how the wake
+            # cases produce an edge at all on a manually driven tick.
+            feed._status_probed_at = 0.0
+            _tick(feed)
+            frames = _queued(subscription)
+            published = [frame for frame in frames if frame["type"] == "catalogue"]
+            key_after = _mutable_key(case, target)
+            order_after = [entry.id for entry in load_catalog(case)]
+
+            assert bool(published) == (key_before != key_after), (
+                f"{name}: the sort key moved {key_before} -> {key_after} and the feed "
+                f"published {len(published)} invalidation(s) — the comparison and "
+                f"rank_entries have drifted apart"
+            )
+            # The tick really derived this row, so a silent case is not a dead feed.
+            # Deliberately shape-agnostic: an older comparison stored the boolean
+            # SECTION under this key, and subscripting it here would raise instead
+            # of reporting the drift the iff above has already caught.
+            assert feed._position_seen.get(target) is not None, f"{name}: never derived"
+            (moved if key_before != key_after else still).append(name)
+            if order_before != order_after:
+                order_moved.append(name)
+            asyncio.run(feed.close())
+    assert moved, "no case moved the row: this matrix proves nothing"
+    assert still, "no case must stay silent: the negative half is missing"
+    assert order_moved, "no case changed the list order: the client-visible half is missing"
+    assert len(order_moved) < len(
+        _DRIFT_CASES
+    ), "every case changed the list order: the tie half is missing"
 
 
 def test_the_unattributed_move_fallback_is_rate_limited(tmp_path, monkeypatch):
