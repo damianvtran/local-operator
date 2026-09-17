@@ -294,6 +294,19 @@ class EpisodeConfig:
     model client owns its context and is built before the runner
     (``create_provider_model_client(keep_recent_frames=...)``), so a copy on
     this config would be a second declaration the runner could not enforce.
+
+    ``step_timeout`` and ``cleanup_timeout`` are FLOORS, not ceilings, for the
+    two calls whose own request declares a duration. ``execute`` is funded for
+    every ``wait`` its batch asked for and ``cleanup`` for the selected
+    actions' declared timeouts and attempts, both plus a fixed headroom; the
+    effective deadline is the greater of that and the value set here
+    (``evaluation.deadlines``). Every other timeout is the whole deadline,
+    because nothing in those requests declares how long their work takes. Read
+    that as the harness keeping its own admission contract -- a batch it
+    accepted is funded to finish -- rather than as a licence: the bound is the
+    protocol's (64 actions x 60 s of waiting is the largest legal ``execute``,
+    so 64.5 minutes is the largest a step can be funded for), and a wedged call
+    declares nothing and is cut off exactly as before.
     """
 
     evidence_root: Path
