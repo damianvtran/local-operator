@@ -1756,7 +1756,10 @@ async def _run_store_maintenance(
     # Exit during this best-effort window is harmless; the next process retries.
     await _wait_for_store_maintenance_idle_window()
 
-    from local_operator.analytics.backfill import backfill_analytics_session_names
+    from local_operator.analytics.backfill import (
+        backfill_analytics_session_daily,
+        backfill_analytics_session_names,
+    )
     from local_operator.resume import backfill_session_origins, backfill_session_titles
     from local_operator.session.cleanup import cleanup_from_config
     from local_operator.tools.group_reaper import sweep_orphan_groups
@@ -1799,6 +1802,18 @@ async def _run_store_maintenance(
         (
             "analytics session-name backfill",
             lambda: backfill_analytics_session_names(config_dir),
+        ),
+        # Re-derive the per-session day rollup ``aggregate()`` reads. It is
+        # created EMPTY on the release that ships it while the ledger already
+        # holds up to 90 days of calls, so without this pass the panel's first
+        # read after upgrading is still the ledger's 5-13 s scan. Bounded
+        # chunked transactions, newest-first, resumable, and off the event loop
+        # like every other pass here — see the pass's own docstring for what a
+        # user sees while it is incomplete (nothing: refused windows are
+        # answered by the ledger, never by a partial total).
+        (
+            "analytics session-daily rollup backfill",
+            lambda: backfill_analytics_session_daily(config_dir),
         ),
     ]
 
@@ -2493,6 +2508,16 @@ async def wire_mcp_into_session(
     # server between this read and the callback install, and an unused callback
     # is free.
     def _on_startup_settled() -> None:
+        # A deferred server's tools arrive WITH the settle, so an opted-in server
+        # that missed the gate is picked up here rather than never — the cold
+        # cache case, where the connect outlasts the 250 ms gate. Guarded
+        # separately from the report below: a preload fault must not cost the
+        # front end its settle report, which is the failure this callback exists
+        # to deliver.
+        try:
+            apply_preload(manager.get_tools())
+        except Exception:  # noqa: BLE001 — a preload fault must not disarm the report
+            logger.debug("MCP preload on settle failed", exc_info=True)
         try:
             settled_failures = _collapse_sdk_missing_failures(
                 manager.startup_failures(), MCP_DISCOVERY_KEY, MCP_SDK_MISSING_ERROR
@@ -2583,6 +2608,47 @@ async def wire_mcp_into_session(
         enabled_origins.add((server_name, raw_tool_name))
         refresh_selected(manager.get_tools())
 
+    def preload_opted_in_tools(source: list[AgentTool]) -> bool:
+        """Activate the whole inventory of every server that opted into it.
+
+        WHY THIS EXISTS. MCP tools are lazy by design: a server's schemas are a
+        permanent per-request context tax, so a tool enters ``session.tools``
+        only once a ``read mcp://`` enables it. That default is right for a
+        situational server and wrong for one whose workflow NAMES its tools — a
+        tool the model cannot see is a tool the model does not use, so on such a
+        workflow laziness degrades the work instead of saving context. A server
+        whose config sets ``preload_tools`` says it is the second kind.
+
+        THE ALLOWLIST STILL WINS, and not by a re-check here: the manager applies
+        ``disabled_tools``/``enabled_tools`` when it BUILDS a tool, before this
+        ever sees it, so an excluded tool is not in ``source`` at all (see
+        ``McpManager._tool_is_enabled``, which filters cached/deferred and live
+        tools alike). Re-filtering here would be a second, weaker copy of a rule
+        the manager already enforces at the one place it cannot be bypassed.
+
+        Returns True when the selected set grew, so a caller can skip a needless
+        tool-list rebind when nothing changed.
+        """
+        added = False
+        for tool in source:
+            meta = manager.get_tool_meta(tool.name) or {}
+            server_name = str(meta.get("server_name", ""))
+            raw_name = str(meta.get("mcp_tool_name", ""))
+            if not server_name or not raw_name:
+                continue
+            cfg = manager.get_server_config(server_name)
+            if cfg is None or not bool(getattr(cfg, "preload_tools", False)):
+                continue
+            if (server_name, raw_name) not in enabled_origins:
+                enabled_origins.add((server_name, raw_name))
+                added = True
+        return added
+
+    def apply_preload(source: list[AgentTool]) -> None:
+        """Grow the selection for opted-in servers, rebinding only if it grew."""
+        if preload_opted_in_tools(source):
+            refresh_selected(manager.get_tools())
+
     from local_operator.mcp.resources import make_mcp_resolver, render_mcp_catalogue
 
     def defer(server_name: str, raw_tool_name: str) -> None:
@@ -2608,11 +2674,22 @@ async def wire_mcp_into_session(
     def on_tools_changed(new_mcp_tools: list[AgentTool]) -> None:
         # Reconnects and tools/list_changed can replace AgentTool objects. Keep
         # the selected origins and swap in only their fresh schemas.
+        # Preload FIRST, so a reconnect that brings a previously-deferred opted-in
+        # server online surfaces its tools in this same rebind rather than one
+        # event later — the server's tools becoming reachable is exactly the
+        # moment an opted-in server expects to see them.
+        preload_opted_in_tools(new_mcp_tools)
         refresh_selected(new_mcp_tools)
         if hasattr(session, "_frontend_state_store"):
             session.refresh_frontend_state()
 
     manager.set_on_tools_changed(on_tools_changed)
+    # The initial pass, AFTER the callback is installed so a server that settles
+    # during it cannot slip between the two. Servers still past the gate
+    # contribute nothing yet; ``_on_startup_settled`` picks those up below, which
+    # is what makes preload work on a cold cache where the connect outlasts the
+    # 250 ms gate.
+    apply_preload(manager.get_tools())
     return manager
 
 
@@ -2893,11 +2970,14 @@ async def create_session(
     (or degraded and recorded) — because headless/exec runs have no front
     end to re-read ``mcp_startup`` when the background round settles; they
     would silently miss both the tool merge and the failure report. The
-    deferral is safe for the TUI only because MCP tools were already lazy
+    deferral is safe for the TUI only because MCP tools are lazy by default
     (see :func:`wire_mcp_into_session`): a turn started before wiring
     settles sees the same non-MCP tool surface as a session whose servers
     missed the gate today, and the ``refresh_selected`` merge lands
-    mid-session exactly as a late ``list_changed`` event already does.
+    mid-session exactly as a late ``list_changed`` event already does. A server
+    that opted into ``preload_tools`` is no exception — its tools land through
+    that same mid-session merge, one wiring pass later, because its schemas
+    cannot exist before its connection does.
 
     ``mcp_publication_gate`` is the RUNTIME CHILD's half of that deferral,
     and it exists because deferring the dispatch did not defer the work. The

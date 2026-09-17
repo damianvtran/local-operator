@@ -570,6 +570,15 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # Enter on the bare command answers, which is the line `/login` sits on
         # the other side of. Keyed by PRIMARY name, so `rename`, not `title`.
         "rename": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/rename`, whose flag row this mirrors: the space offers
+        # `/goal --clear` to a user who has a goal to unset, while bare `/goal`
+        # still reports the current one. NOT a name slot — the row is a flag and
+        # the argument stays free text, which is what `name_argument` says.
+        "goal": ArgumentMode.OPTIONAL,
+        # OPTIONAL for the same reason: the running loop's `--stop` row is an
+        # offer beside the iteration count and the goal text, not a gate in
+        # front of them.
+        "loop": ArgumentMode.OPTIONAL,
     }
     # `/provider` was the third candidate and is deliberately not here: it takes
     # no argument at all — `_cmd_providers` ignores what follows it — so a list

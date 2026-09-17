@@ -48,6 +48,7 @@ from local_operator.server.routes import (
     desktop_profiles,
     desktop_radient,
     desktop_sessions,
+    desktop_wakes,
     health,
     jobs,
     models,
@@ -562,6 +563,13 @@ app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
 app.include_router(desktop_lifecycle.router)
 app.include_router(desktop_radient.router)
+# The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
+# the lifecycle routes for the reason the sessions module documents about its
+# own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`
+# path a sibling swallows would answer here with that sibling's handler. These
+# templates (`/v1/desktop/wakes`, `/v1/desktop/wakes/{a}/{b}`) collide with
+# nothing registered above.
+app.include_router(desktop_wakes.router)
 
 # Add CORS middleware
 app.add_middleware(

@@ -501,7 +501,19 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # message. Submission owns its user row; status/clear never start a turn.
     SlashCommand(
         "goal",
-        "Set the goal and start work; show or clear it",
+        # 52 cells, inside the ~55 at which the description column wraps (see
+        # `/model`, `/rename`). The flag is NAMED here for the reason `/rename`
+        # names `--refresh`: the palette and the `/help` table are where a user
+        # learns the form exists, and `--clear` is otherwise only discoverable by
+        # guessing the bare word `clear`. "show" gave up its cell to it — a bare
+        # `/goal` still reports the goal, while an unstated flag was reachable
+        # from nowhere.
+        #
+        # "clears it", not a synonym: the picker row offers "Clear the standing
+        # goal" and the receipt reads "goal cleared", so the third phrasing of
+        # the same act was the odd one out beside a flag literally spelled
+        # `--clear` (round 1, D3). Same 52 cells, so nothing re-sizes.
+        "Set the goal and start work; /goal --clear clears it",
         echo=True,
         consumes_prompt=True,
         # The trailing text is the objective, this command's own argument.
@@ -509,6 +521,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # ANY, not the NONE default: the command owns its trailing text
         # whatever it says (see ArgumentShape's precedence note).
         argument_shape=ArgumentShape.ANY,
+        # OPTIONAL, like `/rename`: the space offers the `--clear` row for a user
+        # who has a goal to unset, and Enter on the bare command still reports
+        # the current goal — the distinction `/login`'s REQUIRED draws. NOT a
+        # name slot: `--clear` is a flag, and `/goal ship it` stays free text, so
+        # `name_argument` is left at its default.
+        arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.goal",
     ),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
@@ -521,12 +539,29 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # command, and the prompt the turn later announces).
     SlashCommand(
         "loop",
-        # Advertises all THREE forms so each is discoverable from the palette
-        # without reading the source: free text is a goal a judge decides is met,
-        # a number is a bounded iteration count, and `stop` is the escape hatch —
-        # which used to appear only in a launch notice or an already-running
-        # refusal, i.e. after the user needed it (UX round 1, U6).
-        "Loop toward a goal: /loop <goal text>, /loop <n>, or /loop stop to cancel",
+        # Advertises the forms the command actually has on every host: free text
+        # is a goal a judge decides is met, a number is a bounded iteration
+        # count, and the stop flag is the escape hatch — which used to appear
+        # only in a launch notice or an already-running refusal, i.e. after the
+        # user needed it (UX round 1, U6).
+        #
+        # 53 cells, sized against the `/help` description budget at 80 columns —
+        # `W - 26` (4-cell block indent + 20-cell name column), so 54 there, the
+        # common narrow terminal. The 62-cell form this replaces was measured at
+        # the WRONG width: rendered from the base commit at 100 columns it painted
+        # one 95-cell line and did not wrap, so the comment claiming it was "one
+        # of the two rows that wrapped in `/help` at 100 columns" was wrong about
+        # its own evidence (round 1, QA Q2). What it actually did was wrap at 90
+        # columns and below, i.e. long before the 80-column band this is read at;
+        # the replacement is a single line at 80 (re-measured through
+        # `RichBlock.render_line`, see the PR's evidence).
+        #
+        # `--clear` is deliberately NOT in this clause. It is a word the TUI
+        # cannot honour as a dismissal of published state (it publishes none) and
+        # the runtime refuses while a loop runs, so naming it here would teach a
+        # form in the one place it works least; the picker row that offers each
+        # flag, and `docs/DESKTOP_CONTROLS.md`, carry that distinction.
+        "Loop toward a goal: /loop <goal>, <n>; --stop cancels",
         consumes_prompt=True,
         # The trailing text is the loop instruction or count, this command's own
         # argument.
@@ -534,6 +569,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # ANY, not the NONE default: the command owns its trailing text
         # whatever it says (see ArgumentShape's precedence note).
         argument_shape=ArgumentShape.ANY,
+        # OPTIONAL for the same reason `/goal` is, and NOT a name slot: the
+        # running loop's `--stop` row is the offer, the iteration count and the
+        # goal text stay free text, so `name_argument` is left at its default.
+        arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.loop",
     ),
     # NOT an exception, and the reason IS the feature. The question does reach
@@ -693,6 +732,29 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Type or paste a secret after a space; masked",
         aliases=("cred",),
         arguments=ArgumentMode.OPTIONAL,
+        # ANY, and this row is the reason the shape vocabulary needed a third
+        # entry in its exception list: the command route REFUSES hand-typed text
+        # and names the masked form instead ("Enter credentials in the masked
+        # credential form, not command text"), so the text after the word belongs
+        # to this command and must never be planned as PROSE by another path.
+        #
+        # The default `none` said the opposite — "no source at all, so text after
+        # the word is a message" — and that made the published fact false in the
+        # unsafe direction: the messages endpoint's admission rule agreed with it
+        # and admitted a whole-draft `/credential <secret>` as a MESSAGE, so a
+        # client whose composer plans that draft as prose posted a raw credential
+        # to the model. Measured on the released code: `/credential <canary>` and
+        # `/cred <canary>` reached a transcript as a `type=message, role=user`
+        # record — the whole-draft forms this shape now refuses.
+        #
+        # ANY rather than WORD because the refusal is about the text, not its
+        # token count: a secret is arbitrary text, and a single-token shape would
+        # leave `/credential my pass phrase` admitted as a message — the same leak
+        # for the multi-token case. The INLINE form is the composer's own capture
+        # route rather than this predicate's subject, so `please /credential
+        # <secret>` stays a message here by the whole-draft rule — measured, and
+        # pinned in `MESSAGE_DRAFTS`.
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.credential",
     ),
     # NOT an echo. `/team <name> <request>` does reach the model, but as
@@ -704,6 +766,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "List teams, chart a team's org, or send a request to a team's manager",
         aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
+        # The first token is a ROSTER NAME with free text after it, which is a
+        # different fact from "the space opens a list" (see the field).
+        name_argument=True,
         # The request AFTER the team name is a prompt the manager is given, so an
         # inline `/team` reassembles to the front (name from the autofill, the
         # draft as the request) rather than eating the draft as the name.
@@ -731,6 +796,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "List agents, or speak to this session as one",
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
+        # Same name slot as `/team`, whose every surface this mirrors.
+        name_argument=True,
         # The message AFTER the agent name is a prompt the persona is given, so
         # an inline `/agent` reassembles to the front like `/team`.
         consumes_prompt=True,
@@ -929,6 +996,77 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
     ):
         return "Use the MCP setup form for configuration and secret references"
     return None
+
+
+#: The forms the unknown-flag refusal names, per command — the flag spelled
+#: beside words the user can actually type, so the sentence teaches the vocabulary
+#: rather than only complaining about what it received.
+#:
+#: ``clears it``, not a synonym, and the two clauses stay in the flag's own
+#: command form: the palette row already reads "/goal --clear clears it", the
+#: picker says "Clear the standing goal" and the receipt says "goal cleared", so
+#: a fourth verb here was the odd one out beside a flag literally spelled
+#: ``--clear`` (round 2: design D5, UX U7, reviewer NIT-5).
+#:
+#: The rest of the sentence is spelled to the WRAP BUDGET rather than to the
+#: roomier "sets a goal": the refusal paints inside a notice whose body budget at
+#: an 80-column terminal is 70 cells, and the ``unknown flag <token> — `` prefix
+#: spends 22 of them on a ``--stop``-shaped token. "sets a goal" is 4 cells
+#: longer than "sets it", which puts the sentence at 71: it then wraps with the
+#: pronoun ALONE on the second row — the shape D5 captured, and the reason the
+#: shorter clause was chosen rather than D5's own three-word suggestion, which
+#: dangles a two-word tail in the same place. As written the sentence is 67 cells
+#: for ``--stop`` and 69 for ``--clearx``: one painted row at 80 columns for
+#: both, measured through a real ``NoticeBlock``.
+_FLAG_FORMS: dict[str, str] = {
+    "goal": "/goal <text> sets it, /goal --clear clears it",
+    "loop": "/loop <goal> loops toward a goal, /loop <n> runs n turns, /loop --stop cancels",
+}
+
+
+def unknown_flag_refusal(command: str, arguments: str) -> str | None:
+    """The refusal for a BARE ``--token`` that names no flag of ``command``.
+
+    Two flag vocabularies are now taught side by side — ``--clear`` unsets the
+    goal, ``--stop`` ends the loop — so reaching for the wrong one is the
+    expected mistake rather than an exotic one. Under the whole-argument flag
+    rule (`session/goal.py::GOAL_CLEAR_ARGS`, `session/goal_loop.py::LOOP_CLEAR_ARGS`)
+    that mistake was not refused at all: it became the VALUE. ``/goal --stop``
+    stored ``--stop`` as the standing objective and submitted a turn carrying it,
+    and ``/loop --stop now`` started a paid goal-mode loop toward that literal
+    text (round 1: UX U6, reviewer NIT-5).
+
+    Deliberately NARROW, and the narrowness is the contract: only a whole-argument
+    token is treated as a flag ATTEMPT. ``/goal --clear the flaky job`` keeps its
+    tail and stays an objective, which is the same whole-argument rule the flags
+    themselves are matched by — one rule, so `--clear`'s meaning cannot depend on
+    which side of an arbitrary word count it falls.
+
+    Returns ``None`` for every command that declares no flags, so a host may call
+    this unconditionally on its argument path.
+    """
+    # Imported here rather than at module scope: this module is the registry every
+    # host imports, and the vocabularies live in the session layer it should not
+    # pull in at import time.
+    from local_operator.session.goal import GOAL_CLEAR_ARGS
+    from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
+
+    known: frozenset[str] | None = {
+        "goal": GOAL_CLEAR_ARGS,
+        # `status` is a WORD the runtime loop branch answers with its state
+        # block, not a flag — accepted here so the refusal does not name the
+        # forms and then contradict itself on the one word it already honours.
+        "loop": LOOP_STOP_ARGS | LOOP_CLEAR_ARGS | {"status"},
+    }.get(command)
+    if known is None:
+        return None
+    token = arguments.strip()
+    if not token.startswith("--") or token.lower() in known:
+        return None
+    if any(char.isspace() for char in token):
+        # Not a bare token: this is free text that happens to open with dashes.
+        return None
+    return f"unknown flag {token} — {_FLAG_FORMS[command]}"
 
 
 def whole_draft_command(text: str) -> tuple[SlashCommand, str] | None:

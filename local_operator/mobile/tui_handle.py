@@ -1186,12 +1186,17 @@ def _load_subagent_detail(
     full child history here only to discard it duplicated, per child, the exact
     work the /history endpoint already does on fetch, so it is not built.
     """
-    from local_operator.session.transcript import TRANSCRIPT_FILENAME, Transcript
+    from local_operator.session.transcript import (
+        TRANSCRIPT_FILENAME,
+        read_latest_custom,
+    )
 
     path = Path(session_dir) / TRANSCRIPT_FILENAME
     before = path.stat()
-    transcript = Transcript(session_dir)
-    raw_todos = (transcript.latest_custom("todo_snapshot") or {}).get("items") or []
+    # One bounded backward scan instead of a whole ``Transcript`` construction:
+    # hydration runs per child per event, and the reader stops at the newest
+    # snapshot row rather than decoding everything above it.
+    raw_todos = (read_latest_custom(session_dir, "todo_snapshot") or {}).get("items") or []
     after = path.stat()
     # Atomic transcript replacement or an append during hydration invalidates
     # this result; the caller's next child event will request the newer detail.

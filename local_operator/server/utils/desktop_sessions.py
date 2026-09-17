@@ -38,7 +38,7 @@ from local_operator.resume import (
 )
 from local_operator.server.models.desktop_sessions import MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
-from local_operator.session.attached import AttachedSession
+from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import DECORATION_ATTENTION, load_catalog
@@ -49,14 +49,15 @@ from local_operator.session.frontend_state import (
     FrontendUpdate,
     sync_wire_payload,
 )
+from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import DESKTOP_MARKER_NAME
 from local_operator.session.runtime import registry
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
-    Transcript,
-    read_transcript_page,
+    read_latest_custom,
+    read_latest_custom_entry,
 )
 
 # The move shares the TUI's own `/move` machinery rather than a second resolver:
@@ -1003,10 +1004,51 @@ class DesktopSessionBridge:
             # state, and sending the sync payload keeps this frame's ``frontend``
             # field the same shape as the bootstrap snapshot's.
             "frontend.replace",
-            {"frontend": self.state(), "cold": self.remote.is_cold},
+            {"frontend": self.state(), **self._cold_fields()},
         )
 
-    async def acquire(self) -> AttachedSession:
+    def _cold_fields(self) -> dict[str, Any]:
+        """The cold contract as the wire states it — see ``docs/DESKTOP_API.md``.
+
+        ``cold`` is the boolean every existing renderer reads; ``cold_reason`` is
+        the TOKEN that says which of the three cases it is, and ``attaching`` says
+        an authenticated dial is retained and its canonical state has not arrived
+        yet. Computed together, deliberately, so no frame can state one and
+        contradict another — a frame claiming ``cold: false`` while a dial sat
+        unsynced is the exact conflation these tokens exist to remove.
+
+        Three facts the bridge can actually establish, and no copy: the token is
+        the contract and the sentence belongs to the surface (the same discipline
+        the routes' error ``code`` already follows). ``no-runtime`` for a facade
+        with no remote at all; otherwise the facade classifies it (see
+        ``AttachedSession.cold_reason``), defaulting to ``no-runtime`` for a cold
+        facade no read has classified — which is what makes the field safely
+        ADDITIVE for a reader that predates it, since
+        ``cold ? "no-runtime" : null`` is the documented fallback.
+        """
+        remote = self.remote
+        if remote is None:
+            return {"cold": True, "cold_reason": "no-runtime", "attaching": False}
+        return {
+            "cold": remote.is_cold,
+            "cold_reason": remote.cold_reason,
+            "attaching": remote.attaching,
+        }
+
+    async def acquire(self, *, read: bool = False) -> AttachedSession:
+        """Take one reference on this bridge, binding the owner if it is cold.
+
+        ``read`` is the READ envelope, and it is a property of the ROUTE rather
+        than of the facade: reading state must never be able to fail because an
+        existing runtime was too busy to answer, because the durable answer is on
+        disk in the same process (``snapshot``/``history``). Read mode therefore
+        bounds its one attempt at ``READ_ATTACH_BUDGET_S`` and answers cold when
+        it does not land, keeping the authenticated dial for the rollover. The
+        CONTROL envelope (the default) is unchanged: one attempt on the foreground
+        envelope, and a raise the route ladder turns into a named refusal — a
+        write that was not admitted must say so rather than be reported as a
+        served read.
+        """
         async with self.lock:
             self.users += 1
             self.touched = time.monotonic()
@@ -1078,7 +1120,7 @@ class DesktopSessionBridge:
                         remote.subscribe(self._event),
                         remote.subscribe_frontend(self._frontend).unsubscribe,
                     ]
-                await self.remote.attach_existing()
+                await self.remote.attach_existing(budget=READ_ATTACH_BUDGET_S if read else None)
                 if self.attention_task is None:
                     self.attention_task = asyncio.create_task(self._poll_attention())
                 return self.remote
@@ -1234,6 +1276,15 @@ class DesktopSessionBridge:
         # Trajectories are intentionally opt-in on the runtime and absent here;
         # large roster/usage fields still pass through the shared wire budget.
         payload = update.model_dump(mode="json")
+        # THE COLD PAIR RIDES THIS FRAME TOO, and it is the frame that makes the
+        # difference: a read that attached cold and retained its dial learns the
+        # owner came back through the ROLLOVER this store publishes on
+        # ``_install_frontend(..., publish=True)`` (a new epoch, full changes). A
+        # renderer told only by the opening snapshot would keep painting the
+        # cold/attaching row over a live conversation for the rest of its life.
+        # Additive: the same three fields the snapshot carries, so a renderer that
+        # knows the pair reads it here and one that does not ignores them.
+        payload.update(self._cold_fields())
         # Receipt revisions outlive a runtime epoch. Only the independent durable
         # projection below may update them; a delayed runtime delta must not undo
         # a read made through another process while this stream stays mounted.
@@ -1485,7 +1536,7 @@ class DesktopSessionBridge:
             "payload": {
                 "frontend": state,
                 "history": history,
-                "cold": self.remote is None or self.remote.is_cold,
+                **self._cold_fields(),
             },
         }
 
@@ -1504,10 +1555,17 @@ class DesktopSessionBridge:
         ``read_transcript_page`` cannot report them missing. ``before_id``
         backward paging and this cut's direct use by
         ``read_transcript_page``'s own tests are what keep the parameter alive.
+
+        Through ``load_transcript_page`` rather than a bare ``to_thread`` around
+        the reader: the SSE open frame asks for THIS read seconds after this
+        method already did (see ``events``), and the renderer's reconcile walk
+        asks again for pages it has, so the second request for unchanged rows
+        should cost a dict lookup rather than a second decode of the same bytes.
+        The reader's contract, its special returns and its ``FileNotFoundError``
+        are unchanged; only who pays for the read is.
         """
         try:
-            page = await asyncio.to_thread(
-                read_transcript_page,
+            page = await load_transcript_page(
                 self.root / "sessions" / self.session_id,
                 before_id=before_id,
                 through_id=through_id,
@@ -1580,6 +1638,16 @@ class DesktopSessionBridge:
             # an absent viewer. Against that, the write is a field assignment
             # while cold (its RPC half is guarded by a connected client), and it
             # keeps `_desktop_seen` fresh as well as truthful.
+            # NO ``timeout`` HERE, and that is the documented envelope rather
+            # than an oversight: the re-assert's bound is ``_DESKTOP_WATCH_ACK_BOUND_S``
+            # (5 s), which belongs to the LEASE — its TTL is 45 s and the beat that
+            # renews it is 15 s, so this hint's patience is the lease's business and
+            # not a read's. A read narrows it through ``update_desktop_watch``'s
+            # ``timeout`` so the hint can never lengthen a read; a BEAT is not a
+            # read, and clamping it to the remainder of one request's budget would
+            # make the renewal's patience depend on which request happened to
+            # arrive first. ``docs/DESKTOP_API.md`` states the resulting envelope
+            # (≤ 2 s attach + ≤ 5 s hint) for this one route.
             await remote.update_desktop_watch(visible=visible, can_notify=can_notify)
             if not visible:
                 # NO LIVE VISIBLE LEASE, so the intent that earned any standing
@@ -2216,9 +2284,12 @@ def _persisted_children(parent_dir: Path) -> list[Any]:
     sidecar; the sidecar holds the same ``records`` list and is newer, so it is
     consulted first and the entry is the fallback, never the other way round.
 
-    Runs off the event loop like every other reader here: the legacy fallback
-    constructs a ``Transcript``, which parses the parent's whole journal, and a
-    roster read must not block the loop a streaming turn is using.
+    Runs off the event loop like every other reader here. It used to construct a
+    ``Transcript`` for the legacy fallback, which parsed the parent's whole
+    journal; it now takes the same backward one-row read the rest of this module
+    does (``read_latest_custom_entry``), so the roster read is bounded by the
+    distance from EOF to the newest roster row rather than by the journal, and a
+    roster read must not block the loop a streaming turn is using either way.
     """
     from local_operator.fork import fork_instant
     from local_operator.session.session import (
@@ -2232,7 +2303,7 @@ def _persisted_children(parent_dir: Path) -> list[Any]:
         # The entry's TIMESTAMP is the half of the fork rule the sidecar makes
         # unnecessary: an entry at or before ``forked_at`` belongs to the
         # conversation this one was cloned from.
-        entry = Transcript(parent_dir).latest_custom_entry(SUBAGENT_ROSTER_CUSTOM_TYPE)
+        entry = read_latest_custom_entry(parent_dir, SUBAGENT_ROSTER_CUSTOM_TYPE)
         forked_at = fork_instant(parent_dir)
         if entry is None or (forked_at is not None and not entry.ts > forked_at):
             return []
@@ -2385,6 +2456,31 @@ class DesktopSessions:
         self.root = root
         self.bridges: dict[str, DesktopSessionBridge] = {}
         self.lock = asyncio.Lock()
+        #: Session ids with at least one caller inside the HANDOUT window — from
+        #: the moment this pool resolves a bridge for them to the moment that
+        #: caller's first ``acquire()`` returns. Eviction skips a session in this
+        #: window (``_evictable``), which is what replaced "the pool lock is held
+        #: across ``acquire()``, so no other caller can run evict". Counted per
+        #: session rather than flagged on the bridge because a caller is in the
+        #: window BEFORE its bridge exists (the cold path) and because two
+        #: concurrent callers for one session must not clear each other's claim.
+        #: Mutated only from the event loop, and never across an ``await``.
+        self._handouts: dict[str, int] = {}
+        #: The COLD LOOKUP single-flight: ``session id -> (loop, task)`` for a
+        #: ``locate()`` that is already running. The task is the pool's own
+        #: ``asyncio.to_thread(locate)``, so a second caller for the same cold
+        #: session awaits the read instead of starting a second one — and, since
+        #: the read is what constructs the opening ``cwd``, one session cannot be
+        #: built twice. The loop is carried so an entry left behind by a torn-down
+        #: test loop reads as ABSENT rather than as a future bound to a dead loop
+        #: (the ``RuntimeError`` ``tests/unit/tui`` would otherwise hit
+        #: intermittently); the done-callback removes the entry, which is what
+        #: makes a cancelled LEADER harmless — the task itself is never cancelled
+        #: by a waiter (``asyncio.shield``), so it still settles and still
+        #: publishes.
+        self._locate_flights: dict[
+            str, tuple[asyncio.AbstractEventLoop, asyncio.Task[tuple[str, str | None]]]
+        ] = {}
         # Whether the DAEMON this pool serves has LATCHED against new work, asked
         # rather than cached: the answer changes once, mid-life, and both the
         # refusal (``assert_admitting``) and every bridge this pool hands out
@@ -2699,8 +2795,13 @@ class DesktopSessions:
         promises a transcript that will never come.
 
         NO bridge is acquired and no runtime is started — the containment proof
-        refuses before anything else runs, and the whole body rides a worker
-        thread because it stats, reads and parses files.
+        refuses before anything else runs, and the FILESYSTEM half (containment,
+        the two absence probes) still rides a worker thread because it stats
+        paths. The PAGE itself now comes from ``load_transcript_page``, which
+        runs the read in a worker of its own and shares the result with any other
+        surface asking for the same rows — the child panel here is on a 1 Hz
+        timer per open child, and re-decoding an unchanged journal sixty times a
+        minute to answer the same question is what that seam exists to stop.
 
         ``limit`` is checked here as well as in the route's ``Query``: a route
         is not the only caller of an adapter, and a page ceiling that exists
@@ -2709,7 +2810,7 @@ class DesktopSessions:
         if not 1 <= limit <= CHILD_PAGE_LIMIT:
             raise ValueError(f"limit must be between 1 and {CHILD_PAGE_LIMIT}")
 
-        def read() -> dict[str, Any]:
+        def probe() -> Path | dict[str, Any]:
             child_dir = _contained_child_dir(self.root, session_id, child_id)
             if not child_dir.is_dir():
                 # `gone` carries the cursor exactly as `pending` does below and
@@ -2721,20 +2822,25 @@ class DesktopSessions:
                 return _absent_child_page("gone", before_id=before_id)
             if not (child_dir / TRANSCRIPT_FILENAME).exists():
                 return _absent_child_page("pending", before_id=before_id)
-            try:
-                page = read_transcript_page(child_dir, before_id=before_id, limit=limit)
-            except FileNotFoundError:
-                # Vanished between the check above and the open: the same fact
-                # as "never written", and an ordinary race rather than a 500.
-                return _absent_child_page("pending", before_id=before_id)
-            return {
-                "entries": [json.loads(row.to_json()) for row in page.entries],
-                "has_more": page.has_more,
-                "cursor_missing": page.reconciled,
-                "state": "ready",
-            }
+            return child_dir
 
-        return await asyncio.to_thread(read)
+        child_dir = await asyncio.to_thread(probe)
+        if isinstance(child_dir, dict):
+            return child_dir
+        try:
+            page = await load_transcript_page(child_dir, before_id=before_id, limit=limit)
+        except FileNotFoundError:
+            # Vanished between the probe above and the open: the same fact as
+            # "never written", and an ordinary race rather than a 500. The probe
+            # is deliberately KEPT rather than left to the reader's own absent
+            # answer, because it is what distinguishes `pending` from `gone`.
+            return _absent_child_page("pending", before_id=before_id)
+        return {
+            "entries": [json.loads(row.to_json()) for row in page.entries],
+            "has_more": page.has_more,
+            "cursor_missing": page.reconciled,
+            "state": "ready",
+        }
 
     async def child_attachment(
         self, session_id: str, child_id: str, digest: str
@@ -3027,9 +3133,75 @@ class DesktopSessions:
 
         return await asyncio.to_thread(rows)
 
+    def _take_handout(self, session_id: str) -> None:
+        """Enter this session's eviction-protected window. Call under the pool lock."""
+        self._handouts[session_id] = self._handouts.get(session_id, 0) + 1
+
+    def _end_handout(self, session_id: str) -> None:
+        """Leave it. Safe to call unconditionally, including after a failed lock."""
+        remaining = self._handouts.get(session_id, 1) - 1
+        if remaining > 0:
+            self._handouts[session_id] = remaining
+        else:
+            self._handouts.pop(session_id, None)
+
+    def _evictable(self, bridge: DesktopSessionBridge) -> bool:
+        """Whether eviction may take ``bridge`` — asked with the pool lock held.
+
+        ``users == 0`` alone is not enough once the slow halves run outside the
+        lock: a bridge that has been resolved and not yet acquired also has
+        ``users == 0``, and evicting it hands the next request for that session a
+        SECOND bridge, since the pool no longer holds the first one. The handout
+        count is that window, and asking here keeps the reservation explicit
+        instead of leaving it implied by lock ownership.
+        """
+        return bridge.users == 0 and not self._handouts.get(bridge.session_id)
+
+    def _locate_flight(
+        self, session_id: str, locate: Callable[[], tuple[str, str | None]]
+    ) -> asyncio.Task[tuple[str, str | None]]:
+        """The cold LOOKUP for ``session_id``, shared by every concurrent caller.
+
+        Call under the pool lock, so two callers cannot both decide they are the
+        leader. IT MUST STAY AWAIT-FREE AND NON-BLOCKING: the caller holds the
+        pool-wide lock across this call, so an ``await`` or a blocking syscall
+        added here would hold every other session's open behind one session's
+        cold lookup — the defect this method exists to remove, reintroduced one
+        level down. ``locate`` is the caller's own closure (it is defined beside
+        the path it resolves), and the task is created on the RUNNING loop — an
+        entry whose loop is not this one is treated as absent rather than
+        awaited, see ``_locate_flights``.
+        """
+        loop = asyncio.get_running_loop()
+        entry = self._locate_flights.get(session_id)
+        if entry is not None and entry[0] is loop:
+            return entry[1]
+        task = asyncio.create_task(asyncio.to_thread(locate))
+        self._locate_flights[session_id] = (loop, task)
+
+        def forget(settled: asyncio.Task[tuple[str, str | None]]) -> None:
+            # Identity-checked: a later caller may already have replaced this
+            # entry on a fresh loop, and dropping THAT one would lose its flight.
+            current = self._locate_flights.get(session_id)
+            if current is not None and current[1] is settled:
+                del self._locate_flights[session_id]
+
+        task.add_done_callback(forget)
+        return task
+
     @contextlib.asynccontextmanager
-    async def session(self, session_id: str) -> AsyncIterator[DesktopSessionBridge]:
+    async def session(
+        self, session_id: str, *, read: bool = False
+    ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
+
+        ``read`` says the caller is READING state (``snapshot``, ``history``,
+        ``events``, the ``/watch`` presence beat), and it is threaded down to
+        ``bridge.acquire(read=True)`` so the one attempt to attach to an existing
+        owner is bounded and its failure is a cold answer rather than a refusal.
+        It belongs to the door rather than to a flag each route sets on its own:
+        the envelope is a property of WHAT THE CALLER IS DOING, and this method is
+        where every desktop route already declares that.
 
         THE GATE IS HERE, AT THE DOOR, AND THAT IS THE WHOLE MECHANISM (review
         round 2, MAJOR-1). Every desktop route obtains its bridge here and this
@@ -3065,86 +3237,176 @@ class DesktopSessions:
         leaving, and keeping that answer stable is what makes "the 503 is the
         LATCH answering" a readable control in the evidence rather than an
         artefact of routing.
+
+        WHAT THE POOL LOCK DECIDES, AND WHAT IT NO LONGER DOES. ``self.lock`` is
+        the pool's single answer to one question — *which bridges are resident,
+        and which of them may be evicted* — and it is held only for the frames
+        that read or change that: the handout reservation, the cached lookup, the
+        ``BRIDGE_COUNT`` eviction and the insertion. It is deliberately NOT held
+        across either slow half of opening a session. Holding it there is what let
+        one conversation's open become every other conversation's wait: measured on
+        the operator's live backend, a 642-byte session's snapshot answered in
+        **25 ms alone but 829 ms** while the 261 MB session's open was in flight,
+        and the 261 MB open itself took 32.1 s (with a 96 MB open returning 503
+        after 25.4 s) because a cold open queues behind the pool. Two mechanisms
+        replace the lock's old reach here, and neither is a second lock: the
+        ``_handouts`` count keeps a resolved-but-not-yet-acquired bridge out of the
+        eviction path (``_evictable``), and ``_locate_flights`` single-flights a
+        cold session's lookup so racing callers share one journal read. The bridge
+        keeps its OWN lock for its own state — that one answers a different
+        question and always did.
+
+        Reproduced in isolation against a COPY of that 261 MB journal (never the
+        operator's store): the same 642-byte session's snapshot took 29 ms alone
+        and **7909 ms** — the whole 7.9 s open — while the cold open ran, and
+        exactly ONE request completed in that window. On this change the open
+        takes 2453 ms and **24** requests complete inside it (median 70 ms, worst
+        308 ms). See ``docs/evidence/session-load-central-cache``.
         """
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
-        async with self.lock:
-            bridge = self.bridges.get(session_id)
-            if bridge is None:
-                path = self.root / "sessions" / session_id
+        bridge: DesktopSessionBridge | None = None
+        flight: asyncio.Task[tuple[str, str | None]] | None = None
+        # ``taken`` rather than an unconditional release in the ``finally``: a
+        # caller whose LOCK ACQUISITION is cancelled never incremented the count,
+        # and decrementing anyway would release ANOTHER caller's reservation —
+        # the count is per session, not per caller.
+        taken = False
+        try:
+            async with self.lock:
+                # THE HANDOUT IS TAKEN FIRST, while the pool lock is still held,
+                # and it is what the eviction path reads instead of the lock
+                # itself: a bridge this pool has resolved must survive until its
+                # caller's first ``acquire()`` returns, even though both halves of
+                # that wait — the cold lookup and the attach — now run with the
+                # pool lock RELEASED. Taken inside this ``try`` for a reason the
+                # review found: the WARM path's refusal (``assert_admitting``)
+                # raises from inside this block, and a reservation stranded there
+                # would make that session's bridge permanently unevictable and
+                # turn the pool into one that can only refuse at ``BRIDGE_COUNT``.
+                self._take_handout(session_id)
+                taken = True
+                bridge = self.bridges.get(session_id)
+                if bridge is None:
+                    path = self.root / "sessions" / session_id
 
-                def locate() -> tuple[str, str | None]:
-                    """This session's opening directory, and the MARKER's own value.
+                    def locate() -> tuple[str, str | None]:
+                        """This session's opening directory, and the MARKER's own value.
 
-                    The second element is provenance, not decoration: it is what
-                    lets the caller ask
-                    :func:`_cwd_is_unconfirmed` whether the directory is a
-                    durable claim a failed move could have written (the marker),
-                    or the checkpoint fallback for a pre-checkpoint transcript,
-                    which has no marker to doubt.
-                    """
-                    if not path.is_dir() or not is_user_session(path):
-                        raise KeyError("Unknown session")
-                    # Through the TOLERANT reader, not ``json.loads``: a marker this
-                    # code cannot parse (a hand edit, an interrupted write, a
-                    # directory where the document should be) is a document with no
-                    # cwd, and a session whose marker has no readable cwd still opens
-                    # here — on the checkpoint fallback below — instead of failing the
-                    # open with a 409/404 raised out of a parse error. Round 1 of
-                    # #1110 wrote the coverage for a malformed marker and found the
-                    # strict read behind it (R3).
-                    stored = read_desktop_marker(path)
-                    marker_cwd = (stored or {}).get("cwd")
-                    if isinstance(marker_cwd, str) and marker_cwd:
-                        return marker_cwd, marker_cwd
-                    # The cold facade restores cwd from the durable canonical
-                    # checkpoint. This fallback is only used by pre-checkpoint
-                    # transcripts, whose historical launch directory is unknown.
-                    from local_operator.session.frontend_state import (
-                        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-                    )
-                    from local_operator.session.transcript import Transcript
+                        The second element is provenance, not decoration: it is what
+                        lets the caller ask
+                        :func:`_cwd_is_unconfirmed` whether the directory is a
+                        durable claim a failed move could have written (the marker),
+                        or the checkpoint fallback for a pre-checkpoint transcript,
+                        which has no marker to doubt.
+                        """
+                        if not path.is_dir() or not is_user_session(path):
+                            raise KeyError("Unknown session")
+                        # Through the TOLERANT reader, not ``json.loads``: a marker this
+                        # code cannot parse (a hand edit, an interrupted write, a
+                        # directory where the document should be) is a document with no
+                        # cwd, and a session whose marker has no readable cwd still opens
+                        # here — on the checkpoint fallback below — instead of failing the
+                        # open with a 409/404 raised out of a parse error. Round 1 of
+                        # #1110 wrote the coverage for a malformed marker and found the
+                        # strict read behind it (R3).
+                        stored = read_desktop_marker(path)
+                        marker_cwd = (stored or {}).get("cwd")
+                        if isinstance(marker_cwd, str) and marker_cwd:
+                            return marker_cwd, marker_cwd
+                        # The cold facade restores cwd from the durable canonical
+                        # checkpoint. This fallback is only used by pre-checkpoint
+                        # transcripts, whose historical launch directory is unknown.
+                        from local_operator.session.frontend_state import (
+                            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                        )
 
-                    checkpoint = Transcript(path).latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-                    return (
-                        str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
-                        None,
-                    )
+                        # A ONE-ROW read, not a ``Transcript(path)``: constructing the
+                        # transcript JSON-decodes the whole journal (2059.5 ms on the
+                        # operator's 261 MB conversation — the A/B table in
+                        # ``docs/evidence/session-load-central-cache``), and this branch
+                        # runs on every bridge creation for a session that carries no
+                        # ``desktop.json`` marker. The reader answers from the tail
+                        # backward and never creates the directory.
+                        checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+                        return (
+                            str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
+                            None,
+                        )
 
-                # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
-                # daemon too: that is what lets "the 503 is the LATCH answering" be
-                # read as a control in the evidence rather than as an artefact of
-                # routing.
-                cwd, marker_cwd = await asyncio.to_thread(locate)
+                    # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
+                    # daemon too: that is what lets "the 503 is the LATCH answering" be
+                    # read as a control in the evidence rather than as an artefact of
+                    # routing. It is also the read that parses the journal when the
+                    # session has no marker, so it is SHARED rather than repeated: a
+                    # second request for the same cold session awaits this one read
+                    # instead of paying a second full parse, and one session therefore
+                    # cannot be built twice.
+                    flight = self._locate_flight(session_id, locate)
+                else:
+                    # Asked on the WARM path too, and that is not redundancy: the cache
+                    # is a cache of the same door, so without this a refusal would be
+                    # one a client could walk past by never having gone cold.
+                    self.assert_admitting()
+            if flight is not None:
+                # THE SLOW HALVES, BOTH OUTSIDE THE POOL LOCK. This is the change
+                # that stops one conversation's open from being every other
+                # conversation's wait: a 25 ms request for a 642-byte session was
+                # measured at 829 ms while the 261 MB session's open was in flight
+                # — 33x for a read that is trivial — because the whole lookup and
+                # attach held the pool-wide lock. Nothing below touches pool state
+                # except in the guarded section, and the handout taken above is
+                # what keeps this bridge out of the eviction path meanwhile.
+                cwd, marker_cwd = await asyncio.shield(flight)
                 self.assert_admitting()  # THE REFUSAL, before anything is built
-                if len(self.bridges) >= BRIDGE_COUNT:
-                    idle = [b for b in self.bridges.values() if b.users == 0]
-                    if not idle:
-                        raise ValueError("Too many active desktop sessions")
-                    oldest = min(idle, key=lambda b: b.touched)
-                    del self.bridges[oldest.session_id]
-                bridge = DesktopSessionBridge(
-                    self.root,
-                    session_id,
-                    cwd,
-                    retiring=self.retiring_probe,
-                    # Reconstructed from the durable evidence BEFORE the bridge
-                    # can be handed out, so the doubt survives the eviction and
-                    # restart paths that rebuild it (review round 3, MAJOR-1).
-                    # Off the loop: it reads the run directory through discovery.
-                    cwd_unconfirmed=await asyncio.to_thread(
+                # THE BRIDGE THE SHARED LOOKUP WENT ON TO BUILD, read WITHOUT the
+                # pool lock — and that read is safe precisely because of the
+                # handout taken above: a bridge this pool has handed out cannot
+                # be evicted out from under it, so no lock is needed to keep the
+                # answer true. A FOLLOWER therefore stops here: no second lookup,
+                # no second confirmation read, no lock at all. Sharing the flight
+                # is what buys that; sharing the lock never could.
+                bridge = self.bridges.get(session_id)
+                if bridge is None:
+                    # Reconstructed from the durable evidence BEFORE the bridge can
+                    # be handed out, so the doubt survives the eviction and restart
+                    # paths that rebuild it (review round 3, MAJOR-1). Off the loop
+                    # — it reads the run directory through discovery — and off the
+                    # lock, because it is I/O on the path this method exists to
+                    # shorten. Only reached when this caller is the one that builds
+                    # the bridge (or lost the race to build it).
+                    unconfirmed = await asyncio.to_thread(
                         _cwd_is_unconfirmed, self.root, session_id, marker_cwd, cwd
-                    ),
-                )
-                self.bridges[session_id] = bridge
-            else:
-                # Asked on the WARM path too, and that is not redundancy: the cache
-                # is a cache of the same door, so without this a refusal would be
-                # one a client could walk past by never having gone cold.
-                self.assert_admitting()
-            # Reserve under the pool lock; eviction must not remove a bridge
-            # between lookup and its first acquire.
-            await bridge.acquire()
+                    )
+                    async with self.lock:
+                        # Re-read rather than assume: two concurrent cold callers both
+                        # reach here and only the first may build. The second finds the
+                        # bridge and reuses it, which is what makes the single-flight a
+                        # single flight rather than a single LOOKUP.
+                        bridge = self.bridges.get(session_id)
+                        if bridge is None:
+                            if len(self.bridges) >= BRIDGE_COUNT:
+                                idle = [b for b in self.bridges.values() if self._evictable(b)]
+                                if not idle:
+                                    raise ValueError("Too many active desktop sessions")
+                                oldest = min(idle, key=lambda b: b.touched)
+                                del self.bridges[oldest.session_id]
+                            bridge = DesktopSessionBridge(
+                                self.root,
+                                session_id,
+                                cwd,
+                                retiring=self.retiring_probe,
+                                cwd_unconfirmed=unconfirmed,
+                            )
+                            self.bridges[session_id] = bridge
+            assert bridge is not None  # resolved above: either found or built
+            await bridge.acquire(read=read)
+        finally:
+            # The window closes when acquire() returns, success or failure: from
+            # here on the bridge is an ordinary resident one, and ``users`` (which
+            # acquire/release maintain) is what says whether anyone is using it.
+            if taken:
+                self._end_handout(session_id)
         try:
             yield bridge
         finally:

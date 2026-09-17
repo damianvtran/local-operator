@@ -96,6 +96,15 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
     assert shapes["rename"] == "any"
     assert shapes["usage"] == "word"
     assert shapes["compact"] == "none"
+    # `/credential` is `any` with BOTH booleans false, and it is the row a
+    # consumer reading `none` got wrong: the shape said "no source at all", so a
+    # renderer planned a whole-draft `/credential <text>` as prose and the messages
+    # endpoint — reading the same field — admitted the raw credential as a MESSAGE.
+    # The route's own refusal (the masked-form sentence) is a REFUSAL, not an
+    # absence: the text belongs to this command, so the shape publishes where it
+    # goes. See `test_the_credential_row_publishes_its_own_text` for the pair of
+    # fields together, which is the contradiction itself.
+    assert shapes["credential"] == "any"
     # The boolean-carried rows publish `any` EXPLICITLY, not the `none` default:
     # every published definition of `none` says "no source at all", so a consumer
     # reading this field alone must not plan prose for a whole-draft control the
@@ -140,6 +149,54 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
     assert _is_mcp_invocation("zzz", mcp_words) is False
     assert _is_mcp_invocation("add my-server", mcp_words) is True
     assert SERVER_NAME_RE.fullmatch("my-server") is not None
+
+
+def test_the_credential_row_publishes_its_own_text(monkeypatch):
+    """The row's `arguments` and its `argument_shape` must not contradict.
+
+    `/credential` shipped as the ONE row of 39 whose `arguments` (`optional` — a
+    space opens a value list) sat beside an `argument_shape` of `none` ("no
+    source at all, so text after the word is a message"). Both halves are true
+    facts about different surfaces, and together they published a false one: a
+    renderer reading the shape plans a whole-draft `/credential <secret>` as
+    PROSE while the command route refuses the identical text with "Enter
+    credentials in the masked credential form, not command text" — so a client
+    with its command surface off POSTs the raw credential to `/messages`, where
+    the admission rule (same field) admits it as a paid turn. Measured on the
+    released code.
+
+    Asserted on the WIRE because the field exists to be read by another process:
+    the renderer is the consumer that plans the draft, and this is the value it
+    reads. The registry-wide half of the invariant — no row at all may make these
+    two claims at once — is pinned in the shape-policy table
+    (`test_a_row_that_offers_a_value_list_never_publishes_none`).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "catalogue-token")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/desktop/commands", headers={"Authorization": "Bearer catalogue-token"}
+        )
+        assert response.status_code == 200
+        rows = response.json()["result"]["commands"]
+
+    credential = next(row for row in rows if row["name"] == "credential")
+    assert credential["arguments"] == "optional"
+    assert credential["argument_shape"] == "any"
+    # The alias publishes the same row rather than a second one: `/cred` is an
+    # `alias`, so a consumer keyed on either spelling reads this same fact.
+    assert "cred" in credential["aliases"]
+
+    # And it is the ONLY row whose two text fields this test has to hold together
+    # for: every other published row already agreed, verified on the current head
+    # rather than assumed from the 39-row count the row was found in.
+    contradicting = [
+        row["name"]
+        for row in rows
+        if row["argument_shape"] == "none" and row["arguments"] != "none"
+    ]
+    assert contradicting == []
 
 
 def test_the_commands_capability_reports_the_narrowed_policy():

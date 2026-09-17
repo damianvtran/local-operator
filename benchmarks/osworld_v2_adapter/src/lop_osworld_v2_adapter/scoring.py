@@ -28,9 +28,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 from typing import Any, Mapping
+
+from lop_osworld_v2_adapter import artifacts
 
 from local_operator.evaluation.evidence.models import EvidenceArtifactRef, ScoreArtifact
 
@@ -181,13 +182,15 @@ def score_to_artifact(
     )
     # Like observations, these are worker-staged bytes, not trusted evidence.
     # The parent reopens by digest, verifies, and scans them before its receipt.
-    try:
-        fd = os.open(artifact_root / details.sha256, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        pass  # The parent's verifier rejects conflicting or non-regular entries.
-    else:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
+    #
+    # Published indivisibly, exactly like a frame artifact and for the same
+    # reason: the name is the digest of the bytes that must be behind it, so a
+    # created-but-unwritten file under that name is an artifact the parent will
+    # refuse for good (it is how the live canary9 episode died). This used to
+    # be create-then-write with an ``O_EXCL`` dedup, which had the same hazard
+    # as the frame publish: the ``O_EXCL`` create landed the name, and a write
+    # failure after it left the poisoned file for the retry to skip.
+    artifacts.publish(artifact_root / details.sha256, data)
     return ScoreArtifact(
         status="scored",
         binary=1 if value == 1.0 else 0,

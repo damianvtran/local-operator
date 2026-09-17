@@ -7,6 +7,7 @@ import os  # Added os
 import shutil
 import tempfile
 import time
+import unicodedata
 import uuid
 import zipfile
 from contextlib import contextmanager
@@ -258,6 +259,61 @@ class AgentEditFields(BaseModel):
         description="The current working directory for the agent.  Updated whenever the "
         "agent changes its working directory through code execution.",
     )
+
+
+def agent_name_key(name: str) -> str:
+    """The case- and whitespace-insensitive key two agent names collide on.
+
+    The registry's namespace is flat and shared by every row — roles,
+    specialists, ordinary conversational agents and autosave rows alike — while
+    :meth:`AgentRegistry.get_agent_by_name` is an EXACT, case-sensitive match.
+    ``Coder`` and ``coder`` can therefore coexist, and the name resolver then
+    picks one of them silently. So every place that asks "does this name already
+    exist?" on behalf of something the user did NOT type (an import, a pull, a
+    restore) compares keys rather than strings.
+
+    This is the LOCAL half of the hub's duplicate rule (cross-repo contract
+    §3.1) and has to stay compatible with the Go ``name_key`` in agent-server:
+    if the two diverged, the hub would refuse a name this side happily stores
+    (or the reverse) exactly where case or whitespace differs, which is the
+    case an author would reach for. NFKC folds compatibility codepoints
+    (fullwidth ``Ｃｏｄｅｒ`` becomes ``Coder``) and does NOT fold cross-script
+    confusables — Cyrillic ``Сoder`` stays distinct, a known squatting vector
+    the contract leaves open rather than folding names that differ by script.
+
+    Returns ``""`` for a blank name, which no caller should treat as a match:
+    a name is required, so an empty key means the caller has nothing to compare
+    rather than a collision with every other blank one.
+    """
+
+    normalized = unicodedata.normalize("NFKC", str(name or "")).strip().lower()
+    return " ".join(normalized.split())
+
+
+#: The longest legal agent name, and the ONE bound two validators already
+#: agree on: the hub's instruction-set validator (cross-repo contract §1.4,
+#: enforced with 422 ``invalid_instruction_set``) and this repo's own profile
+#: routes (``server/routes/desktop_profiles.py`` — ``max_length=128`` on both
+#: the create and the mutation payloads). A name this side invents has to fit
+#: both, or a pull produces a row the user can never publish.
+MAX_AGENT_NAME_CHARS = 128
+
+
+def _collision_free_name(name: str, suffix: int) -> str:
+    """The ``<base>-<n>`` candidate, truncated to stay within the name cap.
+
+    A module-level function, not a closure, because the name it produces is
+    tested against the registry and then stored: one construction path is what
+    keeps the tested name and the stored name from drifting apart.
+
+    The suffix is never truncated. ``MAX_AGENT_NAME_CHARS - len(tail)`` is at
+    least 1 for any suffix a registry could reach (a 127-digit suffix would
+    need more rows than the collection can hold), so the result is a legal name
+    at the cap rather than one over it.
+    """
+
+    tail = f"-{suffix}"
+    return f"{name[: MAX_AGENT_NAME_CHARS - len(tail)]}{tail}"
 
 
 class AgentRegistry:
@@ -905,6 +961,64 @@ class AgentRegistry:
             if agent.name == name:
                 return agent
         return None
+
+    def resolve_import_name(self, name: str) -> Tuple[str, Optional[str]]:
+        """Pick the name an INCOMING profile lands under, and say if it changed.
+
+        Returns ``(destination_name, renamed_from)``, where ``renamed_from`` is
+        the incoming name only when the registry already held it.
+
+        An import, a pull and a restore are all cases where the user asked for
+        "that agent" and never typed its name locally, so the name is the part
+        they cannot negotiate: refusing the whole operation over it throws away
+        the thing they actually wanted, and storing a second row under a name
+        that is already there makes the resolver pick one of the two silently.
+        The suffix is visible, editable, and reversible, which is why the
+        contract chooses it (cross-repo contract §3.6).
+
+        The suffix is a HYPHEN (``Coder-2``), not the ``" (N)"`` spelling the
+        contract's prose used. That spelling is refused by BOTH validators in
+        the standard: the hub's name rule forbids whitespace (§1.4) and
+        ``write_profile`` refuses it too, so a ``"Coder (2)"`` row could
+        never be published — the pull would hand the user an agent the hub will
+        not take. Collisions are found with :func:`agent_name_key`, so ``coder``
+        blocks an incoming ``Coder``: the local namespace stays case-sensitive,
+        but two rows whose keys collide are exactly the pair the resolver cannot
+        tell apart. The candidate is built from the incoming name VERBATIM (not
+        from its key), so the stored and reported name keeps the published one.
+
+        The result always fits :data:`MAX_AGENT_NAME_CHARS`, because the cap is
+        the second half of the same defect: a hub-legal 128-character name plus
+        a suffix is 130 characters, which the hub refuses and the UI's §6.3
+        pre-validation would then reject with no explanation. The truncation
+        cuts the BASE and keeps the suffix — the suffix is what makes the name
+        free, so losing part of it would re-create the collision it exists to
+        avoid.
+
+        One implementation for both import paths: the legacy ZIP import and
+        the hub pull have to agree about what "already exists" means, or the
+        same archive lands under two different names depending on the route.
+        """
+
+        key = agent_name_key(name)
+        if not key:
+            # Nothing to compare against. ``AgentData.name`` is a bare
+            # required ``str``, so a blank or whitespace-only name really does
+            # import; what it must not do is "collide" with every other blank
+            # one, which is what returning a suffix here would mean.
+            return name, None
+
+        self._refresh_if_needed()
+        taken = {agent_name_key(agent.name) for agent in self._agents.values()}
+        if key not in taken:
+            return name, None
+
+        suffix = 2
+        candidate = _collision_free_name(name, suffix)
+        while agent_name_key(candidate) in taken:
+            suffix += 1
+            candidate = _collision_free_name(name, suffix)
+        return candidate, name
 
     def list_agents(self) -> List[AgentData]:
         """
@@ -1687,7 +1801,7 @@ class AgentRegistry:
             with zip_ref.open(member, "r") as source, target_path.open("wb") as target:
                 shutil.copyfileobj(source, target)
 
-    def import_agent(self, zip_path: Path) -> AgentData:
+    def import_agent(self, zip_path: Path) -> Tuple[AgentData, Optional[str]]:
         """
         Import an agent from a ZIP file.
 
@@ -1696,11 +1810,21 @@ class AgentRegistry:
         The current working directory will be reset to local-operator-home.
         For security, serialized execution context (`context.pkl`) is not imported.
 
+        The published name is kept when the registry does not already hold it,
+        and suffixed (``Coder-2``) when it does — see
+        :meth:`resolve_import_name` for why a collision renames rather than
+        refuses (cross-repo contract §3.6).
+
         Args:
             zip_path (Path): Path to the ZIP file containing agent state files
 
         Returns:
-            AgentData: The imported agent's metadata
+            Tuple[AgentData, Optional[str]]: the imported agent's metadata, and
+                the name it was renamed FROM when a local agent already held
+                the published name. The caller reports that; it is what lets
+                the UI say "Imported as \"Coder-2\" — you already have an
+                agent called \"Coder\"" instead of appearing to have imported
+                something the user cannot find under the name they asked for.
 
         Raises:
             ValueError: If the ZIP file is invalid or missing required files
@@ -1758,6 +1882,26 @@ class AgentRegistry:
                 except ValidationError as exc:
                     raise ValueError("Invalid agent metadata in agent.yml") from exc
 
+                # Land the profile under a name the registry does not already
+                # hold. This is the defect the contract records as D-4: import
+                # went straight to ``save_agent``, which performs no check at
+                # all, so a pulled agent could share a name with an agent the
+                # user already had — and an exact-match check would not have
+                # caught ``Coder`` arriving over a local ``coder`` either.
+                # Resolving BEFORE the destination directory is reserved keeps
+                # the failed-import guarantee intact: nothing is allocated until
+                # the name is settled.
+                destination, renamed_from = self.resolve_import_name(imported_agent.name)
+                if renamed_from is not None:
+                    logging.info(
+                        "Imported agent renamed from %r to %r: the registry already "
+                        "holds that name (agent: %s)",
+                        renamed_from,
+                        destination,
+                        agent_id,
+                    )
+                    imported_agent = imported_agent.model_copy(update={"name": destination})
+
                 with open(agent_yml_path, "w", encoding="utf-8") as f:
                     yaml.dump(imported_agent.model_dump(), f, default_flow_style=False)
 
@@ -1801,7 +1945,7 @@ class AgentRegistry:
                         shutil.rmtree(agent_dir)
                     raise
 
-                return imported_agent
+                return imported_agent, renamed_from
 
             except zipfile.BadZipFile:
                 raise ValueError("Invalid ZIP file")
@@ -1857,7 +2001,7 @@ class AgentRegistry:
         self,
         radient_client,
         agent_id: str,
-    ) -> AgentData:
+    ) -> Tuple[AgentData, Optional[str]]:
         """
         Download an agent from the Radient Agent Hub and import it.
 
@@ -1866,7 +2010,9 @@ class AgentRegistry:
             agent_id (str): The agent ID to download.
 
         Returns:
-            AgentData: The imported agent's metadata.
+            Tuple[AgentData, Optional[str]]: the imported agent's metadata, and
+                the name it was renamed FROM when a local agent already held the
+                published name (see :meth:`import_agent`).
 
         Raises:
             RuntimeError: If the download or import fails.
