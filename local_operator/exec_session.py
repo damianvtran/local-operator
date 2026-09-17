@@ -12,7 +12,7 @@ import os
 import sys
 from typing import Any
 
-from local_operator.exec_startup import apply_startup
+from local_operator.exec_startup import apply_startup, report_unresolved_declared_tools
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,12 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
         await control.handle.cancel_headless_loop()
         if failed and outcome["terminal"] == "succeeded":
             outcome["terminal"] = "failed"
+        # Asked HERE, at the end, rather than when the declaration was applied:
+        # MCP servers connect in the background, so a name that is unreachable at
+        # startup may simply be a server that has not finished connecting. Once
+        # the run is over nothing is in flight, so an unreachable name is the
+        # typo it looks like — see ``report_unresolved_declared_tools``.
+        report_unresolved_declared_tools(session, args)
         # The ledger's own vocabulary, so one run cannot describe its end two
         # different ways to two consumers. Settled by now: the renderer runs
         # this teardown after every turn and the loop have finished.

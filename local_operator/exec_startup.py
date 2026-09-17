@@ -8,9 +8,110 @@ slash commands, and never reinterpret the legacy --agent selector as a role.
 from __future__ import annotations
 
 import argparse
+import logging
+import sys
 from typing import Any
 
-STARTUP_FIELDS = ("team", "profile", "goal", "clear_goal", "loop", "loop_goal", "name", "effort")
+logger = logging.getLogger(__name__)
+
+#: Startup selectors that survive the ``exec --background`` process boundary.
+#: Order is the order :func:`local_operator.exec_mode.build_worker_argv` emits
+#: them in, and each one must exist as a field on ``ExecArgs`` and as an option
+#: on the worker's parser (both are fed by this module).
+STARTUP_FIELDS = (
+    "team",
+    "profile",
+    "goal",
+    "clear_goal",
+    "loop",
+    "loop_goal",
+    "name",
+    "effort",
+    "tools",
+)
+
+#: Separator between tool names in ``--tools``. A COMMA, not a space: the flag's
+#: value crosses the ``--background`` boundary through ``build_worker_argv``'s
+#: ``--opt=value`` form, which is one argv item by construction — a space would
+#: split the declaration into two items and the worker's parser would read the
+#: second half as a stray positional prompt.
+_TOOLS_SEPARATOR = ","
+
+
+def parse_tool_inventory(text: str | None) -> tuple[str, ...] | None:
+    """Parse a ``--tools`` declaration into tool names, or ``None`` when unset.
+
+    ``None`` and ``()`` are DIFFERENT answers and the difference is
+    load-bearing at the one call site: ``None`` means "no declaration, this
+    session reaches whatever the host built", while an empty tuple would be a
+    session that may reach nothing at all. A value that parses to nothing
+    (``--tools ''``, ``--tools ,,``) is refused by :func:`resolve_startup`
+    rather than silently becoming the second one, because an operator who typed
+    a declaration and got a tool-less session would read that as a harness bug.
+    """
+    if text is None:
+        return None
+    names = (name.strip() for name in text.split(_TOOLS_SEPARATOR))
+    return tuple(dict.fromkeys(name for name in names if name))
+
+
+def _name_tuple(value: Any) -> tuple[str, ...] | None:
+    """A session-supplied name sequence, or ``None`` when the host cannot answer.
+
+    Deliberately NOT a bare ``getattr(..., ())``: a reduced host fabricates any
+    attribute it is asked for (a ``Mock`` session in a test, a front end that
+    predates the member), so the default is never reached and the caller gets
+    something truthy and uniterable. Both reads below sit on the startup path,
+    where raising costs the run, so "cannot say" has to be distinguishable from
+    "declares nothing" — hence ``None`` rather than ``()``.
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    return tuple(value)
+
+
+def report_unresolved_declared_tools(session: Any, args: Any) -> None:
+    """Report a ``--tools`` declaration that named tools the run never reached.
+
+    Called at the END of the run (see ``exec_session``), not at startup — and
+    that placement is the whole point rather than tidiness. MCP servers connect
+    in the background, so at startup an unreachable name and a server that has
+    not finished connecting are INDISTINGUISHABLE: a startup report either fires
+    a false alarm on the ordinary path, or — if it waits for the round to settle
+    — never fires at all. Both halves of that were measured on a live run. By the
+    end nothing is in flight, so the answer is definitive.
+
+    Why report at all: a declaration that matches nothing fails CLOSED — the
+    session simply has no tools — which is the right direction, but from the
+    model's side it is indistinguishable from a harness fault. The only symptom
+    is "Tool not found" for every call and a run that answers nothing, so a typo
+    in a security control would read as a broken harness.
+
+    Silent for the ROLE-derived case, deliberately: a profile naming a tool that
+    exists on another machine is ordinary and documented (see
+    ``agent_profiles.filter_tools``), where a name the operator typed into
+    ``--tools`` for THIS run is a typo worth a log line.
+    """
+    declared = parse_tool_inventory(getattr(args, "tools", None))
+    if not declared:
+        return
+    unresolved = getattr(session, "unresolved_declared_tools", None)
+    if not callable(unresolved):
+        return
+    try:
+        unreached = [name for name in (_name_tuple(unresolved()) or ()) if name in set(declared)]
+    except Exception:  # noqa: BLE001 — a report must never cost the run
+        logger.debug("declared-tool resolution check failed", exc_info=True)
+        return
+    if not unreached:
+        return
+    reachable = _name_tuple(getattr(session, "tool_inventory", None)) or ()
+    print(
+        "Warning: --tools names no tool this run could reach: "
+        + ", ".join(unreached)
+        + f". The session reached {len(reachable)} tool(s).",
+        file=sys.stderr,
+    )
 
 
 def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
@@ -49,6 +150,16 @@ def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--name", metavar="TEXT", help="Set the persisted conversation name")
     parser.add_argument(
+        "--tools",
+        metavar="NAMES",
+        help=(
+            "Comma-separated tools this run may reach, and the ONLY ones. Excluded "
+            "tools are unreachable, not merely unapproved. Without --control the "
+            "declared tools are approved by the declaration (nobody is there to "
+            "ask); a name this build does not have is unreachable and reported"
+        ),
+    )
+    parser.add_argument(
         "--effort",
         metavar="LEVEL",
         help="Set reasoning effort; validated against the selected model",
@@ -82,6 +193,14 @@ def resolve_startup(args: Any) -> Any:
         and not getattr(args, "resume", None)
     ):
         raise ValueError("--loop requires --goal, or --resume a session that has one")
+    # Refused at PREFLIGHT, like ``--loop`` above, and for the same reason: a
+    # declaration that can never match anything strands the session with no
+    # tools, and refusing it in apply_startup would leave a session directory
+    # behind to explain that to the operator.
+    if getattr(args, "tools", None) is not None and not parse_tool_inventory(args.tools):
+        raise ValueError(
+            "--tools must name at least one tool; omit it to leave the session unrestricted"
+        )
     team = None
     if getattr(args, "team", None):
         from local_operator.paths import config_dir
@@ -115,12 +234,50 @@ def resolve_startup(args: Any) -> Any:
     return team
 
 
+def declared_tool_inventory(session: Any, args: Any) -> tuple[str, ...] | None:
+    """The inventory this run declares, or ``None`` for an unrestricted session.
+
+    ``--tools`` is the explicit form and WINS over an attached role's own
+    ``tools:`` allow-list: a supervisor that composes a prompt and names the
+    tools for THIS run is stating the run's reach, and a role's allow-list is a
+    weaker statement about the role.
+
+    Falling back to the role's allow-list is what makes a role-declared surface
+    hold for a headless session at all. ``Session.attach_agent_profile`` stamps
+    a profile's INSTRUCTIONS onto the session it is attached to, and its
+    ``tools:`` allow-list was enforced only where the profile is launched as a
+    subagent (``harness.subagent``). A ``lop exec --profile reviewer`` therefore
+    ran a reviewer that could still ``write`` and ``edit`` — the precise
+    capability the reviewer seed's allow-list exists to remove, and the failure
+    that forces a re-review of a diff the reviewer itself changed — with no way
+    for the unattended run to say otherwise.
+
+    ``None`` means "unrestricted", which is the default for both an absent
+    ``--tools`` and a role that declares no ``tools:`` of its own: the negative
+    case must stay byte-for-byte today's behaviour.
+    """
+    explicit = parse_tool_inventory(getattr(args, "tools", None))
+    if explicit is not None:
+        return explicit
+    attached = _name_tuple(getattr(session, "attached_profile_tools", None)) or ()
+    return attached or None
+
+
 def apply_startup(session: Any, args: Any, team: Any) -> None:
     """Apply explicit overrides after ordinary resume restored its attachment."""
     if team is not None:
         session.attach_team(team)
     if getattr(args, "profile", None) and not session.attach_agent_profile(args.profile):
         raise ValueError(f"Could not attach profile {args.profile!r}")
+    # AFTER the attach, because a role's own allow-list is one of the two
+    # sources; and here rather than in the session factory, because an ordinary
+    # resume restores the attachment INSIDE the session and only this step runs
+    # afterwards. ``--control`` reads as attended: the supervisor's gate replaces
+    # the session's (see ``session.runtime.exec_control``), so a declared tool
+    # must still be asked about rather than waved through.
+    inventory = declared_tool_inventory(session, args)
+    if inventory is not None:
+        session.set_tool_inventory(inventory, unattended=not getattr(args, "control", False))
     if getattr(args, "clear_goal", False):
         session.set_goal("")
     elif getattr(args, "goal", None) is not None:
