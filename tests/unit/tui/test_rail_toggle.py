@@ -21,20 +21,23 @@ export of the actual pre-rail commit (``bf67bf69``) and compares row lists
 string for string, rather than asserting in-tree properties that would pass
 against a build that had drifted.
 
-**The promise is bounded at lane >= 8, deliberately and measurably.** Pre-rail
-``AssistantBlock`` had no ``MIN_BODY`` floor — ``_flat_width`` was a bare
-``return self.fold_width(FALLBACK_WIDTH)`` — and no ``authored_width`` or
+**The promise is bounded at lane >= 8**, which is every ordinary terminal.
+Pre-rail ``AssistantBlock`` had no ``MIN_BODY`` floor — ``_flat_width`` was a
+bare ``return self.fold_width(FALLBACK_WIDTH)`` — and no ``authored_width`` or
 ``copy_gutter`` override at all. The floor arrived WITH the rail, for the reason
 ``UserBlock`` records: folding prose into the last two or three cells turns a
-sentence into a column of single characters, so the rows are built wider than
-the frame and Rich clips them instead. With the rail off the floor still
-applies, so a lane below ``MIN_BODY`` folds at 8 where the pre-rail build folded
-at the lane. That divergence is asserted here explicitly
-(``test_rail_off_below_the_min_body_floor_diverges_from_pre_rail``) rather than
-avoided by only testing wide frames: it is reachable — a terminal 9 columns or
-narrower gets there — and the floor is better behaviour than what it replaced,
-so the claim is narrowed to match the code instead of the code being bent to
-match the claim.
+sentence into a column of single characters. Above the floor the two builds are
+identical, and ``T2-a`` proves it against a real export.
+
+**Below the floor the floor gives way, because it broke CONTAINMENT.** It floors
+the text lane, but the painted row is ``rail_cols + lane``, so at narrow widths
+it folded rows wider than the block's own region and painted them over the
+scrollbar — measured at every terminal width to 13 with the rail on and to 11
+with it off, where the pre-rail build always fit (design round 2, D9). So
+``_body_width`` clamps: where the lane cannot afford the floor, fold to what is
+there. ``test_no_row_paints_outside_the_block_at_any_width`` sweeps 6..20 in
+both states and is the pin; the clamp also removes what used to be a documented
+divergence in that range, since folding to the lane is what pre-rail did.
 """
 
 from __future__ import annotations
@@ -269,23 +272,27 @@ async def test_rail_off_renders_byte_identical_rows_to_the_pre_rail_build(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_rail_off")
-async def test_rail_off_below_the_min_body_floor_diverges_from_pre_rail() -> None:
-    """The KNOWN divergence, asserted rather than avoided — lane < ``MIN_BODY``.
+async def test_rail_off_below_the_min_body_floor_folds_to_the_lane() -> None:
+    """Below the floor the fold gives way to the lane — design round 2, D9.
 
-    Pre-rail ``_flat_width`` was ``return self.fold_width(FALLBACK_WIDTH)``, with
-    no floor: at lane 6 it folded at 6. The floor arrived with the rail and
-    still applies when the rail is off, so the same lane folds at 8 here.
+    **This test asserted the opposite until D9, and the change is the point.**
+    It used to pin ``_flat_width() == MIN_BODY`` at a 6-column terminal and call
+    that a known, documented divergence from the pre-rail build. The reasoning
+    was that the floor is better behaviour than no floor, so the CLAIM should be
+    narrowed rather than the code changed.
 
-    This is the one place "OFF restores pre-rail rendering" is FALSE, and it is
-    reachable: a terminal 9 columns or narrower produces a lane under 8
-    (measured — at terminal width 6 the lane is 6). It is documented and pinned
-    here rather than quietly excluded by only testing wide frames, because an
-    undocumented divergence is what turns an honest promise into a false one.
+    That reasoning missed what the floor does to CONTAINMENT. The floor floors
+    the text lane, but the painted row is ``rail_cols + lane``, so at a
+    6-column terminal the block's region is 2 cells and the floor folded a
+    row 8 to 10 cells wide — painted outside its own container, over the
+    scrollbar. The pre-rail build had no floor and always fit. So the floor was
+    not strictly better; it traded a legibility floor for a containment defect,
+    and containment wins (see ``AssistantBlock._body_width``).
 
-    The floor is kept deliberately: folding into two or three cells is worse
-    than letting Rich clip. Making it conditional on a display setting — a floor
-    that exists only when the rail is on — would be a worse defect than the
-    divergence it removed, so the CLAIM is narrowed to lane >= 8 instead.
+    With the clamp the divergence in this range is GONE: below the floor both
+    states fold to what the lane actually holds, which is what pre-rail did.
+    The narrowed "lane >= 8" equivalence claim is unaffected — it describes the
+    range where the floor was never binding, and ``T2-a`` still proves it.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(6, 20)) as pilot:
@@ -300,11 +307,73 @@ async def test_rail_off_below_the_min_body_floor_diverges_from_pre_rail() -> Non
 
         lane = block.fold_width(80)
         assert lane < MIN_BODY, f"this test needs a lane under the floor; got {lane}"
-        # The divergence, stated exactly: the floor, not the lane, and not the
-        # lane less the rail either — the rail is off, so RAIL_COLS is not in it.
-        assert block._flat_width() == MIN_BODY, block._flat_width()
-        assert block._flat_width() != lane, (block._flat_width(), lane)
         assert block._rail_cols() == 0, "the rail is off; the gutter must cost nothing"
+        # The floor gave way: the fold is the lane, not MIN_BODY. With the rail
+        # off the gutter costs nothing, so the body IS the lane — which is
+        # exactly what the pre-rail build did here.
+        assert block._flat_width() == lane, (block._flat_width(), lane)
+        assert block._flat_width() < MIN_BODY, block._flat_width()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_on", [True, False], ids=["rail-on", "rail-off"])
+@pytest.mark.parametrize("terminal", list(range(6, 21)))
+async def test_no_row_paints_outside_the_block_at_any_width(
+    monkeypatch: pytest.MonkeyPatch, terminal: int, rail_on: bool
+) -> None:
+    """D9, the containment pin: the painted row never exceeds its own region.
+
+    The defect this exists for: ``MIN_BODY`` floors the TEXT LANE while the row
+    that gets painted is ``rail_cols + lane``, so the floor could make a row
+    WIDER than the block it belongs to. Measured before the fix, with the rail
+    on, a 9-column terminal gave a 5-cell region and painted a 10-cell row —
+    five cells over the scrollbar. It overflowed at every terminal width to 13
+    with the rail on and to 11 with it off.
+
+    Swept across widths rather than asserted at one, because the defect lives in
+    a RANGE and its boundary moves with the state: a single-width test passes at
+    14 while 9 is broken. Both states, because containment is not a property one
+    state may skip — the rail-off path overflowed too, and a fix that special
+    -cased it would leave the other half painting outside its container.
+
+    Asserted against the block's OWN region rather than the terminal width: the
+    region is what the row is allowed to fill, and comparing to the terminal
+    would pass a row that overflows a narrow block inside a wide frame.
+    """
+    import local_operator.tui.widgets.assistant as _assistant
+
+    real = _assistant.settings_get
+    monkeypatch.setattr(
+        _assistant,
+        "settings_get",
+        lambda key, default=None: (rail_on if key == "display.rail" else real(key, default)),
+    )
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(terminal, 20)) as pilot:
+        view = app.query_one(TranscriptView)
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        # Long enough to wrap hard at every width in the sweep, so the assertion
+        # is made against folded rows rather than one short line that fits by
+        # accident.
+        block.update_text("alpha beta gamma delta epsilon zeta eta theta")
+        block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+
+        region = block.region.width
+        assert region > 0, f"terminal {terminal} gave the block no region at all"
+        visual = block._render()
+        assert isinstance(visual, Content)
+        rows = visual.plain.split("\n")
+
+        over = [(index, len(row), row) for index, row in enumerate(rows) if len(row) > region]
+        assert not over, (
+            f"terminal={terminal} rail_on={rail_on} region={region}: "
+            f"{len(over)} row(s) painted outside the block — {over!r}"
+        )
 
 
 @pytest.mark.asyncio

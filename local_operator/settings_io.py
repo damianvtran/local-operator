@@ -1411,7 +1411,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Assistant gutter rail",
         kind=Kind.BOOL,
         default=True,
-        help="A rule down the left edge of the assistant's answer, matching the prompt's.",
+        help="A rule down the left edge of the assistant's answer, echoing the prompt's.",
         choices=_bool_choices("rail on the answer", "no rail"),
     ),
     Setting(

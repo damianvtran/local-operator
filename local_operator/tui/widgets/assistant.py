@@ -107,10 +107,15 @@ RAIL_COLS = SPINE_INDENT
 #: 4.32:1 — and ``label`` is never equal to ``signal`` or ``accent`` in any of
 #: them, so the rail can never accidentally read as a prompt.
 RAIL_TOKEN = "label"
-#: Narrowest body the prose is folded into, the floor ``UserBlock.MIN_BODY``
-#: established for the same trade: below it, wrapping into the two or three
-#: cells the rail leaves turns a sentence into a column of single characters,
-#: so the rows are built wider than the frame and Rich clips them instead.
+#: Narrowest body the prose is folded into WHEN THE LANE CAN AFFORD IT, the
+#: floor ``UserBlock.MIN_BODY`` established for the same trade: below it,
+#: wrapping into the two or three cells the rail leaves turns a sentence into a
+#: column of single characters.
+#:
+#: It is a floor on legibility, NOT a licence to paint outside the block. Where
+#: the lane cannot pay it, :meth:`AssistantBlock._body_width` clamps it to what
+#: the lane has — see that method for why containment wins the trade (design
+#: round 2, D9).
 MIN_BODY = 8
 #: Default for ``display.rail``. Lives beside the rail it governs so the
 #: registry entry and the render edge can be pinned to ONE constant by test.
@@ -489,6 +494,47 @@ class AssistantBlock(TranscriptBlock):
         """
         return RAIL_COLS if settings_get("display.rail", DEFAULT_RAIL) else 0
 
+    def _body_width(self, lane: int) -> int:
+        """``lane`` less the gutter, floored at :data:`MIN_BODY` — but never
+        wider than the lane can actually hold.
+
+        Two rules that can disagree, resolved here once so every caller gets the
+        same answer. The floor keeps prose legible; the CLAMP keeps the painted
+        row inside the block's own region, and the clamp wins.
+
+        The floor alone breaks containment at narrow widths, because it floors
+        the TEXT LANE while the row that gets painted is ``rail_cols + lane``.
+        Measured before the clamp, with the rail on: a 9-column terminal gives
+        this block a 5-column region, the lane floors at 8, and the row paints
+        10 cells — five cells outside its own container, over the scrollbar. It
+        overflowed at every terminal width up to 13 with the rail on and up to
+        11 with it off, where the pre-rail build (which had no floor at all)
+        always fit.
+
+        So where the lane cannot afford the floor, the floor gives way: fold to
+        what is actually there. That yields text which is nearly unreadable at a
+        2-cell body, and that is the deliberate trade — unreadable text inside
+        the block is recoverable by widening the terminal, whereas a row painted
+        outside its region corrupts the frame around it and the reader cannot
+        tell which widget is lying. Applied in BOTH rail states rather than by
+        special-casing the rail off: containment is not a property one state is
+        allowed to skip.
+
+        Not solved by dropping the rail under a width threshold: a rail that
+        vanishes at some width is a second behaviour to explain, and the block
+        would still have to decide what to do at the width below that one
+        (design round 2, D9).
+        """
+        body = lane - self._rail_cols()
+        if body < MIN_BODY:
+            # The floor would widen the fold past the lane and paint outside the
+            # block. Never negative, and 0 is a real answer rather than a
+            # degenerate one: at a 2-cell region the gutter is the whole lane,
+            # and a 0-cell body paints the rail alone and stays contained
+            # (measured). Asking for 1 there puts a cell back outside the block.
+            return max(body, 0)
+        return body
+
     def _flat_width(self) -> int:
         """The width the rows are built at — the block's own once laid out.
 
@@ -507,11 +553,11 @@ class AssistantBlock(TranscriptBlock):
         The rail's cells come off the top: the markdown is folded into the BODY
         the gutter leaves, not into the whole lane. Folding at the full lane and
         then pushing two cells onto every row overhangs the block by two on
-        every wrapped row. Floored at :data:`MIN_BODY` for the reason
-        ``UserBlock`` records — wrapping into the last two or three cells is
-        worse than letting Rich clip.
+        every wrapped row. :meth:`_body_width` applies the floor and the
+        containment clamp together, so this and :meth:`authored_width` cannot
+        disagree about how narrow is too narrow.
         """
-        return max(self.fold_width(FALLBACK_WIDTH) - self._rail_cols(), MIN_BODY)
+        return self._body_width(self.fold_width(FALLBACK_WIDTH))
 
     def authored_width(self, lane: int) -> int:
         """The lane, less the rail — this block's box is not the whole lane.
@@ -525,10 +571,11 @@ class AssistantBlock(TranscriptBlock):
         for one lane change, which is what turns ``refit_width``'s equality
         guard into a rebuild loop rather than a no-op.
 
-        Same subtraction and same floor as :meth:`_flat_width`, so whichever
-        trigger fires first the rows are folded at one number.
+        Same subtraction and same floor as :meth:`_flat_width`, through the same
+        :meth:`_body_width`, so whichever trigger fires first the rows are folded
+        at one number.
         """
-        return max(super().authored_width(lane) - self._rail_cols(), MIN_BODY)
+        return self._body_width(super().authored_width(lane))
 
     def _flat_console(self) -> Console | None:
         """The app's console, or ``None`` when this block is detached.
