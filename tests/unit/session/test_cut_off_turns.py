@@ -12,7 +12,9 @@ calls worse than the bug it fixes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -630,19 +632,48 @@ def test_a_tear_reported_from_a_record_names_the_pair(monkeypatch) -> None:
 
 
 async def _dispose_with_unsent_run(directory: Path, *, deliberate: bool) -> None:
-    """Boot a real session with an in-flight run, then dispose it."""
+    """Boot a real session with a turn IN FLIGHT, then dispose it.
+
+    The turn is parked in the provider stream rather than staged by state, and
+    the difference is load-bearing: a run left UNSETTLED is *what* the disposal
+    publisher reports, while a live ``_turn_task`` is *whether this disposal cut
+    anything*. A helper that minted the token by hand could not tell a teardown
+    that cut work from a run whose outcome never landed, and those are opposite
+    verdicts — the second is the shape of the operator's spurious rows, where a
+    session that had simply gone quiet was reported as an error for work that
+    had finished (2026-09-17).
+    """
     directory.mkdir(parents=True, exist_ok=True)
-    session = _make_session(directory)
+    session = _make_session(directory, stream=_never_yielding_stream())
     await session.async_init()
     # What `_run_turn` does at the head of a turn: a token is minted and the run
     # is left UNSETTLED, so the dispose publisher sees a turn that never
-    # reported an outcome. Driving this by state rather than by running a turn
-    # keeps the test about the classification, which is the seam in question.
-    session._attention_run_token = str(uuid.uuid4())
-    session._attention_run_settled = False
+    # reported an outcome.
+    task = asyncio.ensure_future(session.prompt("a turn that will be cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session.is_streaming:
+        await asyncio.sleep(0.01)
+    assert session.is_streaming, "the turn never reached the provider stream"
     if deliberate:
         session.note_deliberate_stop()
     await session.dispose()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+def _never_yielding_stream() -> Any:
+    """A provider stream that never yields: the turn stays in flight.
+
+    An async GENERATOR, because that is what ``stream_fn`` requires — a plain
+    coroutine would type-check as a mistake and raise the first time a turn ran.
+    """
+
+    async def _stream(*_args: Any, **_kwargs: Any) -> Any:
+        await asyncio.Event().wait()
+        yield  # pragma: no cover — unreachable: the event is never set
+
+    return _stream
 
 
 @pytest.mark.asyncio
@@ -666,14 +697,20 @@ async def test_the_dispose_route_publishes_the_users_own_stop_as_an_interruption
 
 
 @pytest.mark.asyncio
-async def test_an_unnoted_dispose_is_still_a_cut_off_error(tmp_path: Path) -> None:
+async def test_an_unnoted_dispose_of_a_LIVE_turn_is_still_a_cut_off_error(tmp_path: Path) -> None:
     """The control, and the reason this is a caller's verdict rather than a guess.
 
-    An INVOLUNTARY teardown (a reload, an unmount, ``_mobile_teardown``) is a
-    turn cut off under the user, and it must keep reading as one. Without this
-    half, "note the stop everywhere" would look equivalent to "never report a
-    disposed turn", and the two differ on exactly the teardowns nobody asked
-    for.
+    An INVOLUNTARY teardown (a reload, an unmount, ``_mobile_teardown``) that
+    cuts a turn in flight is a turn cut off under the user, and it must keep
+    reading as one. Without this half, "note the stop everywhere" would look
+    equivalent to "never report a disposed turn", and the two differ on exactly
+    the teardowns nobody asked for.
+
+    The guard the disposal now carries makes that claim TRUE BY CONSTRUCTION
+    rather than by assertion: the note is written only when a ``_turn_task`` is
+    live, which is the same evidence the abort below it uses, so "disposed while
+    this turn was running" is a fact about this disposal rather than a hope
+    about which run end comes next.
     """
     directory = tmp_path / "sessions" / "torn"
     await _dispose_with_unsent_run(directory, deliberate=False)
@@ -682,6 +719,39 @@ async def test_an_unnoted_dispose_is_still_a_cut_off_error(tmp_path: Path) -> No
     assert state["kind"] == "error", state
     assert state["cause"] == "disposed", state
     assert state["reason"], "a cut-off must name a reason"
+
+
+@pytest.mark.asyncio
+async def test_a_dispose_that_cut_no_turn_reports_no_error(tmp_path: Path) -> None:
+    """The operator's rows from the other side, on the seam that wrote them.
+
+    A run left unsettled with NO turn in flight is not work this disposal cut:
+    the turn's task is gone, so there is nothing to abort and nothing to
+    attribute. Writing the ``disposed`` cause anyway claimed a cut of work that
+    had ended — which is what put durable ``error`` rows under sessions that had
+    simply gone quiet (six with the retirement label, more with this one, from
+    the reporting host's ``attention.db``).
+
+    What remains here is the taxonomy's no-evidence verdict, and that is called
+    out rather than blessed: an aborted run with no recorded stop reads as the
+    user's own stop (``interrupted``), so this run's fate is still asserted by
+    whoever reads it. The honest end state — the run's own pipeline settling the
+    run it ended — is out of this change's scope; what this test pins is that
+    the disposal stops INVENTING an error for it.
+    """
+    directory = tmp_path / "sessions" / "quiet"
+    directory.mkdir(parents=True, exist_ok=True)
+    session = _make_session(directory)
+    await session.async_init()
+    # The shape a wedged turn leaves behind: the run was minted and never
+    # published, and the turn that owned it is gone.
+    session._attention_run_token = str(uuid.uuid4())
+    session._attention_run_settled = False
+    await session.dispose()
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state["kind"] != "error", state
+    assert state["cause"] != "disposed", state
 
 
 @pytest.mark.asyncio
