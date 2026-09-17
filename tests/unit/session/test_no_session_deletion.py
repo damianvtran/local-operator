@@ -1189,6 +1189,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "list.remove(key) — drops a written id from the failed-ids list",
     ),
+    # The clipboard scratch probe (2026-09-17). `_probe_scratch_errno` creates
+    # ONE file per candidate base with `mkstemp` and unlinks that same file
+    # immediately, because `tempfile` throws away the errno of the refusal that
+    # matters: on a full volume it collapses `Errno 28` into
+    # `FileNotFoundError: No usable temporary directory found in [...]`, which
+    # named directories that existed and cost the operator a TUI session (the
+    # read runs on `ctrl+v` and must never raise). The name it unlinks is the
+    # one `mkstemp` generated and returned inside `$TMPDIR` — or `/tmp`, or
+    # Windows' `TEMP`/`TMP` — so it comes from the OS's scratch lookup and never
+    # from a caller, a config dir or a session id; the call is `unlink`, which
+    # takes files, and its argument is a scratch file, never a directory.
+    (
+        "local_operator/clipboard.py::_probe_scratch_errno",
+        "os.unlink",
+        "Removes only the probe FILE mkstemp just created in a scratch base "
+        "($TMPDIR//tmp-class); never a directory, never under sessions/",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
