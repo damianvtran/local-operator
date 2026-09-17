@@ -225,6 +225,96 @@ def _read_arms(ledger: Path, *, samples: int) -> dict[str, Any]:
     return out
 
 
+def _session_report_arms(ledger: Path, *, samples: int, sessions: int = 3) -> dict[str, Any]:
+    """``session_report`` for the BUSIEST real sessions — the ``/session`` panel.
+
+    The operator-visible complaint surface for this arm is ``sessions.report``
+    (``/v1/desktop/sessions/{id}/report``), whose op is
+    ``AnalyticsStore.session_report``. The cost is entirely this read: the app
+    adds tens of milliseconds around it, so timing the store call on the real
+    largest sessions is timing the panel.
+
+    The sessions are chosen by ROW COUNT, from the ledger itself, so the arm
+    measures the worst case that exists rather than a convenient one.
+    """
+    with sqlite3.connect(ledger) as conn:
+        busiest = [
+            (str(row[0]), int(row[1]))
+            for row in conn.execute(
+                "SELECT session_id, COUNT(*) AS n FROM calls WHERE session_id <> '' "
+                "GROUP BY session_id ORDER BY n DESC LIMIT ?",
+                (sessions,),
+            )
+        ]
+    store = AnalyticsStore(ledger)
+    out: dict[str, Any] = {}
+    for session_id, calls in busiest:
+        # The FIRST call is recorded on its own: on a ledger copy its pages are
+        # not in cache yet, and that is the state a cold morning's panel opens
+        # in. The warm samples that follow are the steady state, and the two are
+        # reported separately rather than averaged into one number.
+        start = time.perf_counter()
+        first = store.session_report(session_id)
+        first_wall = time.perf_counter() - start
+        wall, cpu, report = _timed(
+            lambda sid=session_id: store.session_report(sid), samples=samples
+        )
+        out[session_id] = {
+            "calls": calls,
+            "first_wall_ms": _ms(first_wall),
+            "wall_ms": wall,
+            "cpu_ms": cpu,
+            "by_model": len(first.by_model),
+            "descendants": len(first.descendant_ids),
+            "recent": len(report.recent),
+        }
+    store.close()
+    return out
+
+
+def _session_report_equivalence(ledger: Path, sessions: list[str]) -> dict[str, Any]:
+    """Compare the merged ``session_report`` against the FROZEN old statements.
+
+    The same oracle the unit test uses (``legacy_session_report``), run here on
+    the operator's OWN ledger — the unit suite cannot see it, because it isolates
+    ``HOME``. So the equivalence claim is asserted on synthetic edges in the test
+    and on production data in this JSON, which is what makes it evidence rather
+    than an argument.
+    """
+    try:
+        from tests.unit.analytics.test_session_report_equivalence import (
+            legacy_session_report,
+        )
+    except ImportError:
+        # The parent tree has no oracle to compare against: the frozen statements
+        # ARE the code there. Recorded rather than silent, so a reader of the
+        # before JSON can see the check was not applicable instead of absent.
+        return {"oracle": "unavailable on this tree"}
+
+    store = AnalyticsStore(ledger)
+    out: dict[str, Any] = {}
+    try:
+        for session_id in sessions:
+            fresh = store.session_report(session_id)
+            with sqlite3.connect(ledger) as conn:
+                legacy = legacy_session_report(store, conn, session_id)
+            fresh_fields = asdict(fresh)
+            legacy_fields = asdict(legacy)
+            differing = sorted(
+                key
+                for key in set(fresh_fields) | set(legacy_fields)
+                if fresh_fields.get(key) != legacy_fields.get(key)
+            )
+            out[session_id] = {
+                "equal": not differing,
+                "differing_fields": differing,
+                "fields": len(fresh_fields),
+            }
+    finally:
+        store.close()
+    return out
+
+
 def _first_touch(ledger: Path) -> dict[str, Any]:
     """The FIRST ``aggregate()`` on a file whose pages are not in cache yet.
 
@@ -498,6 +588,10 @@ def main(argv: list[str] | None = None) -> int:
         result["first_touch_rollup"] = _first_touch(cold)
 
     result["route_payload"] = _route_payload(copy, samples=args.samples)
+    result["session_report"] = _session_report_arms(copy, samples=args.samples)
+    result["session_report_equivalence"] = _session_report_equivalence(
+        copy, list(result["session_report"])
+    )
     if not args.skip_writes:
         result["write"] = _write_arms(copy, samples=args.write_samples)
 
@@ -545,6 +639,19 @@ def main(argv: list[str] | None = None) -> int:
         f"[{args.label}] route payload: {payload['bytes'] / 1e6:.2f} MB, "
         f"{payload['by_session_entries']} sessions, cpu p50 {payload['cpu_ms']['p50']:.1f} ms"
     )
+    if result.get("session_report"):
+        print(f"[{args.label}] session_report (busiest real sessions):")
+        for session_id, stats in result["session_report"].items():
+            calls = f"{stats['calls']:>7,} calls"
+            first = f"first {stats['first_wall_ms']:>8.1f} ms"
+            warm = f"warm wall p50 {stats['wall_ms']['p50']:>8.1f} ms"
+            cpu = f"cpu p50 {stats['cpu_ms']['p50']:>7.2f} ms"
+            print(f"  {session_id} {calls}  {first}  {warm}  {cpu}")
+    for session_id, check in result.get("session_report_equivalence", {}).items():
+        if not isinstance(check, dict) or "equal" not in check:
+            continue  # the parent tree has no oracle to run
+        state = "same" if check["equal"] else f"DIFFERS {check['differing_fields']}"
+        print(f"[{args.label}] session_report equivalence {session_id}: {state}")
 
     if args.json:
         args.json.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
