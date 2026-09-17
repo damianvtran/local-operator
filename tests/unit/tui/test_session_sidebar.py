@@ -3052,6 +3052,197 @@ async def test_ctrl_o_jumps_to_the_first_subagent_row():
 
 
 @pytest.mark.asyncio
+async def test_one_ctrl_o_lands_the_jump_when_the_rows_arrive_later():
+    """D13: from a layer-OFF sidebar, ONE press must reveal AND land.
+
+    The chord cannot land its own jump here. `load_catalog` filters the hidden
+    population at the load site, so with the layer off those rows are not in
+    `entries` when the action runs — they arrive with the re-poll the chord
+    posts. Two things broke:
+
+    1. the action looked for a subagent row once, before that poll, and
+       nothing retried; and
+    2. `set_entries` then actively UNDID the attempt — the chord leaves
+       `cursor_id` empty, so the membership-safe re-adopt branch (QA D3)
+       restored the pre-chord row.
+
+    Both were invisible to a test that pressed the chord with the layer
+    already on, which is why this one drives the layer-off path and delivers
+    the rows the way the app does: a second `set_entries`.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sub = _sub("s1", label="one", agent="qa")
+        # What the catalog yields with the layer OFF: the hidden row filtered
+        # out at the load site. Handing it in anyway would let the chord land
+        # its jump synchronously and test nothing.
+        layer_off = [_plain("a1", active=True), _plain("p1")]
+        sidebar = await _sidebar_with(pilot, app, layer_off, show_subagents=False)
+        await _focus_settled(pilot, sidebar)
+        # The chord's message makes the app re-poll the real (empty) tmp
+        # catalog, which would replace the fixture rows mid-test. The re-poll
+        # is covered elsewhere; this test is about what the ARMED jump does
+        # with the delivery, which it performs by hand below.
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        sidebar.cursor_id = "a1"
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert sidebar.show_subagents is True, "ctrl+o did not reveal the hidden layer"
+
+        # The re-poll the chord asked for, now returning the population the
+        # layer asked to see.
+        sidebar.set_entries(layer_off + [sub])
+        await pilot.pause()
+
+        assert sidebar.cursor_id == "s1", (
+            "one ctrl+o revealed the layer but never landed the jump: cursor is "
+            f"{sidebar.cursor_id!r}, not the first subagent row 's1'. The rows arrive "
+            "with the app's re-poll, after the action has already given up — and the "
+            "re-adopt branch in set_entries then restores the pre-chord row over the "
+            "empty cursor the chord left."
+        )
+        # And it landed on the FIRST press: a second is a no-op, not the thing
+        # that does the work.
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert sidebar.cursor_id == "s1", "the second press moved the cursor"
+
+
+@pytest.mark.asyncio
+async def test_an_armed_jump_does_not_fire_on_an_unrelated_later_poll():
+    """The intent is time-bounded, so a run starting later cannot yank the cursor.
+
+    `ctrl+o` against a store with no subagent runs arms nothing that outlives
+    the reveal by more than `PENDING_SUBAGENT_JUMP_S`. Without the bound, the
+    poll that first carries a delegated run — minutes later, while the user is
+    reading some other row — would move the cursor with no keystroke behind it.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        layer_off = [_plain("a1", active=True), _plain("p1")]
+        sidebar = await _sidebar_with(pilot, app, layer_off, show_subagents=False)
+        await _focus_settled(pilot, sidebar)
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        sidebar.cursor_id = "p1"
+
+        # Imported here rather than at module scope so this file still COLLECTS
+        # against a build without the fix: the discriminating test above must
+        # be able to fail on its assertion, which is where the cause is named.
+        from local_operator.tui.widgets.session_sidebar import PENDING_SUBAGENT_JUMP_S
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        # The layer came back with nothing in it: the store had no runs.
+        sidebar.set_entries(layer_off)
+        await pilot.pause()
+        assert sidebar.cursor_id == "p1", "an empty layer must leave the cursor alone"
+
+        # Now the window closes, and only then does a run appear. Advanced by
+        # moving the DEADLINE into the past rather than by sleeping, so the
+        # test neither takes a second nor races the clock.
+        sidebar._pending_jump_until -= PENDING_SUBAGENT_JUMP_S + 1.0
+        sidebar.set_entries(layer_off + [_sub("s1", label="late", agent="scout")])
+        await pilot.pause()
+        assert sidebar.cursor_id == "p1", (
+            "a stale jump intent fired on an unrelated later poll and moved the cursor to "
+            f"{sidebar.cursor_id!r} with no keystroke behind it"
+        )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_o_is_a_no_op_once_the_cursor_is_already_in_the_layer():
+    """Pressing it again where it already landed must change nothing.
+
+    Both the cursor and the scroll offset: a no-op that re-reveals is still a
+    no-op to the user, but one that re-arms the pending intent would leave a
+    live deadline behind for the next poll to act on.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("a1", active=True), _sub("s1", label="one", agent="qa")]
+        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True)
+        await _focus_settled(pilot, sidebar)
+        sidebar.cursor_id = "s1"
+        before = (sidebar.cursor_id, sidebar._offset, sidebar.show_subagents)
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+
+        assert (sidebar.cursor_id, sidebar._offset, sidebar.show_subagents) == before
+        assert (
+            not sidebar._pending_jump_until
+        ), "a no-op press left a jump armed; the next catalog poll would act on it"
+
+
+@pytest.mark.asyncio
+async def test_a_layer_already_on_arms_nothing_when_there_is_no_row():
+    """With the layer ON, absent rows mean an empty store, not a pending poll.
+
+    Nothing is inbound to wait for, so arming here would hand the cursor to
+    whichever future poll first carries a subagent row.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("a1", active=True), _plain("p1")]
+        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True)
+        await _focus_settled(pilot, sidebar)
+        sidebar.cursor_id = "a1"
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert not sidebar._pending_jump_until, "armed a jump with no re-poll inbound"
+
+        sidebar.set_entries(entries + [_sub("s1", label="later", agent="scout")])
+        await pilot.pause()
+        assert (
+            sidebar.cursor_id == "a1"
+        ), "a press against an already-open empty layer moved the cursor on a later poll"
+
+
+@pytest.mark.asyncio
+async def test_a_landed_jump_still_leaves_the_cursor_on_a_real_row():
+    """QA D3's guarantee must survive the jump landing before the re-adopt.
+
+    `_land_pending_jump` runs FIRST so the re-adopt sees the landed cursor and
+    correctly does nothing. That ordering must not create the defect the
+    re-adopt exists to prevent: `cursor_id` naming a row not in `entries`,
+    where `_cursor_index()` falls back to 0 and paints a caret on row 0 while
+    ENTER is swallowed by `action_select`'s membership guard.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        layer_off = [_plain("a1", active=True), _plain("p1")]
+        sidebar = await _sidebar_with(pilot, app, layer_off, show_subagents=False)
+        await _focus_settled(pilot, sidebar)
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        # The attached session is NOT a catalog row — the shape that made the
+        # old blind adoption produce a dangling id.
+        sidebar.current_id = "sess-not-in-list"
+        sidebar.cursor_id = "a1"
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        sidebar.set_entries(layer_off + [_sub("s1", label="one", agent="qa")])
+        await pilot.pause()
+
+        assert sidebar.cursor_id == "s1", "the jump did not land"
+        ids = {entry.id for entry in sidebar.entries}
+        assert sidebar.cursor_id in ids, f"cursor {sidebar.cursor_id!r} is not a row in the list"
+        # The caret the user sees and `cursor_id` must be the same row — the
+        # disagreement is what made the D3 defect silent.
+        assert sidebar.entries[sidebar._cursor_index()].id == sidebar.cursor_id
+        assert sidebar.cursor_id and any(
+            entry.id == sidebar.cursor_id for entry in sidebar.entries
+        ), "action_select's membership guard would swallow ENTER"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("height", [20, 30, 40])
 async def test_a_click_lands_on_the_row_it_looks_like(height):
     """THE SILENT-DESTRUCTIVE GUARD.
