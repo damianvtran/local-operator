@@ -90,6 +90,42 @@ def read_pins(config_dir: Path) -> list[str]:
     ]
 
 
+def set_pin(config_dir: Path, session_id: str, pinned: bool) -> bool:
+    """Put ``session_id`` into the requested pin STATE and return that state.
+
+    DESIRED STATE, NOT A TOGGLE, and idempotence is the whole reason this
+    exists beside :func:`toggle_pin`: the TUI's verb is a toggle because it is
+    a keypress, while this store now backs an HTTP route whose request can be
+    retried after its response is lost. A retried toggle flips the pin back and
+    reads to the user as "the pin keeps un-pinning itself" — so the wire carries
+    the state the caller wants and this function makes the call safe to repeat.
+
+    A NO-OP WRITES NOTHING, in both directions: re-pinning a pinned session
+    returns ``True`` without touching the file, and unpinning an unpinned one
+    returns ``False`` with no write. That is what keeps a re-pin from REORDERING
+    the list — the store is newest-pin-first, so an unconditional re-pin of an
+    id already in it would silently move the user's newest-pin-first order to a
+    retry, and a flaky link would rewrite an order nobody asked to change.
+
+    Never raises, like its neighbour: its caller is a route answering a user who
+    pressed something, and a read-only config directory must cost them the pin
+    rather than the request.
+    """
+    directory = Path(config_dir)
+    current = read_pins(directory)
+    if pinned:
+        if session_id in current:
+            return True
+        entries = [session_id, *current]
+        del entries[PINS_LIMIT:]
+    else:
+        if session_id not in current:
+            return False
+        entries = [item for item in current if item != session_id]
+    _write_pins(directory, entries)
+    return pinned
+
+
 def toggle_pin(config_dir: Path, session_id: str) -> bool:
     """Pin ``session_id`` if it is not pinned, unpin it if it is.
 
@@ -97,15 +133,9 @@ def toggle_pin(config_dir: Path, session_id: str) -> bool:
     when the pin was removed. A pin re-applied to an already-pinned session is
     an unpin, which is what makes one chord both verbs.
 
-    Written to a temporary file in the SAME directory and ``os.replace``d over
-    the target, the discipline every small index here uses (``config.py``,
-    ``move_targets.py``, ``multiplexer/markers.py``): a torn read of this file
-    would silently empty a user's pins, and same-directory replace is the only
-    form that is atomic.
-
-    Never raises. This runs from a keypress the user has already been given
-    feedback for, so a read-only config directory must cost them the pin and
-    not the session.
+    Unconditional where :func:`set_pin` is not: a keypress names no desired
+    state, so an already-pinned id is the unpin the user asked for rather than a
+    no-op. A caller that knows the state it wants must use ``set_pin``.
     """
     directory = Path(config_dir)
     current = read_pins(directory)
@@ -115,6 +145,26 @@ def toggle_pin(config_dir: Path, session_id: str) -> bool:
     if pinned:
         entries.insert(0, session_id)
     del entries[PINS_LIMIT:]
+    _write_pins(directory, entries)
+    return pinned
+
+
+def _write_pins(directory: Path, entries: list[str]) -> None:
+    """Replace the pin file with ``entries``, atomically, best-effort.
+
+    THE SINGLE WRITE PATH, shared by both verbs: the cap and the atomic replace
+    have one implementation, so there is exactly one place either can be wrong.
+
+    Written to a temporary file in the SAME directory and ``os.replace``d over
+    the target, the discipline every small index here uses (``config.py``,
+    ``move_targets.py``, ``multiplexer/markers.py``): a torn read of this file
+    would silently empty a user's pins, and same-directory replace is the only
+    form that is atomic.
+
+    Never raises. Both callers answer a user who has already been given feedback
+    for their press, so a read-only config directory must cost them the pin and
+    not the action.
+    """
     try:
         directory.mkdir(parents=True, exist_ok=True)
         handle_fd, temporary = tempfile.mkstemp(dir=directory, prefix=".sidebar-pins-")
@@ -127,4 +177,3 @@ def toggle_pin(config_dir: Path, session_id: str) -> bool:
             raise
     except OSError:
         logger.debug("could not record the sidebar pin", exc_info=True)
-    return pinned

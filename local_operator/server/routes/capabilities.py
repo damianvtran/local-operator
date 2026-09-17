@@ -227,6 +227,33 @@ async def capabilities():
                 # to remove. Nothing else in the renderer is gated on it, so
                 # gating anything else here would hide a working surface.
                 "session_interrupt": 1,
+                # Durable conversation pins: the `pinned` flag on every catalogue
+                # row, and POST /v1/desktop/sessions/{id}/pin.
+                #
+                # ITS OWN KEY, not a bump of `session_catalogue`, by the rule
+                # `session_search` states above: an EXISTING surface must keep
+                # working against a backend that lacks the new one, and here that
+                # surface is the whole chats list. Bumping `session_catalogue` to
+                # 4 would hide a working catalogue behind an update it does not
+                # need, and nothing about the row's EXISTING keys changes — the
+                # flag is additive on a model that is `extra="allow"` and a
+                # renderer that ignores it behaves byte-for-byte as it does
+                # today.
+                #
+                # NOT gated on `desktop_feed` either, because the two answer
+                # different questions: the pin is durable state the renderer has
+                # to be able to READ, while the feed is only how fast it learns
+                # that someone else changed it. A backend with the route and no
+                # feed must still show pins — its ≤30 s safety poll picks them up.
+                #
+                # Absent ⇒ the renderer mounts NO affordance at all: no pin slot,
+                # no hover reveal, no handler (`session_interrupt` above is the
+                # precedent, and for the same reason). A DISABLED pin would be
+                # worse than an absent one — the row's control slot exists, so the
+                # user would read it as a feature they have not unlocked, and a
+                # permanently reserved empty slot costs every row width to
+                # advertise nothing.
+                "session_pins": 1,
             },
         },
     )

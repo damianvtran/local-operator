@@ -71,6 +71,21 @@ from local_operator.tui.move_targets import (
     validate_target,
 )
 
+# The pin store is the sidebar's OWN module, reused rather than re-implemented —
+# for the reason the `move_targets` import above cites, which is also that
+# module's stated model: it imports no Textual, so a non-Textual frontend can
+# read the pins without a terminal. A second pin format here would be two
+# surfaces disagreeing about which conversations are pinned, and the file would
+# have two writers with two sets of rules for the cap and the prune.
+# `tests/unit/test_import_graph.py` pins the absence of `textual`/`rich` on this
+# module's own import graph, so the reuse cannot quietly start costing the
+# server a terminal stack.
+#
+# ``set_pin`` is aliased only because this adapter's own method of that name is
+# the caller's entry point; the store function stays the single writer.
+from local_operator.tui.sidebar_pins import read_pins
+from local_operator.tui.sidebar_pins import set_pin as set_sidebar_pin
+
 logger = logging.getLogger(__name__)
 
 #: The page ceiling one child read may ask for, in ONE place. The route declares
@@ -2434,6 +2449,47 @@ class DesktopSessions:
 
         return await asyncio.to_thread(acknowledge)
 
+    async def set_pin(self, session_id: str, pinned: bool) -> dict[str, Any]:
+        """Put a session's pin into the state the caller asked for.
+
+        DESIRED STATE RATHER THAN A TOGGLE, which is the whole reason this takes
+        a flag: this backs an HTTP route, and a toggle is not idempotent over a
+        link that can drop a response and retry. A retried toggle flips the pin
+        BACK, which the user reports as "the pin keeps un-pinning itself" — a bug
+        in the one feature whose entire value is that the pin stays put. A retry
+        of this call lands on the same state.
+
+        VALIDATION DELIBERATELY DIFFERS FROM ``acknowledge_attention`` ABOVE,
+        which is the closest neighbour and the trap here. That method requires
+        ``is_user_session(path)``; this one must NOT, because the sidebar pins
+        DELEGATED RUNS too — `load_catalog(..., pinned_hidden_ids=...)` exists
+        precisely so a pinned delegated run stays resolvable — and a desktop pin
+        the user cannot remove is the worst shape of bug in this feature: the
+        remedy for an unwanted pin is the thing such a check would refuse. A
+        delegated run lives in `sessions/` like every other session, so the
+        id-shape check plus the is-dir check is the whole admission test.
+
+        Cold like its neighbour: no bridge, no runtime, no receipt. The write is
+        a small file replace, and a receipt would buy at-most-once for a call
+        that is already idempotent by construction.
+
+        Returns the answer the route publishes, with the STORE's verdict rather
+        than the caller's request echoed back — today they always agree, and the
+        store is the one authority that can say so.
+        """
+
+        def apply() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            if not (self.root / "sessions" / session_id).is_dir():
+                raise KeyError("Unknown session")
+            return {
+                "session_id": session_id,
+                "pinned": set_sidebar_pin(self.root, session_id, pinned),
+            }
+
+        return await asyncio.to_thread(apply)
+
     def bridged_notify_sessions(self) -> set[str]:
         """The FEED's key domain for sessions whose bridge will announce them.
 
@@ -2762,6 +2818,13 @@ class DesktopSessions:
 
         def rows() -> list[dict[str, Any]]:
             entries = load_catalog(self.root, limit=limit)[:limit]
+            # THE PINS ARE READ ONCE PER LIST, not once per row: membership is
+            # what the projection needs, and `read_pins` already applies both the
+            # store's own read-time prune (an id whose directory is gone is not a
+            # pin) and the id-shape rule, so neither is re-implemented here. One
+            # read also means every row of one page describes the same pin set,
+            # which two reads a millisecond apart would not guarantee.
+            pins = set(read_pins(self.root))
             attention: dict[str, dict[str, Any]] = {}
             # NOT ``contextlib.suppress``: the suppression was silent, so this
             # route answered ``degraded: []`` -- "everything about this page was
@@ -2798,6 +2861,11 @@ class DesktopSessions:
                             "team": stored.team or None if stored else None,
                         },
                         "preview": session_preview(self.root / "sessions" / entry.id),
+                        # ALWAYS PRESENT, BOTH VALUES. See `SessionRow.pinned`:
+                        # the renderer's merge reads an absent key as "no claim",
+                        # so a `false` here is load-bearing and omitting it would
+                        # let a stale optimistic pin outlive a successful unpin.
+                        "pinned": entry.id in pins,
                         # ``_asdict`` already carried this through as a tuple;
                         # spelled as a list here rather than left to the
                         # serializer, because JSON has one array type and a
