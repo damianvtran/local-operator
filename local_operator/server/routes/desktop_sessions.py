@@ -1070,14 +1070,28 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         stamps = engine.status_stamps() if engine is not None else None
         page = await host(request).list(limit, status_stamps=stamps)
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
-        # Concatenated on the wire rather than published as a second field, and
-        # the reason is what the client does with this array: it REPLACES the
-        # rows it is holding with it. A pinned row parked in a sibling field
-        # would be a row the client does not hold until it learns about that
-        # field, and a client that missed it renders nothing for the pin — the
-        # exact gap the extra exists to close. The two are still distinct facts
-        # on the row itself (`pinned`), which is all a client needs to section
-        # them, and `truncated`/`limit` keep describing the PAGE.
+        # DECIDED, not left open: concatenated on the wire rather than published
+        # as a second field, because of what the client does with this array — it
+        # REPLACES the rows it is holding with it. A pinned row parked in a
+        # sibling field would be a row the client does not hold until it learns
+        # about that field, and a client that missed it renders nothing for the
+        # pin, which is the exact gap the extra exists to close. A second field
+        # would also mean every consumer learns a second merge path for rows it
+        # must render identically, while `pinned` already distinguishes them.
+        #
+        # WHAT THAT COSTS, stated so the next reader does not assume the old
+        # invariant: ``len(sessions)`` MAY EXCEED ``limit``. ``limit`` and
+        # ``truncated`` continue to describe the PAGE ONLY — the extras are not
+        # page rows and do not make the page bigger.
+        #
+        # ORDER: the page first, then the extras, which is the catalogue's own
+        # ranking continued below the page — the same order the page's rows
+        # arrive in, and the same order the TUI's ``★ Pinned`` section draws. It
+        # is deliberately NOT pin recency: the store holds that (newest pin
+        # first) and it is one of the few orderings the two surfaces could
+        # disagree about, so ordering the extras by it would put a second
+        # ordering authority inside one section and make the app's Pinned list
+        # read as catalogue order followed by pin order.
         sessions = page.rows + page.pinned_off_page
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
@@ -1085,7 +1099,8 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         # listing-level statement is derivable, and a second channel through
         # `list()` would be one more thing a caller can forget to pass. Sorted
         # so the set is stable across polls, and computed over what is actually
-        # sent — a degraded row beyond the page says nothing about this answer.
+        # sent — a row the page does not carry AND this answer does not send says
+        # nothing about it. (The extras below ARE sent, so they are included.)
         #
         # The stamps and this marker are INDEPENDENT facts about the same rows
         # and neither may displace the other: a stamp answers "is this row newer

@@ -667,13 +667,22 @@ async def test_the_extras_come_after_the_page_in_the_store_s_own_order(pins_api)
     page = await _page_ids(client, 2)
     off_page = [session_id for session_id in full if session_id not in page]
     assert len(off_page) >= 2
-    # Pinned newest-first on purpose, so a pin-recency sort would REVERSE these.
-    toggle_pin(root, off_page[-1])
+    # PINNED IN THE ORDER THAT MAKES THE TWO ORDERINGS DISAGREE. `read_pins` is
+    # newest-first, so setting `off_page[-2]` first and `off_page[-1]` second
+    # leaves the store holding [off_page[-1], off_page[-2]] while the ranking
+    # holds [off_page[-2], off_page[-1]]. An earlier revision pinned them the
+    # other way round, which made pin order and rank order identical and left
+    # this test passing for either implementation — asserted below rather than
+    # left to a comment, so a future fixture change cannot quietly make it
+    # vacuous again.
     toggle_pin(root, off_page[-2])
+    toggle_pin(root, off_page[-1])
+    assert read_pins(root) == [off_page[-1], off_page[-2]], "the fixture must discriminate"
 
     rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))
 
     assert [row["id"] for row in rows[2:]] == [off_page[-2], off_page[-1]]
+    assert [row["id"] for row in rows[2:]] != read_pins(root), "a pin-recency sort must be visible"
 
 
 @pytest.mark.asyncio
