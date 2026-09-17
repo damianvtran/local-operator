@@ -244,7 +244,12 @@ class FakePool:
         self.bridge = FakeBridge(remote)
 
     @contextlib.asynccontextmanager
-    async def session(self, session_id: str):
+    async def session(self, session_id: str, *, read: bool = False):
+        # Accepted and ignored for the same reason ``FakePool`` in the variables
+        # tests accepts it: the double stands in for the route's only door, and a
+        # door that rejects the READ envelope would fail a route for a reason
+        # unrelated to what it does.
+        del read
         if session_id != SESSION:
             raise KeyError("Unknown session")
         yield self.bridge

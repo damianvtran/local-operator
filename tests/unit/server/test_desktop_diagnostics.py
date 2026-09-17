@@ -25,7 +25,13 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from local_operator.analytics.store import AnalyticsStore
+from local_operator.analytics.backfill import backfill_analytics_session_daily
+from local_operator.analytics.store import (
+    AnalyticsStore,
+    _day_shift,
+    _local_day_bounds_ms,
+    _local_day_month,
+)
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.server.routes import capabilities, desktop_catalogues
@@ -321,6 +327,63 @@ async def test_analytics_names_are_absent_rather_than_empty(desktop, tmp_path):
         "session_names",
         "session_parents",
     }
+
+
+@pytest.mark.asyncio
+async def test_analytics_payload_is_byte_identical_from_the_rollup(desktop, tmp_path):
+    """The panel must not be able to tell which read path answered it.
+
+    BYTE-for-byte over HTTP, not merely structurally: the renderer consumes the
+    serialised body, and ``by_session`` is a multi-MB map whose ORDER alone would
+    change the bytes while every number still agreed. This is also the only test
+    that runs the real route against a store whose rollup has been swept, so it
+    is what pins "the desktop path uses the fast path at all".
+    """
+    client, _ = desktop
+    today = _local_day_month(int(time.time() * 1000))[0]
+    yesterday = _local_day_bounds_ms(_day_shift(today, -1))[0]
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    base = replace(_snap(session_id=PARENT), request_id="r1", ts_ms=yesterday + 3_600_000)
+    assert (
+        store.record_batch(
+            [
+                base,
+                replace(
+                    base,
+                    session_id=CHILD,
+                    parent_session_id=PARENT,
+                    request_id="r2",
+                    provider="openai",
+                    ts_ms=yesterday + 7_200_000,
+                ),
+                # A call in TODAY's bucket too, so the sweep has two days to
+                # derive and the window crosses a day boundary the way the
+                # panel's does.
+                replace(base, request_id="r3", ts_ms=int(time.time() * 1000)),
+            ]
+        )
+        == 3
+    )
+    store.upsert_session_name(PARENT, "Named parent")
+    store.close()
+
+    params = {
+        "since_ms": _local_day_bounds_ms(_day_shift(today, -6))[0],
+        "until_ms": _local_day_bounds_ms(_day_shift(today, 1))[0],
+        "days": 7,
+    }
+    # Before the sweep: the gate has no coverage, so this is the ledger's answer.
+    ledger_response = await client.get("/v1/desktop/analytics", params=params)
+    assert ledger_response.status_code == 200, ledger_response.text
+
+    assert backfill_analytics_session_daily(tmp_path) >= 1
+
+    rollup_response = await client.get("/v1/desktop/analytics", params=params)
+    assert rollup_response.status_code == 200, rollup_response.text
+    assert rollup_response.text == ledger_response.text
+    data = json.loads(rollup_response.text)["result"]["data"]
+    assert data["session_parents"] == {CHILD: PARENT}
+    assert data["session_names"] == {PARENT: "Named parent"}
 
 
 @pytest.mark.asyncio

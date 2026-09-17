@@ -34,12 +34,13 @@ class CommandMetadata(BaseModel):
     #: so a response produced before this field existed still validates — the
     #: renderer ignores the key or falls back to its own derivation.
     prefixes_text: bool = False
-    #: The SHAPE the trailing text must have for the desktop to use it as this
+    #: The SHAPE the trailing text must have for the desktop to OWN it as this
     #: command's argument — ``none`` (no source at all: the booleans below are
     #: false and no shape applies), ``word`` (one selector token), ``provider``
     #: (one token naming a provider), ``subcommand`` (``<sub> [name]``, the MCP
-    #: shape) or ``any`` (the command owns its text, whatever it says). See
-    #: ``ArgumentShape``.
+    #: shape) or ``any`` (the command owns its text, whatever it says — a handler
+    #: or form field takes it, or the route REFUSES it because another surface owns
+    #: it, as ``/credential``'s masked-form sentence does). See ``ArgumentShape``.
     #:
     #: PRECEDENCE, published so a consumer may read this field alone OR OR it with
     #: the two booleans and be right either way: ``consumes_prompt`` and
@@ -311,10 +312,17 @@ async def info():
     No parameters, because ``/info`` has exactly one answer per host — the same
     reason the slash command takes no argument at all.
 
-    ``collect_snapshot`` BLOCKS (the macOS session probe measured ~880 ms,
-    because it shells ``top -l1`` for the whole system), so it runs on a worker
-    thread through ``asyncio.to_thread`` exactly as ``/analytics`` does; on the
-    loop it would stall every other request for the duration.
+    ``collect_snapshot`` BLOCKS — a first call in a cold process pays the
+    ``/info`` import graph and the metadata scans (module imports plus the agent
+    and config reads; the macOS session probe's whole-system ``top -l1`` dump is
+    no longer among them) — so it runs on a worker thread through
+    ``asyncio.to_thread`` exactly as ``/analytics`` does; on the loop it would
+    stall every other request for the duration. Measured over a real daemon on a
+    loopback socket: first request after boot 907 ms, median 171 ms, in
+    ``bench/info-snapshot-after.json`` — captured at 35x this 14-CPU box's CPU
+    count, the worst regime any figure in this file was taken in. An independent
+    QA pass on the same head, at load ~220, measured 149 ms first and 42 ms
+    median.
 
     ``LiveState()`` is deliberately EMPTY — no session is attached and the
     session bridge is not touched. The live half of the snapshot (the subagent
@@ -412,7 +420,11 @@ async def skills(
     from local_operator.skills import default_skill_roots, discover_skills
     from local_operator.skills.api import resolve_skill_url
 
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: every row here comes from the session's cwd on DISK (the roots are
+    # discovered locally and resolved by the in-process resolver), so a silent
+    # owner must not 503 a GET whose answer does not depend on one. The cwd comes
+    # from the facade, which serves it from the durable checkpoint when cold.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         cwd = bridge.remote.frontend_state.cwd
         discovered, warnings = await asyncio.to_thread(
@@ -441,7 +453,11 @@ async def skills(
 
 @router.get("/v1/desktop/sessions/{session_id}/failovers", response_model=CRUDResponse[Report])
 async def failovers(session_id: str, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: the selected/effective pair is a canonical FACADE field, and a cold
+    # facade holds it from the durable checkpoint; the chains are read from the
+    # local config store. Nothing here needs an owner to answer, so a silent one
+    # must not refuse the failover chips.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         state = bridge.remote.frontend_state
         from local_operator.settings_io import read_chains
@@ -473,7 +489,11 @@ async def entities(
     spec = slash_command_for("/" + command.removeprefix("/"))
     if spec is None:
         raise HTTPException(422, "Unknown command")
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: the rows are the local registries and catalogs, the current value is a
+    # canonical facade field, and the profile registries are resolved from config
+    # (with their own 503 when even those are unavailable — a durable verdict, not
+    # an owner-shaped one). A silent owner must not refuse the pickers.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         remote = bridge.remote
         assert remote is not None
         assert bridge.remote is not None

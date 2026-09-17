@@ -94,6 +94,26 @@ class MCPStdioServerConfig(BaseModel):
         alias="disabledTools",
         description=("MCP tool names/patterns to deny; wins over enabledTools."),
     )
+    #: Put every tool this server exposes into the model's tool list up front
+    #: instead of leaving them to be discovered through ``read mcp://``.
+    #:
+    #: DEFAULT OFF, and that default is the whole safety of the flag. MCP tools
+    #: are lazy on purpose (see ``resources.py``): a server's schemas are a
+    #: permanent per-request context tax, and most servers are situational. A
+    #: caller opts in only when its workflow names the tools it needs, because
+    #: a tool the model cannot see is a tool the model does not use — the
+    #: problem this exists to solve. Pair it with ``enabled_tools`` when the
+    #: server publishes more than the workflow needs; the two compose, and the
+    #: allowlist is applied by the manager BEFORE anything is activated, so a
+    #: preloaded server can never expose a tool the allowlist excludes.
+    preload_tools: bool = Field(
+        default=False,
+        alias="preloadTools",
+        description=(
+            "Expose this server's tools in the model's tool list without a discovery read. "
+            "Default false (lazy); opt in only when the run's workflow names its tools."
+        ),
+    )
     timeout: float | None = None  # milliseconds; 0 disables client-side timeout
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -121,6 +141,10 @@ class MCPHttpServerConfig(BaseModel):
         alias="disabledTools",
         description=("MCP tool names/patterns to deny; wins over enabledTools."),
     )
+    #: See ``MCPStdioServerConfig.preload_tools``: default off, opt in when the
+    #: workflow names its tools, and ``enabled_tools`` still gates what is
+    #: exposed.
+    preload_tools: bool = Field(default=False, alias="preloadTools")
     timeout: float | None = None
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -149,6 +173,10 @@ class MCPSseServerConfig(BaseModel):
         alias="disabledTools",
         description=("MCP tool names/patterns to deny; wins over enabledTools."),
     )
+    #: See ``MCPStdioServerConfig.preload_tools``: default off, opt in when the
+    #: workflow names its tools, and ``enabled_tools`` still gates what is
+    #: exposed.
+    preload_tools: bool = Field(default=False, alias="preloadTools")
     timeout: float | None = None
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -171,10 +199,43 @@ def _coerce_server_config(raw: JsonValue) -> MCPServerConfig | None:
     ``command`` implies stdio, ``url`` implies http. Malformed entries return
     ``None`` (validation reports them separately via
     :func:`validate_server_config`).
+
+    A Codex-imported server keeps its configured per-tool-call budget. Codex
+    spells it ``tool_timeout_sec`` (SECONDS) where local-operator spells it
+    ``timeout`` (MILLISECONDS), so without this translation ``tomllib`` parses
+    the value into the model's ``extra`` bucket and it is dropped: a user who set
+    ``tool_timeout_sec = 300`` in ``~/.codex/config.toml`` and runs the same
+    server here silently got the default instead, which is the same
+    silent-drop shape as a server that fails to import at all (issue #367's
+    sibling).
+
+    An explicitly-set ``timeout`` always wins: it is this tool's own unit and
+    therefore the more specific statement of intent, and the established
+    precedence (env > ``config.timeout`` > default) is unchanged. A value that
+    is not a usable number is left alone rather than guessed at -- the existing
+    default still applies, and a foreign config we do not own must never be able
+    to break discovery.
+
+    NON-POSITIVE FOREIGN VALUES ARE REJECTED, and that asymmetry is deliberate.
+    A ``timeout`` of ``0`` means "no client-side bound" in this tool's own
+    vocabulary, so honouring a foreign ``tool_timeout_sec = 0`` would let
+    ``~/.codex/config.toml`` silently remove the bound on a server -- the
+    opposite of what a small, sane default is for, and a value we translate
+    cannot carry a meaning we never agreed to. Codex's own schemas give a timeout
+    no such "off" meaning, so the only readings available for ``0``/negative
+    here are "unset" or "someone's arithmetic", and neither should disable a
+    guard. Our own ``timeout = 0`` keeps meaning off, unchanged.
     """
     if not isinstance(raw, dict):
         return None
     data = dict(raw)
+    if "timeout" not in data and "tool_timeout_sec" in data:
+        seconds = data.get("tool_timeout_sec")
+        # ``bool`` is rejected explicitly: it is an ``int`` subclass, so ``True``
+        # would otherwise become a 1 s budget -- the tightest possible -- on a
+        # quiet typo.
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds > 0:
+            data["timeout"] = float(seconds) * 1000.0
     transport = data.get("type")
     if transport not in ("stdio", "http", "sse"):
         if data.get("command"):

@@ -74,6 +74,28 @@ function slashQuery(text: string): string | null {
 	return (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
 }
 
+/**
+ * What a tap on a command row does: run it now, or wait for the text it takes.
+ *
+ * The catalogue's `arguments` field means "does a space open a value list", and
+ * that is exactly the question here: a command with an argument surface needs
+ * the user's text before it can mean anything, so the tap FILLS the composer and
+ * stops; a command with none runs on the tap.
+ *
+ * Named and exported rather than left inline because the answer changed for two
+ * commands without this file being touched: the backend moved `/goal` and
+ * `/loop` from `none` to `optional` when their flag rows landed, so tapping
+ * either now inserts `/goal ` / `/loop ` and waits where it used to run the bare
+ * word. That is the same treatment `/rename`, `/theme`, `/stop`, `/mcp` and
+ * `/approvals` already get — and for `/loop` it is the safer one, since the bare
+ * word used to start iterations — but a shipped surface changing under a remote
+ * field is exactly the kind of thing that should be pinned by a test, which is
+ * what `composer-slash-tap.test.ts` does.
+ */
+export function tapFillsOnly(argumentsField: SlashCommand["arguments"]): boolean {
+	return argumentsField !== "none";
+}
+
 function SlashSheet({
 	open,
 	onClose,
@@ -134,10 +156,12 @@ function SlashSheet({
 						key={c.name}
 						type="button"
 						onClick={() => {
-							if (c.arguments === "none") {
-								onPick(`/${c.name}`, true);
-							} else {
+							/* Fill and wait when the command takes an argument; run it
+							   outright when it takes none. See `tapFillsOnly`. */
+							if (tapFillsOnly(c.arguments)) {
 								onPick(`/${c.name} `, false);
+							} else {
+								onPick(`/${c.name}`, true);
 							}
 							onClose();
 						}}

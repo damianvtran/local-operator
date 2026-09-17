@@ -9,8 +9,44 @@ each round see `docs/VERIFICATION.md`.
 
 ```sh
 cd ~/local-operator
-.venv/bin/python -m pytest tests/unit -q          # ~2700 tests, ~3.5 min
+ISO=$(mktemp -d)   # every block in this file makes its own; see the note below
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
+  PATH="$PATH" TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is minutes
 ```
+
+**Every pytest invocation in this file is isolated, and that is not decoration.**
+Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
+the shell that created it: a block that borrows another's expands to an *empty*
+`HOME`, and Python 3.14 treats an empty `HOME` as `/` rather than as unset, so
+the isolated roots land on `/.local-operator*` — a confusing `OSError` at best,
+and a real root-level store on a host where `/` is writable. Copy one block, not
+half of two.
+
+The suite constructs real `ConfigManager`s, so a run without a redirected `HOME`
+reads the operator's live `~/.local-operator/config.yml`, and the home-derived
+roots beside it (cache, agent home) follow that same home. *Writing* to it is the
+part that has done damage — a run in September 2026 collapsed an operator's
+`subagents.models` tiers to `{}`, which disabled a model tier and killed the
+background jobs that depended on it — and that write path is now closed
+(`tests/unit/test_config.py::test_the_migration_has_exactly_one_caller_and_marking_has_two`
+pins its only caller), but the read path is not, and the next write path nobody
+has thought of starts from the same read. `LOCAL_OPERATOR_CONFIG_DIR` alone
+does not cover this: the override relocates the config dir, and the logs that
+deliberately follow it, but not the cache or the agent home, which derive from
+the home directory independently — see
+[Isolating a run](#isolating-a-run-local_operator_config_dir-alone-is-not-enough)
+for why, and for the `CMUX_*`/`LOP_*` variables `env -i` also strips.
+
+The `REAL CONFIG CHANGED DURING THIS TEST RUN` guard is a **post-mortem, not a
+seatbelt**: it runs in `pytest_sessionfinish`, after the write. If you see it in
+a log, the damage is done — restore the config from a backup and treat every
+number that run produced as void. It is also armed only on the runs that need
+it: it resolves the store from `LOCAL_OPERATOR_CONFIG_DIR`/`HOME`, so the fresh
+`$ISO/.local-operator/sessions` above does not exist and it stands down — the
+snapshot is never taken and its `shutil`/`pathlib` destructive-op wraps are
+never installed. The runs it covers are the un-isolated ones, which is exactly
+the case it exists for.
 
 **The suite caps its own parallelism.** `addopts` asks for `-n auto`, but the
 root `conftest.py` implements xdist's `pytest_xdist_auto_num_workers` hook and
@@ -102,9 +138,17 @@ its own. Any probe failure degrades to the CPU-only cap; the hook never raises.
 Override it per session, or bypass it entirely:
 
 ```sh
-PYTEST_XDIST_AUTO_NUM_WORKERS=12 .venv/bin/python -m pytest tests/unit -q  # honoured unclamped
-.venv/bin/python -m pytest tests/unit -n 12 -q   # explicit -n bypasses the hook
-.venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
+ISO=$(mktemp -d)
+# The isolation prefix is the one from ## Environment; only the worker control differs.
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color PYTEST_XDIST_AUTO_NUM_WORKERS=12 \
+  .venv/bin/python -m pytest tests/unit -q         # honoured unclamped
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -n 12 -q   # explicit -n bypasses the hook
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
 ```
 
 **CI keeps every core.** The CPU share is skipped when `CI` is set: a hosted
@@ -149,7 +193,9 @@ TUI tests need a colour-capable terminal, so run them with the environment the
 suite expects:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
 ```
 
 **A local failure CI does not have is usually your shell, and the fix belongs
@@ -163,7 +209,9 @@ that is green on CI. Confirm the diagnosis by unsetting the variable for one
 run:
 
 ```sh
-env -u AWS_DEFAULT_PROFILE .venv/bin/python -m pytest tests/unit/evaluation -q
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  .venv/bin/python -m pytest tests/unit/evaluation -q   # -i also drops AWS_DEFAULT_PROFILE
 ```
 
 Then add the missing name to the fixture's scrub list. Do **not** leave it as a
@@ -177,7 +225,9 @@ boot, a real turn through a real tool, and `/resume` — and it is **deselected
 from the default run** (`-m "not e2e"` in `addopts`). Run it explicitly:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
 ```
 
 It exists because the whole unit suite was green while the TUI was completely
@@ -1886,7 +1936,9 @@ watch it fail:
 
 ```sh
 # put the synchronous call back on the loop, or delete the to_thread
-.venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  .venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
 # expect a failure with a message that names the real cause, then revert
 ```
 
@@ -2210,6 +2262,129 @@ user.** §9 of the design is explicit and the guide repeats it: it defeats the
 running as the operator that is willing to run `lop` can still read every
 secret. A comment or a docstring that promises more than that is wrong.
 
+## The QwenCloud console ticket (`lop qwencloud-ticket`)
+
+Full agent-facing guidance — advising a USER who wants the personal Token Plan
+window in `/usage`, including capturing the cookie — is `guide://qwencloud`
+(packaged at `local_operator/guides/qwencloud/GUIDE.md`). This section is what
+someone CHANGING this code needs to know, and it is the half that does not
+ship: `AGENTS.md` is absent from `pyproject.toml`'s `package-data`, which is
+why the guide carries the user-facing workflow rather than this file.
+
+**What it is.** `login_qwencloud_ticket`, the QwenCloud console's browser
+session cookie. Not a scoped API key — it is a FULL-ACCOUNT console session,
+the broadest credential in `auth.db`.
+
+**Why it exists at all.** The personal Token Plan window is invisible to the
+BSS gateway the official CLI calls: for a live account that gateway answers
+`IsGray: true` with an empty seat summary and zero instances on every
+commodity. The console gateway the web UI itself calls does report the window,
+and it authenticates on exactly one thing — this cookie. No login flow can mint
+it, because a browser session cookie cannot be refreshed headlessly.
+
+**Storing it.** Stdin only, never argv — a command line is readable by any
+process running as you and lands in shell history:
+
+```sh
+printf %s '<TICKET>' | lop qwencloud-ticket set
+lop qwencloud-ticket status   # presence, length and age; never the value
+lop qwencloud-ticket rm
+```
+
+There is deliberately no `get` verb. The one consumer is inside the process.
+
+**The row is namespaced, not registered.** It is stored under provider id
+`qwencloud-console`, which is deliberately absent from `PROVIDER_REGISTRY` —
+the same trick `mcp-oauth` uses. A row under `alibaba-token-plan` would satisfy
+`ProviderController.has_any_credential` (it matches the provider column with no
+type or field filter) and local-operator would conclude it can run CHAT traffic
+on a read-only console cookie. The value is stored under `data["ticket"]` and
+never `data["key"]`, because the API-key cascade reads `key` and would hand a
+full-account browser cookie to DashScope as an inference bearer.
+
+**The symptom when it expires.** `/usage` simply stops showing the 7 Day
+Credits window for alibaba-token-plan — no error, no "sign-in expired" note,
+because this is not an OAuth row and cannot set `credential_invalid`. An
+expired ticket also returns HTTP **200**, carrying
+`data.errorCode == "BailianGateway.Login.NotLogined"`. The fix is one line:
+capture a fresh cookie and re-run `set`.
+
+**The ticket AUGMENTS a Token Plan credential — it does not replace one.**
+This is the precondition that actually gates the feature, and it is invisible
+unless you know to look. `/usage` only fetches a provider `can_report_usage`
+accepts, which requires `is_usable` — and the ticket deliberately cannot
+satisfy that, because a row that did would be the exact blast radius the
+separate namespace exists to prevent. So with a valid ticket and NO
+`alibaba-token-plan` credential row, `/usage` renders nothing at all: no
+window, no error, no block.
+
+The way you get there is ordinary: `lop logout alibaba-token-plan` removes the
+credential row while leaving the ticket in place. `lop qwencloud-ticket status`
+warns when no such row exists, and that warning is the only signal — do not
+change `is_usable`, `has_any_credential` or `can_report_usage` to "fix" it.
+
+**Cache lag.** The stored ticket is deliberately not part of the usage cache
+fingerprint — hashing a full-account session cookie into a cache key is the
+worse trade. The consequence is that a ticket swap changes NOTHING the cache
+key observes (measured: byte-identical keys across two different tickets), so
+`set` and `rm` call `_invalidate_cached_usage` explicitly, exactly as `lop
+login` and `lop logout` do for the credentials they change. Without that call a
+latched `usage unavailable` row was served for up to ~12.5 minutes
+(`USAGE_UNAVAILABLE_RETRY_MS` 10 min, ±25% jitter) after the user had already
+pasted a working cookie. Press `r` in the panel to force a refresh regardless.
+
+**The value is validated at the door.** `set` rejects a ticket containing an
+embedded newline, any other control character, or a non-latin-1 character, and
+bounds the length at 4096 (the live cookie is 172 chars). This is not
+fastidiousness: the value's only use is interpolation into a `cookie:` header,
+httpx rejects such values LOCALLY, and the console fetcher swallows that as
+`httpx.HTTPError` — so the panel showed its generic empty-result row ("no
+usage — no quota endpoint, or no credential for one"), naming a missing
+credential, with nothing linking it back to the paste. Copying the cookie out of
+devtools is the documented workflow and the cookie expires roughly weekly, so a
+multi-line paste is a recurring certainty rather than a corner case.
+
+**The update hazard.** `lop /update` or `uv tool upgrade` reinstalls from PyPI
+and silently reverts a locally built console fetcher while leaving the row in
+place: nothing reads it, and the credential still looks healthy.
+`lop qwencloud-ticket status` reports that state explicitly.
+
+**Revocation must be provable, not assumed — and `rm` is not a full revoke.**
+`rm` re-reads the store to confirm the row is gone from the API's view, and
+exits **non-zero** saying the ticket may still be stored if it cannot prove
+otherwise — a locked or corrupt store is an ordinary outcome with
+`busy_timeout` at 5s on a busy machine. "Cannot read the store" and "nothing is
+stored" are deliberately different answers (`TicketStoreUnreadable`):
+collapsing them made `rm` report success with exit 0 while the plaintext
+full-account cookie was still on disk, telling the user it had worked. `status`
+reports UNKNOWN for the same reason, and both read with
+`include_disabled=True` so a soft-deleted row cannot hide a cookie that is
+still present.
+
+Be precise about what that confirmation is worth, because it is easy to
+overclaim. Two things `rm` does NOT guarantee, both verified:
+
+- **The plaintext can outlive the row.** After a successful `rm`, `strings
+  auth.db` still returns the deleted row including the ticket; a `VACUUM`
+  clears it. That is ordinary SQLite freelist behaviour from
+  `delete_credential`, not specific to this credential — but it means `rm` is
+  not a secure erase.
+- **The session stays valid server-side.** Deleting the local row ends local
+  use and nothing more. The cookie remains a live browser session until it is
+  signed out in the QwenCloud console.
+
+So `rm` is not a substitute for revoking the session in the console, and it
+says so on the SUCCESS path rather than only when it fails — success is the
+moment a user worried about exposure stops looking.
+
+**Residual risk, stated plainly.** `~/.local-operator/auth.db` is plaintext
+SQLite with no OS keychain, protected only by its 0600 mode, and this cookie is
+broader than every other row in it. `set` refuses to write when the store's
+directory is wider than 0700, and `status` flags a ticket older than about a
+week. Note that `AuthStore._connect` re-chmods the db file to 0600 on every
+open, so the file-mode branch of that check is a backstop for a store opened
+some other way, not something the CLI path can normally hit.
+
 ## Usage analytics (`local_operator/analytics/`)
 
 Every provider call across every session contributes to one shared, on-disk
@@ -2304,6 +2479,46 @@ Things that will bite you if you forget them:
   `idx_calls_parent` over a 475k-row ledger is a ~660 ms stall on the first open
   after upgrade (on the recorder's background thread) and ~4.9 MB of growth.
 
+- **`aggregate()` reads a maintained day rollup, behind a fail-closed gate.**
+  `session_daily` is a per-`(local day, session, provider)` accumulate-upsert
+  written in the SAME transaction as the ledger row (`record_batch`) — the
+  `usage_daily` mechanism at a second grain, so there is still one write path
+  and no separate hook to double-count against. `AnalyticsStore.aggregate()`
+  serves from it ONLY when the gate can prove the same numbers (day-aligned
+  bounds, coverage down to the window's first day, the same bucketing zone, a
+  rollup as new as the ledger's newest row, and a ledger bottom the prune has
+  not cut inside), and otherwise runs the original three ledger scans
+  unchanged, naming the refusal in a `debug` log. Measured on the operator's
+  342.8 MB ledger (1 155 845 calls), p50, both arms measured in one session at
+  load ~215-280: the panel's 30-day window goes from 4 868 ms wall / 3 179 ms CPU
+  to 187 ms / 166 ms CPU — `scripts/bench_panel_latency.py`, `bench/analytics-rollup-*.json`, and THOSE
+  committed numbers are the canonical ones. Wall is not portable between hosts,
+  and neither is CPU to the same degree: the same fast path cost 121 ms of CPU at
+  load 38 and 166 ms at load 237 on this box, so quote the pair with its load and
+  never one arm alone. Three properties matter more than the mechanism:
+  - the gate FAILS CLOSED (a wrong fast-path number is far worse than a slow
+    one; `store.last_aggregate_source` says which path ran and every refusal
+    reason has a test, including the two that guard the day arithmetic and an
+    unreadable schema);
+  - the equivalence is STRUCTURAL (`_assemble_aggregate` builds the result for
+    both paths, so only the table differs);
+  - the gate's two recoverable refusals are RECOVERED FROM, not lived with. A
+    zone change (`TZ=`, travel) re-labels every day the ledger can still answer
+    and publishes the new zone only when that whole span is done; a stale
+    pre-rollup writer's rows land only on days from the previous pass's top
+    onward (`last_sweep_day`), so the pass re-derives from there. Neither is a
+    latch: treating `zone-changed` as permanent was a defect (it cost the
+    feature silently, forever), and a fixed newest-three healing window left a
+    mid-window hole served as exact.
+  The sweep that fills an existing ledger is `backfill_analytics_session_daily`,
+  on the store-maintenance thread, newest-first in bounded per-day transactions;
+  until it reaches a day, reads touching it stay on the ledger, so an upgrade
+  can cost latency but never a number. **The rollup keeps the SAME window as the
+  ledger** (`retention_days`, 90) and does not outlive it: a day the ledger has
+  dropped cannot be served, because the rollup's copy of it is whole while the
+  ledger holds only the pruned remainder. Raising that reach is the deferred
+  change that would serve all-time from the rollup — it needs the clamp relaxed
+  and the panel's window labelled.
 - **Session parentage has exactly ONE rule: `store._PARENT_EDGE_SQL`.** Both
   the `/analytics` per-session rollup and the `/session` subtree walk resolve a
   session's parent through that constant. They used to derive it separately —

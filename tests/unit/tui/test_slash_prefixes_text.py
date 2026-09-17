@@ -19,8 +19,10 @@ THREE tables, one per source of "text after this word is the command's argument"
   free-text prompt, or a value chosen from a list). This is the pair of booleans
   the composer derives ``consumesText`` from.
 * ``ARGUMENT_SHAPE_POLICY`` — the desktop VALIDATES or FORWARDS the text without
-  either a prompt or a list: a provider id, an MCP subcommand, a selector, a
-  path, a title. Adding only the first two was this PR's round-1 MAJOR: 17
+  either a prompt or a list (a provider id, an MCP subcommand, a selector, a
+  path, a title), or REFUSES it because another surface owns it (``/credential``,
+  whose typed text the command route answers with the masked-form sentence).
+  Adding only the first two was this PR's round-1 MAJOR: 17
   whole-draft controls the desktop runs (``/mcp logout``, ``/login openai``,
   ``/rename x``, ``/usage on`` …) were accepted as messages, so a client whose
   command surface is off would have spent a paid turn on each.
@@ -36,7 +38,7 @@ command, which is the exact refusal this change removes.
 from __future__ import annotations
 
 from local_operator.slash_commands import SLASH_COMMANDS
-from local_operator.tui.autocomplete import ArgumentShape
+from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape
 
 #: The composer's inline-completable vocabulary, one row per registry entry.
 #:
@@ -128,15 +130,17 @@ PREFIXES_TEXT_POLICY = {
 }
 
 
-#: The THIRD source: the shape trailing text must have for the desktop to use it
+#: The THIRD source: the shape trailing text must have for the desktop to OWN it
 #: as this command's argument, where neither a prompt nor an inline list applies.
 #:
 #: The rule these entries encode: text after the word is the command's argument
 #: when the desktop's own path USES it — a handler that reads it, a form field it
-#: pre-fills, a selection/filter it forwards. A sentence is never one of those, so
-#: `/usage on` (a view selector) is the command while `/usage more prose` is a
-#: message, and `/mcp logout` is the command while `/mcp logout seems to cause a
-#: crash` is a message.
+#: pre-fills, a selection/filter it forwards — OR REFUSES it because another
+#: surface owns it (`/credential` below: the route answers typed text with the
+#: masked-form sentence, so the text is not prose either). A sentence is never one
+#: of those, so `/usage on` (a view selector) is the command while `/usage more
+#: prose` is a message, and `/mcp logout` is the command while `/mcp logout seems
+#: to cause a crash` is a message.
 ARGUMENT_SHAPE_POLICY = {
     # --- shapes: text the desktop validates or forwards -----------------------
     # ONE selector token, forwarded as the picker's `selected`/`selection`/
@@ -194,10 +198,7 @@ ARGUMENT_SHAPE_POLICY = {
     # whose handler does not read its text does not own it, so a sentence here is
     # a message — which is what the composer now plans for it too.
     "compact": ArgumentShape.NONE,
-    # The route refuses typed text outright: the secret is entered in the masked
-    # form, so no text is ever this command's argument.
-    "credential": ArgumentShape.NONE,
-    # --- ANY: the rows the two booleans already carry -------------------------
+    # --- ANY: text the command owns -------------------------------------------
     # `consumes_prompt` says the text is a prompt; `prefixes_text` says it is a
     # value from a list. Both decide FIRST, and these rows say `ANY` here rather
     # than inheriting `none` — the command owns its trailing text whatever it
@@ -216,6 +217,14 @@ ARGUMENT_SHAPE_POLICY = {
     "effort": ArgumentShape.ANY,
     "approvals": ArgumentShape.ANY,
     "theme": ArgumentShape.ANY,
+    # ...and ONE row neither boolean carries, because the text it owns is REFUSED
+    # rather than consumed. The command route answers typed text with "Enter
+    # credentials in the masked credential form, not command text", so the text
+    # belongs to that form and must never be planned as prose: a consumer reading
+    # NONE plans a whole draft as a message, which is how `/credential <secret>`
+    # reached the model as a paid turn. ANY rather than WORD because a secret is
+    # arbitrary text — `/credential my pass phrase` must not be admitted either.
+    "credential": ArgumentShape.ANY,
 }
 
 
@@ -295,7 +304,9 @@ def test_the_boolean_carried_rows_declare_any_not_none() -> None:
     # No ``boolean_carried == declared`` line here: the second set was the first one
     # written a different way, so the assert could not fail and proved nothing
     # (round 3's NIT). The set that carries the claim is the one below, checked
-    # against the shapes actually published.
+    # against the shapes actually published. The CONVERSE is not claimed —
+    # `/credential` publishes `any` with both booleans false, because its text is
+    # refused rather than consumed (the policy table's last entry).
     shapes = {command.name: command.argument_shape for command in SLASH_COMMANDS}
     assert {name for name in boolean_carried if shapes[name] is not ArgumentShape.ANY} == set()
 
@@ -312,5 +323,31 @@ def test_none_is_reserved_for_rows_neither_boolean_carries() -> None:
         for command in SLASH_COMMANDS
         if command.argument_shape is ArgumentShape.NONE
         and (command.consumes_prompt or command.prefixes_text)
+    ]
+    assert offenders == []
+
+
+def test_a_row_that_offers_a_value_list_never_publishes_none() -> None:
+    """The SECOND contradiction `none` can carry, and the one that leaked.
+
+    `ArgumentMode` and the shape are two independent facts about the same text,
+    and this is the invariant between them: a row whose `arguments` offers a
+    value list says a space here opens a list, so the command takes text and the
+    shape must name where that text GOES. Publishing `none` beside it says the
+    text is prose instead, which is what the messages endpoint's admission rule
+    read for `/credential`: a whole-draft `/credential <secret>` was admitted as a
+    MESSAGE while the command route refused the identical text with its masked-
+    form sentence, so a client planning prose from this field posted a raw
+    credential to the model.
+
+    Registry-wide rather than per-row because it is the cheaper pin for every
+    FUTURE row: `none` and a value list are mutually exclusive claims, and a new
+    command that makes both is wrong whatever its handler does.
+    """
+    offenders = [
+        command.name
+        for command in SLASH_COMMANDS
+        if command.argument_shape is ArgumentShape.NONE
+        and command.arguments is not ArgumentMode.NONE
     ]
     assert offenders == []

@@ -196,6 +196,37 @@ async def test_install_specialist_name_collision_is_actionable_conflict(api):
     ] == "Keep my instructions."
 
 
+async def test_install_reports_whether_it_wrote_or_found_the_profile(api):
+    """One field, and the install-all shortcut cannot be written without it.
+
+    ``install_seed`` knows whether it wrote a row or found one, and the route
+    used to throw that away, so a loop over the built-ins could not report
+    "6 installed, 2 already present" honestly (contract §5.6). The read routes
+    deliberately do NOT carry the field: a GET is not an install, and a client
+    that saw it there would eventually read it as meaning something.
+    """
+
+    client, _ = api
+    first = await client.post("/v1/desktop/profiles/install", json=mutation(name="reviewer"))
+    assert first.status_code == 200, first.text
+    assert first.json()["result"]["already_installed"] is False
+
+    # The second call is the idempotent branch: the SAME row, untouched, and
+    # honest about having written nothing. Reporting "installed" here is the
+    # misreport a user acts on ("I re-installed it, so the packaged guidance is
+    # back") even though their own edited prompt is what a launch will run.
+    second = await client.post("/v1/desktop/profiles/install", json=mutation(name="reviewer"))
+    assert second.status_code == 200, second.text
+    assert second.json()["result"]["already_installed"] is True
+    assert second.json()["result"]["agent_id"] == first.json()["result"]["agent_id"]
+
+    detail = await client.get("/v1/desktop/profiles/reviewer")
+    assert "already_installed" not in detail.json()["result"]
+    catalogue = await client.get("/v1/desktop/profiles")
+    rows = catalogue.json()["result"]["profiles"]
+    assert rows and all("already_installed" not in row for row in rows)
+
+
 async def test_catalogue_is_authenticated_and_never_allocates(api):
     client, root = api
     denied = await client.get("/v1/desktop/profiles", headers={"Authorization": "Bearer wrong"})

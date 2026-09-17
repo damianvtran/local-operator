@@ -1488,15 +1488,17 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
         await _wait_history(pilot, view)
         calls = 0
         original = __import__(
-            view.__module__, fromlist=["read_transcript_page"]
-        ).read_transcript_page
+            view.__module__, fromlist=["load_transcript_page"]
+        ).load_transcript_page
 
-        def slow(*args, **kwargs):
+        # Async because the seam is: the view awaits the shared page read, so a
+        # sync wrapper would be awaited-into a TypeError rather than counted.
+        async def slow(*args, **kwargs):
             nonlocal calls
             calls += 1
-            return original(*args, **kwargs)
+            return await original(*args, **kwargs)
 
-        monkeypatch.setattr(view.__module__ + ".read_transcript_page", slow)
+        monkeypatch.setattr(view.__module__ + ".load_transcript_page", slow)
         view._initial_tail_pending = True
         view._body.scroll_home(animate=False)
         await _wait_geometry_settled(pilot, view._body)
@@ -1664,16 +1666,16 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
     # since the PREVIOUS read, extended forward to the next observation, and
     # the assertion judges the completed timeline.
     reads = {"n": 0, "first": True, "peaks": [], "peak": 0.0}
-    original_read = subagent_view.read_transcript_page
+    original_read = subagent_view.load_transcript_page
     real_scroll = SubagentView._scroll_changed
 
-    def counting_read(*args: Any, **kwargs: Any) -> Any:
+    async def counting_read(*args: Any, **kwargs: Any) -> Any:
         if not reads["first"]:
             reads["peaks"].append(reads["peak"])
         reads["first"] = False
         reads["n"] += 1
         reads["peak"] = 0.0
-        return original_read(*args, **kwargs)
+        return await original_read(*args, **kwargs)
 
     def auditing_scroll(self: SubagentView, *args: Any) -> None:
         reads["peak"] = max(reads["peak"], self._body.scroll_y)
@@ -1681,10 +1683,10 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
 
     # BOTH patches are restored in the finally below. A module-attribute
     # swap that leaks contaminates every later test in the same xdist worker:
-    # `read_transcript_page` is module state, not instance state, so a leaked
+    # `load_transcript_page` is module state, not instance state, so a leaked
     # counter keeps wrapping (and keeps mutating the shared `reads` dict) for
     # the rest of the worker's lifetime (review round 2, M5).
-    subagent_view.read_transcript_page = counting_read
+    subagent_view.load_transcript_page = counting_read
     SubagentView._scroll_changed = auditing_scroll  # type: ignore[method-assign]
     try:
         async with app.run_test(size=(90, 28)) as pilot:
@@ -1781,7 +1783,7 @@ async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -
                 assert len(view._history_ids) > before
     finally:
         SubagentView._scroll_changed = real_scroll  # type: ignore[method-assign]
-        subagent_view.read_transcript_page = original_read
+        subagent_view.load_transcript_page = original_read
 
 
 @pytest.mark.asyncio
@@ -1986,17 +1988,18 @@ async def test_history_job_switch_discards_a_late_page(tmp_path, monkeypatch) ->
         "Comms", (), {"session_dir_of": lambda self, job_id: directories[job_id]}
     )()
     original = __import__(
-        SubagentView.__module__, fromlist=["read_transcript_page"]
-    ).read_transcript_page
+        SubagentView.__module__, fromlist=["load_transcript_page"]
+    ).load_transcript_page
 
-    def delayed(directory, **kwargs):
+    async def delayed(directory, **kwargs):
         if str(directory) == str(first.directory):
-            import time
+            # ``asyncio.sleep``, not ``time.sleep``: the seam is a coroutine on
+            # the app's loop now, so a blocking sleep would freeze the pilot
+            # rather than delay this one child's page.
+            await asyncio.sleep(0.05)
+        return await original(directory, **kwargs)
 
-            time.sleep(0.05)
-        return original(directory, **kwargs)
-
-    monkeypatch.setattr(SubagentView.__module__ + ".read_transcript_page", delayed)
+    monkeypatch.setattr(SubagentView.__module__ + ".load_transcript_page", delayed)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job_a)
@@ -2466,16 +2469,19 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         # an explicit reader gesture and is admitted regardless of the note.
         attempts = 0
 
-        def flaky(*args, **kwargs):
+        async def flaky(*args, **kwargs):
             nonlocal attempts
             attempts += 1
             if attempts == 1:
                 raise OSError("disk busy")
-            return __import__(
-                "local_operator.session.transcript", fromlist=["read_transcript_page"]
-            ).read_transcript_page(*args, **kwargs)
+            # The unpatched seam, not the bare reader: this test is about the
+            # view's retry, and going straight to ``read_transcript_page`` here
+            # would bypass the cache the production path uses.
+            return await __import__(
+                "local_operator.session.page_cache", fromlist=["load_transcript_page"]
+            ).load_transcript_page(*args, **kwargs)
 
-        monkeypatch.setattr(SubagentView.__module__ + ".read_transcript_page", flaky)
+        monkeypatch.setattr(SubagentView.__module__ + ".load_transcript_page", flaky)
         # Inject the failure deterministically; the regression below exercises
         # the real mounted Home binding for the explicit retry itself.
         view.action_home()
@@ -4618,14 +4624,14 @@ async def test_a_missing_transcript_costs_one_stat_per_refresh_and_no_read(
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
 
         reads = 0
-        real_read = subagent_view.read_transcript_page
+        real_read = subagent_view.load_transcript_page
 
-        def counted_read(*args, **kwargs):
+        async def counted_read(*args, **kwargs):
             nonlocal reads
             reads += 1
-            return real_read(*args, **kwargs)
+            return await real_read(*args, **kwargs)
 
-        monkeypatch.setattr(subagent_view, "read_transcript_page", counted_read)
+        monkeypatch.setattr(subagent_view, "load_transcript_page", counted_read)
         for _ in range(6):
             app._refresh_subagent_view(view.job_id)
             await pilot.pause()
@@ -4712,7 +4718,7 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         reads = 0
         failed = 0
         succeeded = 0
-        real_read = subagent_view.read_transcript_page
+        real_read = subagent_view.load_transcript_page
 
         # The failure is aimed at the PROBE, identified by the only thing that
         # distinguishes it: it is the read that happens once the transcript
@@ -4729,7 +4735,7 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         # matters.
         armed = True
 
-        def flaky(*args, **kwargs):
+        async def flaky(*args, **kwargs):
             nonlocal reads, failed, succeeded, armed
             reads += 1
             if armed and (child_dir / TRANSCRIPT_FILENAME).exists():
@@ -4740,12 +4746,12 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
             # scheduling detail, while "the probe failed" and "a later read
             # succeeded" are the two facts this test is about, and both are
             # stable under load.
-            result = real_read(*args, **kwargs)
+            result = await real_read(*args, **kwargs)
             if failed:
                 succeeded += 1
             return result
 
-        monkeypatch.setattr(subagent_view, "read_transcript_page", flaky)
+        monkeypatch.setattr(subagent_view, "load_transcript_page", flaky)
 
         # The file appearing is what triggers the probe, and that probe fails.
         transcript = Transcript(child_dir)
@@ -4840,12 +4846,12 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
 
         reads = 0
 
-        def always_fails(*args, **kwargs):
+        async def always_fails(*args, **kwargs):
             nonlocal reads
             reads += 1
             raise OSError("permission denied")
 
-        monkeypatch.setattr(subagent_view, "read_transcript_page", always_fails)
+        monkeypatch.setattr(subagent_view, "load_transcript_page", always_fails)
 
         footers = set()
         for _ in range(20):

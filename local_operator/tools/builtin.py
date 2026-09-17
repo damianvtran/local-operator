@@ -105,6 +105,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import (
     WakeSchedule,
+    build_wake_edit,
     build_wake_schedule,
     format_duration,
 )
@@ -6842,10 +6843,16 @@ async def _wake_create(
     from local_operator.wakes.display import format_wake_time
 
     due = format_wake_time(schedule.next_due_at)
+    # The ID and the instant ride as structured DETAILS as well as in the
+    # sentence, so a caller that is not a model reading prose (the desktop
+    # owner command, whose reply becomes an HTTP body) does not have to parse
+    # the message back out. Content is unchanged: the tool's rendered result
+    # is still the one sentence it always was.
     return _text(
         tool_call_id,
         "wake",
         f"Scheduled wake '{schedule.id}' at {due}: \"{schedule.message}\"",
+        details={"wake_id": schedule.id, "next_due_at": schedule.next_due_at},
     )
 
 
@@ -6864,7 +6871,52 @@ async def _wake_cancel(
             f"No wake schedule with id '{params.id}' (known: {ids})",
         )
     await scheduler.update(remaining)
-    return _text(tool_call_id, "wake", f"Cancelled wake schedule '{params.id}'.")
+    return _text(
+        tool_call_id,
+        "wake",
+        f"Cancelled wake schedule '{params.id}'.",
+        details={"wake_id": params.id},
+    )
+
+
+async def _wake_edit(
+    tool_call_id: str,
+    wake_id: str,
+    request: dict[str, Any],
+    scheduler: WakeSchedulerProtocol,
+    now_ms: int,
+) -> ToolResult:
+    """Reword or re-bound one existing schedule, keeping its identity.
+
+    Takes a plain ``request`` rather than :class:`WakeParams` because the
+    caller that needs it is the desktop's owner command, and the distinction
+    that request MUST carry is "key absent" vs "key present and null" — the
+    difference between leaving a bound alone and removing it. A pydantic model
+    built from a fixed keyword list cannot express that for a caller that did
+    not come through the model.
+
+    Deliberately NOT wired to a ``wake`` tool op: the agent's tool has
+    create/list/cancel, and adding a fourth op is a change to what the model
+    is offered rather than a change to how a wake is written. Everything that
+    decides what an edit MEANS lives in ``build_wake_edit``, which the
+    route-less arm path also calls — so the two writers cannot diverge.
+    """
+    existing = list(scheduler.schedules)
+    outcome = build_wake_edit(request, existing, wake_id, now_ms)
+    if "error" in outcome:
+        if outcome["malformed"]:
+            return _invalid_arguments(tool_call_id, "wake", outcome["error"])
+        return _error(tool_call_id, "wake", outcome["error"])
+    row = outcome["schedule"]
+    updated = [row if schedule.id == wake_id else schedule for schedule in existing]
+    await scheduler.update(updated)
+    every = f" every {format_duration(row.every_ms)}" if row.every_ms else ""
+    return _text(
+        tool_call_id,
+        "wake",
+        f"Updated wake '{row.id}'{every}: \"{row.message}\"",
+        details={"wake_id": row.id, "next_due_at": row.next_due_at},
+    )
 
 
 def build_wake_tool(context: ToolContext) -> AgentTool | None:

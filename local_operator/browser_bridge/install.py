@@ -198,20 +198,15 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
         if outcome.kind != "repaired":
             return outcome
-        # bootout + bootstrap, NOT kickstart -k: measured — a kickstart after a
-        # rewrite restarts the job from launchd's in-memory definition and keeps
-        # running the old argv. See :mod:`local_operator.launchd`.
-        _launchctl("bootout", _domain(), str(path))
-        loaded = _launchctl("bootstrap", _domain(), str(path))
-        if loaded.returncode:
+        # bootout + bootstrap through the shared helper, NOT kickstart -k:
+        # measured — a kickstart after a rewrite restarts the job from launchd's
+        # in-memory definition and keeps running the old argv. See
+        # :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=label(), path=path, runner=_launchctl)
+        if not reloaded.ok:
             # Names the recovery, because the job is DOWN at this point: see
             # `launchd.reload_failure`.
-            return launchd.reload_failure(
-                name,
-                path,
-                "lop browser install",
-                loaded.stderr.strip()[:200] or str(loaded.returncode),
-            )
+            return reloaded.as_refresh_failure(name=name, path=path, recovery="lop browser install")
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
@@ -715,10 +710,15 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             plist_path().write_bytes(plistlib.dumps(render_plist(port)))
         steps.append(f"wrote {plist_path()}")
         if not dry_run:
-            _launchctl("bootout", _domain(), str(plist_path()))
-            loaded = _launchctl("bootstrap", _domain(), str(plist_path()))
-            if loaded.returncode:
-                return {"ok": False, "steps": steps, "error": loaded.stderr.strip()[:300]}
+            # The shared reload rather than an inline pair: it tolerates an
+            # absent job, waits for launchd to release the label, retries past
+            # the measured teardown race, and only then reports the load. The
+            # old shape returned launchd's raw stderr as the whole error and, on
+            # success, said "loaded the LaunchAgent" without checking. See
+            # :mod:`local_operator.launchd`.
+            reloaded = launchd.reload_job(label=label(), path=plist_path(), runner=_launchctl)
+            if not reloaded.ok:
+                return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
             steps.append(f"loaded the LaunchAgent ({label()})")
     elif supervisor == "systemctl":
         systemd_path().parent.mkdir(parents=True, exist_ok=True)

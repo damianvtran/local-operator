@@ -490,6 +490,13 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
     was not sent: ..." (review round 2, MAJOR-1).
 
     Vettedness cannot be recovered from message text, so it rides the type.
+
+    AND THE BODY IS CODED (design D8): ``{code, message}``, not a bare sentence.
+    The status alone cannot say whether a 503 is about THIS conversation or about
+    the server not answering at all, so the renderer branches on ``code`` -- while
+    ``message`` still carries the vetted sentence, because the shipped app matches
+    that text for its own copy and the two repositories must not have to move in
+    step.
     """
     from fastapi import HTTPException
 
@@ -498,12 +505,17 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
 
     generic = "Session owner is unavailable. Reconnect and reconcile before retrying."
 
-    async def relay(error: BaseException) -> str:
+    async def relay(error: BaseException) -> dict[str, Any]:
         with pytest.raises(HTTPException) as raised:
             async with errors():
                 raise error
         assert raised.value.status_code == 503
-        return str(raised.value.detail)
+        # ``HTTPException.detail`` is declared ``str``; this ladder answers a
+        # coded OBJECT, so the cast is the test's claim about the shape it is
+        # asserting rather than a narrowing pyright could make on its own.
+        detail = cast("dict[str, Any]", raised.value.detail)
+        assert detail["code"] == "runtime_unreachable"
+        return detail
 
     leaky = [
         ConnectionError(
@@ -515,12 +527,12 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
     ]
     for error in leaky:
         detail = await relay(error)
-        assert detail == generic, detail
+        assert detail["message"] == generic, detail
         # The specific values from the reproduction must be absent, not merely
         # reworded: these are an internal port and another session's identifier.
-        assert "54321" not in detail
-        assert "abc123secretsession" not in detail
-        assert "127.0.0.1" not in detail
+        assert "54321" not in detail["message"]
+        assert "abc123secretsession" not in detail["message"]
+        assert "127.0.0.1" not in detail["message"]
 
     # The vetted sentence still survives -- suppressing it would re-break the
     # "no model provider configured" case this relay exists to report (QA Q1).
@@ -528,7 +540,7 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
         "No model provider is configured yet. Connect one in Settings > Providers, "
         "then send the message again."
     )
-    assert await relay(ActionableConnectionError(vetted)) == vetted
+    assert (await relay(ActionableConnectionError(vetted)))["message"] == vetted
 
 
 @pytest.mark.asyncio
@@ -1492,12 +1504,13 @@ async def test_an_unreachable_owner_is_a_503_and_not_a_leak(tmp_path, monkeypatc
                 f"/v1/desktop/sessions/{sid}/interrupt", json={"request_id": rid}
             )
             assert response.status_code == 503, response.text
-            detail = str(response.json()["detail"])
-            assert detail == (
+            detail = response.json()["detail"]
+            assert detail["code"] == "runtime_unreachable"
+            assert detail["message"] == (
                 "Session owner is unavailable. Reconnect and reconcile before retrying."
             ), detail
             for leaked in ("54321", "127.0.0.1"):
-                assert leaked not in detail, detail
+                assert leaked not in detail["message"], detail
             assert owner.ops == ["abort"], "the route never actually asked the owner"
             # The claim was left PENDING rather than recorded, so the SAME id can
             # be retried — which is the remedy the sentence above promises
@@ -4517,7 +4530,9 @@ async def test_a_move_during_owner_recovery_answers_503(move_api) -> None:
         )
 
         assert response.status_code == 503, response.text
-        assert response.json()["detail"] == (
+        detail = response.json()["detail"]
+        assert detail["code"] == "runtime_unreachable"
+        assert detail["message"] == (
             "Session owner is unavailable. Reconnect and reconcile before retrying."
         )
         assert bridge.remote.cwd == str(before)
@@ -6240,6 +6255,21 @@ MESSAGE_DRAFTS = [
         "can you review and fix that issue,\n"
         "replicate it and then fix and test end to end"
     ),
+    # The credential RESIDUAL, pinned rather than left to the PR body: only a
+    # WHOLE-DRAFT invocation is refused, so a draft that MENTIONS the word, or
+    # puts the word on its own line, is still a message — deliberately. The shape
+    # answers "is the text after this word the command's own", and a draft whose
+    # FIRST word is not the command has no such text; refusing it would refuse
+    # ordinary prose that talks ABOUT the command, which is the operator's
+    # original report (`/mcp logout seems to cause a crash`, two rows up). The
+    # inline gesture is closed by the composer's own capture, not by this rule.
+    #
+    # Pinned because the shape change hands a future author a new argument for
+    # widening the rule ("another surface owns that text"), and widening it here
+    # would silently re-break #1180. So the boundary is asserted on the side that
+    # stays a message, with the residual named out loud rather than implied.
+    "please /credential sk-CANARY-not-a-real-secret",
+    "/credential\nsk-CANARY-not-a-real-secret",
 ]
 
 #: Drafts that, as a WHOLE, are a command and so belong on the command endpoint.
@@ -6286,6 +6316,15 @@ COMMAND_DRAFTS = [
     "/fast maybe",
     "/stop now",
     "/fast on",
+    # The refusal-direction row: the command route refuses hand-typed text and
+    # names the masked form, so the text is this command's own and a whole-draft
+    # `/credential <secret>` must be refused HERE rather than admitted as prose.
+    # Before the shape was corrected this was the one leak of the catalogue: a
+    # canary spelled this way reached a session transcript as a
+    # `type=message, role=user` record. Both spellings, because the alias reaches
+    # the same entry.
+    "/credential sk-CANARY-not-a-real-secret",
+    "/cred sk-CANARY-not-a-real-secret",
 ]
 
 
@@ -6359,9 +6398,14 @@ def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypat
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
     headers = {"Authorization": "Bearer policy-token"}
 
-    # The shapes the command route validates. `credential` is here because the
-    # route refuses typed args for it outright — its shape is NONE, so the
-    # admission rule agrees.
+    # The shapes the command route validates. `credential` is NOT among them any
+    # more, and deliberately: it is the one row whose text the route REFUSES
+    # rather than consumes or validates, so the route answers 422 where the
+    # admission rule says "this text is the command's own". That asymmetry is
+    # `test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands`
+    # below — the same class as a selector the route forwards, and the safe
+    # direction for the row: a whole-draft `/credential <secret>` is refused on
+    # BOTH endpoints rather than admitted as a paid turn here.
     cases = [
         ("mcp", "logout"),
         ("mcp", "logout seems to cause a crash"),
@@ -6370,7 +6414,6 @@ def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypat
         ("login", "openai"),
         ("login", "zzz"),
         ("logout", "openai"),
-        ("credential", "sk-secret"),
     ]
 
     with TestClient(app) as client:
@@ -6391,6 +6434,65 @@ def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypat
                 != 422
             )
             assert granted == used, (command, args, granted, used)
+
+
+def test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands(monkeypatch):
+    """`/credential` is the row where the two questions differ BY DESIGN.
+
+    The registry says the row OWNS its trailing text (`argument_shape=any`) —
+    because the route refuses it and names the masked form, and a shape of `none`
+    would tell every other path that the text is prose. That refusal is the
+    route's own 422 with its own sentence, which `command_argument_refusal` does
+    not produce: it validates the provider and MCP shapes and forwards a selector,
+    and the credential sentence is about the FORM rather than about an argument.
+
+    Both endpoints therefore refuse a whole-draft `/credential <text>`, which is
+    the point rather than a dead end: the text reaches the masked form or nothing,
+    and a client whose command surface is off cannot turn a raw credential into a
+    paid model turn. Before the shape was corrected this endpoint admitted it and
+    the credential reached a transcript as a `type=message, role=user` record.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.slash_commands import (
+        command_argument_is_used,
+        slash_command_for,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "policy-token")
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    headers = {"Authorization": "Bearer policy-token"}
+    body = {"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+    canary = "sk-CANARY-not-a-real-secret"
+
+    spec = slash_command_for("/cred")
+    assert spec is not None and spec.name == "credential"
+    # The admission rule's half: never prose, for any text the word is followed by.
+    assert command_argument_is_used(spec, canary) is True
+    assert command_argument_is_used(spec, "my pass phrase") is True
+
+    with TestClient(app) as client:
+        for text in (f"/credential {canary}", f"/cred {canary}"):
+            refused = client.post(
+                "/v1/desktop/sessions/0badc0ffee00/messages",
+                headers=headers,
+                json={**body, "text": text},
+            )
+            assert refused.status_code == 422, (text, refused.status_code, refused.text)
+        for command in ("credential", "cred"):
+            response = client.post(
+                "/v1/desktop/sessions/0badc0ffee00/commands",
+                headers=headers,
+                json={**body, "command": command, "args": canary},
+            )
+            # An HTTPException detail, not a validation error, so the sentence
+            # survives the shaper `prompt`'s 422 does not — asserted here because
+            # it is the instruction that names the route the user wants.
+            assert response.status_code == 422, (command, response.status_code)
+            assert response.json()["detail"] == (
+                "Enter credentials in the masked credential form, not command text"
+            ), (command, response.text)
 
 
 def test_the_route_forwards_a_selector_the_admission_rule_calls_prose() -> None:
@@ -6441,3 +6543,293 @@ def test_the_refusal_message_is_the_one_the_ui_can_act_on():
                 "text": "/compact",
             }
         )
+
+
+# -- the pool lock's reach (perf/session-load-central-cache) -------------------
+#
+# The defect these pin was measured on the operator's live backend at load
+# average ~244: a 642-byte session's snapshot answered in **25 ms** on its own and
+# **829 ms** while the 261 MB session's open was in flight (33x, for a session
+# whose own read is trivial), the 261 MB open itself took 32.1 s, and a 96 MB open
+# returned 503 after 25.4 s — while `/health` answered in 5.5 ms throughout. The
+# server was alive; it was serialised. ``DesktopSessions.session`` held the
+# pool-wide lock across its WHOLE body, so one conversation's lookup (a
+# whole-journal parse before this change) and its socket attach were every other
+# conversation's wait.
+#
+# Every test here is STRUCTURAL: each asserts what COMPLETED, never how long it
+# took, because a wall-clock bound on a box at load average ~200 measures the
+# weather (AGENTS.md §Timing). Each carries ONE deadline, and it is a backstop
+# rather than the assertion — the pass condition is the state the deadline
+# wraps — so a regression fails the suite instead of hanging it. On the
+# pre-change code every one of these hangs at that backstop.
+
+#: Backstop for an open that must complete while another session is parked. Not a
+#: latency budget: 30 s is ~1000x what the same open costs on an idle box.
+_POOL_BACKSTOP_S = 30.0
+
+
+async def _open_and_release(pool: DesktopSessions, session_id: str) -> str:
+    """The door, start to finish: acquire a bridge, hold it for no time, release."""
+    async with pool.session(session_id):
+        return session_id
+
+
+def _park_marker_read(
+    monkeypatch: pytest.MonkeyPatch, session_id: str
+) -> tuple[threading.Event, threading.Event]:
+    """Park ``session_id``'s cold lookup inside its worker thread.
+
+    ``read_desktop_marker`` is called from ``locate()``, which the door runs
+    through ``asyncio.to_thread`` — so the parking uses THREADING events (set and
+    waited on inside the worker) while the test waits for ``entered`` through
+    ``asyncio.to_thread``. A time.sleep or an asyncio.Event here would park
+    nothing: one blocks the loop, the other is set on it.
+    """
+    entered, release = threading.Event(), threading.Event()
+    original = module.read_desktop_marker
+
+    def parked(path: Path) -> dict[str, Any] | None:
+        if path.name == session_id:
+            entered.set()
+            if not release.wait(_POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked lookup")
+        return original(path)
+
+    monkeypatch.setattr(module, "read_desktop_marker", parked)
+    return entered, release
+
+
+@pytest.mark.asyncio
+async def test_a_parked_lookup_does_not_delay_another_sessions_open(tmp_path, monkeypatch):
+    """One conversation's cold open is not another's wait.
+
+    This is the live symptom in its smallest form: ``slow`` holds the door for
+    its own session — parked inside the lookup, which is where the whole-journal
+    parse used to be — and a request for an unrelated session must complete while
+    it is parked.
+    """
+    pool = DesktopSessions(tmp_path)
+    parked_sid = await pool.create(str(tmp_path))
+    other_sid = await pool.create(str(tmp_path))
+    entered, release = _park_marker_read(monkeypatch, parked_sid)
+
+    parked = asyncio.create_task(_open_and_release(pool, parked_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the lookup never started"
+
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        async with pool.session(other_sid) as other:
+            assert other.session_id == other_sid
+
+    release.set()
+    assert await parked == parked_sid
+
+
+@pytest.mark.asyncio
+async def test_a_parked_lookup_does_not_delay_an_already_warm_session(tmp_path, monkeypatch):
+    """The warm half of the same property, and the one the operator noticed.
+
+    A session this process already holds a bridge for must answer without
+    consulting any pool-wide resource, so the session the user switches BACK to
+    is never the one that queues behind the session that is slow to open.
+    """
+    pool = DesktopSessions(tmp_path)
+    warm_sid = await pool.create(str(tmp_path))
+    cold_sid = await pool.create(str(tmp_path))
+    async with pool.session(warm_sid) as warm:
+        resident = warm
+
+    entered, release = _park_marker_read(monkeypatch, cold_sid)
+    parked = asyncio.create_task(_open_and_release(pool, cold_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the lookup never started"
+
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        async with pool.session(warm_sid) as again:
+            assert again is resident, "the warm session was rebuilt instead of reused"
+
+    release.set()
+    assert await parked == cold_sid
+
+
+@pytest.mark.asyncio
+async def test_two_cold_callers_share_one_lookup_and_one_bridge(tmp_path, monkeypatch):
+    """Single-flight: one journal read, one bridge, two viewers.
+
+    Two requests racing on a cold session used to run the lookup twice — two
+    whole-journal parses where the session has no ``desktop.json``. They must now
+    share one, and they must end up on the SAME bridge: a second one would mean
+    two facades attached to one owner runtime, one of them invisible to
+    ``close()``.
+    """
+    pool = DesktopSessions(tmp_path)
+    session_id = await pool.create(str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    original = module.read_desktop_marker
+
+    def parked(path: Path) -> dict[str, Any] | None:
+        if path.name == session_id:
+            entered.set()
+            if not release.wait(_POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked lookup")
+        return original(path)
+
+    monkeypatch.setattr(module, "read_desktop_marker", parked)
+
+    # THE INSTRUMENT IS THE FLIGHT, not the byte read: ``read_desktop_marker`` is
+    # also called by ``draft_birth_selection`` inside ``acquire``, so counting it
+    # would count a legitimate per-caller read and prove nothing about sharing.
+    # What must be unique is the LOOKUP TASK — a join hands back the leader's own
+    # task object, so identity is the assertion.
+    flights: list[Any] = []
+    real_flight = module.DesktopSessions._locate_flight
+
+    def counting_flight(self: Any, target: str, locate: Any) -> Any:
+        task = real_flight(self, target, locate)
+        if target == session_id:
+            flights.append(task)
+        return task
+
+    monkeypatch.setattr(module.DesktopSessions, "_locate_flight", counting_flight)
+
+    opened: list[Any] = []
+    both_in = asyncio.Event()
+
+    async def hold() -> None:
+        async with pool.session(session_id) as bridge:
+            opened.append(bridge)
+            if len(opened) == 2:
+                both_in.set()
+            await both_in.wait()
+
+    first = asyncio.create_task(hold())
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the lookup never started"
+    second = asyncio.create_task(hold())
+    # PUMP, because the follower's join is a loop step with no I/O behind it.
+    for _ in range(8):
+        await asyncio.sleep(0)
+    release.set()
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        await asyncio.gather(first, second)
+
+    assert (
+        len({id(task) for task in flights}) == 1
+    ), f"the two callers started {len({id(task) for task in flights})} journal reads"
+    assert len(opened) == 2
+    assert opened[0] is opened[1], "two bridges were built for one session"
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_awaiting_its_first_acquire_is_not_evicted(tmp_path, monkeypatch):
+    """``users == 0`` no longer means "idle", so the reservation says so.
+
+    The invariant the old code kept by holding the pool lock across its whole
+    body — "eviction must not remove a bridge between lookup and its first
+    acquire" — is now kept explicitly. Without it, a request at ``BRIDGE_COUNT``
+    would evict a bridge whose caller had been handed it but had not attached
+    yet, and the NEXT request for that session would build a SECOND bridge for
+    it. This test drives exactly that window: the first caller is parked before
+    ``users`` moves, and the second session's refusal is what proves the parked
+    bridge was not selected for eviction.
+    """
+    monkeypatch.setattr(module, "BRIDGE_COUNT", 1)
+    pool = DesktopSessions(tmp_path)
+    first_sid = await pool.create(str(tmp_path))
+    other_sid = await pool.create(str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    real_acquire = module.DesktopSessionBridge.acquire
+
+    # ``read`` is the door's envelope (``session(read=...)``): the stub
+    # accepts and FORWARDS it rather than swallowing it, so a caller parked
+    # here is still the caller the route's own signature would have made.
+    async def parked_acquire(self: Any, *, read: bool = False) -> Any:
+        if self.session_id == first_sid:
+            entered.set()
+            # Parked BEFORE ``users`` moves: the bridge is resident and resolved
+            # by a caller, and no one has attached to it yet.
+            if not await asyncio.to_thread(release.wait, _POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked acquire")
+        return await real_acquire(self, read=read)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "acquire", parked_acquire)
+
+    held = asyncio.create_task(_open_and_release(pool, first_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the first open never parked"
+    assert pool.bridges[first_sid].users == 0, "the window this test is about never opened"
+
+    with pytest.raises(ValueError, match="Too many active desktop sessions"):
+        await asyncio.wait_for(_open_and_release(pool, other_sid), _POOL_BACKSTOP_S)
+    assert first_sid in pool.bridges, "the handed-out bridge was evicted under its own acquire"
+
+    release.set()
+    assert await held == first_sid
+    # And once that caller has finished with it, the ordinary rule returns: an
+    # idle bridge is a candidate again, so the cap still binds.
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        async with pool.session(other_sid) as other:
+            assert other.session_id == other_sid
+    assert first_sid not in pool.bridges, "the idle bridge outlived the cap"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_open_leaves_no_reservation_behind(tmp_path, monkeypatch):
+    """The handout is released on every exit, including the refusal path.
+
+    A leaked reservation would make a bridge permanently unevictable, which at
+    ``BRIDGE_COUNT`` turns one failed request into a pool that can only refuse.
+    The refusal is taken twice here — once while the first session is parked (so
+    the handout is held and released by a FAILING caller), once after it settles.
+    """
+    monkeypatch.setattr(module, "BRIDGE_COUNT", 1)
+    pool = DesktopSessions(tmp_path)
+    first_sid = await pool.create(str(tmp_path))
+    other_sid = await pool.create(str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    real_acquire = module.DesktopSessionBridge.acquire
+
+    # ``read`` is the door's envelope (``session(read=...)``): the stub
+    # accepts and FORWARDS it rather than swallowing it, so a caller parked
+    # here is still the caller the route's own signature would have made.
+    async def parked_acquire(self: Any, *, read: bool = False) -> Any:
+        if self.session_id == first_sid:
+            entered.set()
+            if not await asyncio.to_thread(release.wait, _POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked acquire")
+        return await real_acquire(self, read=read)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "acquire", parked_acquire)
+
+    held = asyncio.create_task(_open_and_release(pool, first_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S)
+    with pytest.raises(ValueError, match="Too many active desktop sessions"):
+        await asyncio.wait_for(_open_and_release(pool, other_sid), _POOL_BACKSTOP_S)
+    assert pool._handouts == {first_sid: 1}, "the refused caller kept its reservation"
+
+    release.set()
+    assert await held == first_sid
+    assert pool._handouts == {}, "the reservations outlived their callers"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_warm_open_leaves_no_reservation_behind(tmp_path):
+    """The WARM refusal raises from inside the guarded block, and it used to strand.
+
+    ``assert_admitting`` is asked on the warm path as well as the cold one, and it
+    RAISES. A handout taken outside the guard would survive that raise, and a
+    session whose bridge is permanently reserved can never be evicted — so at
+    ``BRIDGE_COUNT`` the pool would reach a state where it can only refuse, which
+    is a worse failure than the refusal itself. The mutation this catches is the
+    reservation taken before the ``try`` (it was, until this test was written).
+    """
+    retiring = False
+    pool = DesktopSessions(tmp_path, retiring=lambda: retiring)
+    session_id = await pool.create(str(tmp_path))
+    async with pool.session(session_id):
+        pass  # resident, and users back to 0
+
+    retiring = True
+    with pytest.raises(module.DaemonRetiring):
+        async with pool.session(session_id):
+            pytest.fail("a latched daemon admitted an open")
+
+    assert pool._handouts == {}, "the warm refusal stranded a reservation"
+    assert pool._locate_flights == {}, "the refusal left a lookup flight behind"

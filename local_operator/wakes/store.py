@@ -133,14 +133,35 @@ def read_entry(config_dir: Path, session_id: str) -> dict[str, Any] | None:
 def read_index(config_dir: Path) -> dict[str, dict[str, Any]]:
     """Every readable entry keyed by session id. A missing directory is an
     empty index — the common case on a machine that has never set a wake."""
+    return read_index_report(config_dir)[0]
+
+
+def read_index_report(config_dir: Path) -> tuple[dict[str, dict[str, Any]], bool]:
+    """``(entries, read_error)`` — :func:`read_index` plus whether the
+    DIRECTORY could not be listed.
+
+    The two empty answers are different claims and one caller has to tell them
+    apart. "The directory is not there" means no wakes, which is the ordinary
+    state of a machine that never scheduled one; "the directory is there and
+    unreadable" means this process does not know, and rendering it as "no
+    schedules" is the painted-frame-contradicts-the-process defect this
+    subsystem exists to remove. The distinction lives HERE, beside the read it
+    describes, rather than as a second listdir in the caller that could drift
+    from this one.
+
+    A per-ENTRY failure is deliberately not reported: ``read_entry`` treats a
+    corrupt or unknown-schema file as absent, which is the store's documented
+    contract (the owning session rewrites it on its next open), and folding
+    that into ``read_error`` would make one bad row speak for the whole store.
+    """
     directory = wakes_dir(config_dir)
     try:
         names = sorted(os.listdir(directory))
     except FileNotFoundError:
-        return {}
+        return {}, False
     except OSError:
         logger.warning("wake index: cannot list %s", directory, exc_info=True)
-        return {}
+        return {}, True
     index: dict[str, dict[str, Any]] = {}
     for name in names:
         if not name.endswith(".json") or name.startswith("."):
@@ -154,7 +175,7 @@ def read_index(config_dir: Path) -> dict[str, dict[str, Any]]:
         # is what the owning session will overwrite.
         entry["session_id"] = session_id
         index[session_id] = entry
-    return index
+    return index, False
 
 
 def write_entry(

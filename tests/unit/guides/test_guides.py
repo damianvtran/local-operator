@@ -33,6 +33,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "mcp",
         "mobile",
         "peer-messaging",
+        "qwencloud",
         "teams",
         "tunnel",
     ]
@@ -76,6 +77,7 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("list available agents or spawn a subagent", "agents"),
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
+        ("why is my usage blank", "qwencloud"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
