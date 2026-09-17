@@ -9,8 +9,44 @@ each round see `docs/VERIFICATION.md`.
 
 ```sh
 cd ~/local-operator
-.venv/bin/python -m pytest tests/unit -q          # ~2700 tests, ~3.5 min
+ISO=$(mktemp -d)   # every block in this file makes its own; see the note below
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
+  PATH="$PATH" TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is minutes
 ```
+
+**Every pytest invocation in this file is isolated, and that is not decoration.**
+Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
+the shell that created it: a block that borrows another's expands to an *empty*
+`HOME`, and Python 3.14 treats an empty `HOME` as `/` rather than as unset, so
+the isolated roots land on `/.local-operator*` — a confusing `OSError` at best,
+and a real root-level store on a host where `/` is writable. Copy one block, not
+half of two.
+
+The suite constructs real `ConfigManager`s, so a run without a redirected `HOME`
+reads the operator's live `~/.local-operator/config.yml`, and the home-derived
+roots beside it (cache, agent home) follow that same home. *Writing* to it is the
+part that has done damage — a run in September 2026 collapsed an operator's
+`subagents.models` tiers to `{}`, which disabled a model tier and killed the
+background jobs that depended on it — and that write path is now closed
+(`tests/unit/test_config.py::test_the_migration_has_exactly_one_caller_and_marking_has_two`
+pins its only caller), but the read path is not, and the next write path nobody
+has thought of starts from the same read. `LOCAL_OPERATOR_CONFIG_DIR` alone
+does not cover this: the override relocates the config dir, and the logs that
+deliberately follow it, but not the cache or the agent home, which derive from
+the home directory independently — see
+[Isolating a run](#isolating-a-run-local_operator_config_dir-alone-is-not-enough)
+for why, and for the `CMUX_*`/`LOP_*` variables `env -i` also strips.
+
+The `REAL CONFIG CHANGED DURING THIS TEST RUN` guard is a **post-mortem, not a
+seatbelt**: it runs in `pytest_sessionfinish`, after the write. If you see it in
+a log, the damage is done — restore the config from a backup and treat every
+number that run produced as void. It is also armed only on the runs that need
+it: it resolves the store from `LOCAL_OPERATOR_CONFIG_DIR`/`HOME`, so the fresh
+`$ISO/.local-operator/sessions` above does not exist and it stands down — the
+snapshot is never taken and its `shutil`/`pathlib` destructive-op wraps are
+never installed. The runs it covers are the un-isolated ones, which is exactly
+the case it exists for.
 
 **The suite caps its own parallelism.** `addopts` asks for `-n auto`, but the
 root `conftest.py` implements xdist's `pytest_xdist_auto_num_workers` hook and
@@ -102,9 +138,17 @@ its own. Any probe failure degrades to the CPU-only cap; the hook never raises.
 Override it per session, or bypass it entirely:
 
 ```sh
-PYTEST_XDIST_AUTO_NUM_WORKERS=12 .venv/bin/python -m pytest tests/unit -q  # honoured unclamped
-.venv/bin/python -m pytest tests/unit -n 12 -q   # explicit -n bypasses the hook
-.venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
+ISO=$(mktemp -d)
+# The isolation prefix is the one from ## Environment; only the worker control differs.
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color PYTEST_XDIST_AUTO_NUM_WORKERS=12 \
+  .venv/bin/python -m pytest tests/unit -q         # honoured unclamped
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -n 12 -q   # explicit -n bypasses the hook
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
 ```
 
 **CI keeps every core.** The CPU share is skipped when `CI` is set: a hosted
@@ -149,7 +193,9 @@ TUI tests need a colour-capable terminal, so run them with the environment the
 suite expects:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
 ```
 
 **A local failure CI does not have is usually your shell, and the fix belongs
@@ -163,7 +209,9 @@ that is green on CI. Confirm the diagnosis by unsetting the variable for one
 run:
 
 ```sh
-env -u AWS_DEFAULT_PROFILE .venv/bin/python -m pytest tests/unit/evaluation -q
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  .venv/bin/python -m pytest tests/unit/evaluation -q   # -i also drops AWS_DEFAULT_PROFILE
 ```
 
 Then add the missing name to the fixture's scrub list. Do **not** leave it as a
@@ -177,7 +225,9 @@ boot, a real turn through a real tool, and `/resume` — and it is **deselected
 from the default run** (`-m "not e2e"` in `addopts`). Run it explicitly:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
 ```
 
 It exists because the whole unit suite was green while the TUI was completely
@@ -1886,7 +1936,9 @@ watch it fail:
 
 ```sh
 # put the synchronous call back on the loop, or delete the to_thread
-.venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  .venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
 # expect a failure with a message that names the real cause, then revert
 ```
 
