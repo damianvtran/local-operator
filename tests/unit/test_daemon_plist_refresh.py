@@ -27,6 +27,7 @@ The real end-to-end behaviour is on the PR as live ``ps``/``plutil`` captures.
 
 from __future__ import annotations
 
+import os
 import plistlib
 import sys
 from collections.abc import Callable
@@ -58,38 +59,70 @@ Target = tuple[ModuleType, Path, Callable[[], dict[str, object]], str]
 LEGACY_ARGV = ["-m"]
 
 
+def _freeze_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace ``launchd``'s clock, so a bounded wait becomes an assertion.
+
+    ``reload_job`` waits for launchd to release a label and retries the
+    bootstrap until a real deadline. Against a stubbed launchctl that never
+    releases the label, the honest implementation spends that deadline in wall
+    clock — seconds per test — so the tests advance it instead. Returned so a
+    test can assert the retries were spaced rather than spun.
+    """
+    sleeps: list[float] = []
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(launchd, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(launchd, "_sleep", sleep)
+    return sleeps
+
+
 def _patch_launcher(
     monkeypatch: pytest.MonkeyPatch, module, calls: list[tuple[str, ...]], *, fail: bool = False
 ) -> None:
-    """Install a recording stand-in for one module's ``launchctl`` call.
+    """Install a launchd-shaped stand-in for one module's ``launchctl`` call.
 
-    Three modules have a ``_launchctl(*args)`` helper. The tunnel has none — it
-    calls ``subprocess.run`` directly, because its ``_run`` is also what drives
-    ``systemctl`` on Linux — so that call site is patched where it is and its
-    fake answers with BYTES stderr, which is what the call site decodes.
+    Three modules have a ``_launchctl(*args)`` helper and the tunnel has its
+    own copy of one; the stand-in covers all four the same way.
+
+    It answers like launchd rather than like a stub where every call succeeds,
+    because that is the whole difference this change is about: ``print``
+    resolves only while the label is loaded, ``bootout`` unloads it, and
+    ``bootstrap`` loads it back unless the test is asking for the failure. The
+    old "everything returns 0" fake is what let an un-sequenced pair look
+    correct — and it would make the release wait look like a permanent stall.
     """
-    if hasattr(module, "_launchctl"):
+    _freeze_clock(monkeypatch)
 
-        class _Completed:
-            returncode = 1 if fail else 0
-            stderr = "Bootstrap failed: 5: Input/output error" if fail else ""
+    class _Completed:
+        def __init__(self, args: list[str], returncode: int) -> None:
+            self.args = args
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = "" if returncode == 0 else "Bootstrap failed: 5: Input/output error"
 
-        def fake(*args: str):
-            calls.append(args)
-            return _Completed()
+    loaded = [False]
 
-        monkeypatch.setattr(module, "_launchctl", fake)
-        return
+    def fake(*args: str):
+        calls.append(args)
+        verb = args[0]
+        if verb == "print":
+            # `launchctl print <domain>/<label>`: non-zero exactly when launchd
+            # does not know the label.
+            return _Completed(list(args), 0 if loaded[0] else 1)
+        if verb == "bootout":
+            loaded[0] = False
+            return _Completed(list(args), 0)
+        if verb == "bootstrap" and fail:
+            return _Completed(list(args), 1)
+        if verb == "bootstrap":
+            loaded[0] = True
+        return _Completed(list(args), 0)
 
-    class _BytesCompleted:
-        returncode = 1 if fail else 0
-        stderr = b"Bootstrap failed: 5: Input/output error" if fail else b""
-
-    def fake_run(argv: list[str], **_kwargs: object):
-        calls.append(tuple(argv[1:]))
-        return _BytesCompleted()
-
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_launchctl", fake)
 
 
 def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Target]:
@@ -130,7 +163,12 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
             browser_install,
             "plist_path",
             lambda: browser_install.render_plist(4099),
-            browser_install.LABEL,
+            # `label()`, not the `LABEL` constant: this root's registration is
+            # addressed under its own suffixed label, which is the label the
+            # reload must name. Using the bare constant here would assert the
+            # wrong name and, worse, hand the fixture a plist whose Label
+            # disagrees with what the installer renders.
+            browser_install.label(),
         ),
         (
             "tunnel",
@@ -206,14 +244,18 @@ def test_a_stale_plist_is_rewritten_and_the_daemon_restarted(
     written = plistlib.loads(path.read_bytes())
     assert written == render(), name
     assert written["ProgramArguments"][0].startswith(procname.BRAND), name
-    # Bootout + bootstrap, in that order: a kickstart would restart the OLD
-    # in-memory definition and the rewrite would have been pointless.
-    assert [call[0] for call in calls] == ["bootout", "bootstrap"], calls
-    # Both calls must address THIS daemon — the bootout by label, the bootstrap
-    # by the plist path, which is the file launchd re-reads. (The tunnel's own
-    # install uses the same two forms.)
-    joined = " ".join(part for call in calls for part in call)
-    assert label in joined and str(path) in joined, calls
+    # Bootout, then wait for the label to be released, then bootstrap, then
+    # verify: a kickstart would restart the OLD in-memory definition and the
+    # rewrite would have been pointless, and a bare bootout+bootstrap pair races
+    # launchd's teardown (the defect this sequence exists to fix).
+    assert [call[0] for call in calls] == ["bootout", "print", "bootstrap", "print"], calls
+    # Addressed by DOMAIN and LABEL, never by plist path: `launchctl print` on a
+    # path is not a thing, and the bootout must name the job launchd knows.
+    assert calls[0] == ("bootout", f"gui/{os.getuid()}/{label}"), calls
+    # The bootstrap hands launchd the FILE it re-reads.
+    assert calls[2] == ("bootstrap", f"gui/{os.getuid()}", str(path)), calls
+    assert calls[1] == ("print", f"gui/{os.getuid()}/{label}"), calls
+    assert calls[3] == ("print", f"gui/{os.getuid()}/{label}"), calls
 
 
 @pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
