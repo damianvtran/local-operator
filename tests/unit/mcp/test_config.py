@@ -732,3 +732,84 @@ def test_a_sandboxed_write_is_read_back_by_the_loader(
     target.write_text(json.dumps({"mcpServers": {"probe": {"command": "true"}}}))
 
     assert target in _local_operator_file_paths(str(tmp_path))
+
+
+class TestCodexToolTimeoutImport:
+    """Codex's per-tool-call budget must survive the import.
+
+    Codex is the one import source local-operator does not own, and it is the
+    only one that carries a timeout for the servers in it. It spells that value
+    in SECONDS where local-operator spells it in MILLISECONDS, so before this
+    translation it parsed into the model's ``extra`` bucket and was dropped: the
+    server imported, its tools worked, and the budget the user configured for it
+    silently did not apply. That is the same silent-drop shape as a server that
+    fails to import at all, and it is worse to notice because nothing errors.
+    """
+
+    def test_tool_timeout_sec_becomes_the_client_timeout(self, tmp_path: Path, home: Path) -> None:
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.slow]
+            command = "slow-server"
+            tool_timeout_sec = 300
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["slow"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        # Seconds in, milliseconds out -- and the raw Codex key is left alone so
+        # the document still round-trips the way it arrived.
+        assert cfg.timeout == 300_000
+        assert cfg.model_dump()["tool_timeout_sec"] == 300
+
+    def test_explicit_timeout_wins_over_tool_timeout_sec(self, tmp_path: Path, home: Path) -> None:
+        """A server declaring BOTH keeps its own unit's value.
+
+        ``timeout`` is this tool's spelling and therefore the more specific
+        statement of intent, so it must not be overwritten by a translated
+        foreign one.
+        """
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.both]
+            command = "srv"
+            timeout = 120000
+            tool_timeout_sec = 300
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["both"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        assert cfg.timeout == 120_000
+
+    def test_unusable_tool_timeout_sec_leaves_the_default_in_place(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """A value we cannot read must not become a guessed budget.
+
+        ``timeout`` stays None so the resolver's own default applies; a foreign
+        config must never be able to break discovery, and it must not be able to
+        install a nonsense timeout either. A bool is rejected explicitly: it is
+        an ``int`` subclass in Python, so ``True`` would otherwise become a 1 s
+        budget -- the tightest possible one -- on a quiet typo.
+        """
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.odd]
+            command = "srv"
+            tool_timeout_sec = "soon"
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["odd"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        assert cfg.timeout is None
