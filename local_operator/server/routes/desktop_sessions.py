@@ -40,6 +40,7 @@ from local_operator.server.models.desktop_sessions import (
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
+    PinState,
     PresenceReceipt,
     SessionList,
     SessionSearch,
@@ -74,7 +75,6 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
-from local_operator.session.session_search import search_store
 from local_operator.slash_commands import (
     command_argument_refusal,
     slash_command_for,
@@ -477,6 +477,29 @@ class Notified(Input):
     # The two routes are otherwise unrelated — this one claims the right to
     # notify and NEVER acknowledges a read.
     completion_token: RequestID
+
+
+class Pin(Input):
+    """The pin STATE the caller wants this session to be in.
+
+    A desired state rather than a toggle verb, and that is deliberate: see the
+    route's docstring. ``extra="forbid"`` (inherited from ``Input``) is what
+    makes an omitted ``pinned`` a 422 rather than a silent false — the field is
+    the whole request, so a body that does not carry it is not a request this
+    route can honour.
+
+    ``StrictBool`` rather than a bare ``bool``, matching every other boolean on
+    this plane (``PresenceWindow``, ``PresenceBeat``, ``Watch``, ``Answer``). A
+    bare ``bool`` coerces the strings and integers a generous JSON client sends
+    — ``{"pinned": "yes"}`` and ``{"pinned": 1}`` both pin the session — so a
+    client whose serialiser is producing the wrong type gets a 200 and no
+    signal, and the bug surfaces later as "the pin came from nowhere". The
+    neighbours refuse that shape, and a pin is durable state rather than a
+    display hint: being wrong about it silently is what this route exists to
+    prevent.
+    """
+
+    pinned: StrictBool
 
 
 class PresenceWindow(Input):
@@ -1093,15 +1116,39 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         # contract an older backend's rows carry.
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
-        rows = await host(request).list(limit + 1, status_stamps=stamps)
-        sessions = rows[:limit]
+        page = await host(request).list(limit, status_stamps=stamps)
+        # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
+        # DECIDED, not left open: concatenated on the wire rather than published
+        # as a second field, because of what the client does with this array — it
+        # REPLACES the rows it is holding with it. A pinned row parked in a
+        # sibling field would be a row the client does not hold until it learns
+        # about that field, and a client that missed it renders nothing for the
+        # pin, which is the exact gap the extra exists to close. A second field
+        # would also mean every consumer learns a second merge path for rows it
+        # must render identically, while `pinned` already distinguishes them.
+        #
+        # WHAT THAT COSTS, stated so the next reader does not assume the old
+        # invariant: ``len(sessions)`` MAY EXCEED ``limit``. ``limit`` and
+        # ``truncated`` continue to describe the PAGE ONLY — the extras are not
+        # page rows and do not make the page bigger.
+        #
+        # ORDER: the page first, then the extras, which is the catalogue's own
+        # ranking continued below the page — the same order the page's rows
+        # arrive in, and the same order the TUI's ``★ Pinned`` section draws. It
+        # is deliberately NOT pin recency: the store holds that (newest pin
+        # first) and it is one of the few orderings the two surfaces could
+        # disagree about, so ordering the extras by it would put a second
+        # ordering authority inside one section and make the app's Pinned list
+        # read as catalogue order followed by pin order.
+        sessions = page.rows + page.pinned_off_page
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the
         # listing-level statement is derivable, and a second channel through
         # `list()` would be one more thing a caller can forget to pass. Sorted
         # so the set is stable across polls, and computed over what is actually
-        # sent — a degraded row beyond the page says nothing about this answer.
+        # sent — a row the page does not carry AND this answer does not send says
+        # nothing about it. (The extras below ARE sent, so they are included.)
         #
         # The stamps and this marker are INDEPENDENT facts about the same rows
         # and neither may displace the other: a stamp answers "is this row newer
@@ -1112,7 +1159,7 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         return reply(
             {
                 "sessions": sessions,
-                "truncated": len(rows) > limit,
+                "truncated": page.truncated,
                 "limit": limit,
                 "degraded": degraded,
             }
@@ -1148,20 +1195,9 @@ async def search_sessions(
     one would be projected into every digest comparison.
     """
     async with errors():
-        matches = await asyncio.to_thread(search_store, host(request).root, q, limit=limit)
         return reply(
             {
-                "sessions": [
-                    {
-                        "id": match.row.id,
-                        "name": match.row.name,
-                        "mtime": match.row.mtime,
-                        "forked": match.row.forked,
-                        "rank": match.rank,
-                        "body_match": match.body_match,
-                    }
-                    for match in matches
-                ],
+                "sessions": await host(request).search(q, limit),
                 "query": q,
                 "limit": limit,
             }
@@ -1874,6 +1910,66 @@ async def notified(session_id: str, body: Notified, request: Request):
     async with errors():
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
+
+
+@router.post("/v1/desktop/sessions/{session_id}/pin", response_model=CRUDResponse[PinState])
+async def pin(session_id: str, body: Pin, request: Request):
+    """Set a session's durable pin to the state the caller asked for.
+
+    THE PIN FILE IS NOW A CROSS-SURFACE CONTRACT. It began as the sidebar's own
+    index and it is now the durable record two front ends share — the TUI writes
+    it with f10 and reads it on every sidebar refresh, this route writes it for
+    the desktop app, and the catalogue row below reports it — so a change to its
+    shape is a coordinated change between the two surfaces and the backend, not
+    a private refactor of a TUI index. It stays a bare JSON array of session
+    directory names for the reasons `sidebar_pins` gives; nothing here adds a
+    field to it.
+
+    DESIRED STATE, NOT A TOGGLE. The TUI's verb is a toggle because it is a
+    keypress; over HTTP a toggle is not idempotent, so a request retried after a
+    dropped response flips the pin BACK and the user reports "the pin keeps
+    un-pinning itself". The body therefore carries the state the caller wants
+    and a retry lands on the same state — re-pinning a pinned session is a no-op
+    that does not even rewrite the file, which is also what keeps a retry from
+    reordering the user's pins (the store is newest-pin-first).
+
+    RECEIPT-FREE, deliberately, unlike the mutating routes around it. Receipts
+    buy at-most-once for calls that ADMIT WORK (a retried send must not run a
+    turn twice); this call is idempotent by construction, which is strictly
+    better than putting it on the ``ReceiptConflict`` 409 ladder.
+
+    LAST WRITER WINS across processes, accepted and documented rather than
+    fixed, and the unit of arbitration is the WHOLE LIST rather than this one id:
+    every write is a read-modify-write of the entire index, so two presses
+    landing inside one window do not merely arbitrate over the conversation they
+    share — the later ``os.replace`` is what the file holds, and anything the
+    earlier writer added in that same window is gone. That can be a pin to a
+    DIFFERENT conversation.
+
+    THAT LOSS IS NOT SOMETHING THIS ROUTE INTRODUCES. The store's own docstring
+    already concedes it between two ``lop`` processes — the TUI was the only
+    writer, not the only possible one — and what this route changes is how often
+    the window is hit: a press here beside a press in the terminal is routine in
+    a way two terminal processes colliding never was, so a few-microsecond race
+    stops being a curiosity. A cross-process lock for a small index has no precedent in this
+    codebase, the store's own docstring records why no read-back is wanted
+    either, and the only consequence a user can observe is that two presses
+    within one animation resolve to the second — the correct reading of their own
+    two actions. Stated rather than left to the store's comment because the
+    client reconciles its row on this answer: until the next catalogue read
+    agrees, a pin the app just made is not yet durable, and it never is on a
+    config root the backend cannot write.
+
+    ID SHAPE AND IS-DIR ONLY. Deliberately NOT the ``is_user_session`` check its
+    neighbour ``/seen`` applies: the sidebar pins delegated runs, and a route
+    that refused to unpin one would leave a pin the user can see and cannot
+    remove. Unknown and malformed ids both raise ``KeyError`` into ``errors()``
+    above, which answers the generic 404 — the reader cannot act on the
+    difference between the two, and inventing a code for it would be a
+    distinction with no remedy behind it.
+    """
+    async with errors():
+        return reply(await host(request).set_pin(session_id, body.pinned))
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

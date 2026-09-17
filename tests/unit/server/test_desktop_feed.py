@@ -1438,7 +1438,7 @@ def test_revisions_are_monotone_and_the_lists_stamp_agrees(tmp_path):
     assert revisions == [1, 2, 3]
 
     pool = DesktopSessions(root)
-    rows = asyncio.run(pool.list(50, status_stamps=feed.status_stamps()))
+    rows = asyncio.run(pool.list(50, status_stamps=feed.status_stamps())).rows
     row = next(entry for entry in rows if entry["id"] == sid)
     assert row["status_epoch"] == feed.epoch
     assert row["status_revision"] == 3
@@ -1446,7 +1446,7 @@ def test_revisions_are_monotone_and_the_lists_stamp_agrees(tmp_path):
 
     # ADDITIVE, proven rather than asserted: a caller that passes no stamps gets
     # the response it always got, byte for byte in the fields that matter.
-    plain = asyncio.run(pool.list(50))
+    plain = asyncio.run(pool.list(50)).rows
     for entry in plain:
         assert "status_revision" not in entry
         assert "status_epoch" not in entry

@@ -26,6 +26,19 @@ MULTI-PROCESS: LAST WRITER WINS, accepted. Two ``lop`` sessions pinning at the
 same instant means the second write is what the file holds; no precedent in this
 codebase takes a cross-process lock for a small index, and the same-directory
 ``os.replace`` means a reader never sees a torn file — only an older one.
+
+THE GRANULARITY IS THE WHOLE INDEX, NOT ONE ID, and that property is NOT new
+here: the multi-process case above already loses a DIFFERENT-id pin, because
+every write is a read-modify-write of the entire list — two writers landing
+inside one window do not merely arbitrate over the id they share, and the later
+``os.replace`` discards every entry the earlier one added. What the desktop route
+changes is the FREQUENCY, not the existence, of the overlap: it adds a second
+frontend writing this same file, so a few-microsecond window that previously
+needed two ``lop`` processes to collide becomes routine — a press in the app
+beside a press in the terminal. The window itself is one ``read_pins`` plus one
+``os.replace``, inherent to an index kept in one file; per-id durability would
+need a real store. Stated here because a caller that has just been answered 200
+is not entitled to treat the pin as durable until the next read agrees.
 """
 
 from __future__ import annotations
@@ -90,6 +103,41 @@ def read_pins(config_dir: Path) -> list[str]:
     ]
 
 
+def set_pin(config_dir: Path, session_id: str, pinned: bool) -> bool:
+    """Put ``session_id`` into the requested pin STATE and return that state.
+
+    DESIRED STATE, NOT A TOGGLE, and idempotence is the whole reason this
+    exists beside :func:`toggle_pin`: the TUI's verb is a toggle because it is
+    a keypress, while this store now backs an HTTP route whose request can be
+    retried after its response is lost. A retried toggle flips the pin back and
+    reads to the user as "the pin keeps un-pinning itself" — so the wire carries
+    the state the caller wants and this function makes the call safe to repeat.
+
+    A NO-OP WRITES NOTHING, in both directions: re-pinning a pinned session
+    returns ``True`` without touching the file, and unpinning an unpinned one
+    returns ``False`` with no write. That is what keeps a re-pin from REORDERING
+    the list — the store is newest-pin-first, so an unconditional re-pin of an
+    id already in it would silently move the user's newest-pin-first order to a
+    retry, and a flaky link would rewrite an order nobody asked to change.
+
+    Never raises, like its neighbour: its caller is a route answering a user who
+    pressed something, and a read-only config directory must cost them the pin
+    rather than the request.
+    """
+    directory = Path(config_dir)
+    current = read_pins(directory)
+    if pinned:
+        if session_id in current:
+            return True
+        entries = [session_id, *current]
+    else:
+        if session_id not in current:
+            return False
+        entries = [item for item in current if item != session_id]
+    _write_pins(directory, entries)
+    return pinned
+
+
 def toggle_pin(config_dir: Path, session_id: str) -> bool:
     """Pin ``session_id`` if it is not pinned, unpin it if it is.
 
@@ -97,15 +145,9 @@ def toggle_pin(config_dir: Path, session_id: str) -> bool:
     when the pin was removed. A pin re-applied to an already-pinned session is
     an unpin, which is what makes one chord both verbs.
 
-    Written to a temporary file in the SAME directory and ``os.replace``d over
-    the target, the discipline every small index here uses (``config.py``,
-    ``move_targets.py``, ``multiplexer/markers.py``): a torn read of this file
-    would silently empty a user's pins, and same-directory replace is the only
-    form that is atomic.
-
-    Never raises. This runs from a keypress the user has already been given
-    feedback for, so a read-only config directory must cost them the pin and
-    not the session.
+    Unconditional where :func:`set_pin` is not: a keypress names no desired
+    state, so an already-pinned id is the unpin the user asked for rather than a
+    no-op. A caller that knows the state it wants must use ``set_pin``.
     """
     directory = Path(config_dir)
     current = read_pins(directory)
@@ -114,17 +156,47 @@ def toggle_pin(config_dir: Path, session_id: str) -> bool:
     pinned = len(entries) == len(current)
     if pinned:
         entries.insert(0, session_id)
-    del entries[PINS_LIMIT:]
+    _write_pins(directory, entries)
+    return pinned
+
+
+def _write_pins(directory: Path, entries: list[str]) -> None:
+    """Replace the pin file with ``entries``, capped, atomically, best-effort.
+
+    THE SINGLE WRITE PATH, shared by both verbs, and it owns BOTH halves of the
+    discipline: the cap and the atomic replace. A verb that prepared its own
+    trimmed list would leave the other one's guarantee to be re-established by
+    hand at each call site — which is what the first cut did, and the cap is the
+    half that would have gone missing first: a third verb calling this function
+    would have inherited no cap at all while every existing test stayed green,
+    because the per-verb cap tests exercise the verbs rather than the writer.
+
+    The cap keeps the OLDEST pins out of the file, and ``PINS_LIMIT`` is
+    measured from the FRONT because the list is newest-pin-first, so the pin the
+    user just made is the one position can never drop.
+
+    Written to a temporary file in the SAME directory and ``os.replace``d over
+    the target, the discipline every small index here uses (``config.py``,
+    ``move_targets.py``, ``multiplexer/markers.py``): a torn read of this file
+    would silently empty a user's pins, and same-directory replace is the only
+    form that is atomic.
+
+    Never raises. Both callers answer a user who has already been given feedback
+    for their press, so a read-only config directory must cost them the pin and
+    not the action.
+    """
     try:
         directory.mkdir(parents=True, exist_ok=True)
         handle_fd, temporary = tempfile.mkstemp(dir=directory, prefix=".sidebar-pins-")
         try:
             with os.fdopen(handle_fd, "w") as handle:
-                json.dump(entries, handle)
+                # Sliced rather than trimmed in place: the caller's list is not
+                # this function's to mutate, and a caller that kept it (to report
+                # what it wrote, say) must not find it silently shortened.
+                json.dump(entries[:PINS_LIMIT], handle)
             os.replace(temporary, directory / PINS_FILE)
         except BaseException:
             Path(temporary).unlink(missing_ok=True)
             raise
     except OSError:
         logger.debug("could not record the sidebar pin", exc_info=True)
-    return pinned
