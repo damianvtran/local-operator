@@ -58,6 +58,19 @@ from .test_steering_approval import _boot
 
 MODEL = ModelSpec(provider="test", model_id="m")
 
+#: The producer the store folds against while these turns are IN FLIGHT, for the
+#: two tests that snapshot the seed mid-turn.
+#:
+#: It MUST report ``is_streaming=True``, because that is what a real producer
+#: reports for the whole of a turn and it is what ``refresh_from_session`` gates
+#: the transient fields on -- the in-flight seed among them. A stand-in that
+#: omits the flag says "no turn is in flight", so the first boundary event
+#: (``tool_execution_end``, ``message_end``) correctly blanks the seed and the
+#: snapshot under test arrives empty. That is the correct behaviour being
+#: exercised by the wrong fixture, and the trap is the same one
+#: ``test_frontend_state._live_session`` documents at length.
+LIVE_PRODUCER_SESSION = SimpleNamespace(effective_model=MODEL, is_streaming=True)
+
 WAIT_ID = "call_wait_bf321"
 #: Composed in the SAME step as the wait and executed in a later group, because
 #: `wake` is `exclusive` and the batch runner does not mix the two kinds.
@@ -334,7 +347,7 @@ async def test_a_joiner_replays_the_queued_row_without_a_viewer_relative_clock()
             event = await asyncio.wait_for(turn.queue.get(), timeout=30)
             if event is None:
                 raise AssertionError(f"the turn ended too early: {turn.seen}")
-            store.observe_event(None, event)
+            store.observe_event(LIVE_PRODUCER_SESSION, event)
             if isinstance(event, ToolExecutionStartEvent):
                 live = list(store.state.live_events)
                 break
@@ -801,7 +814,7 @@ async def test_a_joiner_replaying_a_never_run_verdict_keeps_the_size_too() -> No
             event = await asyncio.wait_for(turn.queue.get(), timeout=30)
             if event is None:
                 raise AssertionError(f"the turn ended too early: {turn.seen}")
-            store.observe_event(None, event)
+            store.observe_event(LIVE_PRODUCER_SESSION, event)
             if isinstance(event, ToolCallComposeEvent) and getattr(event, "not_run_reason", None):
                 live = list(store.state.live_events)
                 break

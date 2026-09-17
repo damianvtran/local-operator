@@ -21,7 +21,9 @@ from local_operator.agent_profiles import (
 )
 
 
-def profile_detail(registry: Any, name: str, *, detail: bool = True) -> dict[str, Any]:
+def profile_detail(
+    registry: Any, name: str, *, detail: bool = True, already_installed: bool | None = None
+) -> dict[str, Any]:
     # Force an actual registry read before the tolerant runtime resolver. A
     # failed registry must not masquerade as a successful packaged fallback.
     complete = getattr(registry, "require_complete_metadata", None)
@@ -59,6 +61,17 @@ def profile_detail(registry: Any, name: str, *, detail: bool = True) -> dict[str
     seed = load_seed(origin) if origin else None
     if seed is not None:
         result["divergent_fields"] = list(seed_divergence(metadata, seed))
+    if already_installed is not None:
+        # Present ONLY on an install response, and only because the caller asked
+        # for it: ``install_seed`` returns ``(profile, already_installed)``
+        # (agent_profiles.py:548-560) and the route used to discard the second
+        # element, so a client could not tell "I installed it" from "it was
+        # already there" — which is exactly what the sidebar's install-all
+        # summary has to report ("6 installed, 2 already present", contract
+        # §5.6). It is deliberately absent from read responses: a GET is not an
+        # install, and a field that means nothing there is one a client will
+        # eventually read as if it did.
+        result["already_installed"] = already_installed
     if detail:
         result["instructions"] = instructions if kind == "specialist" else metadata.instructions
         if seed is not None:
