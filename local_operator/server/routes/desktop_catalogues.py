@@ -34,12 +34,13 @@ class CommandMetadata(BaseModel):
     #: so a response produced before this field existed still validates — the
     #: renderer ignores the key or falls back to its own derivation.
     prefixes_text: bool = False
-    #: The SHAPE the trailing text must have for the desktop to use it as this
+    #: The SHAPE the trailing text must have for the desktop to OWN it as this
     #: command's argument — ``none`` (no source at all: the booleans below are
     #: false and no shape applies), ``word`` (one selector token), ``provider``
     #: (one token naming a provider), ``subcommand`` (``<sub> [name]``, the MCP
-    #: shape) or ``any`` (the command owns its text, whatever it says). See
-    #: ``ArgumentShape``.
+    #: shape) or ``any`` (the command owns its text, whatever it says — a handler
+    #: or form field takes it, or the route REFUSES it because another surface owns
+    #: it, as ``/credential``'s masked-form sentence does). See ``ArgumentShape``.
     #:
     #: PRECEDENCE, published so a consumer may read this field alone OR OR it with
     #: the two booleans and be right either way: ``consumes_prompt`` and

@@ -26,14 +26,18 @@ on it — no surface is withheld — and its one consumer is the refusal alert's
 which differs by whether a correct client can reach that refusal at all.
 
 "IS a command" means the word plus an argument the desktop actually consumes — a
-prompt, a value from a list, or a shape the command route validates or forwards
-(`argument_shape` / `argument_words` on the catalogue, see
+prompt, a value from a list, or a shape the command route validates, forwards or
+REFUSES (`argument_shape` / `argument_words` on the catalogue, see
 [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md)). So `/compact hello`, `/usage more
 prose` and a draft that merely OPENS with `/mcp logout` are messages, while
-`/mcp logout`, `/login openai` and `/move ~/x` are still refused — each of those
-is a control the composer runs. The two booleans decide FIRST and a row they
-carry publishes `any` rather than `none`, so a client may read the shape alone or
-OR the three facts and reach the same answer.
+`/mcp logout`, `/login openai`, `/move ~/x` and `/credential <key> <value>` are
+still refused — each of those is a control the composer runs. The refusal case is
+the one where the text's destination is another surface rather than this one:
+`/credential`'s typed text is answered on `/commands` with "Enter credentials in
+the masked credential form, not command text", so a whole-draft form of it is
+refused on `/messages` too rather than posted as a message. The two booleans
+decide FIRST and a row they carry publishes `any` rather than `none`, so a client
+may read the shape alone or OR the three facts and reach the same answer.
 
 Electron **main**, not the renderer, generates a random 32-byte token for each
 managed backend lifetime. Supply it only through `LOCAL_OPERATOR_DESKTOP_TOKEN`
