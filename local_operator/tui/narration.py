@@ -30,15 +30,26 @@ DEFAULT_NARRATION = True
 def is_intermediate_narration(*, stop_reason: str | None, has_tool_calls: bool) -> bool:
     """Is this finalized assistant message mid-turn narration rather than the answer?
 
-    Either signal alone is sufficient. ``tool_calls`` is the direct evidence
-    that the turn continues after this message; ``stop_reason == "toolUse"`` is
-    the provider saying the same thing, and providers exist that report one
-    without the other.
+    ``tool_calls`` is the whole rule, and ``stop_reason`` deliberately does NOT
+    corroborate it on its own. Hiding narration is only justified because tool
+    activity FOLLOWS it and supersedes it on screen; with no calls there is
+    nothing to supersede it, so the prose is the only thing the turn produced
+    and it must stay.
 
-    Every OTHER stop reason is FINAL and must classify as False: ``stop``,
-    ``length``, ``refusal``, ``error`` and ``aborted`` (the vocabulary is at
-    ``harness/types.py``) each mean this message is the last thing the user
-    sees. Treating one of them as narration would erase the outcome of the
-    turn — a refusal, or a half sentence the user needs to see was cut off.
+    ``stop_reason == "toolUse"`` with an EMPTY ``tool_calls`` is reachable, not
+    hypothetical: ``providers/clients.py`` maps ``finish_reason`` to
+    ``stop_reason`` before the calls are assembled, and ``harness/loop.py``
+    assigns the two independently, so a provider that reports
+    ``finish_reason=tool_calls`` whose arguments then fail to assemble produces
+    exactly this pair. Accepting either signal removed the prose, the
+    ``for call in tool_calls`` loop mounted nothing, and
+    ``assistant_stop_notice`` returns None for ``toolUse`` — leaving the user's
+    prompt followed by SILENCE (review MAJOR-1).
+
+    Every stop reason is therefore irrelevant here, and the terminal ones
+    (``stop``, ``length``, ``refusal``, ``error``, ``aborted`` —
+    ``harness/types.py``) stay False for the same underlying reason: this
+    message is the last thing the user sees, and removing it would erase the
+    outcome of the turn.
     """
-    return bool(has_tool_calls) or stop_reason == "toolUse"
+    return bool(has_tool_calls)
