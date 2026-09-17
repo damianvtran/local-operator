@@ -73,21 +73,42 @@ from local_operator.evaluation.protocol import ActionBatch, ProtocolModel, WaitA
 #: runs), so the undeclared cost does not grow with action count -- measured: the
 #: worst wait-free call had 2 actions and the second worst had 6.
 #:
-#: WHAT IT COSTS AT THE BOUND. The largest legal declaration is 64 x 60 s of
-#: waiting, so the largest funded ``execute`` is 3_840 s + 30 s = 64.5 min. That
-#: is a real consequence and not a rounding error: a model that spends its last
-#: 64 minutes waiting will hold one step open for 64 minutes, and a benchmark
-#: whose protocol fixes wall-clock can overrun by up to that one step's declared
+#: WHAT IT COSTS AT THE BOUND -- PER FUNDED PATH, because one of them is far
+#: larger than the other and stating only the smaller one would hide the real
+#: number. Both ceilings come from the schema; neither is invented here.
+#:
+#: ``execute``: the largest legal declaration is 64 waits x 60 s, so the largest
+#: funded call is 3_840 s + 30 s = 64.5 min. A model that spends its last 64
+#: minutes waiting will hold one step open for 64 minutes, and a benchmark whose
+#: protocol fixes wall-clock can overrun by up to that one step's declared
 #: duration. The alternative is not cheaper, and the canary bundle is the
 #: evidence: today that same call is cut off at the caller's budget, the channel
 #: is poisoned, the worker is killed, the episode is forfeited unscored, and a
 #: RESCUE worker is spawned to tear the guest down -- so the run is spent, the
 #: provider spend is spent, and a fresh process pays the teardown anyway. A step
 #: that runs its declared 64 minutes at least buys the observation the model
-#: asked for. The protocol bound is the
-#: only ceiling here deliberately: any cap invented in this module would be a
-#: second, arbitrary limit on top of the one the action contract already states,
-#: and it would silently refuse work the harness had already admitted.
+#: asked for.
+#:
+#: ``cleanup``: the honest ceiling is **29_491_200 s -- 341 days for ONE call**
+#: -- and it is the protocol's, not this module's. A plan may hold
+#: ``MAX_DECLARATIONS`` (256) actions (``lifecycle.py``), each declaring up to
+#: ``MAX_CLEANUP_TIMEOUT_MS`` (1 h) x ``MAX_CLEANUP_ATTEMPTS`` (32), and the
+#: episode path selects every action in ONE call (``episode._run_cleanup``).
+#: That is not new exposure: the same aggregate teardown is already funded
+#: today by ``supervisor.run_rescue``, which loops the same plan one action per
+#: call at ``timeout_ms * max_attempts`` each (``supervisor.py:1414``) in a
+#: FRESH worker, after the episode has already forfeited every cleanup receipt.
+#: Funding it in one call spends the same time in one process and keeps the
+#: receipts. What keeps this from being a practical hazard is that the plan is
+#: the adapter's own verified ``prepare`` output (OSWorld declares 200 s, which
+#: funds at 230 s); a plan written to burn a year of teardown is a declaration
+#: problem, and no budget-shaped fix exists for it here -- any clamp would
+#: refuse work the call was admitted to do, and would convert a completed
+#: cleanup into a failed one plus a rescue that repeats the same work.
+#:
+#: The protocol's bounds are the only ceilings deliberately: any cap invented in
+#: this module would be a second, arbitrary limit on top of the one the action
+#: contract already states, and it would silently refuse admitted work.
 DECLARED_WORK_HEADROOM_S: float = 30.0
 
 
@@ -103,7 +124,19 @@ def declared_work_seconds(params: ProtocolModel) -> float:
     ``cleanup`` sums the SELECTED actions, not the whole plan, because that is
     what the call asks the worker to do; the same formula is already the budget
     the rescue path grants one action at a time (``supervisor.run_rescue``), so
-    this is the existing contract stated once instead of twice.
+    this is the existing contract stated once instead of twice. The sum is not
+    capped, deliberately: see the ceiling stated on
+    :data:`DECLARED_WORK_HEADROOM_S`.
+
+    The two cases are matched on the PROTOCOL OBJECT's own type
+    (``ActionBatch``, ``CleanupPlan``) rather than on the caller's params class,
+    because this module reads the action contract and not the adapter-facing
+    params API. A future params model carrying an ``ActionBatch`` under
+    ``action_batch`` and an ``action_ids`` selection over a ``CleanupPlan`` under
+    ``cleanup_plan`` is an execute-shaped and cleanup-shaped request by
+    construction, so funding it is the intent rather than an accident -- the
+    type guard is what stops any OTHER model with a coincidentally named
+    attribute from being funded.
     """
 
     batch = getattr(params, "action_batch", None)
@@ -133,6 +166,19 @@ def funded_timeout(configured: float, params: ProtocolModel) -> float:
     caller's budget stays a floor (an operator raising ``step_timeout`` still
     raises the effective deadline for every call) and the declaration becomes a
     floor as well (a legal batch is never killed by a budget that never saw it).
+
+    That second floor is ``declared + DECLARED_WORK_HEADROOM_S`` and it does not
+    shrink with the declaration: a 1 ms wait lifts a 1 s budget to 30.001 s. It
+    is intended, because the headroom is the cost of the part of the call that no
+    request field declares (see the constant for the measurement) and that part
+    exists whether or not a wait was declared -- a wait-free call simply gets its
+    allowance from the operator's configured budget instead. The trigger is
+    therefore "declared anything", not "declared a lot".
+
+    Over-funding is the deliberate direction on the retry path too: the
+    observation-phase resume (``episode._execute_with_observation_recovery``)
+    sends the SAME batch, so it is funded for the same declaration even though a
+    resume only re-reads the state that batch already applied.
     """
 
     declared = declared_work_seconds(params)

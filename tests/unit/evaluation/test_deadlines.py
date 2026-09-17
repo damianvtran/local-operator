@@ -7,17 +7,26 @@ Measured, from the preserved bundle of episode ``ep-fca426e92c42``
 (``runs/batch-deepseek-flash-canary9b/task_016``): the model emitted
 ``wait 60000``, ``key enter``, then three more ``wait 60000`` -- 240 s of
 declared waiting -- against a 180 s ``step_timeout``, and the episode died at
-186.3 s (180 budget + 1 s cancel grace + ~5.3 s teardown) with a fatal,
-non-retryable ``TimeoutError`` after 130 real steps and 1.7 h of work. The
-batch was LEGAL: ``MAX_BATCH_SIZE`` is 64 and ``MAX_WAIT_MS`` is 60 s.
+186.29 s (180 budget + 1 s cancel grace + ~5.3 s teardown before the error event
+was journalled) with a fatal, non-retryable ``TimeoutError`` after 130 real
+steps and 1.7 h of work. The batch was LEGAL: ``MAX_BATCH_SIZE`` is 64 and
+``MAX_WAIT_MS`` is 60 s.
 
 So this file pins two things. First, the derivation itself: the seconds a
 request declares, and that a request declaring nothing gets its configured
 budget back UNCHANGED (not quietly extended by the headroom -- that would widen
-every timeout in the harness). Second, that the bound is the protocol's own:
-the largest legal ``execute`` is ``MAX_BATCH_SIZE`` x ``MAX_WAIT_MS``, so the
-change cannot create an unbounded wait, only stop refusing work the harness had
-already admitted.
+every timeout in the harness). Second, that the bound is the protocol's own,
+stated per funded path because the two differ by orders of magnitude:
+
+* ``execute`` -- ``MAX_BATCH_SIZE`` x ``MAX_WAIT_MS`` = 3_840 s, so at most
+  64.5 min funded from one legal batch.
+* ``cleanup`` -- ``MAX_DECLARATIONS`` x ``MAX_CLEANUP_TIMEOUT_MS`` x
+  ``MAX_CLEANUP_ATTEMPTS`` = 29_491_200 s, i.e. 341 days for ONE call, because
+  the episode path selects every action of the plan in a single call. That is
+the protocol's ceiling rather than this change's (``supervisor.run_rescue``
+already funds the same aggregate one action at a time), and the test below pins
+it so the two numbers cannot drift apart silently -- an earlier draft of this
+PR stated only the ``execute`` bound and implied it covered both.
 """
 
 from __future__ import annotations
@@ -36,7 +45,12 @@ from local_operator.evaluation.deadlines import (
     funded_timeout,
 )
 from local_operator.evaluation.evidence.models import canonical_digest
-from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
+from local_operator.evaluation.lifecycle import (
+    MAX_CLEANUP_ATTEMPTS,
+    MAX_CLEANUP_TIMEOUT_MS,
+    CleanupAction,
+    CleanupPlan,
+)
 from local_operator.evaluation.protocol import (
     MAX_BATCH_SIZE,
     MAX_WAIT_MS,
@@ -46,6 +60,7 @@ from local_operator.evaluation.protocol import (
     ProtocolModel,
     WaitAction,
 )
+from local_operator.evaluation.receipts import MAX_DECLARATIONS
 
 TASK = "task"
 EPISODE = "episode"
@@ -166,6 +181,45 @@ def test_a_cleanup_call_is_funded_for_the_actions_it_selects() -> None:
     # call asks the worker to do, and the worker loops over the selection.
     both = cleanup(PLAN, "a-first", "b-second")
     assert declared_work_seconds(both) == 180.0
+
+
+def test_the_cleanup_ceiling_is_the_protocols_and_is_stated_not_implied() -> None:
+    """The other funded path has a far larger bound, so it is pinned explicitly.
+
+    An earlier draft of this change stated the ``execute`` bound (64.5 min) and
+    read as though it covered both paths. It does not: the episode path selects
+    EVERY plan action in one call, and the schema allows 256 actions of 1 h x 32
+    attempts each, so a maximal legal plan declares 341 days for a single call.
+    That ceiling is the protocol's rather than this module's -- the rescue path
+    already funds the same aggregate, one action per call at the same product --
+    and this test exists so the two numbers cannot drift apart silently, and so
+    nobody re-derives the smaller one and believes it is the bound.
+    """
+
+    huge = CleanupPlan(
+        episode_id=EPISODE,
+        actions=tuple(
+            cleanup_action(
+                f"a-{index:03d}",
+                timeout_ms=MAX_CLEANUP_TIMEOUT_MS,
+                max_attempts=MAX_CLEANUP_ATTEMPTS,
+            )
+            for index in range(MAX_DECLARATIONS)
+        ),
+    )
+    selected = cleanup(huge, *(action.action_id for action in huge.actions))
+    declared = MAX_DECLARATIONS * MAX_CLEANUP_TIMEOUT_MS * MAX_CLEANUP_ATTEMPTS / 1000.0
+    assert declared == 29_491_200.0
+    assert declared_work_seconds(selected) == declared
+    assert funded_timeout(60.0, selected) == declared + DECLARED_WORK_HEADROOM_S
+
+    # What the rescue path grants the same plan one action at a time
+    # (supervisor.py's `action.timeout_ms / 1000 * action.max_attempts`): the
+    # per-call bound when a single action is selected, which is 32 h, not 341
+    # days. Same aggregate work, different call granularity.
+    one = cleanup(huge, "a-000")
+    assert declared_work_seconds(one) == MAX_CLEANUP_TIMEOUT_MS * MAX_CLEANUP_ATTEMPTS / 1000.0
+    assert funded_timeout(60.0, one) == 115_230.0
 
 
 def test_a_wait_free_execute_declares_nothing_and_keeps_its_budget() -> None:
