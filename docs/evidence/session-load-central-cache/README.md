@@ -194,9 +194,12 @@ The full unit suite is **green here**, which is the stronger half of the flake
 claim below: the five failures the first head saw did not recur on a head that
 contains the same code plus a comment reflow and one new test.
 
-Gate results for the first head (`bf67bf699` + 6 commits, the head the round-1
-review read) — kept because the analysis of its five failures is the flake
-evidence, and because "green now" is only meaningful beside "was it green then":
+Gate results for the SIX-commit tree round 1 read (`bf67bf699` + the six commits
+before the bench-harness output change — the review's own scope line names the
+seven-commit head `d5450efbd`, whose seventh commit only adds the per-worker load
+field to the harness) — kept because the analysis of its five failures is the
+flake evidence, and because "green now" is only meaningful beside "was it green
+then":
 
 ```
 .venv/bin/python -m flake8 .                              → rc=0 (clean)
