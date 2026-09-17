@@ -15,7 +15,7 @@ import pytest
 from pydantic import SecretStr
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.clients._http import APIError
+from local_operator.clients._http import REDACTION_MARKER, APIError
 from local_operator.clients.radient import INSTRUCTION_SET_FIELDS
 from local_operator.server.routes.agents import (
     PUBLICATION_STATUS_BY_CODE,
@@ -452,6 +452,11 @@ async def test_publish_maps_every_hub_code_onto_its_status_and_structure(
     The status is the hub's own, and the detail is a structure — code, message,
     details — because a duplicate name, a reserved built-in, a moderation refusal
     and an oversized document are indistinguishable behind one prose sentence.
+
+    `details` here is the hub's own, EXACTLY as it sent it, and no `hub_code` is added
+    alongside it: on this arm the outward `code` IS the hub's code, so carrying it a
+    second time would be an echoed duplicate a renderer could only read as a
+    disagreement. The auth arm is the one where the two differ (see below).
     """
     agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
     dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
@@ -490,6 +495,48 @@ async def test_publish_reports_a_hub_failure_it_did_not_describe(
     assert detail["details"] == {}
 
 
+@pytest.mark.asyncio
+async def test_publish_masks_a_credential_the_hub_put_in_the_details(
+    test_app_client, dummy_registry: AgentRegistry
+) -> None:
+    """The known-code arm carries the hub's `details`, so it carries the masker with them.
+
+    QA round 2's A4 cell and review round 2's MINOR 1, both on the wire: the identical
+    hub text that the `message` half masks arrived VERBATIM in `details` -- the field
+    this contract says the renderer reads (`rule`, `field`), so an unscrubbed one is a
+    rendered sentence and not a hidden field. Asserted on the RESPONSE, not on the
+    exception, because what a caller receives is a formatted body: an arm that builds
+    one is where a guarantee can be lost, whatever produced the refusal underneath.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+    canary = "sk-radient-PUBLICATION-CANARY-0000"
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.side_effect = APIError(
+            f"the hub saw Authorization: Bearer {canary} and refused",
+            status_code=422,
+            code="moderation_rejected",
+            details={
+                "note": f"Authorization: Bearer {canary}",
+                "rule": f"quoted back: {canary}",
+                "existing_agent_id": "hub-7",
+                "categories": ["fraud_or_deception"],
+            },
+        )
+        response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
+
+    assert response.status_code == 422
+    assert canary not in response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "moderation_rejected"
+    # Masked, not dropped: the field and the classification a renderer switches on are
+    # still there, and the nested list keeps its shape.
+    assert detail["details"]["existing_agent_id"] == "hub-7"
+    assert detail["details"]["categories"] == ["fraud_or_deception"]
+    assert REDACTION_MARKER in json.dumps(detail)
+
+
 @pytest.mark.parametrize(
     "hub_status,hub_code",
     [
@@ -499,12 +546,22 @@ async def test_publish_reports_a_hub_failure_it_did_not_describe(
         (401, None),
         (401, "unauthorized"),
         (401, "invalid_api_key"),
+        # A code that CARRIES information, and the one QA round 2's B3 cell uses: an
+        # expired key and a revoked one answer with the same outward code, so if the
+        # hub's own code is dropped the two are indistinguishable to a renderer.
+        (401, "token_expired"),
         # A 403 with no recognised code is the same class of refusal -- the hub
         # answered and refused the caller -- where `not_owner` is a different one
         # and keeps its own code (the table test above pins that).
         (403, None),
     ],
-    ids=["401-no-code", "401-unknown-code", "401-other-spelling", "403-no-code"],
+    ids=[
+        "401-no-code",
+        "401-unknown-code",
+        "401-other-spelling",
+        "401-expired-key",
+        "403-no-code",
+    ],
 )
 @pytest.mark.asyncio
 async def test_publish_reports_a_refused_credential_rather_than_a_hub_outage(
@@ -516,6 +573,14 @@ async def test_publish_reports_a_refused_credential_rather_than_a_hub_outage(
     `hub_unavailable` selects "retry" -- the one thing that cannot fix an expired
     key, and the exact instruction the wrong code sent. The hub's own sentence
     travels in `message` unchanged, so a caller that ignores `code` loses nothing.
+
+    The hub's own code is CARRIED in `details.hub_code` rather than published as the
+    outward `code`: the outward code is a closed set in the renderer, and a member it
+    has no treatment for is the objection that keeps the 429 out of the vocabulary.
+    Carried, it is additive -- a renderer that does not read the key answers exactly
+    as it did -- and it is the difference between an expired key and a revoked one.
+    The hub's own `details` still do NOT travel: an unrecognised refusal's details are
+    the one part of that body this proxy has no shape for.
     """
     agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
     dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
@@ -535,7 +600,10 @@ async def test_publish_reports_a_refused_credential_rather_than_a_hub_outage(
     detail = response.json()["detail"]
     assert detail["code"] == "hub_unauthorized"
     assert detail["message"] == "Invalid API key provided."
-    assert detail["details"] == {}
+    # The hub's code is carried when it sent one, and nothing is invented when it did
+    # not -- the live hub's prose-only 401 answers exactly as it did before.
+    assert detail["details"] == ({"hub_code": hub_code} if hub_code else {})
+    assert "echo" not in json.dumps(detail)
 
 
 @pytest.mark.asyncio

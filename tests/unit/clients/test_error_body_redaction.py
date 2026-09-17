@@ -29,7 +29,15 @@ import pytest
 import requests
 from pydantic import SecretStr
 
-from local_operator.clients import _http, fal, ollama, openrouter, serpapi, tavily
+from local_operator.clients import (
+    _http,
+    fal,
+    ollama,
+    openrouter,
+    radient,
+    serpapi,
+    tavily,
+)
 from local_operator.clients._http import (
     NO_RESPONSE_BODY,
     REDACTION_MARKER,
@@ -279,6 +287,120 @@ def test_scrubbed_response_body_reads_a_response_and_reports_absence() -> None:
     assert "tvly-LEAKME-1" not in scrubbed_response_body(response)
     assert scrubbed_response_body(None) == NO_RESPONSE_BODY
     assert scrubbed_response_body(genuine_response(204, "   ")) == NO_RESPONSE_BODY
+
+
+# --- the other half of a structured refusal: `details` ------------------------------
+
+#: The credential THIS machine authenticates with, and a DIFFERENT one the hub reflected
+#: back. Two of them on purpose: the client removes its own key by value, so a canary the
+#: client holds would pass this test with the shape rules doing nothing at all.
+CLIENT_CANARY = "sk-radient-CLIENTKEY-000000000000"
+REFLECTED_CANARY = "tvly-REFLECTED-0000000000000000"
+
+
+def _refusal_body_with_credentials_in_details() -> str:
+    """A hub refusal whose `details` carry a credential in every shape it can.
+
+    The keys are the ones the contract says a renderer reads (`rule`, `reason`,
+    `categories`), and the shapes are the three the message half was fixed for: a
+    reflected `Authorization` header, a bare issuer-prefixed token, and a named field.
+    A nested object and a non-string carry two properties the walk has to get right --
+    it must not skip a shape we have no contract for, and it must not stringify the
+    values a renderer switches on.
+    """
+
+    return json.dumps(
+        {
+            "error": "refused",
+            "code": "moderation_rejected",
+            "details": {
+                "rule": f"Authorization: Bearer {REFLECTED_CANARY}",
+                "reason": f"the key {REFLECTED_CANARY} is not allowed",
+                "note": f"token={CLIENT_CANARY}",
+                "context": {"api_key": REFLECTED_CANARY},
+                "categories": ["fraud_or_deception", f"quoted {REFLECTED_CANARY}"],
+                "owned_by_caller": False,
+                "attempts": 2,
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("transport_name", ["raising", "returning"])
+def test_a_credential_inside_a_refusals_details_is_masked_too(
+    transport_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structured refusal is masked ANYWHERE the credential sits, not only in `message`.
+
+    `message` was fixed first, and that is precisely the shape of this defect: the same
+    hub body, one field over, reached the caller verbatim -- because the masker took a
+    string and `details` is a dict, so the one field nothing walked was the one the
+    contract says the desktop app renders inline. A hub is free to put a credential in
+    it (reflecting the request it refused is how the message half got hit), and the
+    guarantee belongs to the shared masker rather than to the arm that happens to
+    forward the dict -- so the assertion is on the VALUE the client hands its caller,
+    which is what every route surfaces later, not on one route's formatting.
+    """
+
+    make_transport = raising_transport if transport_name == "raising" else returning_transport
+    monkeypatch.setattr(
+        radient.requests, "post", make_transport(422, _refusal_body_with_credentials_in_details())
+    )
+    client = radient.RadientClient(
+        api_key=SecretStr(CLIENT_CANARY), base_url="https://hub.invalid/v1"
+    )
+
+    with pytest.raises(_http.APIError) as exc_info:
+        client.publish_agent_instruction_set({"name": "coder"})
+
+    refusal = exc_info.value
+    # Nowhere in what the caller holds: not in the sentence, not in any detail, at any
+    # depth, and not in a serialisation of the whole refusal either.
+    assert CLIENT_CANARY not in str(refusal)
+    assert CLIENT_CANARY not in json.dumps(refusal.details)
+    assert REFLECTED_CANARY not in json.dumps(refusal.details)
+    # Masked, not dropped: the classification survives, every detail key a renderer
+    # reads survives, and the carries that are NOT strings keep their types.
+    assert refusal.code == "moderation_rejected"
+    assert refusal.details["context"]["api_key"] == REDACTION_MARKER
+    assert refusal.details["categories"] == ["fraud_or_deception", f"quoted {REDACTION_MARKER}"]
+    assert refusal.details["owned_by_caller"] is False
+    assert refusal.details["attempts"] == 2
+
+
+def test_scrub_details_walks_the_shape_and_leaves_what_is_not_a_credential() -> None:
+    """The structured masker: recursive, type-preserving, and not over-eager.
+
+    Keys are left alone on purpose -- a key is the part of the contract a renderer
+    switches on -- and a detail an upstream composed without a credential in it must
+    come back byte-identical, or the masker has traded one defect for another.
+    """
+
+    details = {
+        "field": "instructions",
+        "rule": "must be at most 8000 characters",
+        "limit_bytes": 65536,
+        "owned_by_caller": True,
+        "api_key": REFLECTED_CANARY,
+        "nested": {"token": f"Bearer {REFLECTED_CANARY}"},
+        "items": (REFLECTED_CANARY, 3),
+    }
+
+    scrubbed = _http.scrub_details(details)
+
+    assert scrubbed == {
+        "field": "instructions",
+        "rule": "must be at most 8000 characters",
+        "limit_bytes": 65536,
+        "owned_by_caller": True,
+        "api_key": REDACTION_MARKER,
+        "nested": {"token": f"Bearer {REDACTION_MARKER}"},
+        "items": (REDACTION_MARKER, 3),
+    }
+    # A tuple stays a tuple and an int stays an int: the details are machine-readable.
+    assert isinstance(scrubbed["items"], tuple)
+    # Keys are not the masker's business: the renderer switches on them.
+    assert sorted(scrubbed) == sorted(details)
 
 
 # --- the guard: the next call site is caught by CI ----------------------------------
