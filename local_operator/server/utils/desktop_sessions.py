@@ -1614,6 +1614,16 @@ class DesktopSessionBridge:
             # an absent viewer. Against that, the write is a field assignment
             # while cold (its RPC half is guarded by a connected client), and it
             # keeps `_desktop_seen` fresh as well as truthful.
+            # NO ``timeout`` HERE, and that is the documented envelope rather
+            # than an oversight: the re-assert's bound is ``_DESKTOP_WATCH_ACK_BOUND_S``
+            # (5 s), which belongs to the LEASE — its TTL is 45 s and the beat that
+            # renews it is 15 s, so this hint's patience is the lease's business and
+            # not a read's. A read narrows it through ``update_desktop_watch``'s
+            # ``timeout`` so the hint can never lengthen a read; a BEAT is not a
+            # read, and clamping it to the remainder of one request's budget would
+            # make the renewal's patience depend on which request happened to
+            # arrive first. ``docs/DESKTOP_API.md`` states the resulting envelope
+            # (≤ 2 s attach + ≤ 5 s hint) for this one route.
             await remote.update_desktop_watch(visible=visible, can_notify=can_notify)
             if not visible:
                 # NO LIVE VISIBLE LEASE, so the intent that earned any standing

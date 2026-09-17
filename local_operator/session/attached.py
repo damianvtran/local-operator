@@ -2413,7 +2413,14 @@ class AttachedSession:
                     # ``no-runtime`` — "no pid holds this session's transcript
                     # lease" — while a socket to that very pid is up and serving
                     # (review round 1, MINOR-1).
-                    self._note_read_cold_reason(None, self._runtime_pid)
+                    #
+                    # The RECORD goes with it, not None: a connected owner that is
+                    # finishing work in flight first is exactly
+                    # ``owner-leaving``, and the record this facade dialled is in
+                    # hand while its leaving flag is the registry's own phrase for
+                    # it. Passing None made that token unreachable from this arm
+                    # (review round 2, NIT-2).
+                    self._note_read_cold_reason(self._runtime_record, self._runtime_pid)
                 return False
             record, owner = await asyncio.to_thread(
                 find_runtime_record, self._config_dir, self._session_id

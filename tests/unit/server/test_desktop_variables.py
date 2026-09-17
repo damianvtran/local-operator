@@ -42,10 +42,15 @@ SESSION = "8fd6c6a40934"
 
 
 class FakeRemote:
-    """A viewer facade with the two facts the routes read and nothing else."""
+    """A viewer facade with the facts the routes read and nothing else."""
 
-    def __init__(self, *, cold: bool = False) -> None:
+    def __init__(self, *, cold: bool = False, cold_reason: str | None = None) -> None:
         self._cold = cold
+        # ``cold_reason`` is a sibling of ``is_cold`` on the real facade, and the
+        # variables route branches on it: a cold facade with no runtime keeps the
+        # observed/absent reading, while one whose owner is merely silent is
+        # UNREAD.
+        self._cold_reason = cold_reason
         self.binds = 0
         self.calls: list[tuple[Any, ...]] = []
         self.answers: dict[str, dict[str, Any]] = {}
@@ -53,6 +58,14 @@ class FakeRemote:
     @property
     def is_cold(self) -> bool:
         return self._cold
+
+    @property
+    def cold_reason(self) -> str | None:
+        if not self._cold:
+            return None
+        # Defaulted to ``no-runtime`` because that is the state this suite builds:
+        # ``is_cold`` with nothing holding the session's lease.
+        return self._cold_reason or "no-runtime"
 
     async def bind_runtime(self) -> None:
         self.binds += 1
@@ -160,6 +173,28 @@ async def test_a_cold_session_reads_absent_without_engaging_a_runtime(desktop) -
         "truncated": False,
     }
     assert remote.binds == 0, "a read engaged the runtime"
+    assert remote.calls == [], "a cold session has no kernel to ask"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_session_with_a_silent_owner_is_unread_not_empty(desktop) -> None:
+    """A runtime that holds the lease and does not answer is not an empty namespace.
+
+    ``variables: []`` means observed and empty, so the same payload that is right
+    for a session with no runtime is a lie for one whose owner is alive and
+    silent — it renders "Nothing stored yet" over a namespace nobody read, and
+    ``runtime: "absent"`` repeats the false "no runtime" claim this read mode
+    exists to remove (review round 2, MINOR-2). The token on the facade is what
+    separates the two, and ``busy`` is the retryable state the panel already has.
+    """
+    client, remote = desktop
+    remote._cold = True
+    remote._cold_reason = "owner-silent"
+
+    response = await client.get(_variables_url())
+
+    assert response.status_code == 200
+    assert response.json()["result"]["data"] == {"state": "busy"}
     assert remote.calls == [], "a cold session has no kernel to ask"
 
 

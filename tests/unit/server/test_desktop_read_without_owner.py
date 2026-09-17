@@ -18,6 +18,7 @@ budget, with the same rows on ``/history``.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from pathlib import Path
@@ -35,6 +36,13 @@ from local_operator.server.routes import (
 from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
+)
+
+# The presence hint's own bound, private to the facade: the beat's documented
+# envelope is ``READ_ATTACH_BUDGET_S`` + this, and a test that hard-coded 5 s
+# would keep passing after the constant moved (review round 2, MINOR-1).
+from local_operator.session.attached import (
+    _DESKTOP_WATCH_ACK_BOUND_S as DESKTOP_WATCH_ACK_BOUND_S,
 )
 from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
 from local_operator.session.runtime import launch, registry
@@ -93,6 +101,21 @@ class _Harness:
 @pytest.fixture(autouse=True)
 def _desktop_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every row runs against a synthetic HOME, not the operator's.
+
+    ``/mcp`` resolves its rows through ``load_all_mcp_configs``, which reads the
+    user scope out of ``Path.home()`` (``~/.codex/config.toml``, ``~/.claude.json``
+    and friends) as well as the project scope. Without this, the row quietly reads
+    the machine it is running on — read-only, but a test that asserts isolation
+    and then opens the operator's own config is worse than one that does not
+    claim it (review round 2, NIT-3).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir(parents=True, exist_ok=True)
 
 
 async def _get(client: AsyncClient, url: str) -> tuple[int, float, dict[str, Any]]:
@@ -486,6 +509,7 @@ async def test_the_watch_beat_answers_200_for_a_silent_owner(
         _publish_live(tmp_path, owner, session_id=harness.session_id)
         async with harness.pool.session(harness.session_id, read=True) as held:
             subscription = held.subscribe()
+            started = time.monotonic()
             response = await harness.client.post(
                 f"/v1/desktop/sessions/{harness.session_id}/watch",
                 json={
@@ -494,8 +518,19 @@ async def test_the_watch_beat_answers_200_for_a_silent_owner(
                     "can_notify": False,
                 },
             )
+            elapsed = time.monotonic() - started
         assert response.status_code == 200, response.text
         assert response.json()["result"]["lease_seconds"] == 45
+        # The beat's envelope is its ATTACH budget plus the presence hint's own
+        # bound, and the doc says so for this one route: the hint is a lease
+        # renewal (``_DESKTOP_WATCH_ACK_BOUND_S``, 5 s), not part of serving the
+        # read, so it is not clamped by ``READ_ATTACH_BUDGET_S``. Asserted rather
+        # than described, because the round-2 review found the doc claiming the
+        # read budget here while the route measured 5.04 s for a silent owner
+        # (review round 2, MINOR-1).
+        assert (
+            elapsed < READ_ATTACH_BUDGET_S + DESKTOP_WATCH_ACK_BOUND_S + 1.0
+        ), f"the beat took {elapsed:.2f}s, past its documented envelope"
         await owner.stop()
 
 
@@ -506,9 +541,17 @@ async def test_the_watch_beat_answers_200_for_a_silent_owner(
 #: the shape of the answer itself.
 _DURABLE_SESSION_READS = (
     ("/v1/desktop/sessions/{session}/mcp", {"data": {"cold": True}}),
-    ("/v1/desktop/sessions/{session}/variables", {"data": {"runtime": "absent"}}),
+    # A SILENT owner is not an absent one: the cold payload says the namespace is
+    # UNREAD (retryable), not observed-and-empty (review round 2, MINOR-2). The
+    # absent case keeps the observed/empty reading and has its own test below.
+    ("/v1/desktop/sessions/{session}/variables", {"data": {"state": "busy"}}),
     ("/v1/desktop/skills?session_id={session}", {}),
-    ("/v1/desktop/sessions/{session}/failovers", {"data": {"live_model_source": "owner"}}),
+    # Marker-less on purpose, like ``/skills``: every field in this payload is a
+    # literal in the route or a config default, so no value here discriminates a
+    # cold answer from a live one and asserting one would be a test that cannot
+    # fail (review round 2, NIT-1). The row's content is the 200 inside the
+    # budget.
+    ("/v1/desktop/sessions/{session}/failovers", {}),
     (
         "/v1/desktop/sessions/{session}/command-entities?command=approvals",
         {"command": "approvals", "entities": [{"value": "auto"}, {"value": "ask"}]},
@@ -593,3 +636,69 @@ async def test_a_durable_session_read_is_unchanged_for_a_healthy_owner(
                 assert status == 200, (template, body)
         finally:
             await server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_variables_keeps_the_observed_empty_reading_when_no_pid_holds_the_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-2's other half: the absent case is genuinely absent.
+
+    ``variables: []`` means observed and empty, never unknown, so the payload only
+    keeps that reading where it is true. With no owner at all there is no
+    namespace to read and the panel's "no code memory yet" is correct; with a
+    runtime holding the lease and not answering, the same payload would render
+    that sentence over a namespace nobody read — which is the `data.state: "busy"`
+    row in the silent-owner case above.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        status, elapsed, body = await _get(
+            harness.client, f"/v1/desktop/sessions/{harness.session_id}/variables"
+        )
+
+        assert status == 200, body
+        assert elapsed < READ_ATTACH_BUDGET_S + 1.0
+        assert body["result"]["data"] == {
+            "state": "observed",
+            "runtime": "absent",
+            "kernel": "absent",
+            "variables": [],
+            "truncated": False,
+        }
+
+
+@pytest.mark.asyncio
+async def test_the_mcp_row_answers_from_the_projects_own_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NIT-3: the row's isolation is asserted, not claimed.
+
+    ``load_all_mcp_configs`` reads the user scope out of ``Path.home()``, so
+    without a redirected HOME this row answers from the operator's own
+    ``~/.codex/config.toml``. With it, the synthetic project file is the only
+    source and its path is the assertion — which also makes the row discriminate
+    something the cold flag alone does not (review round 2, NIT-3).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        project = harness.inputs / ".mcp.json"
+        project.write_text(
+            json.dumps({"mcpServers": {"synthetic-one": {"command": "true"}}}), encoding="utf-8"
+        )
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+
+        status, _elapsed, body = await _get(
+            harness.client, f"/v1/desktop/sessions/{harness.session_id}/mcp"
+        )
+
+        assert status == 200, body
+        data = body["result"]["data"]
+        assert data["cold"] is True, data
+        assert [server["name"] for server in data["servers"]] == ["synthetic-one"], data["servers"]
+        assert data["servers"][0]["source"] == str(project), data["servers"][0]
+        await owner.stop()

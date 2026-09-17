@@ -314,6 +314,21 @@ async def variables(session_id: str, request: Request):
     async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
+            # THE COLD PAYLOAD DEPENDS ON WHY IT IS COLD, because ``variables: []``
+            # means "observed and empty, never unknown" (see ``read_variables``
+            # above). ``no-runtime`` is the genuine absent case and keeps that
+            # reading: no pid holds the lease, so there is no namespace to read
+            # and the panel's "no code memory yet" is true. A ``owner-silent`` or
+            # ``owner-leaving`` facade is the opposite claim — a runtime holds the
+            # lease and simply did not answer — and answering the observed/empty
+            # payload there renders "Nothing stored yet" over a namespace nobody
+            # read, which is the same false "no runtime" statement this read mode
+            # exists to remove (review round 2, MINOR-2). ``busy`` is the retryable
+            # state the panel already renders for a namespace it could not read;
+            # it carries no ``variables`` key precisely so nothing can render it
+            # as empty.
+            if bridge.remote.cold_reason in ("owner-silent", "owner-leaving"):
+                return reply({"data": {"state": "busy"}})
             return reply({"data": dict(_COLD_VARIABLES)})
         answer = await bridge.remote.variables_op("list")
         return reply({"data": read_variables(answer)})
