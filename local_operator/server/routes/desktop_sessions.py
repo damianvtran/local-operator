@@ -1068,8 +1068,17 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         # contract an older backend's rows carry.
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
-        rows = await host(request).list(limit + 1, status_stamps=stamps)
-        sessions = rows[:limit]
+        page = await host(request).list(limit, status_stamps=stamps)
+        # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
+        # Concatenated on the wire rather than published as a second field, and
+        # the reason is what the client does with this array: it REPLACES the
+        # rows it is holding with it. A pinned row parked in a sibling field
+        # would be a row the client does not hold until it learns about that
+        # field, and a client that missed it renders nothing for the pin — the
+        # exact gap the extra exists to close. The two are still distinct facts
+        # on the row itself (`pinned`), which is all a client needs to section
+        # them, and `truncated`/`limit` keep describing the PAGE.
+        sessions = page.rows + page.pinned_off_page
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the
@@ -1087,7 +1096,7 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         return reply(
             {
                 "sessions": sessions,
-                "truncated": len(rows) > limit,
+                "truncated": page.truncated,
                 "limit": limit,
                 "degraded": degraded,
             }

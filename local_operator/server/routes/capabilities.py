@@ -235,10 +235,21 @@ async def capabilities():
                 # working against a backend that lacks the new one, and here that
                 # surface is the whole chats list. Bumping `session_catalogue` to
                 # 4 would hide a working catalogue behind an update it does not
-                # need, and nothing about the row's EXISTING keys changes — the
-                # flag is additive on a model that is `extra="allow"` and a
-                # renderer that ignores it behaves byte-for-byte as it does
-                # today.
+                # need, and no EXISTING key's shape changes — `sessions` gains
+                # rows (see below) without gaining a field.
+                #
+                # STILL 1, AND THAT IS NOT AN OMISSION. `sessions` on this route
+                # now also carries pinned conversations the page did not reach,
+                # which a client MUST read to render a pin made on an older
+                # conversation; that is a change to what the contract contains,
+                # not to the contract's shape, and the number has never been
+                # RELEASED — this key and the route that reads it are landing in
+                # the same unreleased window, and #1200/#1214 are still open. A
+                # bump to 2 would advertise a difference from a version no client
+                # has ever talked to, which is a migration nobody can perform.
+                # What the number gates is unchanged: absent ⇒ no affordance, no
+                # slot, no handler; present ⇒ the row's `pinned` flag is readable
+                # and settable, and `sessions` is complete for the pinned set.
                 #
                 # NOT gated on `desktop_feed` either, because the two answer
                 # different questions: the pin is durable state the renderer has
