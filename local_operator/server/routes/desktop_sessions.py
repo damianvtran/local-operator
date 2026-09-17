@@ -75,7 +75,6 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
-from local_operator.session.session_search import search_store
 from local_operator.slash_commands import (
     command_argument_refusal,
     slash_command_for,
@@ -462,9 +461,19 @@ class Pin(Input):
     makes an omitted ``pinned`` a 422 rather than a silent false — the field is
     the whole request, so a body that does not carry it is not a request this
     route can honour.
+
+    ``StrictBool`` rather than a bare ``bool``, matching every other boolean on
+    this plane (``PresenceWindow``, ``PresenceBeat``, ``Watch``, ``Answer``). A
+    bare ``bool`` coerces the strings and integers a generous JSON client sends
+    — ``{"pinned": "yes"}`` and ``{"pinned": 1}`` both pin the session — so a
+    client whose serialiser is producing the wrong type gets a 200 and no
+    signal, and the bug surfaces later as "the pin came from nowhere". The
+    neighbours refuse that shape, and a pin is durable state rather than a
+    display hint: being wrong about it silently is what this route exists to
+    prevent.
     """
 
-    pinned: bool
+    pinned: StrictBool
 
 
 class PresenceWindow(Input):
@@ -1114,20 +1123,9 @@ async def search_sessions(
     one would be projected into every digest comparison.
     """
     async with errors():
-        matches = await asyncio.to_thread(search_store, host(request).root, q, limit=limit)
         return reply(
             {
-                "sessions": [
-                    {
-                        "id": match.row.id,
-                        "name": match.row.name,
-                        "mtime": match.row.mtime,
-                        "forked": match.row.forked,
-                        "rank": match.rank,
-                        "body_match": match.body_match,
-                    }
-                    for match in matches
-                ],
+                "sessions": await host(request).search(q, limit),
                 "query": q,
                 "limit": limit,
             }

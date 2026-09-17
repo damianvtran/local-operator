@@ -102,6 +102,23 @@ class SessionSearchRow(BaseModel):
     forked: bool = False
     rank: int
     body_match: bool = False
+    #: Whether this conversation is pinned: ALWAYS PRESENT, both values, on every
+    #: row — the same rule, and the same reason, as :attr:`SessionRow.pinned`.
+    #:
+    #: NOT OPTIONAL HERE EVEN THOUGH THE SEARCH IS A DIFFERENT QUESTION. A client
+    #: that synthesises a row from a search hit — which the app does, for a
+    #: conversation beyond the 500 rows its own page holds — would otherwise
+    #: render a pinned conversation in an ordinary section with no Pinned section
+    #: at all, and offer a pin control whose press is an idempotent no-op that
+    #: cannot repair the row (the pin is already true server-side, so the next
+    #: search answers the same way). An absent key there is not a neutral choice:
+    #: the client reads it as "no claim", so the omission is what makes the state
+    #: permanently wrong on that surface.
+    #:
+    #: REQUIRED rather than defaulted, like the list row's: a projection that
+    #: forgot it fails loudly here instead of shipping an omission the client is
+    #: entitled to read as no claim.
+    pinned: bool
 
 
 class SessionSearch(BaseModel):
