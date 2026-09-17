@@ -5892,6 +5892,7 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         QWENCLOUD_TICKET_STALE_MS,
         TicketStoreError,
         TicketStoreLocked,
+        _secret_is_present,
         delete_ticket,
         read_ticket_record,
         store_ticket,
@@ -5941,6 +5942,23 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         # file.
         try:
             record = read_ticket_record(store)
+            # The ROW is not the whole answer, and this is the other half of the
+            # fix `rm` already needed. `store_ticket` writes the VALUE first and
+            # the row second, on purpose, so a crash, a kill or an older
+            # `auth.db` restored from a backup leaves a SECRET ORPHAN: a live
+            # value with nothing pointing at it (see `delete_ticket`'s
+            # docstring for the same state from the revoking side).
+            # `read_ticket_record` reads rows and reports None for it, so
+            # without this probe `status` answers "no ticket stored" over a live
+            # full-account cookie -- hiding the exposure AND pointing away from
+            # `rm`, the only verb that revokes it.
+            #
+            # INSIDE this `try`, deliberately: `_secret_is_present` raises the
+            # same `TicketStoreError` family (`TicketStoreLocked`,
+            # `TicketStoreUnreadable`), and a store that cannot be read must
+            # reach the UNKNOWN branch below rather than fall through to the
+            # no-ticket receipt.
+            unreferenced_value = record is None and _secret_is_present(None)
         # No separate `TicketStoreLocked` clause here, unlike `rm`. The remedy
         # ("Run `lop secret unlock`") lives in the EXCEPTION MESSAGE that Slice
         # A raises, and this clause interpolates it, so a locked store already
@@ -5957,6 +5975,26 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
             )
             return 1
         if record is None:
+            if unreferenced_value:
+                # Exit 0, not 1: unlike the UNKNOWN branch above, the question
+                # WAS answered -- something is stored, and the answer is
+                # "stored with no metadata row". The metadata-orphan WARNING
+                # below also rides exit 0, and 1 is this verb's dedicated code
+                # for "could not be read at all".
+                #
+                # No length and no age: both live in the row that is missing,
+                # and reading them would mean retrieving the value, which is
+                # the one thing this verb promises never to do. `/usage` does
+                # not read the value either -- with no row there is nothing for
+                # the controller to find -- so this state is present AND
+                # unusable, and the honest receipt says both.
+                print(
+                    "A QwenCloud console ticket VALUE is stored, but no metadata "
+                    "row records it, so /usage does not read it and its age and "
+                    "length are unknown."
+                )
+                print('  Run "lop qwencloud-ticket rm" to revoke it.')
+                return 0
             print("No QwenCloud console ticket stored.")
             print("  printf %s '<TICKET>' | lop qwencloud-ticket set")
             return 0
