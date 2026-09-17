@@ -16829,13 +16829,28 @@ class OperatorApp(App[None]):
         move that cannot work. "Couldn't attach an image from the clipboard" is
         true in every case because it describes what the app did.
 
-        Three variants, matching exactly what
+        The set of variants is exactly the closed set
         :class:`~local_operator.tui.widgets.editor.EditorPasteEmpty` can
         establish, and no more — a per-backend message would fight the
         deliberate collapse in :mod:`local_operator.clipboard` and would mean
-        guessing between an empty clipboard and a missing ``xclip``. The two
+        guessing between an empty clipboard and a missing ``xclip``. The ones
         that are knowable name the user's next move, since a failure the user
-        can act on is worth more words than one they cannot.
+        can act on is worth more words than one they cannot. Only ``nothing``
+        has no move to name, which is the whole reason it is the one variant
+        that does not take the failure duration.
+
+        **A named move has to work for EVERY cause the variant covers**, which
+        is why ``read-failed`` names the path route and not a retry (review
+        round 1, NIT-5 / QA Q2). That variant is the union of a transient
+        escape and a permanent refusal — QA staged a ``chmod 500`` scratch base
+        that refuses on every attempt — and a retry names an action the second
+        half rules out. Pasting a file path bypasses the clipboard read
+        entirely, so it survives both halves and survives a full volume; it is
+        also the move ``remote`` already spells, so the family teaches one
+        route rather than three. ``unattachable`` used to spell it too and does
+        not any more — round 2 removed the phrase from its copy (its own branch
+        comment below says why, D10) — so a reader looking for a second sibling
+        notice will not find one (design round 2, D3).
 
         Capitalised, noun-first: this is a state notice, the family
         ``No provider configured`` belongs to, not a gesture receipt like
@@ -16844,8 +16859,8 @@ class OperatorApp(App[None]):
         ``TOAST_FAILURE_MS`` and not the 5 s default, because
         ``toast.py`` splits duration by ACTIONABILITY rather than severity:
         a receipt the user can verify at a glance gets 5 s, something they must
-        read and act on gets 10 s. Two of these three now carry a remedy, so
-        they belong in the second family (design round 1, D6).
+        read and act on gets 10 s. Every variant but ``nothing`` now carries a
+        remedy, so the family is the second one (design round 1, D6).
 
         ``yield_to_actionable`` for the same reason the copy receipt uses it:
         the user just pressed a key, so this must not evict an MCP failure they
@@ -16864,6 +16879,38 @@ class OperatorApp(App[None]):
             # family is one line; this one now is too, and it keeps the remedy
             # that makes it actionable.
             text = "Clipboard isn't read over SSH. Paste a file path."
+        elif message.reason == "read-no-space":
+            # 55 cells. The card has to do two jobs the family's other branches
+            # do not: it is the ONLY place the user is told the clipboard was
+            # not consulted at all (so "copy again", the move every other
+            # notice implies, would be wrong advice), and it has to convert a
+            # disk condition into a paste-shaped sentence, because the failure
+            # the user experienced was a keystroke, not a filesystem. "Free up
+            # space" is therefore not decoration - it is the entire content of
+            # the notice, and it is why this variant cannot be merged into
+            # `read-failed` below (2026-09-17).
+            text = "Clipboard not read — no temp space left. Free up space."
+        elif message.reason == "read-failed":
+            # 46 cells. Says what happened and the one move that helps, and
+            # deliberately does NOT guess why: the cause this branch covers is
+            # the union of "a probe could not name it" and "an exception
+            # escaped a backend", which is a set this app cannot enumerate. Not
+            # collapsed into `nothing` for the reason the whole reason field
+            # exists: this user's clipboard was never read, and telling them it
+            # was empty sends them to re-copy something that may be perfectly
+            # fine.
+            #
+            # The move is the PATH route, not a retry (review round 1, NIT-5 /
+            # QA Q2). "Try ctrl+v again" was right for the transient half of
+            # this value (an escaped `EMFILE`) and provably wrong for the
+            # permanent half: QA staged a `chmod 500` scratch base, where every
+            # attempt is refused, so the notice named an action that could not
+            # work. The path route bypasses the clipboard READ altogether, so
+            # it survives both halves - and "Paste a file path" is already the
+            # family's own vocabulary (`remote` names it, and `unattachable`
+            # did until round 2 removed the phrase from its copy), so this is
+            # not a new move to teach.
+            text = "Clipboard not read. Paste a file path instead."
         elif message.reason == "unattachable":
             # No "paste its file path" here any more: the path route runs the
             # same bounding tail, so a refusal caused by the IMAGE cannot be
