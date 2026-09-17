@@ -383,8 +383,20 @@ app = FastAPI(
 #: the router by :func:`_legacy_gate_matchers` so a newly added route under them
 #: is gated BY DEFAULT. This set is only the flat singleton paths, which have no
 #: id segment and no family to walk.
+#:
+#: ``/v1/agent-name-availability`` is here because a route can be flat, read-only
+#: and carry no credential of its own and still be the wrong thing to leave open:
+#: it is EGRESS this machine performs on an unauthenticated caller's behalf (the
+#: hub is asked whether a name is free), on an app whose ``CORSMiddleware``
+#: allows every origin, so a page the operator merely visited could drive it. The
+#: prefix families cannot see it — ``"/v1/agent-name-availability".startswith(
+#: "/v1/agents")`` is False, the hyphen is not a segment boundary — which is why
+#: ``test_managed_gate_covers_every_control_surface_route`` walks the ROUTERS
+#: rather than the prefixes and fails when a route like this appears without an
+#: entry here.
 _LEGACY_CONTROL_PATHS = frozenset(
     {
+        "/v1/agent-name-availability",
         "/v1/config",
         "/v1/config/system-prompt",
         "/v1/credentials",

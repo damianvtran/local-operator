@@ -157,6 +157,8 @@ def test_list_models_api_error(ollama_client: OllamaClient) -> None:
     # Mock the API request to raise an HTTP error
     mock_requests_get = MagicMock()
     mock_requests_get.return_value.status_code = 400
+    # Bytes, as on a real Response: the error path decodes and scrubs the body.
+    mock_requests_get.return_value.content = b'{"error": "bad request"}'
     mock_requests_get.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(
         "Bad Request", response=mock_requests_get.return_value
     )
