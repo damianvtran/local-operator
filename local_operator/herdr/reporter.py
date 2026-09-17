@@ -243,22 +243,25 @@ process group, on a process whose own group could not be read, compared
 nothing and is UNKNOWN.
 
 That rule is the module's doctrine in both directions, and the deliberate
-cost is on one side of it: where ``ps`` cannot answer or the walk runs out of
-budget, an interloper reports again — the ~2/min flap could come back on such
-a host. The walk of a process STARTED inside the pane terminates at a readable
-pid 1 within a few hops, so a real interloper still reads FOREIGN and the cost
-is narrow; silencing a legitimate row is not narrow, and it is the failure
-this module's contract forbids.
+cost is on one side of it: where ``ps`` cannot answer, where the walk runs out
+of hops, or where it runs out of budget, an interloper reports again — the
+~2/min flap could come back on such a host. The walk of a process STARTED
+inside the pane terminates at a readable pid 1 within a few hops, so a real
+interloper still reads FOREIGN and the cost is narrow; silencing a legitimate
+row is not narrow, and it is the failure this module's contract forbids.
 
 The check is one bounded call: a :data:`PANE_PROBE_TIMEOUT_S` probe plus an
 :data:`ANCESTRY_BUDGET_S` walk, and its verdict is MEMOIZED per process keyed
 by the pane id, so adopting a session again or swapping sessions does not
 re-ask. It runs INLINE on the calling thread — which is the app's event loop,
 at session adoption — so that budget is worst-case loop time: ~1 s against a
-wedged ``herdr`` socket, ~3 s with a wedged ``ps`` behind it. The common case
-measured on 0.9.0 is ~10 ms. Moving it off the loop (``asyncio.to_thread``,
-as ``mobile.peer_send`` does for its own walk) is a follow-up, and it needs an
-awaitable caller at ``app._adopt_session`` before it is possible at all.
+wedged ``herdr`` socket, ~3 s with a wedged ``ps`` behind it (the walk's
+budget covers its last hop, not just the gaps between hops — see
+:func:`_hop_timeout_s`). The common case measured on 0.9.0 is ~10 ms. Moving
+it off the loop is a follow-up about its CALLER rather than about the
+mechanism: ``asyncio.to_thread`` is available today — ``mobile.peer_send``
+already uses it for its own walk — and what is missing is an awaitable
+``app._adopt_session`` to await it from.
 
 Everything else is UNKNOWN, AND UNKNOWN FAILS OPEN: a probe that failed or
 timed out, a non-zero exit, ``pane_not_found``, an unparsable payload, a
@@ -357,7 +360,9 @@ PARENT_LOOKUP_TIMEOUT_S = 2.0
 #: How long the WHOLE ancestry walk may take. Exceeding it is UNKNOWN, not
 #: "not an ancestor": a process tree this slow to read is one we cannot
 #: conclude anything from, and the module's rule is that a legitimate row is
-#: never silenced on an unanswerable question.
+#: never silenced on an unanswerable question. The budget bounds the walk's
+#: LAST hop as well as the gaps between hops — see :func:`_hop_timeout_s` —
+#: so ``PARENT_LOOKUP_TIMEOUT_S`` is not a second full overrun of this figure.
 ANCESTRY_BUDGET_S = 2.0
 
 #: How long one ``herdr pane process-info`` may take. This is the one ``herdr``
@@ -375,6 +380,22 @@ PANE_PROBE_TIMEOUT_S = 1.0
 #: ``mobile.peer_send._ANCESTRY_MAX_HOPS``. Running out of hops is UNKNOWN
 #: rather than negative — see :func:`_reaches_ancestor`.
 _ANCESTRY_MAX_HOPS = 8
+
+#: Deadline (``time.monotonic``) of the ancestry walk running ON THIS THREAD,
+#: absent when no walk is in progress. :func:`_hop_timeout_s` reads it to cap
+#: the default parent lookup's ``ps`` timeout by what is left of the walk's
+#: budget, because the walk itself can only check that budget BETWEEN hops: a
+#: hop whose per-hop timeout outlives the budget overruns the documented worst
+#: case by a whole :data:`PARENT_LOOKUP_TIMEOUT_S` (measured: 1 s probe + 2 s
+#: budget + one 2 s hop = 5 s, not the 3 s the module promises).
+#:
+#: Thread-local rather than a module global so a walk on one thread cannot
+#: shorten a walk on another, and a thread-local rather than a wider
+#: ``parent_of`` signature because that seam is ``Callable[[int], int | None]``
+#: — widening it to carry a timeout would change the contract the walk, the
+#: tests and every injected fake are written against. An injected ``parent_of``
+#: simply ignores this, which is why it stays a DEFAULT-lookup concern.
+_WALK_DEADLINE = threading.local()
 
 #: Worst-case delay a user can experience at interpreter exit because of the
 #: release. One bounded join per process, shared by every reporter, never on
@@ -980,6 +1001,24 @@ def _default_pane_probe(pane_id: str, binary: str) -> str | None:
     return completed.stdout
 
 
+def _hop_timeout_s() -> float:
+    """How long the hop about to run may take, capped by the walk's budget.
+
+    Outside a walk this is :data:`PARENT_LOOKUP_TIMEOUT_S`. Inside one it is
+    the smaller of that and whatever the budget on this thread has left, so the
+    walk's deadline covers its last hop rather than only the gaps between hops.
+    ``0.0`` is a real answer — an already-expired budget — and it means the
+    lookup gives up at once, which the walk reads as UNKNOWN like any other
+    unanswered hop. Never negative: ``subprocess.run`` raises ``ValueError`` on
+    a negative timeout, which would raise where the rule expects an
+    unanswerable question.
+    """
+    deadline = getattr(_WALK_DEADLINE, "value", None)
+    if deadline is None:
+        return PARENT_LOOKUP_TIMEOUT_S
+    return min(PARENT_LOOKUP_TIMEOUT_S, max(0.0, deadline - time.monotonic()))
+
+
 def _default_parent_pid(pid: int) -> int | None:
     """The parent of ``pid``, or None when it cannot be determined.
 
@@ -991,6 +1030,10 @@ def _default_parent_pid(pid: int) -> int | None:
     duplicated rather than imported because that one is private to a module
     this change does not touch and importing it would couple two unrelated
     features to one another. Unifying them is a follow-up.
+
+    The timeout comes from :func:`_hop_timeout_s`, so a lookup made inside a
+    walk spends what is left of that walk's budget rather than the full
+    per-hop constant.
     """
     if pid <= 1:
         return None
@@ -999,7 +1042,7 @@ def _default_parent_pid(pid: int) -> int | None:
             ["ps", "-o", "ppid=", "-p", str(pid)],
             capture_output=True,
             text=True,
-            timeout=PARENT_LOOKUP_TIMEOUT_S,
+            timeout=_hop_timeout_s(),
             check=False,
         )
     except Exception:  # noqa: BLE001 — an unwalkable tree is unknown, not foreign
@@ -1086,36 +1129,46 @@ def _reaches_ancestor(pid: int, target: int, parent_of: Callable[[int], int | No
     cycle that proves the chain loops — which is a real answer. **None** means
     the walk could not be finished: a parent lookup that failed or answered
     nothing (``ps`` missing, a process that exited, a busybox that prints
-    nothing), or the hop bound running out without reaching either the target
-    or pid 1. Reading that second case as "not an ancestor" is what the
-    reviewer caught: on a host where ``ps`` is unusable it turned the ancestry
-    arm into a negative, and an ancestry-only lop — the backgrounded-in-the-
-    pane case this arm exists for — would be silenced. UNKNOWN keeps the arm
-    from voting, and the verdict caller fails open on it.
+    nothing), or the hop bound or the time budget running out without reaching
+    either the target or pid 1. Reading that second case as "not an ancestor"
+    is what the reviewer caught: on a host where ``ps`` is unusable it turned
+    the ancestry arm into a negative, and an ancestry-only lop — the
+    backgrounded-in-the-pane case this arm exists for — would be silenced.
+    UNKNOWN keeps the arm from voting, and the verdict caller fails open on it.
 
     Bounded twice over: ``_ANCESTRY_MAX_HOPS`` hops, and an overall
     :data:`ANCESTRY_BUDGET_S` so eight slow-but-not-hanging lookups cannot add
-    up to eight times the per-hop timeout. Running out of either is UNKNOWN.
+    up to eight times the per-hop timeout. The budget is published to
+    :func:`_hop_timeout_s` for the duration of the walk, so the DEFAULT lookup
+    caps itself by what is left instead of overrunning the deadline by one
+    full ``ps`` timeout — the whole point of a deadline nothing else enforces.
+    An injected ``parent_of`` ignores it, which is the injector's business.
     Cycle-safe, and a process is never its own ancestor.
     """
     seen = {pid}
     current = pid
     deadline = time.monotonic() + ANCESTRY_BUDGET_S
-    for _hop in range(_ANCESTRY_MAX_HOPS):
-        if time.monotonic() >= deadline:
-            return None
-        parent = parent_of(current)
-        if parent is None:
-            return None
-        if parent <= 1:
-            return False
-        if parent == target:
-            return True
-        if parent in seen:
-            return False
-        seen.add(parent)
-        current = parent
-    return None
+    previous = getattr(_WALK_DEADLINE, "value", None)
+    _WALK_DEADLINE.value = deadline
+    try:
+        for _hop in range(_ANCESTRY_MAX_HOPS):
+            if time.monotonic() >= deadline:
+                return None
+            parent = parent_of(current)
+            if parent is None:
+                return None
+            if parent <= 1:
+                return False
+            if parent == target:
+                return True
+            if parent in seen:
+                return False
+            seen.add(parent)
+            current = parent
+        return None
+    finally:
+        # Restored, not cleared: a nested walk must see the outer deadline again.
+        _WALK_DEADLINE.value = previous
 
 
 def _pane_ownership(

@@ -743,6 +743,50 @@ def test_the_ancestry_walk_gives_up_when_its_budget_is_spent(
     assert len(hops) == 1
 
 
+def test_the_walk_gives_its_last_hop_no_more_than_the_budget_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged ``ps`` costs the caller the budget, not the budget plus a hop.
+
+    The walk checks its budget BETWEEN hops, so without capping the lookup the
+    promise of ~3 s (1 s probe + 2 s walk) was really ~5 s: the last hop spent
+    a whole ``PARENT_LOOKUP_TIMEOUT_S`` of its own. The per-hop timeout here is
+    set far larger than the budget, so only the cap can bound this.
+    """
+    fake = tmp_path / "ps"
+    fake.write_text("#!/bin/sh\nsleep 5\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(reporter_mod, "PARENT_LOOKUP_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(reporter_mod, "ANCESTRY_BUDGET_S", 0.3)
+    started = time.monotonic()
+    verdict = reporter_mod._reaches_ancestor(
+        os.getpid(), FOREIGN_SHELL_PID, reporter_mod._default_parent_pid
+    )
+    elapsed = time.monotonic() - started
+    assert verdict is None
+    assert elapsed < 2.0, elapsed
+    # And the deadline does not outlive the walk that published it.
+    assert getattr(reporter_mod._WALK_DEADLINE, "value", None) is None
+
+
+def test_the_hop_timeout_is_the_per_hop_constant_outside_a_walk() -> None:
+    assert reporter_mod._hop_timeout_s() == reporter_mod.PARENT_LOOKUP_TIMEOUT_S
+
+
+def test_an_expired_budget_answers_like_any_other_unanswered_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``0.0`` is a real timeout: the lookup gives up at once and never raises."""
+    monkeypatch.setattr(reporter_mod._WALK_DEADLINE, "value", time.monotonic() - 1)
+    assert reporter_mod._hop_timeout_s() == 0.0
+    started = time.monotonic()
+    # A ``ps`` fast enough to answer inside an expired budget may still answer;
+    # what must never happen is an exception or a bogus pid.
+    assert reporter_mod._default_parent_pid(os.getpid()) in (None, os.getppid())
+    assert time.monotonic() - started < 1.0
+
+
 def test_the_ancestry_walk_is_cycle_and_self_parent_safe() -> None:
     """A tree that loops proves its own chain is not ours — a real answer."""
     payload = _process_info_payload(shell_pid=FOREIGN_SHELL_PID)
