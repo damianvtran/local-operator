@@ -1406,8 +1406,9 @@ class InfoScreen(ModalScreen[None]):
 
     Push-before-read is ``/session``'s pattern and is right here for a stronger
     reason than there: the sessions block measured **879.5 ms** on this host
-    (``session_resource_usage`` shells ``top -l1`` for the whole system on
-    macOS), three orders of magnitude past a frame. So the screen owns a
+    while ``session_resource_usage`` shelled ``top -l1`` for the whole system on
+    macOS (7-42 ms over the same pids in the passes recorded since), three
+    orders of magnitude past a frame. So the screen owns a
     visible, cancellable surface before any I/O starts, and a late result
     updates that surface rather than pushing over whatever the user did next.
 
@@ -1607,10 +1608,10 @@ class InfoScreen(ModalScreen[None]):
     def action_refresh_report(self) -> None:
         """Re-run the probes on demand. NOT on a timer.
 
-        A ``top -l1`` fork per second is a real cost on the machine being
-        diagnosed, and ``/info`` is a snapshot rather than a monitor — so this
-        is a manual gesture and the captured-at stamp says which moment is on
-        screen.
+        A fork per refresh and a registry walk are a real cost on the machine
+        being diagnosed, and ``/info`` is a snapshot rather than a monitor — so
+        this is a manual gesture and the captured-at stamp says which moment is
+        on screen.
 
         The snapshot is cleared FIRST so the screen acknowledges the keypress
         within a frame. Without it the probe took ~4 s during which the screen
