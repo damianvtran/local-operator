@@ -344,6 +344,54 @@ class IncrementalWriter:
             view = view[written:]
 
 
+#: The magnitude at which ``:g`` leaves fixed notation, named so the renderer
+#: below has a band rather than an anecdote. ``:g`` emits six significant
+#: digits, so 999_999 s renders ``999999`` and 1_000_000 s renders ``1e+06``.
+_EXPONENT_FORM_AT_S = 1_000_000.0
+
+
+def _rendered_budget(timeout: float) -> str:
+    """Render a budget in seconds in the units an operator reads: never exponent.
+
+    WHY ``:g`` IS NOT ENOUGH HERE. This number is the only place the sentence
+    says how long the deadline was, and ``:g`` drops into exponent form from
+    ``_EXPONENT_FORM_AT_S``, which is reachable rather than theoretical now
+    that the budget can be the FUNDED value: nine maximal cleanup actions
+    declare 1_036_800 s and fund to ``1.03683e+06s`` in the one line an
+    operator reads. The protocol's own ceiling is worse -- ``CleanupPlan``
+    admits ``MAX_DECLARATIONS`` (256) actions of ``MAX_CLEANUP_TIMEOUT_MS`` x
+    ``MAX_CLEANUP_ATTEMPTS`` (115_200 s) each, so the largest legal call funds
+    to 29_491_230 s and would print ``2.949123e+07s``. ``execute`` cannot reach
+    the band at all (its ceiling is 3_870 s of declared waiting); the renderer
+    serves both arms because neither should have to know that.
+
+    THE BAND BELOW IS DELIBERATELY UNTOUCHED. Every value already rendered
+    must stay byte-identical, because those strings are what the campaign's
+    readouts quote and what this module's tests assert: ``0.05s``/``0.25s`` for
+    ``close``, ``180s``/``0.5s``/``31.5s`` for ``execute`` and ``cleanup``. The
+    guard is therefore on the RENDERED text rather than on the magnitude --
+    ``:g`` rounds to six significant digits before it decides, so 999_999.9 s
+    renders an exponent too -- and only a value that already renders one is
+    re-rendered, which makes the byte-identity a property of the check instead
+    of a promise about it.
+
+    Fixed point rather than ``repr`` (``1000000.0``) or a rounded integer cast:
+    the trailing zeros of the six decimals are stripped, so 29_491_230.0 s
+    reads ``29491230`` while a budget carrying declared milliseconds keeps
+    them.
+    """
+
+    rendered = f"{timeout:g}"
+    # Read the RENDERED text rather than comparing against ``_EXPONENT_FORM_AT_S``:
+    # ``:g`` rounds to six significant digits before it decides, so a value just
+    # below the band (999_999.9 s) renders an exponent too, and the comparison
+    # would leave it in exponent form. The boundary is pinned by
+    # ``test_the_longest_legal_budget_renders_in_plain_units``.
+    if "e" not in rendered:
+        return rendered
+    return f"{timeout:.6f}".rstrip("0").rstrip(".")
+
+
 def _timeout_detail(
     method: AdapterMethod,
     *,
@@ -389,19 +437,21 @@ def _timeout_detail(
 
     ORDER IS LOAD-BEARING. The readouts that consume the recorded diagnostic
     truncate it (110-160 characters), so the method and the budget come first,
-    the correlation ids last. ``elapsed`` is SAMPLED rather than assumed equal
-    to ``timeout``: timer granularity, a busy loop, or an executor in the way
-    all push the actual firing time past the deadline, and a gap that is not
-    the deadline is worth recording rather than rounding away. It is measured
-    from BEFORE the request frame is written (see ``call``), so it is the
-    caller's wall time for the whole call -- ``wait_for``'s own deadline begins
-    a moment later -- which is the reading "exceeded its budget after N s"
-    claims.
+    the correlation ids last. The budget itself goes through
+    :func:`_rendered_budget`, which keeps it in the plain units ``elapsed`` is
+    already in at every magnitude the protocol admits. ``elapsed`` is SAMPLED
+    rather than assumed equal to ``timeout``: timer granularity, a busy loop, or
+    an executor in the way all push the actual firing time past the deadline,
+    and a gap that is not the deadline is worth recording rather than rounding
+    away. It is measured from BEFORE the request frame is written (see ``call``),
+    so it is the caller's wall time for the whole call -- ``wait_for``'s own
+    deadline begins a moment later -- which is the reading "exceeded its budget
+    after N s" claims.
     """
 
     rendered_operation = f"; operation_id {operation_id[:MAX_DETAIL_NAME]}" if operation_id else ""
     return (
-        f"{method} exceeded its {timeout:g}s budget after {elapsed:.1f}s "
+        f"{method} exceeded its {_rendered_budget(timeout)}s budget after {elapsed:.1f}s "
         f"(request {request_id}{rendered_operation})"
     )
 
