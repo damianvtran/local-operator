@@ -744,6 +744,16 @@ class TestCodexToolTimeoutImport:
     server imported, its tools worked, and the budget the user configured for it
     silently did not apply. That is the same silent-drop shape as a server that
     fails to import at all, and it is worse to notice because nothing errors.
+
+    THIS IS ALSO HOW A DECLARED BUDGET REACHES THIS HARNESS. Callers that need a
+    specific per-tool budget (Minerva's risk-assessment server does) declare
+    ``tool_timeout_sec`` in the shared per-run MCP document they hand to every
+    harness, so that they bind to a value the caller owns instead of to two
+    different upstream defaults. The emitting side is pinned by the codex/lop
+    harness parity check in agent-runtime-svc
+    (``adapters/lopcli/harness_parity_test.go``, which asserts the literal key
+    spelling); the consuming side is pinned here. A rename on either side fails
+    one of them.
     """
 
     def test_tool_timeout_sec_becomes_the_client_timeout(self, tmp_path: Path, home: Path) -> None:
@@ -813,3 +823,104 @@ class TestCodexToolTimeoutImport:
         cfg = configs["odd"]
         assert isinstance(cfg, MCPStdioServerConfig)
         assert cfg.timeout is None
+
+    def test_a_bool_tool_timeout_sec_is_not_a_budget(self, tmp_path: Path, home: Path) -> None:
+        """``True`` must not become a 1 s budget.
+
+        ``bool`` is an ``int`` subclass in Python, so a naive numeric check accepts
+        ``tool_timeout_sec = true`` and installs the TIGHTEST possible timeout --
+        a one-second bound on every call to that server -- from what is far more
+        likely a typo than an intent. This is the subtlest constraint in the
+        translation, so it is tested directly rather than left to the string case.
+        """
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.truthy]
+            command = "srv"
+            tool_timeout_sec = true
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["truthy"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        assert cfg.timeout is None, "a bool is not a duration; the default must stand"
+
+    @pytest.mark.parametrize("value", [0, -1, -0.5])
+    def test_non_positive_tool_timeout_sec_does_not_disable_the_bound(
+        self, tmp_path: Path, home: Path, value: float
+    ) -> None:
+        """A foreign non-positive value must not switch the bound OFF.
+
+        ``timeout = 0`` means "no client-side bound" in this tool's own vocabulary,
+        so translating a foreign ``tool_timeout_sec = 0`` into it would let
+        ``~/.codex/config.toml`` silently remove the guard on a server -- the
+        opposite of what a small sane default is for. Codex's schema gives a
+        timeout no such "off" meaning, so the only available readings here are
+        "unset" and "someone's arithmetic", and neither should disable a guard.
+
+        Reached through the RESOLVER, not just the parsed field: leaving
+        ``timeout`` unset is only useful if the default then actually applies.
+        """
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            f"""
+            [mcp_servers.zeroed]
+            command = "srv"
+            tool_timeout_sec = {value}
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["zeroed"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        assert cfg.timeout is None
+        assert (
+            resolve_mcp_timeout_s(cfg) is not None
+        ), "a foreign 0 must not remove the bound; our own timeout=0 still does"
+
+    def test_preload_tools_is_read_under_its_exact_rendered_spelling(
+        self, tmp_path: Path, home: Path
+    ) -> None:
+        """The literal ``preload_tools`` key must reach the parsed config.
+
+        THIS IS THE LINK THAT WOULD FAIL SILENTLY. ``extra="allow"`` means an
+        unrecognised key is ACCEPTED AND IGNORED, so if this spelling ever drifted
+        on either side -- the emitter or the field -- the flag would parse, the
+        server would load, and nothing would preload. The tools would simply go
+        back to being invisible, with no error anywhere. Callers declare the flag
+        by writing this exact key into a config file, so the spelling is pinned
+        end-to-end from the file rather than only on the field.
+        """
+        cwd = tmp_path / "proj"
+        cwd.mkdir(parents=True)
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.declared]
+            command = "srv"
+            preload_tools = true
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        cfg = configs["declared"]
+        assert isinstance(cfg, MCPStdioServerConfig)
+        assert cfg.preload_tools is True
+
+        # And the default is the lazy path for everything that did not declare it.
+        _write_toml(
+            home / ".codex" / "config.toml",
+            """
+            [mcp_servers.silent]
+            command = "srv"
+            """,
+        )
+        configs, _ = load_all_mcp_configs(cwd)
+        silent = configs["silent"]
+        assert isinstance(silent, MCPStdioServerConfig)
+        assert silent.preload_tools is False
