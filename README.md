@@ -826,10 +826,14 @@ lop credential delete TAVILY_API_KEY
 ```
 
 OAuth tokens from `lop login` are stored separately, in
-`~/.local-operator/auth.db`, and refresh themselves. The one credential there
-that does not is the QwenCloud console ticket: a browser session cookie you
-capture and store by hand, expiring roughly weekly, which the
-[QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers.
+`~/.local-operator/auth.db`, and refresh themselves. The one credential that
+does not is the QwenCloud console ticket: a browser session cookie you capture
+and store by hand, expiring roughly weekly. Its value is held in the encrypted
+`lop secret` store rather than in `auth.db`, which keeps only when it was
+captured and how long it is — a higher bar than a file mode, though not a vault,
+since anything running as you that can run `lop` can read it. The
+[QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
+including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
 
 ## 🌟 Radient: automatic model selection and agent sharing
 
