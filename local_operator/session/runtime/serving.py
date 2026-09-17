@@ -277,15 +277,24 @@ class _PromptCommand:
 
 
 def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
-    """Read one historical plan without materializing or rewriting its files."""
+    """Read one historical plan without materializing or rewriting its files.
+
+    TWO different "nothing here" answers, kept distinct because callers act on
+    them differently: ``None`` is "this child has no journal" (a session that was
+    never engaged), ``[]`` is "its journal says nothing about todos". The reader
+    is the one-row backward scan over the tail, so this costs the distance from
+    EOF to the newest snapshot rather than a decode of the child's whole history.
+    """
     from local_operator.session.frontend_state import TodoItemState, TodoPhaseState
-    from local_operator.session.transcript import Transcript
+    from local_operator.session.transcript import (
+        TRANSCRIPT_FILENAME,
+        read_latest_custom,
+    )
 
     try:
-        transcript = Transcript(directory, defer_materialise=True)
-        if not transcript.path.is_file():
+        if not (Path(directory) / TRANSCRIPT_FILENAME).is_file():
             return None
-        payload = transcript.latest_custom("todo_snapshot") or {}
+        payload = read_latest_custom(directory, "todo_snapshot") or {}
         raw = payload.get("items", [])
         if not isinstance(raw, list):
             return None
