@@ -20,7 +20,7 @@ Two shapes exist on purpose:
 """
 
 import json
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import requests
 from requests.exceptions import RequestException
@@ -56,6 +56,36 @@ def response_body(exc: RequestException) -> str:
     # UnicodeDecodeError raised from inside the error handler.
     body = response.content.decode(errors="replace")
     return body if body.strip() else NO_RESPONSE_BODY
+
+
+REDACTION_MARKER = "[redacted]"
+"""What a credential is replaced with in anything about to be surfaced."""
+
+
+def redact_secrets(text: str, secrets: Iterable[Optional[str]]) -> str:
+    """Replace every occurrence of a credential in ``text`` with a marker.
+
+    WHY THIS EXISTS: an upstream is free to reflect the request it received -- the
+    ``Authorization`` header included -- into its error body, and an error body is
+    exactly what a useful failure message quotes. Quoting it verbatim is how an
+    operator's API key ends up in a message the desktop app renders and the log
+    keeps, so the body a caller is about to surface goes through here first. The
+    body is otherwise kept: for a failure the upstream did not design an error
+    vocabulary for, it is the only thing that says what happened.
+
+    Args:
+        text: The text about to be surfaced.
+        secrets: The credential values to remove. Empty and ``None`` entries are
+            skipped, so a caller with no key configured changes nothing.
+
+    Returns:
+        The text with every non-empty secret replaced.
+    """
+
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, REDACTION_MARKER)
+    return text
 
 
 class APIError(RuntimeError):
@@ -131,6 +161,7 @@ def api_error_from_response(
     response: Optional[requests.Response],
     *,
     fallback_message: str,
+    secrets: Iterable[Optional[str]] = (),
 ) -> APIError:
     """Build an :class:`APIError` from a failed response.
 
@@ -145,6 +176,9 @@ def api_error_from_response(
     Args:
         response: The failed response, or ``None`` when the request never got one.
         fallback_message: The message to use when the upstream sent no usable one.
+        secrets: Credential values to remove from the message. An upstream that
+            reflects the request it received into its prose must not be able to
+            put the caller's key into a message that gets rendered.
 
     Returns:
         An :class:`APIError` carrying the status, code and details.
@@ -154,7 +188,7 @@ def api_error_from_response(
 
     message, code, details = error_payload(response.content.decode(errors="replace"))
     return APIError(
-        message or f"{fallback_message} (HTTP {response.status_code})",
+        redact_secrets(message or f"{fallback_message} (HTTP {response.status_code})", secrets),
         status_code=response.status_code,
         code=code,
         details=details,
