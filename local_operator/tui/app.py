@@ -7202,6 +7202,31 @@ class OperatorApp(App[None]):
         # drops is per-token text already superseded by that seed.
         if outgoing.controller is not None:
             outgoing.controller.set_parked(True)
+        # Tell the OWNER too, not just this process. Its notification routing
+        # suppresses the out-of-band toast whenever a terminal is attached,
+        # and the connection this source holds stays open while it is parked --
+        # so without this a gate parked on the session the user just left waits
+        # in silence, its card painted into a viewer showing something else.
+        self._note_viewer_watching(outgoing, displaying=False)
+
+    def _note_viewer_watching(self, source: SessionInteraction, *, displaying: bool) -> None:
+        """Tell a source's owner whether this terminal still shows its session.
+
+        Best-effort by contract, like the viewer record: notification routing
+        is chrome and must never be able to break a switch. Fire-and-forget
+        because the answer is state the owner keeps, not a value this side
+        reads back -- awaiting it would put an owner round trip on the switch
+        path, which is the interaction the sidebar exists to keep instant.
+        """
+        session = getattr(source, "session", None)
+        client = getattr(session, "_client", None)
+        watch = getattr(client, "viewer_watch", None)
+        if watch is None:
+            return
+        try:
+            self.run_worker(watch(displaying=displaying), exclusive=False)
+        except Exception:  # noqa: BLE001 -- routing chrome never breaks a switch
+            logger.debug("viewer watch signal failed", exc_info=True)
 
     def _commit_sidebar_session(
         self,
@@ -8910,6 +8935,10 @@ class OperatorApp(App[None]):
         # path below replays the owner's live seed through the same controller.
         if source.controller is not None:
             source.controller.set_parked(False)
+        # The other edge of the owner-side watch signal parked in
+        # `_park_switched_away_source`: this source IS the screen now, so its
+        # owner must count it again and paint any parked card in band.
+        self._note_viewer_watching(source, displaying=True)
         self._watch_source_frontend(source)
         self._set_approve_all(self._approve_all)
         if getattr(session, "session_id", ""):

@@ -808,6 +808,21 @@ class _ClientConn:
     desktop_visible: bool = False
     desktop_can_notify: bool = False
     desktop_seen: float = 0.0
+    #: Whether a TERMINAL attach is currently DISPLAYING this session.
+    #:
+    #: A multiplexing TUI keeps the outgoing session's connection open when the
+    #: user switches away (the outgoing source is retained for the sidebar), so
+    #: "connected" stopped implying "on screen" the moment one viewer could
+    #: show several sessions. Routing a parked gate on the connection alone
+    #: therefore suppressed the out-of-band toast for a card painted into a
+    #: viewer showing something else.
+    #:
+    #: DEFAULTS TRUE, which is what makes this safe to add: a client that never
+    #: sends ``viewer_watch`` (every build before this field, and every
+    #: non-TUI attach) keeps counting exactly as it did. Only a client that
+    #: explicitly declares it switched away is discounted, so the change can
+    #: never invent a silent session out of an older viewer.
+    terminal_displaying: bool = True
     #: Which action-carrying slash receipts this client renders itself (see
     #: ``SLASH_ACTION_RECEIPTS``). ``None`` means the auth frame omitted the
     #: field, i.e. a client built before it existed — the runtime then
@@ -2545,14 +2560,27 @@ class RuntimeServer:
         unchanged, which is what keeps this additive: an old UI's behaviour is
         byte-identical, and only a new one's occluded-window case changes (a
         banner IS raised, per the design's matrix).
+
+        A TERMINAL ATTACH IS COUNTED ONLY WHILE IT IS DISPLAYING THIS SESSION,
+        for the same reason the desktop leg consults window state rather than
+        the socket. A multiplexing TUI retains the outgoing session's
+        connection when the user switches away, so a live attach stopped
+        meaning "on screen" and a gate parked behind one waited in silence for
+        a card painted into a viewer showing something else. ``viewer_watch``
+        carries that fact; a client that never sends it stays counted, so an
+        older viewer behaves exactly as before.
         """
         return {
             "desktop" if conn.surface == "desktop" else "attach"
             for conn in self._clients.values()
             if conn.kind == "attach"
             and (
-                conn.surface != "desktop"
-                or (self._desktop_lease_live(conn) and self._desktop_visible(conn))
+                (conn.surface != "desktop" and conn.terminal_displaying)
+                or (
+                    conn.surface == "desktop"
+                    and self._desktop_lease_live(conn)
+                    and self._desktop_visible(conn)
+                )
             )
         }
 
@@ -2709,6 +2737,30 @@ class RuntimeServer:
                 conn.desktop_seen = time.monotonic()
                 self._republish_detached()
                 detail = "desktop lease renewed"
+            elif op == "viewer_watch":
+                # A MULTIPLEXING TERMINAL SAYS WHETHER IT IS STILL SHOWING US.
+                #
+                # The desktop leg above answers the same question with window
+                # state; a terminal had no way to answer it at all, so a viewer
+                # that switched away kept its retained connection counted as a
+                # person reading this session and every parked gate behind it
+                # went silent.
+                #
+                # No lease and no timestamp, unlike ``desktop_watch``: this is
+                # EDGE-TRIGGERED state a viewer sets when it switches, not a
+                # liveness claim that has to expire. Socket close remains the
+                # liveness signal, exactly as before.
+                if conn.kind != "attach" or id(conn.writer) not in self._clients:
+                    raise ValueError("viewer watch requires a live attach connection")
+                displaying = frame.get("displaying")
+                if type(displaying) is not bool:
+                    raise ValueError("viewer watch field must be a boolean")
+                conn.terminal_displaying = displaying
+                # The 1<->0 transition this can cause is exactly the one
+                # ``reannounce_pending`` exists for: a gate that opened while
+                # somebody was watching, whose watcher has now looked away.
+                self._republish_detached()
+                detail = f"viewer {'watching' if displaying else 'away'}"
             elif op in ("watch", "unwatch"):
                 # The reaper's phone-watcher signal (§2.8). watch_supported
                 # latches on the FIRST op seen so a mixed-version child never

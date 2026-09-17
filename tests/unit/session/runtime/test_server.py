@@ -3391,3 +3391,103 @@ async def test_the_shedding_pass_does_not_mutate_the_shared_frame() -> None:
     assert clipped != "x" * (2 * _MAX_LINE_BYTES), "the shed stage did not run"
     assert clipped.endswith("…")
     assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_that_switched_away_stops_counting_as_a_watcher() -> None:
+    """A retained attach is a connection, not a person reading this session.
+
+    THE BUG THIS PINS. A multiplexing TUI keeps the outgoing session's
+    connection open when the user switches away, so `_visible_attach_surfaces`
+    counted a viewer that was showing something else. `_announce_pending`
+    suppresses its out-of-band toast whenever a surface is watching, so a gate
+    parked behind such a connection waited in silence for the whole unattended
+    timeout with its card painted into a viewer nobody was looking at.
+
+    Asserted on `watching_surfaces()` -- the predicate the notification
+    routing actually reads -- rather than on the flag, so the test fails if the
+    field stops reaching the decision.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+
+        # Displaying by default: an older viewer that never sends the op is
+        # counted exactly as it was before this field existed.
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 1, "displaying": False}).encode() + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "ack", 1)
+
+        # The connection is still open -- only the claim to be showing it went.
+        assert runtime.attach_clients() == 1
+        assert runtime.watching_surfaces() == frozenset()
+
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 2, "displaying": True}).encode() + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "ack", 2)
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_switching_away_re_announces_a_parked_gate() -> None:
+    """The 1->0 transition must reach `reannounce_pending`.
+
+    The suppression is only half the defect: a gate that opened while somebody
+    WAS watching sends no toast by design, and the re-announce on the detached
+    edge is what rescues it. A viewer that switches away without closing its
+    socket has to produce that edge, or the rescue never runs.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    announced: list[str] = []
+    setattr(handle, "reannounce_pending", lambda: announced.append("reannounced"))
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        runtime.set_record_pending("approval")
+        announced.clear()
+
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 1, "displaying": False}).encode() + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "ack", 1)
+
+        assert announced == ["reannounced"], "a parked gate was not re-announced on switch-away"
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_viewer_watch_rejects_a_non_boolean_and_leaves_state_intact() -> None:
+    """A malformed frame must not silently blank the display claim."""
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 1, "displaying": "no"}).encode() + b"\n"
+        )
+        await writer.drain()
+        reply = await _until(reader, "error", 1)
+        assert "boolean" in str(reply.get("message", ""))
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+        writer.close()
+    finally:
+        runtime.close()
