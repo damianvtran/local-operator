@@ -27,10 +27,12 @@ from local_operator.mcp.auth import (
 )
 from local_operator.mcp.config import MCPStdioServerConfig
 from local_operator.mcp.manager import (
+    DEFAULT_MCP_TIMEOUT_MS,
     McpManager,
     ServerConnection,
     build_cmd_exe_argv,
     build_stdio_argv,
+    resolve_mcp_timeout_s,
     stdio_start_new_session,
 )
 from local_operator.mcp.tool_cache import McpToolCache, config_digest
@@ -4709,3 +4711,55 @@ class TestRefreshRefusalCopy:
         # reason must never be confused with the un-armed answer.
         REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_ENDPOINT)
         assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_ENDPOINT
+
+
+class TestMcpRequestTimeoutDefault:
+    """The client-side per-request budget, and why its default is a parity figure.
+
+    These tests exist because the default is not a free choice: it decides
+    whether the SAME MCP server is flaky here and reliable under the sibling CLI
+    harness, and that asymmetry is invisible from either side alone. The default
+    was briefly 30 s, which sat inside the latency spread of a real batch
+    screening call (one run exceeded it; two siblings completed at 12.9 s and
+    20.2 s), so it fired on the tail rather than on a wedged server.
+    """
+
+    def test_default_matches_the_sibling_harnesss_per_tool_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default is the Codex CLI per-tool budget, in seconds.
+
+        Codex defaults ``mcp_servers.<name>.tool_timeout_sec`` to 60 s. Both
+        harnesses drive the same MCP servers over the same transports, so a
+        tighter default here is the one configuration that makes them disagree
+        about a server neither of them controls. Pinned as an equality rather
+        than a floor so a future edit has to restate the comparison deliberately.
+        """
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+        assert DEFAULT_MCP_TIMEOUT_MS == 60_000.0
+        assert resolve_mcp_timeout_s(None) == 60.0
+
+    def test_env_override_and_per_server_config_still_beat_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Raising the default must not disturb the established precedence.
+
+        env > ``config.timeout`` > default, and ``0`` keeps meaning "off" rather
+        than "use the default" -- the distinction the whole precedence chain
+        rests on, and the one a careless ``or`` would silently collapse.
+        """
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+        per_server = MCPStdioServerConfig(command="srv", timeout=300_000)
+        assert resolve_mcp_timeout_s(per_server) == 300.0
+
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "5000")
+        assert resolve_mcp_timeout_s(per_server) == 5.0
+
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "0")
+        assert resolve_mcp_timeout_s(per_server) is None
+
+    def test_unparsable_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "not-a-number")
+        assert resolve_mcp_timeout_s(None) == 60.0
