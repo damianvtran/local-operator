@@ -43,11 +43,27 @@ INVOCATION
 CI (`--github-output`/`--summary` are the Actions channel files)::
 
     python scripts/ci_scope.py --event "$GITHUB_EVENT_NAME" --base "$sha" \
+        --root "$GITHUB_WORKSPACE" \
         --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+
+`--root` is passed EXPLICITLY by the workflow even though `default_root`
+resolves the repository on its own, and that redundancy is the point: the step
+runs a COPY of this file from `$RUNNER_TEMP`, so a module that trusted
+`__file__` would compute `/home/runner/work` as its repository, `git diff` would
+exit 128 there, and the fail-open branch would set every flag true on every pull
+request — correct classifier, dead gate. Two independent fixes beat one clever
+default; see `default_root` for the resolution order.
+
+The report goes to **stdout always** (the run log) and additionally to
+`--summary` when given. Both, because the summary is what a reviewer is told to
+read and the log is where anyone debugging a run actually looks.
 
 Local (index + working tree + untracked, then run the selected gates)::
 
     python scripts/ci_scope.py --since "$(git merge-base origin/main HEAD)" --run
+
+`--run` prints each job it will NOT run (see `LOCAL_EXCLUSIONS`) with the reason,
+so a local green is never quietly narrower than it looks.
 
 Exit status is 0 for every classification outcome, including the fail-open
 ones — this module's verdict is only "how much to run", and refusing would red
@@ -142,6 +158,23 @@ WINDOWS_CONFTEST_PATHS = frozenset(
     }
 )
 
+#: What the job's pytest run imports THROUGH that chain, which the path list
+#: above does not cover. `conftest.py` does `from tests import
+#: shard_stall_watchdog` at module scope, and pytest imports the `__init__.py`
+#: markers for both protected modules — so a change to any of these can change
+#: the Windows job's behaviour without touching a file it names. Narrow, since
+#: Linux runs `tests/shard_stall_watchdog.py` too, but it is the same "flag
+#: narrower than the guard's real input" pattern this classifier exists to
+#: avoid, and the fix is a name in a set.
+WINDOWS_LOADED_PATHS = frozenset(
+    {
+        "tests/shard_stall_watchdog.py",
+        "tests/__init__.py",
+        "tests/unit/__init__.py",
+        "tests/unit/server/__init__.py",
+    }
+)
+
 #: `context-budget` builds the real tool surface through these two scripts, so
 #: a change to either is a change to what the job measures.
 BUDGET_SCRIPTS = frozenset(
@@ -150,6 +183,18 @@ BUDGET_SCRIPTS = frozenset(
         "scripts/real_tool_surface.py",
     }
 )
+
+#: `cli-sanity` EXECUTES this script (`ci.yml`: `python
+#: scripts/check_streaming_contract.py run.jsonl`), and nothing else in the repo
+#: imports it — so without naming it here a scripts-only diff skips the job's
+#: only CI surface: the diff that changes a guard is the diff that skips it.
+#:
+#: A named input set rather than adding `scripts/**` to the `cli` predicate, and
+#: the choice is deliberate: widening to all of `scripts/**` would run both
+#: live-LLM jobs (real spend) plus the audit on every scripts-only diff, which
+#: the per-class cost analysis rates as safe to skip. This is the same shape
+#: `BUDGET_SCRIPTS` already uses for `context-budget`.
+CLI_SANITY_SCRIPTS = frozenset({"scripts/check_streaming_contract.py"})
 
 GATE_CONFIG_PATHS = frozenset({"Makefile", ".flake8", "setup.cfg", "tox.ini"})
 MANIFEST_PATHS = frozenset({"pyproject.toml"})
@@ -330,7 +375,6 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
         # colour-capable terminal").
         "env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit -q",
     ),
-    "pip-audit": (".venv/bin/python -m pip_audit .",),
     "tui-e2e": (
         "env -u NO_COLOR TERM=xterm-256color " ".venv/bin/python -m pytest tests/e2e -m e2e -n0 -q",
     ),
@@ -351,6 +395,18 @@ LOCAL_EXCLUSIONS: dict[str, str] = {
         "is never part of a default local run"
     ),
     "server-sanity": ("live-LLM job: same secrets and spend as cli-sanity"),
+    "pip-audit": (
+        "no faithful local spelling. CI is `pypa/gh-action-pip-audit@v1.1.0`, "
+        "which does `pip install .` and then runs `pip-audit … --desc "
+        "--vulnerability-service pypi <dir>` in a HERMETIC venv it builds "
+        "itself; the local equivalent (`.venv/bin/python -m pip_audit .`) "
+        "cannot build that venv on this host — `ve.create(ve_dir)` dies with "
+        "`ensurepip … <Signals.SIGABRT: 6>`, rc=1, reproducibly and on a clean "
+        "tree — so a local 'audit failure' would be a false red for a check "
+        "the job may well pass. Excluded rather than left as a gate that cries "
+        "wolf; the audit stays a required CI check and this classifier cannot "
+        "skip it on any dependency-touching diff."
+    ),
 }
 
 #: Human-readable predicate per flag, used in `--summary` so the reason a job
@@ -363,7 +419,10 @@ FLAG_REASONS: dict[str, str] = {
     "tui": "same predicate as `unit`, deliberately (scripts/** is a tui input)",
     "windows": "a path the Windows job reads, or a manifest/CI/gate config",
     "audit": "a Python, manifest, lockfile, CI or unrecognised path",
-    "cli": "a Python, manifest, lockfile, CI or unrecognised path",
+    "cli": (
+        "a Python, manifest, lockfile, CI or unrecognised path, or the "
+        "streaming-contract script cli-sanity executes"
+    ),
     "server": "same predicate as `cli`",
 }
 
@@ -476,13 +535,17 @@ def flags_for(
     # `cli == server == audit` deliberately (see PERMISSIVE_DEPS): the two
     # live-LLM jobs `need:` pip-audit, so an `audit` narrower than `cli` would
     # let a `local_operator/**`-only diff skip the audit and therefore skip the
-    # sanity jobs that depend on it.
-    cli = bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_DEPS_LOCK, CAT_CI, CAT_OTHER})
+    # sanity jobs that depend on it. `CLI_SANITY_SCRIPTS` is shared by all three
+    # so the equality survives the named-script widening (R2), and `cli` still
+    # implies `lint`/`types`/`unit` because that script is not inert.
+    cli = bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_DEPS_LOCK, CAT_CI, CAT_OTHER}) or bool(
+        path_set & CLI_SANITY_SCRIPTS
+    )
     audit = cli
     windows = (
         CAT_PYTHON in cats
         or bool(cats & {CAT_CI, CAT_MANIFEST, CAT_GATE_CONFIG, CAT_OTHER})
-        or bool(path_set & (WINDOWS_TEST_PATHS | WINDOWS_CONFTEST_PATHS))
+        or bool(path_set & (WINDOWS_TEST_PATHS | WINDOWS_CONFTEST_PATHS | WINDOWS_LOADED_PATHS))
     )
     budget = bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_DEPS_LOCK}) or bool(
         path_set & BUDGET_SCRIPTS
@@ -788,6 +851,34 @@ def run_jobs(jobs: Sequence[str], root: Path) -> int:
 # --------------------------------------------------------------------------
 
 
+def default_root(module_file: Path) -> Path:
+    """The repository to classify, resolved WITHOUT trusting where this file is.
+
+    `Path(__file__).resolve().parent.parent` is the tempting default and it is
+    wrong in exactly the place that matters: the `changes` step copies this
+    module to `$RUNNER_TEMP` and runs the copy, so the file's grandparent is
+    `/home/runner/work` — one level ABOVE the checkout and inside no repository.
+    `root` is also the `cwd` of every git call, so that default made `git diff`
+    exit 128 and the fail-open branch set every flag true on every pull request:
+    the classifier was right and never engaged, which is the failure this whole
+    change exists to remove.
+
+    So: the git top level of the INVOCATION directory first (the step runs with
+    the workspace as its cwd), then the tree this file was shipped inside, then
+    the invocation directory. The CI step also passes `--root
+    "$GITHUB_WORKSPACE"` explicitly, deliberately belt-and-braces: that flag is
+    what makes the workflow independent of this function's cleverness.
+    """
+    rc, out, _ = _git(["rev-parse", "--show-toplevel"])
+    if rc == 0 and out.strip():
+        return Path(out.strip()).resolve()
+    candidate = module_file.resolve().parent.parent
+    rc, out, _ = _git(["rev-parse", "--show-toplevel"], cwd=candidate)
+    if rc == 0 and out.strip():
+        return Path(out.strip()).resolve()
+    return Path.cwd().resolve()
+
+
 def _github_event(args: argparse.Namespace) -> str | None:
     """The Actions event name, or None when this is a LOCAL run.
 
@@ -857,7 +948,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="also print the report to stdout.",
+        help=(
+            "retained for existing callers; the report is now always printed to "
+            "stdout, so this flag changes nothing."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -869,7 +963,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
+    root = Path(args.root).resolve() if args.root else default_root(Path(__file__))
     ci_event = _github_event(args)
     event = ci_event or "local"
 
@@ -949,11 +1043,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     text = "\n".join(lines)
+    # The report goes to the LOG unconditionally and to the step summary as well
+    # when `--summary` is given. D13 asks for both: the summary is what a
+    # reviewer is told to read, and the log is where anyone debugging a run
+    # actually looks. `--verbose` is retained for existing callers and is now
+    # redundant — it used to be the only way to see the report locally.
+    print(text)
     if args.summary:
         with open(args.summary, "a", encoding="utf-8") as handle:
             handle.write(text + "\n")
-    if args.verbose or not args.summary:
-        print(text)
 
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8") as handle:
