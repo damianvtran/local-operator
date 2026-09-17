@@ -1407,8 +1407,8 @@ class InfoScreen(ModalScreen[None]):
     Push-before-read is ``/session``'s pattern and is right here for a stronger
     reason than there: the sessions block measured **879.5 ms** on this host
     while ``session_resource_usage`` shelled ``top -l1`` for the whole system on
-    macOS (11-28 ms over the same pids now), three orders of magnitude past a
-    frame. So the screen owns a
+    macOS (7-42 ms over the same pids in the passes recorded since), three
+    orders of magnitude past a frame. So the screen owns a
     visible, cancellable surface before any I/O starts, and a late result
     updates that surface rather than pushing over whatever the user did next.
 

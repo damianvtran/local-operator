@@ -33367,7 +33367,8 @@ class OperatorApp(App[None]):
         states at ``session_panel.py``. Everything blocking then runs in a
         worker, because the sessions block alone measured **879.5 ms** on this
         host while ``session_resource_usage`` shelled ``top -l1`` for the whole
-        system on macOS (11-28 ms over the same pids now, and the first call in
+        system on macOS (7-42 ms over the same pids in the passes recorded since
+        — the range is the machine's load, not the read — and the first call in
         a cold process still pays that block's imports and metadata scans),
         which is far past a frame at 30 fps.
 
