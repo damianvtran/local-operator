@@ -544,26 +544,35 @@ AUTH_REVALIDATE_INTERVAL_S = 60.0
 # Default per-request timeout; ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` overrides,
 # config ``timeout`` (ms) refines, ``0`` disables.
 #
-# 60 s, not 30 s, and the number is a PARITY figure rather than a taste one. The
-# sibling CLI harness this client is routinely paired with (Codex CLI) defaults
-# its per-tool-call budget to 60 s via ``mcp_servers.<name>.tool_timeout_sec``,
-# and MCP tool calls are ordinary network calls with the same latency
-# distribution on either side. A tighter default here therefore does not make
-# lop safer; it makes the SAME server flaky on one harness and not the other,
-# which is the hardest possible failure to attribute.
+# 300 s, DERIVED rather than guessed, and the derivation is the point: an earlier
+# revision of this constant said 60 s on the belief that it matched the sibling
+# CLI harness, which was true of codex only up to about v0.100. The sibling
+# actually installed here reports ``codex-cli 0.147.0``, and its own source at
+# that tag (``codex-rs/codex-mcp/src/rmcp_client.rs``, ``rust-v0.147.0``) reads:
 #
-# Measured, not assumed: on the risk-assessment workload a batch screening call
-# exceeded 30 s and was killed client-side while two sibling calls completed at
-# 12.9 s and 20.2 s — i.e. the 30 s budget sat inside the workload's real
-# latency spread, so it fired on the tail rather than on a hang. The job of this
-# default is to bound a WEDGED server, not a slow-but-working one; 60 s still
-# does that (a stdio child that has died is caught by the stream-pump failure
-# path, not by this timer) while matching the harness it is compared against.
+#     pub(crate) const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+#     pub(crate) const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 #
-# Per-server refinement stays available and takes precedence, so a workload that
-# genuinely needs longer than the sibling harness's default can say so without
-# changing every other server's budget.
-DEFAULT_MCP_TIMEOUT_MS = 60_000.0
+# So the number a caller must express parity with is 300, and a version-chasing
+# constant is the wrong shape for this: it silently rots the moment upstream
+# moves, and it rots in the direction that looks like a deliberate policy.
+#
+# THAT IS WHY THE BUDGETS THAT MATTER ARE NOW DECLARED, NOT INHERITED. A caller
+# that cares (Minerva's risk-assessment tool server does) states the budget in
+# the shared per-run MCP document, and both harnesses bind to that declared
+# value — so no workload's behaviour depends on either client's default. This
+# constant is only the floor under a server nobody declared, and it is set to
+# the sibling's own figure so an undeclared server behaves the same on both.
+#
+# WHAT IT COSTS, STATED PLAINLY: this is 10x looser than the 60 s it replaced.
+# The timer's job is to bound a WEDGED server, not a slow-but-working one; a
+# stdio child that has died is caught by the stream-pump failure path rather
+# than by this timer, and 300 s still bounds a hang. A caller who wants a tighter
+# bound for its own servers has two levers that take precedence — the
+# ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` env override and a per-server ``timeout`` —
+# and a deployment that declares budgets in its config never reaches this value
+# at all.
+DEFAULT_MCP_TIMEOUT_MS = 300_000.0
 
 
 class McpConnectionError(RuntimeError):
@@ -792,7 +801,15 @@ def resolve_mcp_timeout_s(cfg: MCPServerConfig | None) -> float | None:
     """Resolve the client-side request timeout in seconds (``None`` = off).
 
     Precedence: ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` env > ``config.timeout`` >
-    30 s default; ``0`` disables the timeout entirely (established behavior).
+    :data:`DEFAULT_MCP_TIMEOUT_MS`; ``0`` disables the timeout entirely
+    (established behavior).
+
+    The default's VALUE is deliberately not restated here. Spelling it out is how
+    this docstring came to promise "30 s" while the constant above it said 60 --
+    documentation that disagrees with its code is how the next reader re-derives
+    the wrong budget, which is exactly what happened once already. The constant is
+    the single place the number lives; this function is the single place the
+    precedence lives.
     """
     env_raw = os.environ.get("LOCAL_OPERATOR_MCP_TIMEOUT_MS")
     if env_raw is not None:
