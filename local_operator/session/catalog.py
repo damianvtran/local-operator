@@ -462,19 +462,35 @@ def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> t
     return status_of(row._replace(heartbeat_age_s=None), attention)
 
 
-def active_of(row: SessionRow, attention: Mapping[str, Any] | None) -> bool:
-    """``CatalogEntry.active`` for one row — which SECTION the sidebar files it in.
+def order_key_of(
+    row: SessionRow, attention: Mapping[str, Any] | None
+) -> tuple[int, int, float, str]:
+    """``CatalogEntry.rank`` for one row — WHERE the sidebar files it, not only which section.
 
     A second CALLER of the same home, for the same reason :func:`status_of` is
-    one: section membership is derived state (``pending or unseen or
-    live_state``), and a caller that restated it would be free to move a row the
-    list does not move. The desktop feed asks this beside ``status_of`` because a
-    row can need to change section while its pair changes too — a background
-    session that finishes goes from "Previous chats" to "Active chats", and
-    placement is carried by a LIST read, so the feed owes its client an
-    invalidation when that happens (finding 8).
+    one: the order key is derived state (tier from ``session_category``, wake band
+    from ``wakes``, then birth and id), and a caller that restated it would be free
+    to move a row the list does not move. The desktop feed asks this beside
+    ``status_of`` because a row can need to change position while its pair changes
+    too — a busy session that finishes is 4 -> 1 and STAYS in "Active chats" — and
+    placement travels on a LIST read, so the feed owes its client an invalidation
+    for that (finding 8).
+
+    WHICH SECTION A ROW IS FILED IN IS THE KEY'S OWN FIRST TERM, so this single
+    comparison subsumes the section rule the feed used to make beside it: a
+    section move always changes the first term, while the converse is false (the
+    intra-section reorder above is the reported bug). ``CatalogEntry.active`` is
+    the boolean the sidebar collapses "Previous chats" by, and it is still built
+    from the same home (``entry_for``) — but nothing derives it for an EDGE, so
+    there is no second entry point to keep in step:
+    :func:`~local_operator.session.catalog.load_catalog` reads it off the entry.
+
+    The full key, including ``wake_rank``, and not just the category: the two are
+    equivalent for every ACTIVE row (``wake_rank`` is the constant there) and the
+    full key is the key the sort actually uses, so "changed" cannot drift from
+    "the client's next list read places it differently".
     """
-    return entry_for(row, attention).active
+    return entry_for(row, attention).rank
 
 
 def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
