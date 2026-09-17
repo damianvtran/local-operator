@@ -61,7 +61,6 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -79,11 +78,6 @@ PlistRefreshKind = Literal[
 ]
 
 ReloadOutcome = Literal["reloaded", "not-addressable", "failed"]
-
-#: Timeout for ONE ``launchctl`` invocation. Every call this module makes is
-#: answered in milliseconds; the bound exists only so a wedged ``launchctl``
-#: cannot hang an install or the daemons-refresh child of ``lop update``.
-_LAUNCHCTL_TIMEOUT_S = 20.0
 
 #: How long to wait for launchd to actually RELEASE a label after ``bootout``.
 #:
@@ -103,12 +97,34 @@ _LABEL_RELEASE_POLL_S = 0.05
 
 #: Bootstrap retry budget for ONE reload, and the first backoff between tries.
 #: Sized from the measurement above (~500 ms was enough at the worst spacing)
-#: with an order of magnitude of headroom, while leaving the four-daemon
-#: refresh child comfortably inside ``update._DAEMON_REFRESH_TIMEOUT_S`` even
-#: on a machine where every launchctl call burns its whole budget.
+#: with an order of magnitude of headroom, and corroborated on a real machine
+#: (PR #1231's review round): a stubborn daemon's whole reload took 5.2 s, and
+#: the four the upgrade refresh walks took 21 s together.
+#:
+#: WHAT THESE BUDGETS ARE, AND WHAT THEY ARE NOT. They bound the WAITING this
+#: module does — 2.5 s + 6.0 s = 8.5 s per daemon, 34 s for four. They do NOT
+#: bound the calls themselves: each ``launchctl`` invocation is bounded by the
+#: RUNNER's own timeout (15 s in ``mobile``/``browser``/``wakes``, 20 s in
+#: ``tunnels``), and a reload makes at least four of them (bootout, at least one
+#: ``print``, at least one ``bootstrap``, one verifying ``print``). So a machine
+#: on which launchctl answers NOTHING can spend more than
+#: ``update._DAEMON_REFRESH_TIMEOUT_S`` (60 s — the cap on the child that
+#: refreshes all four plists) on a single daemon and be killed mid-refresh,
+#: leaving it booted out. That cap bounds how long an upgrade may be held
+#: hostage; it cannot promise a reload finishes, which is exactly why the
+#: recovery is a NAMED command (``lop <daemon> install``) rather than a longer
+#: timeout here. The budgets below assume launchctl answers in milliseconds,
+#: which is what it does when it is not wedged at all.
 _BOOTSTRAP_DEADLINE_S = 6.0
 _BOOTSTRAP_BACKOFF_S = 0.1
 _BOOTSTRAP_BACKOFF_CAP_S = 1.0
+
+#: How long to re-probe for registration after a bootstrap that exited 0, on
+#: the same backoff. Far shorter than the bootstrap budget because it is not
+#: waiting for a load to succeed — only for a load that already reported
+#: success to become visible. A single probe here would report a GOOD reload as
+#: STOPPED (see :func:`_await_registration`).
+_REGISTRATION_DEADLINE_S = 1.5
 
 
 @dataclass(frozen=True)
@@ -252,18 +268,21 @@ def _launchctl_message(result: object) -> str:
     return f"launchctl exited {getattr(result, 'returncode', '?')}"
 
 
-def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
-    """This module's own ``launchctl`` invocation.
+def _call(run: Callable[..., object], *args: str) -> tuple[object | None, str]:
+    """One guarded ``launchctl`` call: ``(result, "")`` or ``(None, why)``.
 
-    The default :func:`reload_job` runner. The installers each have a copy of
-    this one-liner and pass their own, so a test that already stubs a module's
-    helper intercepts every call the reload makes — no test-only seam, and no
-    module silently reaching the real ``launchctl`` because a stub stopped
-    covering it.
+    ``reload_job`` answers with a structured failure and never raises, and a
+    wedged launchd is exactly where a raise would be worst: the bootout has
+    already succeeded by then, so an escaping ``TimeoutExpired`` hands the
+    caller a traceback while the daemon is DOWN — the opposite of the recovery
+    sentence this module exists to print. A runner that raises is therefore the
+    same KIND of answer as one that exits non-zero; only the words differ, and
+    they are kept verbatim.
     """
-    return subprocess.run(  # noqa: S603 — fixed argv, no shell
-        ["launchctl", *args], capture_output=True, text=True, timeout=_LAUNCHCTL_TIMEOUT_S
-    )
+    try:
+        return run(*args), ""
+    except Exception as exc:  # noqa: BLE001 — the runner's failure IS the answer
+        return None, f"launchctl did not answer ({exc.__class__.__name__}: {exc})"
 
 
 def _monotonic() -> float:
@@ -288,16 +307,24 @@ def job_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
-def _registered(target: str, run: Callable[..., object]) -> bool:
-    """Whether launchd currently resolves ``<domain>/<label>``.
+def _registration(target: str, run: Callable[..., object]) -> tuple[bool, str]:
+    """``(registered, why)`` for one guarded ``launchctl print``.
 
-    ``print`` and only ``print``: it answers about the label launchd knows,
-    and is what the reload waits on and verifies with. A job that has exited
-    still prints (a real trap this codebase has already been bitten by — see
-    ``wakes/install.supervisor_state``), which is exactly right here, where
-    the question is "is the job registered", not "is it running".
+    ``print`` and only ``print``: it answers about the label launchd knows, and
+    is what the reload waits on and verifies with. A job that has exited still
+    prints (a real trap this codebase has already been bitten by — see
+    ``wakes/install.supervisor_state``), which is exactly right here, where the
+    question is "is the job registered", not "is it running".
+
+    ``why`` is empty when registered, launchd's own words when it answered
+    non-zero, and the runner's reason when it did not answer at all.
     """
-    return getattr(run("print", target), "returncode", 1) == 0
+    result, why = _call(run, "print", target)
+    if result is None:
+        return False, why
+    if getattr(result, "returncode", 1) == 0:
+        return True, ""
+    return False, _launchctl_message(result)
 
 
 def _wait_for_label_release(
@@ -310,22 +337,53 @@ def _wait_for_label_release(
     absent job" case) costs one call and no sleep. A label STILL resolving at
     the deadline is not an error here: the bootstrap below retries on its own
     budget and reports launchd's own words if it truly cannot load, which is
-    the honest answer rather than a timeout invented by this module.
+    the honest answer rather than a timeout invented by this module. A probe
+    that cannot be ANSWERED reads as released for the same reason — the
+    bootstrap is where a wedged launchctl becomes a reported failure.
     """
     limit = _monotonic() + deadline_s
     while True:
-        if not _registered(target, run):
+        if not _registration(target, run)[0]:
             return True
         if _monotonic() >= limit:
             return False
         _sleep(_LABEL_RELEASE_POLL_S)
 
 
+def _await_registration(
+    target: str, run: Callable[..., object], *, deadline_s: float = _REGISTRATION_DEADLINE_S
+) -> tuple[bool, str]:
+    """Wait, bounded, for launchd to resolve the label after a ``bootstrap``.
+
+    NOT a single probe, which is what this was: the bootstrap above retries for
+    six seconds precisely because launchd answers inconsistently around a load,
+    so one ``print`` that has not caught up yet turns a GOOD reload into
+    :func:`reload_failure`'s sentence — "… the daemon is now STOPPED; run `lop
+    mobile install` to reinstall it" — about a daemon that is running, and the
+    installer paths would then skip their health checks. Same backoff, much
+    shorter budget: this is not waiting for a load to succeed, only for one
+    that already reported success to become visible.
+
+    ``(registered, why)``, with ``why`` carrying the last probe's answer so an
+    unverifiable load reports launchd's own words rather than "not registered".
+    """
+    limit = _monotonic() + deadline_s
+    backoff = _BOOTSTRAP_BACKOFF_S
+    while True:
+        registered, why = _registration(target, run)
+        if registered:
+            return True, ""
+        if _monotonic() >= limit:
+            return False, why
+        _sleep(backoff)
+        backoff = min(backoff * 2, _BOOTSTRAP_BACKOFF_CAP_S)
+
+
 def reload_job(
     *,
     label: str,
     path: Path,
-    runner: Callable[..., object] | None = None,
+    runner: Callable[..., object],
 ) -> JobReload:
     """Reload one LaunchAgent: ``bootout``, wait for release, ``bootstrap``.
 
@@ -349,9 +407,25 @@ def reload_job(
        never by plist path: the path form answers a different question.
     3. ``bootstrap`` with bounded retries and backoff until a deadline, so the
        transient EIO above ends the attempt only when it is real.
-    4. Verify the job is registered, and return launchd's own stderr either
-       way so a failure can be reported as :func:`reload_failure`'s sentence
-       naming the recovery.
+    4. Verify the job is registered — re-probed on the same backoff, because
+       a single probe reports a slow-but-successful load as a failure — and
+       return launchd's own stderr either way so a failure can be reported as
+       :func:`reload_failure`'s sentence naming the recovery.
+
+    NOTHING IN THIS SEQUENCE RAISES. Every call goes through :func:`_call`, so
+    a ``launchctl`` that stops answering — the case where the bootout has
+    already landed — returns this function's failure with launchd's reason and
+    the recovery command, rather than a traceback out of an installer that has
+    just taken a daemon down.
+
+    Scope, so the docstring is not read as more than it says: the ``bootout`` +
+    ``bootstrap`` PAIR is written once, here. A caller that only needs "load
+    this if it is absent" still issues a bare ``bootstrap`` after its own
+    ``print`` (``mobile.service_action``, ``browser.action``); that is safe for
+    its case because the plist has not changed and a failure is reported, but
+    ``print`` is NOT a "launchd has let go" signal (measured: it kept
+    resolving for 2.6 s into a teardown), so a reload after a REWRITE must come
+    through here.
 
     ``bootout`` + ``bootstrap`` rather than ``kickstart -k`` because the
     callers reload after REWRITING the plist: a kickstart restarts the job
@@ -363,26 +437,46 @@ def reload_job(
     passwd home produces for ``label`` (:func:`is_own_plist`): a redirected
     ``HOME`` would otherwise reload a REAL unit from a sandbox. This is a
     precondition rather than a convenience, so a caller that forgot the guard
-    cannot reach launchd through this function.
+    cannot reach launchd through this function. A host whose passwd entry
+    cannot be read at all gets its OWN answer, because that is a broken host
+    rather than a sandbox and an installer declining on it must say which of
+    the two it hit.
 
-    ``runner`` is the caller's own ``launchctl`` helper — see
-    :func:`_launchctl` for why it is threaded through instead of hard-coded.
+    ``runner`` is REQUIRED and is the caller's own ``launchctl`` helper. Each
+    installer owns its subprocess call, its per-call timeout (15 s in
+    ``mobile``/``browser``/``wakes``, 20 s in ``tunnels``) and therefore its
+    test seam — see the budget note on ``_BOOTSTRAP_DEADLINE_S`` for why that
+    per-call bound is the one thing this function cannot size. There is
+    deliberately no default: a second ``launchctl`` invocation with a second
+    timeout inside this module would be a second budget that nothing checks.
     """
+    if real_home() is None:
+        return JobReload(
+            label=label,
+            outcome="not-addressable",
+            detail=(
+                f"cannot read the passwd entry for uid {os.getuid()}, so there is no way to tell "
+                f"whether {path} is the real LaunchAgent for {label}"
+            ),
+        )
     if not is_own_plist(path, label):
         return JobReload(
             label=label,
             outcome="not-addressable",
             detail=f"{path} is not the LaunchAgent the real home owns for {label}",
         )
-    run = runner if runner is not None else _launchctl
     domain = job_domain()
     target = f"{domain}/{label}"
 
     # 1. Tolerate an absent job: `launchctl bootout` on one exits non-zero, and
-    # that is not a failure to report.
-    run("bootout", target)
+    # that is not a failure to report. A call that is not ANSWERED is not fatal
+    # here either — the bootstrap below is what turns a wedged launchctl into a
+    # reported failure, with launchd's words and the recovery command.
+    _, bootout_reason = _call(runner, "bootout", target)
+    if bootout_reason:
+        logger.debug("launchctl bootout of %s did not answer: %s", target, bootout_reason)
     # 2. Wait for launchd to let go of the label (bounded; not fatal if not).
-    _wait_for_label_release(target, run)
+    _wait_for_label_release(target, runner)
 
     # 3. Bootstrap until the deadline. Every attempt is retried, not only one
     # that looks transient: launchd's messages vary by version, and a deadline
@@ -394,10 +488,10 @@ def reload_job(
     attempts = 0
     while True:
         attempts += 1
-        result = run("bootstrap", domain, str(path))
-        if getattr(result, "returncode", 1) == 0:
+        result, why = _call(runner, "bootstrap", domain, str(path))
+        if result is not None and getattr(result, "returncode", 1) == 0:
             break
-        failure = _launchctl_message(result)
+        failure = why or _launchctl_message(result)
         if _monotonic() >= limit:
             return JobReload(
                 label=label,
@@ -411,14 +505,16 @@ def reload_job(
 
     # 4. A zero exit is launchd's claim, not evidence: `bootstrap` has been
     # observed to return 0 for a job it then does not resolve. The caller
-    # claims success to the operator, so the claim is checked.
-    if not _registered(target, run):
+    # claims success to the operator, so the claim is checked — and re-checked,
+    # because one probe that has not caught up is not evidence either.
+    registered, unverified = _await_registration(target, runner)
+    if not registered:
         return JobReload(
             label=label,
             outcome="failed",
             detail=(
                 f"bootstrap reported success but {target} is not registered"
-                f" ({_launchctl_message(result)})"
+                f" ({unverified or 'no answer from launchctl'})"
             ),
             attempts=attempts,
         )
