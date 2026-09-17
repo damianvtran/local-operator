@@ -30,6 +30,16 @@ export function WorkingLine({
 }) {
 	const [frame, setFrame] = useState(0);
 	const [elapsed, setElapsed] = useState(startedS);
+	/* A start we do not know is not a start at ZERO. The wire carries one float
+	 * (``activity_started_s``) and the projection publishes 0.0 both for "this
+	 * phase began this instant" and for "no anchor was stated" (its third step,
+	 * the fold's own arrival). The band therefore withholds the digits on 0 —
+	 * exactly as every tool row does with its own ``elapsed_s > 0`` guard, and
+	 * for the same reason — while the SLOT stays reserved by the width class
+	 * below, so withholding cannot reflow the label beside it. Two answers to
+	 * one state on one screen (a fabricated ``0.0s`` here beside a row that shows
+	 * nothing) was the design round 1 D4 finding. */
+	const hasClock = startedS > 0;
 
 	/* Re-seed the clock when the server sends a new phase or a fresh age. */
 	useEffect(() => {
@@ -64,8 +74,17 @@ export function WorkingLine({
 			<span className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
 				{activity}
 			</span>
-			<span className="shrink-0 font-mono text-mono-sm text-ink-dim tabular-nums">
-				{formatElapsed(elapsed)}
+			{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of
+			 * the widest form the formatter can produce (``59m59s``/``41d16h``/
+			 * ``100d+``), right-aligned so the digits grow leftward into their own
+			 * space. The TUI reserves ``WorkingBlock._CLOCK_COL`` for exactly this
+			 * reason — an unreserved clock re-clips the label as the number changes
+			 * form, so at 320px the label read 38 characters at ``1h`` and 28 at
+			 * ``1000h 40m`` and jumped 5 characters in the single tick across the
+			 * ``59m 59s`` → ``1h`` crossing (design round 1 D2). Reserved cells also
+			 * make withholding free: an empty slot is the same width as a full one. */}
+			<span className="w-[6ch] shrink-0 text-right font-mono text-mono-sm text-ink-dim tabular-nums">
+				{hasClock ? formatElapsed(elapsed) : ""}
 			</span>
 		</div>
 	);
