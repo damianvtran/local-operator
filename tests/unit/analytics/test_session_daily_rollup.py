@@ -950,15 +950,19 @@ def test_an_upgrade_launch_refuses_for_coverage_not_for_a_zone_it_never_set(
 
 
 def test_the_rollup_read_degrades_its_edges_with_the_ledgers_schema(tmp_path, monkeypatch):
-    """Both paths must agree about a ledger that cannot express a parent edge.
+    """The flag-false shape agrees on the edge map; the guard stays a guard.
 
-    Review round 1, Q2. The ``no-parent-column`` precondition cannot fire in
-    practice (``_migrate`` adds the column and nothing drops it), so the state it
-    guards is only reachable through the guard being bypassed — and in that state
-    the two paths used to disagree on the whole ``session_parents`` side map
-    (6,456 edges from the rollup's buckets against none from the ledger) while
-    every call COUNT still matched, which the count check cannot see. The guard is
-    kept, but the agreement is now enforced where it matters: in the read.
+    Review round 1, Q2 narrowed by round 3's F1/Q4. The substituting branch is
+    keyed on ``_has_parent_column()`` — the SAME predicate as the guard — so it
+    is reachable only where that predicate is false, which is the state this test
+    pins by switching it off. The shape round 1 measured is NOT this one: there
+    the column was renamed away and ``_migrate`` re-added it, so the predicate is
+    true, the substitution does not apply, and the two maps still disagree (6,533
+    vs 0 on that copy) while every count matches. That state needs an out-of-band
+    edit no product path performs, and through ``aggregate()`` the guard refuses
+    before the rollup read runs. So this asserts the flag-false shape only; the
+    guarded shape stays divergent by construction, and the count check is blind
+    to a side-map divergence.
     """
     store = _seeded_store(tmp_path)
     assert backfill_analytics_session_daily(tmp_path, store=store) >= 1
