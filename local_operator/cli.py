@@ -7878,3 +7878,5 @@ if __name__ == "__main__":
     # absent under ``python -S`` and in frozen builds, so this is the more
     # portable spelling regardless (QA round 1, Q1).
     sys.exit(main())
+
+# ci-scope probe: a local_operator/** diff
