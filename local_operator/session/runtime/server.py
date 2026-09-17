@@ -964,6 +964,13 @@ class ProjectionSink(Protocol):
     a frame) and calls ``set_pending`` (the reduced-handle bridge for gate
     cards), so that is the whole contract — narrow enough that a test can
     hand in a stub and a future runtime with no phone can hand in nothing.
+
+    Read-only is a REAL constraint, not a description: the runtime re-dates the
+    band's age through the handle's fold (the one the events are fed into) at
+    frame build, and an injected sink must not do that from its own state. A
+    fold that is never fed has no phase, and writing its emptiness over a shared
+    projection object is what served every attached phone ``null`` for every
+    phase (review round 4, BLOCKER 1).
     """
 
     @property
@@ -1073,7 +1080,11 @@ class RuntimeServer:
         # constructs no fold at all. Welcomes and repaints before that moment
         # serialize the seed directly: the seed IS the object the handle's
         # own fold mutates, so the bytes on the wire are identical either
-        # way. See ``_ensure_projection_sink``.
+        # way — and the band's age is re-dated through that same handle fold
+        # at every frame build, because the runtime's own sink fold is never
+        # fed and must not write state it does not own (review round 4,
+        # BLOCKER 1). See ``_ensure_projection_sink`` and
+        # ``_projection_payload``.
         self._projection_sink: ProjectionSink | None = projection_sink
         #: How many times this runtime built a fold on its own. Observable
         #: for tests and for the "did a headless runtime pay for a fold?"
@@ -4240,18 +4251,24 @@ class RuntimeServer:
         """
         from local_operator.mobile.projection import cap_projection_frame
 
+        # RE-DATE BEFORE SERIALIZING, through the fold the EVENTS REACH. The
+        # band's age is a reading taken when the phase last moved, and this frame
+        # is the moment it becomes an answer to "how long has this been going" —
+        # for whoever is attached now, including a phone that just attached
+        # mid-phase.
+        #
+        # It must be the HANDLE's fold, not ``self._projection_sink``: that sink
+        # is the runtime's own lazily-built fold over the handle's projection
+        # OBJECT, and nothing ever feeds it events — the feeders are the handles'
+        # own folds. Re-dating through it stamped its empty state over the live
+        # age, so every pushed frame carried ``null`` and the phone withheld its
+        # clock for every phase, watched edges included (review round 4, BLOCKER
+        # 1). Probed rather than required: a reduced handle has no fold, and the
+        # sink contract deliberately stays read-only plus ``set_pending``.
+        redate = getattr(self._handle, "redate_from_phase", None)
+        if callable(redate):
+            redate()
         sink = self._projection_sink
-        if sink is not None:
-            # RE-DATE BEFORE SERIALIZING. The band's age is a reading taken when
-            # the phase last moved, and this frame is the moment it becomes an
-            # answer to "how long has this been going" — for whoever is attached
-            # now, including a phone that just attached mid-phase. Probed rather
-            # than required: the sink protocol is deliberately narrow (a test
-            # stub supplies only ``projection``/``set_pending``), and a stub
-            # that cannot re-date simply publishes the number it holds.
-            refresh = getattr(sink, "refresh_activity_age", None)
-            if callable(refresh):
-                refresh()
         projection = sink.projection if sink is not None else self._handle.session_projection_seed
         data, degraded = cap_projection_frame(projection)
         if degraded and not self._frame_cap_warned:

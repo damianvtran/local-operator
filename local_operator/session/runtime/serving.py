@@ -1681,14 +1681,22 @@ class ServingSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
-        """The projection this handle hands a viewer at attach — re-dated.
+        """The projection skeleton: identity fields the runtime folds onto.
 
-        Same reason as the TUI handle's: ``activity_started_s`` is only written
-        when the phase moves, so a viewer attaching mid-phase would otherwise
-        seed on the age it had at the last edge (review round 3, MAJOR 1).
+        A pure read; see :meth:`redate_from_phase` for the hand-off that dates
+        the band's age, and the TUI handle's same pair for why they are separate
+        (review round 4, NIT 2).
         """
-        self._fold.refresh_activity_age()
         return self._projection
+
+    def redate_from_phase(self) -> None:
+        """Re-date the band's age through the fold the EVENTS ARE FED into.
+
+        The runtime calls this on every frame it serializes: the age is written
+        when the phase moves, so a viewer or a push arriving mid-phase is
+        otherwise served the number from the last edge (review round 3, MAJOR 1).
+        """
+        self._fold.redate_from_phase()
 
     # -- v4 full-TUI capability --------------------------------------------------
     # These three are what makes ``RuntimeServer`` advertise
