@@ -564,7 +564,11 @@ AUTH_REVALIDATE_INTERVAL_S = 60.0
 # constant is only the floor under a server nobody declared, and it is set to
 # the sibling's own figure so an undeclared server behaves the same on both.
 #
-# WHAT IT COSTS, STATED PLAINLY: this is 10x looser than the 60 s it replaced.
+# WHAT IT COSTS, STATED PLAINLY: this is 5x the 60 s this constant briefly held,
+# and 10x the 30 s that is STILL SHIPPED in the packaged harness today — the
+# release that carries this change is what actually moves a lop run off 30 s, so
+# quoting one factor without saying which baseline it is against is how a
+# document ends up disagreeing with itself.
 # The timer's job is to bound a WEDGED server, not a slow-but-working one; a
 # stdio child that has died is caught by the stream-pump failure path rather
 # than by this timer, and 300 s still bounds a hang. A caller who wants a tighter
