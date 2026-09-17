@@ -1248,6 +1248,17 @@ def test_a_heartbeat_rewrite_publishes_nothing(tmp_path):
     replaces. The pair is read from
     ``pending``/``busy``/``detached``/``leaving``, none of which a heartbeat
     touches, so the answer must be: nothing, even though the doorbell RINGS.
+
+    BOTH CHANNELS, and the second one is not decoration. A heartbeat leaves the
+    pair unchanged AND the order key unchanged, so a republish must publish on
+    neither ``session_status`` nor ``catalogue``. Asserting only the status
+    channel was sufficient by construction until the position comparison was
+    hoisted out from behind the pair gate (M1): after that the catalogue channel
+    is reachable on a tick whose pair did not move, so this test could pass while
+    a no-op republish published an invalidation (measured: with the comparison
+    mutated to fire for every candidate the status-only form passed while seven
+    sibling guards failed — ``test_the_key_and_the_sort_cannot_drift``'s
+    heartbeat case among them).
     """
     root = tmp_path
     sid = "e2" * 6
@@ -1268,7 +1279,9 @@ def test_a_heartbeat_rewrite_publishes_nothing(tmp_path):
         # simply failed to notice the write.
         assert _fingerprint(feed._registry_dir) != feed._registry_fingerprint
         _tick(feed)
-        assert _statuses(_queued(subscription)) == []
+        frames = _queued(subscription)
+        assert _statuses(frames) == [], frames
+        assert [frame for frame in frames if frame["type"] == "catalogue"] == [], frames
     asyncio.run(feed.close())
 
 
