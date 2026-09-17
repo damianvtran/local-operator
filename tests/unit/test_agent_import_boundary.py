@@ -124,17 +124,42 @@ def test_import_suffixes_a_name_already_held_in_ANY_case(tmp_path):
 
 
 def _assert_publishable(name: str) -> None:
-    """The rules BOTH validators share (contract §1.4 / ``write_profile``).
+    """The name rules a pulled row must satisfy to be publishable at all.
 
-    A name the import invents has to satisfy these or the user ends up with a
-    row the hub refuses — and the UI's §6.3 pre-validation refuses it too, with
-    no explanation of where the name came from. Spelling them out here means a
-    future suffix cannot quietly introduce a space or exceed the cap.
+    Taken from the two validators the standard names, and asserted as their
+    union so a future suffix cannot quietly introduce a character either side
+    refuses or exceed the cap: the hub's document rule (contract §1.4 — 1..128
+    characters, no ``\\ / :`` or Unicode whitespace, no leading/trailing ``-``
+    or ``.``) and the local create path's own refusal (``write_profile``: no
+    whitespace, no ``/`` or ``\\``).
+
+    ``:`` is the one character only §1.4 refuses — the local validator has no
+    colon rule, so a produced name carrying one would pass the create path and
+    be refused at publication, which is the silent failure this helper exists
+    to catch.
+
+    Note the stricter-than-now set of rules: the operator has ruled ordinary
+    INTERNAL spaces legal in a published name (normalised to single spaces with
+    the ends trimmed, the unrenderable-character refusals and the cap
+    unchanged), implemented in agent-server. The names these tests produce from
+    their own bases contain no spaces either way, so this stays the right
+    assertion for them; do not read it as the post-ruling name spec.
     """
 
     assert 1 <= len(name) <= MAX_AGENT_NAME_CHARS, name
-    assert not any(char.isspace() or char in "/\\" for char in name), name
+    assert not any(char.isspace() or char in "/\\:" for char in name), name
     assert not name.startswith(("-", ".")) and not name.endswith(("-", ".")), name
+
+
+def test_the_publishability_check_can_see_every_rule_it_asserts():
+    """A guard has to be able to fail on the rules it names, so each one is fed
+    a violating name here. The colon is the one that was missing while the
+    helper's docstring cited §1.4, which lists it (§1.4: ``\\ / :``)."""
+
+    _assert_publishable("Report-ready")  # the control: a legal name passes
+    for illegal in ("Report: ready", "Report:ready", "Report/ready", "Report\\ready", "x" * 129):
+        with pytest.raises(AssertionError):
+            _assert_publishable(illegal)
 
 
 def test_import_takes_the_first_free_suffix(tmp_path):
