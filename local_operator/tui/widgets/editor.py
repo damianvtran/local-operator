@@ -135,7 +135,11 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
-from local_operator.clipboard import MAX_CLIPBOARD_READ_BYTES, read_clipboard
+from local_operator.clipboard import (
+    MAX_CLIPBOARD_READ_BYTES,
+    SCRATCH_NO_SPACE,
+    read_clipboard,
+)
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
@@ -198,6 +202,21 @@ PASTE_READING_NOTICE_DELAY_S = 0.35
 #: card's own lifetime, not about every notice that can occupy the slot
 #: (issue #422).
 PASTE_READING_NOTICE_MIN_S = 0.4
+
+#: How a clipboard read that never HAPPENED is named on
+#: :class:`EditorPasteEmpty`, keyed by the reason
+#: :mod:`local_operator.clipboard` records.
+#:
+#: A mapping rather than a branch per reason because the two ends are named for
+#: different things on purpose: the module names the CAUSE (``"no-space"``),
+#: which is what a log reader needs, and the message names the READ
+#: (``"read-no-space"``), which is what a user needs — one of them is about a
+#: filesystem and the other is about a paste. The default covers every other
+#: reason, including the ones this module cannot classify, so a new reason
+#: added to the clipboard lands on the honest generic notice rather than
+#: falling through to "the clipboard was empty".
+_CLIPBOARD_READ_FAILURE_REASONS = {SCRATCH_NO_SPACE: "read-no-space"}
+DEFAULT_CLIPBOARD_READ_FAILURE_REASON = "read-failed"
 
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
 #: a separator is what keeps prose out: "see screenshot.png" splits into two
@@ -1332,7 +1351,15 @@ class EditorPasteEmpty(Message):
     clipboard was never read, and an oversized screenshot IS on the clipboard.
     Both mislead a user into the one move that cannot help — re-copying.
 
-    Three values, no more, because three is what the code can establish:
+    **A CLOSED SET, and the list is the record of how it got closed.** One
+    value per outcome this code can honestly name, no more and no fewer. It
+    started at three and has grown one value per case a single value would have
+    described WRONGLY; that history is why the bar for a new one is not "is
+    this interesting" but "does the user's next move differ from every move
+    already on the list". Two of the values below exist only because the reason
+    they replace sent the user to the one action that could not work
+    (``"timeout"``, ``"too_large"``), and the two newest exist for exactly the
+    same reason:
 
     * ``"nothing"`` — the clipboard was read and had nothing attachable on it.
       This is the deliberately vague one: an empty clipboard, a text-only one,
@@ -1372,9 +1399,24 @@ class EditorPasteEmpty(Message):
       screenshot that their clipboard was empty (ux round 1, U3). A retry is
       the move that helps here and the move that cannot help there, so one
       sentence could not serve both.
+    * ``"read-no-space"`` — the read never happened because there was no room
+      to stage it: the scratch directory the file-based backends need could not
+      be allocated and the OS said the volume or the quota was full. The move
+      is to free space, and it is the ONLY move: ``copy again``, which is what
+      every other down-the-list reason implies, cannot help on a full disk, and
+      the failure surfaces as a paste that kills the app rather than as
+      anything about a disk (2026-09-17).
+    * ``"read-failed"`` — the read never happened for any other reason: a
+      scratch allocation refused for something other than space, an allocation
+      refused while the scratch bases looked writable to a probe, or an
+      exception escaping a backend and caught by the guard in
+      :func:`~local_operator.clipboard.read_clipboard`. One value for all of
+      them because the distinction is not one this code can establish, and the
+      honest thing to say is exactly what it knows: the clipboard was not read,
+      so paste again.
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
-    card to the app; this only says which of the three happened.
+    card to the app; this only says which of them happened.
 
     THIS NOTICE IS NOT A DISCOVERY SURFACE, and an earlier revision's attempt
     to make it one is recorded here because the reasoning looks right and is
@@ -5512,6 +5554,28 @@ class Editor(TextArea):
                     _retire_this_card()
                 else:
                     self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, _retire_this_card)
+        if contents.read_failed:
+            # FIRST, ahead of every shape below. A read that never happened has
+            # no image, no paths and no text, so it would fall through the text
+            # branch into the reason block at the bottom and be reported as
+            # ``"nothing"`` — telling a user who is holding a screenshot that
+            # their clipboard is empty. That is the exact wrong-diagnosis class
+            # ``"timeout"`` and ``"too_large"`` were split out to end, and on
+            # the incident that produced these two values the user's clipboard
+            # did hold a valid image; what was empty was the disk (2026-09-17).
+            #
+            # Nothing below can be reachable honestly once this is set, which is
+            # why this is a guard at the top rather than another ``elif`` at the
+            # bottom beside the other reasons: the ordering is the claim, not a
+            # detail of which branch happens to win.
+            self.post_message(
+                EditorPasteEmpty(
+                    reason=_CLIPBOARD_READ_FAILURE_REASONS.get(
+                        contents.read_failed, DEFAULT_CLIPBOARD_READ_FAILURE_REASON
+                    )
+                )
+            )
+            return None
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:

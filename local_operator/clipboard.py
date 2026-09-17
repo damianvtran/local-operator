@@ -97,6 +97,23 @@ Every backend obeys the same four rules, which is what makes them substitutable:
    a keystroke: the user pressed ``Cmd+V``, and an exception (or a stderr line
    about a missing binary) on every stray empty paste would be worse than the
    silence it replaced.
+
+   **This rule is enforced, not audited, and it has to be.** It was prose only
+   until it was violated by the one call nobody counted as part of a backend:
+   the scratch directory was allocated directly as a ``TemporaryDirectory``,
+   straight in the keystroke handler. On 2026-09-17 the operator's data volume filled (99 %,
+   443 GB used, 4.5-6 GB free) and the host logged 56 ``Errno 28``s in six
+   minutes; the next ``ctrl+v`` raised
+   ``FileNotFoundError: [Errno 2] No usable temporary directory found in
+   ['/var/folders/qd/.../T/', '/tmp', '/var/tmp', '/usr/tmp', '/Users/damian']``
+   out of :func:`_read_macos`. Textual's ``App._handle_exception`` exits the app
+   on any exception raised from a message handler, so the paste did not fail —
+   it **killed the session**, and the message the user could see named
+   directories that plainly existed. Two guards now hold the rule by
+   construction: every scratch allocation goes through
+   :func:`_open_scratch_dir`, which reports a reason instead of raising, and
+   :func:`read_clipboard` wraps the whole backend dispatch, so a future hole
+   on any platform is caught rather than shipped.
 2. **Bounded by :data:`CLIPBOARD_TIMEOUT_S`.** Each backend shells out, and a
    wedged clipboard daemon (a hung ``wl-paste``, an X11 selection owner that
    never answers, a stalled AppleScript) would otherwise hold the process
@@ -124,6 +141,8 @@ machinery, so it stays testable as plain functions.
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import shutil
 import signal
@@ -137,6 +156,8 @@ from pathlib import Path
 from typing import Mapping
 
 from local_operator.media import sniff_image
+
+logger = logging.getLogger(__name__)
 
 #: The budget for ONE clipboard read operation, across every subprocess it
 #: takes. A clipboard daemon that never answers is what this bounds: the read
@@ -201,6 +222,33 @@ MAX_CLIPBOARD_TEXT_BYTES = 1024 * 1024
 #: versions and configurations, and a session with only ``SSH_CLIENT`` set is
 #: exactly as remote as one with all three.
 SSH_ENV_VARS = ("SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT")
+
+#: A read that never happened: the scratch directory the file-based backends
+#: stage the pasteboard through could not be allocated because the volume (or
+#: the user's quota) was full. Named separately from
+#: :data:`SCRATCH_UNAVAILABLE` because the MOVE differs and only one of them is
+#: worth the user's time: on a full disk the retry that helps is "free up
+#: space", and "copy again" — the move every other empty-paste reason implies —
+#: cannot help at all.
+SCRATCH_NO_SPACE = "no-space"
+
+#: A read that never happened for any other reason: a scratch allocation that
+#: failed for something other than space (a read-only or missing directory, a
+#: full file table), an allocation that failed while the platform's scratch
+#: bases looked writable to a probe, or an exception escaping a backend. One
+#: reason for all of them deliberately: this module can establish that the
+#: clipboard was not read, and CANNOT establish why, so it says only what it
+#: knows (the same discipline as the collapse in :class:`ClipboardContents`).
+SCRATCH_UNAVAILABLE = "unavailable"
+
+#: The scratch bases a probe tries, in ``tempfile``'s own order, skipping any
+#: that is unset or empty. Restated here rather than reaching for
+#: ``tempfile._candidate_tempdir_list`` because that helper is private and is
+#: exactly what moves between the interpreters this project runs on
+#: (``_get_default_tempdir`` gained a ``dirlist`` parameter in 3.14), and a
+#: probe that itself broke would turn a reportable failure into a new one.
+SCRATCH_PROBE_BASES = ("TMPDIR", "TEMP", "TMP")
+SCRATCH_PROBE_FALLBACK = "/tmp"
 
 #: MIME types worth pulling off an X11/Wayland clipboard, in preference order.
 #: PNG first because it is lossless and what a screenshot tool puts there;
@@ -634,6 +682,97 @@ end run
 """
 
 
+# -- the paste's scratch directory --------------------------------------------
+#
+# Two backends need a real file to carry the pasteboard's bytes out of a
+# subprocess: macOS's ``osascript`` and Windows' PowerShell both write to a
+# path rather than to stdout (Windows cannot pipe image bytes at all — see
+# `_read_windows_image`). The allocation is shared rather than repeated because
+# it is the one call in this module that can fail for a reason that has nothing
+# to do with the clipboard, and two copies of a never-raise contract is one
+# copy that drifts. This is also the call that killed the session: see rule 1
+# of the module docstring.
+
+
+def _scratch_probe_bases() -> tuple[str, ...]:
+    """The platform's own scratch bases, unset ones skipped.
+
+    Order matters and is ``tempfile``'s: the first base that answers is the one
+    a healthy host would have used, so the first base that REFUSES is the one
+    whose errno describes this host.
+    """
+    bases = [value for name in SCRATCH_PROBE_BASES if (value := os.environ.get(name))]
+    bases.append(SCRATCH_PROBE_FALLBACK)
+    return tuple(bases)
+
+
+def _classify_scratch_failure(errno_value: int | None) -> str:
+    """The reason to report for a scratch refusal, from the errno it gave.
+
+    Pure, and separate from the probe that supplies the errno, because the
+    mapping is the decision worth pinning: ``ENOSPC`` and ``EDQUOT`` are the
+    two answers that mean "there is no room" (a full volume, and a full quota
+    on a volume with room — the same user-visible problem, and the same move),
+    and everything else is not something this module can name.
+
+    ``None`` — the probe could not produce a refusal because a base accepted a
+    file — is :data:`SCRATCH_UNAVAILABLE` too: the space was demonstrably
+    writable, so "no space" would be a claim that contradicts the evidence.
+    """
+    if errno_value in (errno.ENOSPC, errno.EDQUOT):
+        return SCRATCH_NO_SPACE
+    return SCRATCH_UNAVAILABLE
+
+
+def _probe_scratch_errno() -> int | None:
+    """The errno a real create against the scratch bases gives, or ``None``.
+
+    **For NAMING only — never for allocating.** ``tempfile`` discards the cause
+    before it raises: ``_get_default_tempdir`` collapses every refusal
+    (``ENOSPC``, ``EACCES``, ``EMFILE``, ``ENOENT``) into
+    ``FileNotFoundError(ENOENT, "No usable temporary directory found in ...")``,
+    so the exception the caller finally sees names missing directories on a
+    host where those directories exist and the disk is simply full. That is the
+    one piece of information the user's move depends on, and this is the only
+    place it can be recovered.
+
+    One create-and-write per base, stopped at the first refusal — the first
+    refusal is the interesting one, and a base that accepts a file proves the
+    filesystem had room, which is itself an answer.
+    """
+    for base in _scratch_probe_bases():
+        try:
+            handle, name = tempfile.mkstemp(prefix="lo-clip-probe-", dir=base)
+        except OSError as exc:
+            return exc.errno
+        os.close(handle)
+        try:
+            os.unlink(name)
+        except OSError:
+            # A file left behind by a failed unlink is not a failure of this
+            # probe, and must not be reported as one.
+            pass
+        return None
+    return None
+
+
+def _open_scratch_dir() -> tuple[tempfile.TemporaryDirectory[str] | None, str]:
+    """Allocate the paste's scratch directory, or name why it could not be.
+
+    Returns ``(directory, "")`` on success and ``(None, reason)`` on failure,
+    where ``reason`` is :data:`SCRATCH_NO_SPACE` or
+    :data:`SCRATCH_UNAVAILABLE`. Never raises: that is the whole point, and why
+    every caller can stay inside rule 1 without its own try block.
+    """
+    try:
+        return tempfile.TemporaryDirectory(prefix="lo-clip-"), ""
+    except OSError:
+        # The caught exception is deliberately not inspected: `tempfile` has
+        # already replaced the real cause with a misleading ENOENT, so the
+        # probe is the only route to an honest answer.
+        return None, _classify_scratch_failure(_probe_scratch_errno())
+
+
 def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
     """macOS: image bytes, file URLs, or text, from ONE ``osascript`` spawn.
 
@@ -651,8 +790,15 @@ def _read_macos(max_bytes: int, deadline: _Deadline) -> ClipboardContents:
         # Not reachable on a stock macOS, but this module must never assume a
         # binary exists just because the platform usually ships it.
         return ClipboardContents()
-    with tempfile.TemporaryDirectory(prefix="lo-clip-") as tmp:
-        dest = Path(tmp) / "clipboard.png"
+    tmp, scratch_reason = _open_scratch_dir()
+    if tmp is None:
+        # A read that never happened, carrying the reason. NOT an empty
+        # result: on the operator's full volume the pasteboard held a valid
+        # screenshot, and reporting it as empty would send them to re-copy the
+        # one thing that was already there (2026-09-17).
+        return ClipboardContents(read_failed=scratch_reason)
+    with tmp:
+        dest = Path(tmp.name) / "clipboard.png"
         # `-` reads the script from stdin; everything after it is `argv` to the
         # script's `on run` handler, so the destination never has to be spliced
         # into the source text.
@@ -941,18 +1087,32 @@ try {
 
 
 def _read_windows_text(
-    max_bytes: int, deadline: _Deadline, oversized: list[bool] | None = None
+    max_bytes: int,
+    deadline: _Deadline,
+    oversized: list[bool] | None = None,
+    scratch_failed: list[str] | None = None,
 ) -> str:
     """Windows: the clipboard's text, or ``""``.
 
     ``-STA`` for the same reason the image backend needs it: the Windows
     clipboard API is single-threaded-apartment only.
+
+    ``scratch_failed`` is how a failed scratch allocation reports itself out of
+    a backend that can only return a string — the same out-parameter shape
+    ``oversized`` uses. The caller turns the reason into
+    :attr:`ClipboardContents.read_failed`. Passed rather than raised: rule 1 is
+    what stops this keystroke killing the session.
     """
     shell = _windows_shell()
     if shell is None:
         return ""
-    with tempfile.TemporaryDirectory(prefix="lo-clip-") as tmp:
-        script = Path(tmp) / "read_text.ps1"
+    tmp, scratch_reason = _open_scratch_dir()
+    if tmp is None:
+        if scratch_failed is not None:
+            scratch_failed.append(scratch_reason)
+        return ""
+    with tmp:
+        script = Path(tmp.name) / "read_text.ps1"
         try:
             script.write_text(_WINDOWS_TEXT_SCRIPT, encoding="utf-8")
         except OSError:
@@ -987,20 +1147,31 @@ def _windows_shell() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell")
 
 
-def _read_windows_image(max_bytes: int, deadline: _Deadline) -> ClipboardImage | None:
+def _read_windows_image(
+    max_bytes: int, deadline: _Deadline, scratch_failed: list[str] | None = None
+) -> ClipboardImage | None:
     """Windows: PowerShell reads the clipboard bitmap and PNG-encodes it.
 
     Via a temp file for the encoding reason documented on
     :data:`_WINDOWS_SCRIPT`: binary on PowerShell's stdout is corrupted by the
     output encoding, and no combination of flags makes that stream safe for
     image bytes.
+
+    ``scratch_failed`` mirrors :func:`_read_windows_text`'s: a backend whose
+    return type cannot say "the clipboard was not read" hands the reason to its
+    caller.
     """
     shell = _windows_shell()
     if shell is None:
         return None
-    with tempfile.TemporaryDirectory(prefix="lo-clip-") as tmp:
-        dest = Path(tmp) / "clipboard.png"
-        script = Path(tmp) / "read_clipboard.ps1"
+    tmp, scratch_reason = _open_scratch_dir()
+    if tmp is None:
+        if scratch_failed is not None:
+            scratch_failed.append(scratch_reason)
+        return None
+    with tmp:
+        dest = Path(tmp.name) / "clipboard.png"
+        script = Path(tmp.name) / "read_clipboard.ps1"
         try:
             script.write_text(_WINDOWS_SCRIPT, encoding="utf-8")
         except OSError:
@@ -1052,6 +1223,10 @@ class ClipboardContents:
     and a wedged daemon are one answer, because a message that guessed between
     them would be inventing a diagnosis. A TEXT-only clipboard is no longer in
     that collapse — it has its own field, because ``Ctrl+V`` has to insert it.
+    Neither is a read that never HAPPENED: ``refused_remote`` and
+    ``read_failed`` are the two states where the clipboard was not consulted at
+    all, and both are named because in each one the honest answer is not about
+    the clipboard's contents.
 
     The three shapes are MUTUALLY EXCLUSIVE by construction, in the order
     image, paths, text. That order is the user's intent, not a convenience: a
@@ -1096,6 +1271,22 @@ class ClipboardContents:
     #: D12 correction exists to prevent, and a retry is the one move that helps,
     #: so the notice has to be able to say so.
     timed_out: bool = False
+    #: The read never happened for a reason this module can name, and the value
+    #: is that reason (:data:`SCRATCH_NO_SPACE` or :data:`SCRATCH_UNAVAILABLE`,
+    #: or ``""`` when the read did happen).
+    #:
+    #: Carried separately from the "nothing attachable here" collapse for the
+    #: same reason ``timed_out`` is: a user holding a screenshot must not be
+    #: told the clipboard was empty, and the move that helps differs. On a full
+    #: volume (the operator's host, 2026-09-17) the retry that works is "free up
+    #: space"; "copy again" — what every empty answer implies — cannot work,
+    #: and the exception that actually reached the user named missing
+    #: directories on a host where they existed.
+    #:
+    #: Set by the scratch allocation (both file-based backends need one) and by
+    #: the guard around the whole dispatch in :func:`read_clipboard`, so rule 1
+    #: of the module docstring holds for every platform and every future hole.
+    read_failed: str = ""
 
 
 def read_clipboard(
@@ -1121,6 +1312,14 @@ def read_clipboard(
     host — this module's whole failure mode was a platform assumption that only
     one developer's environment could disprove.
 
+    **Never raises, and that is enforced rather than audited.** The dispatch
+    below runs inside one guard: any exception a backend or a future edit lets
+    escape is reported as a read that did not happen
+    (:attr:`ClipboardContents.read_failed`) and logged with its traceback, so
+    the failure is diagnosable from the log while the keystroke that caused it
+    stays a keystroke. Rule 1 of the module docstring explains the incident
+    that made the difference between those two outcomes a crashed session.
+
     Wayland is chosen over X11 by ``WAYLAND_DISPLAY`` rather than by
     distribution: a Wayland session commonly also runs XWayland, so ``DISPLAY``
     is set in both, and testing ``DISPLAY`` first would route a Wayland session
@@ -1141,11 +1340,17 @@ def read_clipboard(
         # out, so the flag is only attached to an empty-handed result. Reporting
         # "the read timed out" beside an attached image would be a notice about
         # a failure that did not happen.
+        #
+        # `not contents.read_failed` for the same reason, and it is the more
+        # specific of the two: a read that never happened cannot also have run
+        # out of time, and the failure is the answer that tells the user what
+        # to do, so it must not be reported beside a timeout.
         if (
             contents.image is None
             and not contents.paths
             and not contents.text
             and not contents.text_too_large
+            and not contents.read_failed
         ):
             return replace(contents, timed_out=deadline.hit)
         return contents
@@ -1156,21 +1361,39 @@ def read_clipboard(
     # whichever backend ran, so an over-budget payload is reported as itself
     # rather than as an empty clipboard (code round 2, F7).
     oversized: list[bool] = []
-    if system == "win32":
-        image = _read_windows_image(max_bytes, deadline)
-        if image is None:
-            text = _read_windows_text(max_bytes, deadline, oversized)
-    elif system.startswith("linux") or "bsd" in system:
-        if source.get("WAYLAND_DISPLAY"):
-            # One call for both shapes: the compositor's type listing answers
-            # the image question and the text question together.
-            image, text = _read_wayland(max_bytes, deadline, oversized)
-        elif source.get("DISPLAY"):
-            image = _read_x11_image(max_bytes, deadline)
-            if image is None:
-                text = _read_x11_text(max_bytes, deadline, oversized)
-        # A headless Linux box (a container, a bare tty) has no clipboard at
-        # all, and shelling out to discover that costs a subprocess per paste.
+    # Carries "the scratch directory could not be allocated, so the clipboard
+    # was never read" back out of the Windows backends, whose return types
+    # cannot express it. macOS reports the same thing on its result directly.
+    scratch_failed: list[str] = []
+    # RULE 1 IS ENFORCED HERE, not audited. Every backend obeys never-raise by
+    # its own construction, but "every backend" is a claim that decays with
+    # every edit — and the path that killed the operator's session was not in a
+    # backend at all, it was a scratch allocation in the keystroke handler
+    # (module docstring, rule 1). One guard around the whole dispatch means a
+    # future hole on any platform costs a notice instead of the session, and the
+    # traceback still reaches the log where a maintainer can see it.
+    try:
+        if system == "win32":
+            image = _read_windows_image(max_bytes, deadline, scratch_failed)
+            # The text read is skipped when the scratch failed: it needs the same
+            # directory, so it would fail identically and only append a second
+            # copy of the reason.
+            if image is None and not scratch_failed:
+                text = _read_windows_text(max_bytes, deadline, oversized, scratch_failed)
+        elif system.startswith("linux") or "bsd" in system:
+            if source.get("WAYLAND_DISPLAY"):
+                # One call for both shapes: the compositor's type listing answers
+                # the image question and the text question together.
+                image, text = _read_wayland(max_bytes, deadline, oversized)
+            elif source.get("DISPLAY"):
+                image = _read_x11_image(max_bytes, deadline)
+                if image is None:
+                    text = _read_x11_text(max_bytes, deadline, oversized)
+            # A headless Linux box (a container, a bare tty) has no clipboard at
+            # all, and shelling out to discover that costs a subprocess per paste.
+    except Exception:
+        logger.exception("Clipboard read failed on %s; reporting the clipboard as unread", system)
+        return ClipboardContents(read_failed=SCRATCH_UNAVAILABLE)
     # The text read is skipped when an image was found, so the common
     # screenshot gesture does not pay for a second subprocess, and so the two
     # fields keep the exclusivity `ClipboardContents` documents.
@@ -1185,7 +1408,9 @@ def read_clipboard(
     # `timed_out` only when the read came back EMPTY-HANDED: a wedged type read
     # that still yielded an image is a success, and a notice claiming a timeout
     # beside an attached image would describe a failure that did not happen.
-    empty_handed = image is None and not text
+    # A failed scratch is excluded for the same reason it is excluded above —
+    # the read never ran, so it cannot also have been cut short.
+    empty_handed = image is None and not text and not scratch_failed
     return ClipboardContents(
         image=image,
         text=text,
@@ -1194,4 +1419,8 @@ def read_clipboard(
         # payload was found and named, which is a more specific answer than a
         # budget that also expired.
         timed_out=deadline.hit if empty_handed and not oversized else False,
+        # The first reason wins: a second backend failing the same way appends
+        # the same string, so anything else would be reporting an artifact of
+        # how many backends ran.
+        read_failed=scratch_failed[0] if scratch_failed else "",
     )

@@ -108,7 +108,7 @@ async def _paste(app: App[None], pilot, text: str) -> None:
 
 
 def _stub_clipboard(
-    monkeypatch, *, image=None, paths=None, text="", refused_remote=False
+    monkeypatch, *, image=None, paths=None, text="", refused_remote=False, read_failed=""
 ) -> dict[str, int]:
     """Replace the clipboard read; record the calls so routing is assertable."""
     counts = {"reads": 0}
@@ -120,6 +120,7 @@ def _stub_clipboard(
             paths=tuple(paths or ()),
             text=text,
             refused_remote=refused_remote,
+            read_failed=read_failed,
         )
 
     monkeypatch.setattr(editor_module, "read_clipboard", read_clipboard)
@@ -1123,6 +1124,104 @@ async def test_ctrl_v_on_an_empty_clipboard_says_so(monkeypatch) -> None:
 
         assert editor.text == ""
         assert [notice.reason for notice in app.empty_notices] == ["nothing"]
+
+
+# -- a read that never happened -----------------------------------------------
+# The operator's own case, 2026-09-17. The data volume filled, every candidate
+# in `tempfile`'s list failed a create, `tempfile` collapsed the real Errno 28
+# into `FileNotFoundError: [Errno 2] No usable temporary directory found in
+# [...]`, and that exception left `read_clipboard` — a function the module
+# documents as never raising — straight into Textual's message handler, which
+# exits the app on any exception raised from one. `ctrl+v` did not fail to
+# paste; it took the session down, and `runtime.log` recorded 56 Errno 28s in
+# the six minutes before it.
+#
+# What is pinned here is the composer's half of the fix. The clipboard module
+# now reports a read that never happened as its own state
+# (`ClipboardContents.read_failed`) instead of raising; these tests hold the
+# composer to reporting it as itself — a notice that names the move that helps,
+# never the "nothing to paste" answer that tells a user holding a screenshot to
+# re-copy the one thing that was already there.
+
+
+@pytest.mark.parametrize(
+    ("read_failed", "expected"),
+    [("no-space", "read-no-space"), ("unavailable", "read-failed")],
+)
+@pytest.mark.asyncio
+async def test_ctrl_v_survives_a_clipboard_read_that_never_happened(
+    monkeypatch, read_failed: str, expected: str
+) -> None:
+    """The keypress stays a keypress, the buffer stays empty, and the notice
+    names the reason rather than the clipboard.
+
+    ``app.is_running`` is the actual regression assertion: on the pre-fix tree
+    this same gesture ended the process, so a test that only checked the notice
+    would have passed on a corpse. The mapping is asserted through the message
+    the app receives, which is the seam the two modules agree on.
+    """
+    _stub_clipboard(monkeypatch, read_failed=read_failed)
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert app.is_running, "the paste must not be able to exit the app"
+        assert editor.text == "", "a read that never happened inserted nothing"
+        assert editor.referenced_images() == []
+        assert [notice.reason for notice in app.empty_notices] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_the_empty_paste_route_reports_an_unread_clipboard_too(monkeypatch) -> None:
+    """Both routes are ONE implementation on purpose (``_attach_clipboard_image``
+    is shared), and an earlier round's bug was exactly a second route behaving
+    differently from the tested one. This is the route a terminal sends when
+    ``Cmd+V`` had nothing textual to give, so it is the shape a Ghostty user
+    pastes a screenshot with.
+    """
+    _stub_clipboard(monkeypatch, read_failed="no-space")
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _paste(app, pilot, "")
+
+        assert app.is_running
+        assert editor.text == ""
+        assert [notice.reason for notice in app.empty_notices] == ["read-no-space"]
+
+
+@pytest.mark.asyncio
+async def test_an_unread_clipboard_outranks_the_shapes_that_cannot_be_true(monkeypatch) -> None:
+    """A result can only carry ``read_failed`` alongside an empty image, paths
+    and text — the read did not happen — and this pins the ORDER rather than
+    the contents, because the bottom of the handler is a chain of ``elif``s
+    that would happily describe such a result as ``nothing``.
+
+    The contents here are deliberately contradictory: the point is that the
+    guard is a guard, not a branch that happens to win on today's inputs.
+    """
+    _stub_clipboard(
+        monkeypatch,
+        image=ClipboardImage(_png_bytes(), "image/png"),
+        paths=["/tmp/never-read.png"],
+        text="never read",
+        read_failed="unavailable",
+    )
+    app = Host()
+    async with app.run_test() as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await _ctrl_v(app, pilot)
+
+        assert [notice.reason for notice in app.empty_notices] == ["read-failed"]
+        assert editor.text == "", "nothing may be attached from a read that did not run"
+        assert editor.referenced_images() == []
 
 
 @pytest.mark.asyncio
