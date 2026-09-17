@@ -240,7 +240,8 @@
       "loading",
       "empty",
       "error",
-      "populated"
+      "populated",
+      "qwencloud"
     ],
     "analytics-panel": [
       "empty",
