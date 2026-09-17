@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -104,9 +105,11 @@ def test_darwin_direct_probe_covers_the_pids_and_skips_top(monkeypatch) -> None:
         raise AssertionError(f"top must not be spent when the direct read answers: {argv}")
 
     usage = session_resource_usage([pid], runner=runner, footprint_probe=lambda _pid: 206_467_072)
+    # The property is "no whole-system dump", not a fixed subprocess sequence: a
+    # legitimate change to the reader's shape must not fail this.
+    assert "top" not in asked
     assert usage[pid].footprint_bytes == 206_467_072
     assert usage[pid].rss_bytes == 1024 * 1024
-    assert asked == ["ps"]
 
 
 def test_darwin_default_probe_is_the_direct_read(monkeypatch) -> None:
@@ -190,11 +193,13 @@ def test_darwin_a_gone_pid_costs_no_dump_and_keeps_its_neighbour(monkeypatch) ->
         return 1, ""
 
     usage = session_resource_usage([live, gone], runner=runner, footprint_probe=_no_direct_probe)
+    # Asserted FIRST, because this is the property: the dump ran once, and only
+    # for the pid that could be answered. Ordering matters to the diagnosis — with
+    # the outcome assertion first, that is the one that fires and the regression
+    # reads as a wrong number rather than as a dump nobody needed.
+    assert asked.count("top") == 1
     assert usage[live].footprint_bytes == 197 * 1024 * 1024
     assert usage[gone].footprint_bytes is None
-    # And the dump ran at all only because of the live pid — one call, for the
-    # reader that could answer.
-    assert asked == ["ps", "top"]
 
 
 def test_darwin_a_gone_pid_alone_never_reaches_the_dump(monkeypatch) -> None:
@@ -218,20 +223,28 @@ def test_darwin_a_gone_pid_alone_never_reaches_the_dump(monkeypatch) -> None:
         return 0, f"PID    MEM\n{gone}    999M\n"
 
     usage = session_resource_usage([gone], runner=runner, footprint_probe=_no_direct_probe)
+    # First, and by property rather than by sequence: the dump is the thing that
+    # must not happen, and a reader-shape change must not fail this.
+    assert "top" not in asked, "a gone pid must not put the whole-system dump on the path"
     assert usage[gone].rss_bytes == 2048 * 1024
     assert usage[gone].footprint_bytes is None
-    assert asked == ["ps"], "a gone pid must not put the whole-system dump on the path"
 
 
 def test_darwin_a_zero_footprint_is_not_a_reading(monkeypatch) -> None:
     """R2: the kernel's zero is the unknown sentinel here, and buys no dump.
 
     ``ri_phys_footprint`` is 0 for a zombie (measured), so a successful call can
-    still carry no memory figure. ``None`` is what the panel renders as the
-    unknown sentinel; ``0`` would print "0 MB" for a process whose memory could
-    not be read, which ``info/model.py`` names as the thing not to do. A zero is
-    also not a reason to spend the dump: the pid that answers this way is a
-    zombie, i.e. the gone case above, and no reader can give it a figure.
+    still carry no memory figure, and ``0`` is not a reading: it is not what a
+    live process costs and it is what the kernel reports when it has nothing to
+    report. The claim is scoped to the layers that own the sentinel — the
+    FOOTPRINT column ``lop sessions`` prints (``—``) and the wire payload's
+    ``footprint_bytes`` (``null``), which ``info/model.py`` names as the only
+    correct output for unreadable memory. The TUI's memory cell is a third rule
+    (``format_bytes(footprint_bytes or rss_bytes)``) and a zombie's RSS is 0 too,
+    so that surface renders "0 MB" on this and every earlier release alike: a
+    pre-existing property of the row, not something this guard changes.
+    A zero is also not a reason to spend the dump: the pid that answers this way
+    is a zombie, i.e. the gone case above, and no reader can give it a figure.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
     pid = _live_pid()
@@ -244,9 +257,9 @@ def test_darwin_a_zero_footprint_is_not_a_reading(monkeypatch) -> None:
         return 0, f"PID    MEM\n{pid}    197M\n"
 
     usage = session_resource_usage([pid], runner=runner, footprint_probe=lambda _pid: 0)
+    assert "top" not in asked, "a zero footprint must not spend the dump either"
     assert usage[pid].rss_bytes == 1024 * 1024
     assert usage[pid].footprint_bytes is None
-    assert asked == ["ps"], "a zero footprint must not spend the dump either"
 
 
 def test_darwin_a_raising_direct_probe_degrades_to_top(monkeypatch) -> None:
@@ -291,21 +304,71 @@ def test_pid_exists_separates_a_gone_pid_from_a_live_one() -> None:
     assert resources._pid_exists(_live_pid()) is True
 
 
+def test_pid_exists_answers_for_pids_os_kill_cannot_take() -> None:
+    """R10: a pid outside C ``int`` is "does not exist", not an ``OverflowError``.
+
+    ``os.kill`` raises ``OverflowError`` — not an ``OSError`` — past ``2**31-1``,
+    and the liveness check sits outside the probe's own guard, so that exception
+    would leave this module and break the one contract it states in capitals
+    (no probe failure may sink a listing). Unreachable through today's caller —
+    the registry would refuse such a pid first — which is exactly why the guard
+    has to state the bound rather than read as if it covered it.
+    """
+    assert resources._pid_exists(2**31) is False
+    assert resources._pid_exists(-1) is False
+
+
+def test_an_oversized_pid_costs_no_dump_and_no_raise(monkeypatch) -> None:
+    """The same bound through the read, where the contract is observable."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    asked: list[str] = []
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        asked.append(argv[0])
+        if argv[0] == "ps":
+            return 0, ""
+        return 0, "PID    MEM\n"
+
+    usage = session_resource_usage([2**31], runner=runner, footprint_probe=_no_direct_probe)
+    assert usage[2**31].footprint_bytes is None
+    assert "top" not in asked
+
+
 @pytest.mark.skipif(
     sys.platform != "darwin" or os.geteuid() == 0,
     reason="pid 1 is another account's process unless the suite runs as root",
 )
-def test_an_unreadable_pid_exists_and_earns_the_dump() -> None:
+def test_an_unreadable_pid_exists_and_earns_the_dump(monkeypatch) -> None:
     """The other side of R1's gate: EPERM is a pid the dump CAN answer.
 
     pid 1 is the shape of the residue — alive, not ours, unreadable by the direct
     call — and ``/usr/bin/top`` is setuid root, so the batched dump does return a
     figure for it (QA measured 24,117,248 B from the dump where the direct read
-    returned nothing). The pair asserted here is what sends it to the dump
-    instead of leaving it as an em dash.
+    returned nothing). Three facts, in order: it exists, the direct read cannot
+    answer it, and the read therefore CONSULTS the dump — the last one asserted on
+    the call log with an injected reader, because "earns the dump" is what the
+    name claims and existence plus unreadability alone do not show it.
     """
     assert resources._pid_exists(1) is True
     assert resources._darwin_footprint_bytes(1) is None
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    live = _live_pid()
+    asked: list[str] = []
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        asked.append(argv[0])
+        if argv[0] == "ps":
+            return 0, f"{live} 1024\n1 2048\n"
+        return 0, f"PID    MEM\n{live}    197M\n1    23M\n"
+
+    def probe(pid: int) -> int | None:
+        return None if pid == 1 else 206_467_072
+
+    usage = session_resource_usage([live, 1], runner=runner, footprint_probe=probe)
+    assert "top" in asked
+    assert usage[1].footprint_bytes == 23 * 1024 * 1024
+    assert usage[live].footprint_bytes == 206_467_072
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="proc_pid_rusage is macOS-only")
@@ -333,17 +396,54 @@ def test_the_footprint_offset_is_the_one_the_module_reads() -> None:
     lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     lib.proc_pid_rusage.restype = ctypes.c_int
     lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-    pid = os.getpid()
-    buffer = ctypes.create_string_buffer(2048)
-    assert lib.proc_pid_rusage(pid, 2, ctypes.byref(buffer)) == 0
-
     assert resources._RUSAGE_PHYS_FOOTPRINT_OFFSET == 64 + 8
-    assert resources._darwin_footprint_bytes(pid) == int.from_bytes(
-        buffer.raw[
-            resources._RUSAGE_PHYS_FOOTPRINT_OFFSET : resources._RUSAGE_PHYS_FOOTPRINT_OFFSET + 8
-        ],
-        "little",
-    )
+
+    # A PARKED CHILD, not this process. The two reads below happen at different
+    # instants, and a process cannot be asked twice for one footprint: this one
+    # allocates while the suite runs, which moved its own reading by a 16 KB page
+    # mid-collection and failed this assertion for a reason that has nothing to do
+    # with the offset. A child parked in ``sleep`` is idle by construction.
+    def raw(pid: int) -> int:
+        buffer = ctypes.create_string_buffer(2048)
+        assert lib.proc_pid_rusage(pid, 2, ctypes.byref(buffer)) == 0
+        offset = resources._RUSAGE_PHYS_FOOTPRINT_OFFSET
+        return int.from_bytes(buffer.raw[offset : offset + 8], "little")
+
+    parked = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        # And let it SETTLE first, by waiting for the number to stop moving rather
+        # than for a fixed delay: a fresh interpreter faults its pages in for the
+        # first instants of its life, so the first pair of reads of it differ by
+        # more than a page as a startup artefact (measured: 32 KB), which has
+        # nothing to do with the offset this test is about.
+        previous = None
+        for _ in range(500):
+            current = raw(parked.pid)
+            if current == previous:
+                break
+            previous = current
+            time.sleep(0.01)
+        else:
+            pytest.fail("the parked child's footprint never settled")
+
+        before = raw(parked.pid)
+        module_value = resources._darwin_footprint_bytes(parked.pid)
+        after = raw(parked.pid)
+    finally:
+        parked.kill()
+        parked.wait()
+
+    # Nearest of the two samples, with a page of slack: the phys footprint is the
+    # kernel's live accounting, so an idle process can still move by a page between
+    # two reads rather than being frozen for the test's convenience. Every field
+    # this could wrongly land on is orders of magnitude further away: the
+    # neighbouring ``ri_resident_size`` differs by the compressed and shared memory
+    # the footprint exists to include (measured ~2.5x lower on a parked
+    # interpreter), and a field the kernel leaves empty reads 0. `None` is the
+    # module's other failure answer and is what a wrong offset cannot produce on a
+    # pid that just answered `raw` — hence its own assertion first.
+    assert module_value is not None
+    assert min(abs(module_value - before), abs(module_value - after)) <= 16_384
 
 
 def test_degrades_to_none_when_every_probe_fails() -> None:
