@@ -81,6 +81,79 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Classifies this diff and exposes one flag per job. The classifier
+  # (`scripts/ci_scope.py`) is the SINGLE SOURCE OF TRUTH for both this job and
+  # `make check-changed`, so the local gate and CI cannot drift into two
+  # different opinions about which gates a diff needs.
+  #
+  # WHY THIS JOB CAN NEVER BE GATED ON THE EVENT: every heavy job now `needs:`
+  # it, and a `needs:` on a skipped job skips the dependent too — an
+  # `if: pull_request` here would skip the ENTIRE workflow on `push` to `main`.
+  # The event is handled inside the module, which returns every flag TRUE for
+  # anything but a `pull_request`.
+  #
+  # Reads the diff as `git diff HEAD^1 HEAD` — the RECOMPUTED
+  # refs/pull/N/merge's first parent — NOT `github.event.pull_request.base.sha`,
+  # for the reason measured in version-bump-guard below: a frozen base goes
+  # stale the moment `main` moves and sweeps in commits this PR never wrote.
+  # NOT `github.event.before` (zero SHA on a new branch, unreachable after a
+  # force push).
+  #
+  # Runs the classifier from the BASE revision, never from the PR's copy: a PR
+  # that edits the classifier must not be able to disarm the gates that classify
+  # it. A base copy that is absent is not an error — fall back to the checked-in
+  # copy in `--all` mode and warn.
+  #
+  # The flags are strings 'true'/'false', and every gate reads `!= 'false'`
+  # rather than `== 'true'`. That is load-bearing: an output that was never
+  # written is EMPTY, `'' == 'true'` is false, and a classifier that died would
+  # therefore produce a fully green PR that ran nothing. `!= 'false'` runs
+  # everything it cannot prove is unnecessary.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lint: ${{ steps.classify.outputs.lint }}
+      types: ${{ steps.classify.outputs.types }}
+      budget: ${{ steps.classify.outputs.budget }}
+      unit: ${{ steps.classify.outputs.unit }}
+      tui: ${{ steps.classify.outputs.tui }}
+      windows: ${{ steps.classify.outputs.windows }}
+      audit: ${{ steps.classify.outputs.audit }}
+      cli: ${{ steps.classify.outputs.cli }}
+      server: ${{ steps.classify.outputs.server }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # HEAD^1 must be present. Two commits is the whole requirement, as in
+          # version-bump-guard.
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Classify the change
+        id: classify
+        # No `pip install`: the classifier imports stdlib only, so a broken
+        # dependency resolution can never decide what runs. Same argument as
+        # version-bump-guard's "a guard that needs an install is a guard that
+        # goes red for reasons unrelated to versions".
+        run: |
+          set -uo pipefail
+          base="$(git rev-parse HEAD^1 2>/dev/null || true)"
+          if [ -n "$base" ] && git cat-file -e "$base:scripts/ci_scope.py" 2>/dev/null; then
+            git show "$base:scripts/ci_scope.py" > "$RUNNER_TEMP/ci_scope.py"
+            python "$RUNNER_TEMP/ci_scope.py" \
+              --event "$GITHUB_EVENT_NAME" --base "$base" \
+              --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Change classification unavailable::no classifier at the base commit, so this diff cannot be classified. Running every job rather than guessing."
+            python scripts/ci_scope.py --all --summary "$GITHUB_STEP_SUMMARY" \
+              --github-output "$GITHUB_OUTPUT"
+          fi
+
   # A feature PR must never carry a version bump. Releases are cut as ONE
   # deliberate `chore(release):` PR per window by that window's owner, so a
   # bump riding a feature diff silently consumes a version number that is
@@ -252,6 +325,18 @@ jobs:
           esac
 
   lint:
+    # Every gate below is `needs: [changes]` plus `!cancelled() && <flag> != 'false'`.
+    # `!cancelled()` is required rather than decorative: GitHub applies an
+    # implicit `success()` to any `if:` containing no status-check function,
+    # and a SKIPPED dependency skips its dependents — so without it, a job this
+    # diff deliberately skips would still run (or, worse, skip) its own
+    # dependents. The `!= 'false'` comparison is the fail-open half: only the
+    # literal string `false` skips, so an output that was never written runs
+    # the job.
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.lint != 'false'
     runs-on: ubuntu-latest
     # Generous against the ~30 s this takes; it exists so a wedged install step
     # cannot hold a concurrency slot for the 360-minute GitHub default.
@@ -263,6 +348,12 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          # The pip cache is why this job does not pay a cold dependency
+          # install on every run. `cache-dependency-path` is load-bearing: the
+          # default key hashes no lockfile here (there is none), so without it
+          # the cache would be keyed on nothing and never hit.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -279,6 +370,10 @@ jobs:
         run: isort --check .
 
   type-check:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.types != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # pyright's version is the pin in pyproject.toml's dev extra. Do NOT
@@ -294,6 +389,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -309,6 +406,10 @@ jobs:
         run: python -m local_operator.browser_bridge.gen_ts --check
         
   context-budget:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.budget != 'false'
     # Guards the start-of-session context contract in docs/REWRITE.md. It
     # builds the real tool surface and renders the real prompt blocks, then
     # fails when a fresh session's start context exceeds the ratchet in
@@ -327,6 +428,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -337,6 +440,10 @@ jobs:
         run: python scripts/bench_context_budget.py --verbose
 
   filesystem-boundaries-windows:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.windows != 'false'
     # Canonical containment must use native Windows drive/junction semantics,
     # not a POSIX test with os.name mocked. Keep this bounded to the HTTP/import
     # contract rather than claiming the complete interactive suite is portable.
@@ -347,6 +454,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: python -m pip install -e ".[dev]"
       - name: Verify native filesystem boundaries
@@ -359,6 +468,10 @@ jobs:
           python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py -n0 -q
 
   test:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.unit != 'false'
     runs-on: ubuntu-latest
     # Keep five shards within the 20-job concurrency budget. PR #643 job
     # 101250352578 reached 97% before GitHub cancelled it at the 15-minute
@@ -459,6 +572,12 @@ jobs:
           retention-days: 1
           include-hidden-files: true
 
+  # `coverage-report` is deliberately left with `needs: test` and NO `if:`, and
+  # that is the whole disposition — do not add `always()` for symmetry with the
+  # gated jobs above. GitHub's default ("a skipped need skips the dependent") is
+  # exactly right here: a docs-only PR must not run a coverage combine over
+  # zero shard artifacts. An `always()` would do precisely that and go red on a
+  # PR that changed nothing the test job reads.
   coverage-report:
     runs-on: ubuntu-latest
     needs: test
@@ -504,6 +623,10 @@ jobs:
           retention-days: 7
 
   pip-audit:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.audit != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -516,10 +639,26 @@ jobs:
   cli-sanity:
     runs-on: ubuntu-latest
     # Live-LLM job: needs a real OpenRouter key. Fork pull requests do not get
-    # repository secrets, so without this gate every external contributor sees a
-    # permanently red check they cannot fix.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # repository secrets, so without the fork half of this condition every
+    # external contributor sees a permanently red check they cannot fix. The
+    # fork clause is PRESERVED by ANDing the scope flag onto it, not replaced by
+    # it — a rewrite that dropped it would restore exactly that permanent red.
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      needs.changes.outputs.cli != 'false' &&
+      needs.lint.result == 'success' &&
+      needs.type-check.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs.pip-audit.result == 'success'
+    # The `.result == 'success'` clauses restore what the implicit `success()`
+    # used to provide: a FAILED cheaper gate still blocks this one. A
+    # deliberately SKIPPED one does not, which is the point of the change — and
+    # `pip-audit` can only be skipped on a diff where `audit` is false, which
+    # also makes `cli` false, so this job is skipped by its own flag first. No
+    # PERMISSIVE_DEPS pair is needed (see scripts/ci_scope.py).
     needs:
+      - changes
       - lint
       - type-check
       - test
@@ -531,6 +670,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       # Deliberately the bare default install, with no extras: this job is the
       # regression guard that the core agent still runs on the lean dependency
       # set. Do not add extras here to fix a failure — fix the lazy import.
@@ -644,6 +785,14 @@ jobs:
           echo "error-path stdout is clean"
 
   tui-e2e:
+    needs: [changes, lint, type-check]
+    # `!cancelled()` is required, not decoration: `needs` skips a job when a
+    # needed job was SKIPPED, and GitHub applies an implicit `success()` to any
+    # `if` that contains no status-check function. Without it, lint's deliberate
+    # skip on an inert diff would skip the freeze guard — the #426 defect in a
+    # new costume. The explicit `.result == 'success'` clauses restore the other
+    # half: a FAILED lint or type-check still blocks this job.
+    #
     # BOTH platforms, and macOS is the one that makes this job worth having.
     #
     # This job exists because a FULLY GREEN unit suite did not catch a total
@@ -680,11 +829,13 @@ jobs:
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
     # need a real OpenRouter key, so they are skipped on fork PRs that cannot
     # have one. This job is scripted end to end — no key, no network, no model
-    # — so it runs on EVERY pull request including forks, and because the
-    # matrix includes macOS, a fork contributor reintroducing the deadlock sees
-    # it go red on their own PR on the macOS leg. Both halves are load-bearing:
-    # a secrets-gated job could not reach forks at all, and a Linux-only job
-    # would reach them and report green.
+    # — so it runs on every pull request whose diff is NOT INERT, forks included.
+    # It still carries no fork gate; what changed with scope gating is only that
+    # a diff touching nothing but `docs/**` (or the mobile-web subproject) does
+    # not run it — and because the matrix includes macOS, a fork contributor
+    # reintroducing the deadlock sees it go red on their own PR on the macOS
+    # leg. Both halves are load-bearing: a secrets-gated job could not reach
+    # forks at all, and a Linux-only job would reach them and report green.
     #
     # Headless in the sense this job depends on: no display server, no window
     # and no `xvfb`. Most of the stage drives Textual's `run_test()` pilot into
@@ -708,9 +859,19 @@ jobs:
     # assertion. The job installs the package itself, so it does not need
     # those stages to have built anything. cli-sanity/server-sanity keep
     # the full `needs` list — they are live-LLM cost, not freeze guards.
-    needs:
-      - lint
-      - type-check
+    # What changed with scope gating: this job now also `needs: changes` and
+    # carries the `tui` flag, whose predicate is deliberately EQUAL to `unit`.
+    # Not laziness — `tests/e2e/test_fork_e2e.py` and
+    # `test_mcp_failure_reaches_the_viewer_e2e.py` import `scripts.*`, so a
+    # `scripts/` change is a tui-e2e input anyway, and gating the freeze guard
+    # more finely than the unit matrix re-creates the #426 disarm in a new
+    # costume: a flag narrow enough to skip the guard on a diff that could have
+    # broken it.
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.tui != 'false' &&
+      needs.lint.result == 'success' &&
+      needs.type-check.result == 'success'
     # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
     # macOS runner, which is slower and queues longer). The failure mode under
     # test is a hang, and each test carries its own tighter `faulthandler`
@@ -725,6 +886,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       # `mcp` is a BASE dependency, so `.[dev]` is sufficient and this job does
       # not name it. If it ever becomes an extra, this install must name it
       # explicitly: without the SDK the manager short-circuits every server
@@ -759,14 +922,17 @@ jobs:
         run: python -m tests.e2e.watchdog
 
   server-sanity:
+    needs: [changes, lint, type-check, test, pip-audit]
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      needs.changes.outputs.server != 'false' &&
+      needs.lint.result == 'success' &&
+      needs.type-check.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs.pip-audit.result == 'success'
     runs-on: ubuntu-latest
-    # Live-LLM job — same fork-secret gate as cli-sanity.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    needs:
-      - lint
-      - type-check
-      - test
-      - pip-audit
+    # Live-LLM job — same fork-secret gate as cli-sanity, preserved the same way.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -774,6 +940,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install Package in Editable Mode
         run: |
           python -m pip install --upgrade pip

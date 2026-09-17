@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test coverage format lint type-check adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -111,6 +111,25 @@ format: ## Format code with black and isort
 # Run linting with flake8
 lint: ## Run linting with flake8
 	.venv/bin/python -m flake8 .
+
+# Run exactly the CI gates this branch's diff can affect. The selector is
+# `scripts/ci_scope.py` — the SAME module the workflow's `changes` job runs and
+# whose flags gate its jobs — so the local answer and CI's answer cannot drift
+# into two opinions about which gates a diff needs.
+#
+# `--since` is the merge base with `origin/main`, not `origin/main` itself: a
+# plain two-dot diff against a moved `origin/main` sweeps in every commit main
+# landed since this branch was cut and would run gates for work this branch
+# never wrote (the same staleness `version-bump-guard` documents in ci.yml).
+# The module adds the index, the working tree and untracked files on top.
+#
+# `.venv/bin/python ...` goes through the interpreter, and every gate the module
+# then runs is spelled `python -m` or `uvx` for the #423 reason above: a bare
+# `.venv/bin/flake8` can exit 126 and be swallowed by a pipeline.
+check-changed: ## Run the CI gates this branch's diff can affect
+	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
+	echo "checking changes since $$base"; \
+	.venv/bin/python scripts/ci_scope.py --since "$$base" --run
 
 # Run type checking with pyright
 type-check: ## Run type checking with pyright
