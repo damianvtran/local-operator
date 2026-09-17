@@ -40,7 +40,7 @@ from local_operator.evaluation.adapters.api import (
 )
 from local_operator.evaluation.adapters.discovery import workspace_digest
 from local_operator.evaluation.runner.episode import EpisodeRunner
-from tests.unit.evaluation.adapters.osworld import fixtures
+from tests.unit.evaluation.adapters.osworld import fixtures, spawn_helpers
 from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
@@ -147,7 +147,7 @@ def _selector(workspace: Path, adapter: OSWorldV2Adapter, digest: str) -> Adapte
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.2",
+        version=spawn_helpers.ADAPTER_VERSION,
         entry_point="lop_osworld_v2_adapter:create",
         package_digest=metadata.package_digest,
         release_digest=metadata.release_digest,
