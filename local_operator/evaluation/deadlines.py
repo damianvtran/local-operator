@@ -128,6 +128,15 @@ def declared_work_seconds(params: ProtocolModel) -> float:
     capped, deliberately: see the ceiling stated on
     :data:`DECLARED_WORK_HEADROOM_S`.
 
+    One consequence specific to ``cleanup``, stated because it is easy to
+    assume otherwise: a cleanup request ALWAYS declares something, since
+    ``CleanupParams.action_ids`` has ``min_length=1`` and a ``CleanupAction``'s
+    ``timeout_ms`` has ``ge=1``. So a cleanup call's effective floor is
+    ``0.001 s + DECLARED_WORK_HEADROOM_S``, and the configured
+    ``cleanup_timeout`` is dominated rather than binding -- at the library's
+    60 s and the campaign's 120 s that changes nothing today, but an operator
+    who sets a cleanup budget BELOW the headroom will not get it.
+
     The two cases are matched on the PROTOCOL OBJECT's own type
     (``ActionBatch``, ``CleanupPlan``) rather than on the caller's params class,
     because this module reads the action contract and not the adapter-facing
@@ -179,6 +188,15 @@ def funded_timeout(configured: float, params: ProtocolModel) -> float:
     observation-phase resume (``episode._execute_with_observation_recovery``)
     sends the SAME batch, so it is funded for the same declaration even though a
     resume only re-reads the state that batch already applied.
+
+    The RESCUE path gains the headroom as well, and that is intended rather than
+    an oversight: ``supervisor.run_rescue`` passes one action's
+    ``timeout_ms / 1000 * max_attempts`` as that call's budget, and the call's
+    own params declare the same product, so the effective deadline for a rescue
+    step moves from the product to the product plus the headroom. Rescue calls do
+    the same undeclared work as any other cleanup call (a cloud terminate, a
+    lease revocation) under a budget sized only from its declared action, so the
+    allowance belongs there for the same reason it belongs anywhere else.
     """
 
     declared = declared_work_seconds(params)

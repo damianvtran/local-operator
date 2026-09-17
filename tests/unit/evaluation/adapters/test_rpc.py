@@ -184,6 +184,27 @@ def _undeclared_execute() -> ExecuteParams:
     )
 
 
+async def _finish_peer(task: asyncio.Task[None], *fds: int) -> None:
+    """Retire the peer, then close every protocol fd. ALWAYS run this first.
+
+    A call that timed out leaves a reader thread blocked inside
+    ``asyncio.to_thread`` on the response pipe, and a peer that never answers
+    never releases it; closing the WRITE end is what gives that read its EOF.
+    So this has to run before ANY assertion in these tests, and for every
+    exception rather than the expected one: an assertion raised while the
+    thread is still parked hangs the loop's own shutdown (measured: still
+    hanging at 45 s) instead of reporting a clean failure, which turns a test
+    failure into an infrastructure error.
+    """
+
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    for fd in fds:
+        os.close(fd)
+
+
 @pytest.mark.asyncio
 async def test_a_batch_that_declares_waiting_is_funded_past_the_callers_budget() -> None:
     """A LEGAL batch is never killed by a budget that never saw it.
@@ -233,11 +254,14 @@ async def test_a_batch_that_declares_waiting_is_funded_past_the_callers_budget()
     timed_out: TimeoutError | None = None
     result: dict[str, Any] | None = None
     try:
-        result = await client.call("execute", params, timeout=0.2)
-    except TimeoutError as error:
-        timed_out = error
-    elapsed = time.monotonic() - started
-    await task
+        try:
+            result = await client.call("execute", params, timeout=0.2)
+        except TimeoutError as error:
+            timed_out = error
+        elapsed = time.monotonic() - started
+        poisoned = terminated.is_set()
+    finally:
+        await _finish_peer(task, requests_read, requests_write, responses_read, responses_write)
 
     assert timed_out is None, (
         "BASE behaviour: the call was cut off at the caller's budget although the batch "
@@ -247,9 +271,7 @@ async def test_a_batch_that_declares_waiting_is_funded_past_the_callers_budget()
     assert elapsed >= 0.6
     # Funding the declaration is not the same as disarming the deadline: the
     # call completed because the worker did, so nothing poisoned anything.
-    assert not terminated.is_set()
-    for fd in (requests_read, requests_write, responses_read, responses_write):
-        os.close(fd)
+    assert not poisoned
 
 
 @pytest.mark.asyncio
@@ -279,17 +301,14 @@ async def test_a_wedged_execute_that_declares_nothing_still_times_out_and_poison
     task = asyncio.create_task(peer())
     timed_out: TimeoutError | None = None
     try:
-        await client.call("execute", _undeclared_execute(), timeout=0.05)
-    except TimeoutError as error:
-        timed_out = error
-    await task
-    poisoned = terminated.is_set()
-    # Closed before asserting, for the reason spelled out in
-    # `test_the_derived_budget_is_a_deadline_and_not_a_licence`: this peer never
-    # answers, so a failed assertion above would leave a reader thread blocked
-    # and hang the loop's shutdown instead of reporting a clean failure.
-    for fd in (requests_read, requests_write, responses_read, responses_write):
-        os.close(fd)
+        try:
+            await client.call("execute", _undeclared_execute(), timeout=0.05)
+        except TimeoutError as error:
+            timed_out = error
+        poisoned = terminated.is_set()
+    finally:
+        # Before any assertion, and for every exception: see `_finish_peer`.
+        await _finish_peer(task, requests_read, requests_write, responses_read, responses_write)
     assert timed_out is not None, "a wedged call must still time out"
     assert poisoned, "a timed-out channel must still be poisoned"
     with pytest.raises(RpcProtocolError, match="poisoned"):
@@ -309,9 +328,13 @@ async def test_the_derived_budget_is_a_deadline_and_not_a_licence(
     cancel grace), which is why the headroom is monkeypatched to 3 s: the
     derived budget is then 3.05 s, so a LOWER bound on the elapsed time
     distinguishes "the derived number governs" from "the configured number
-    governs", and an UPPER bound still distinguishes it from no deadline at
-    all. With the default headroom the companion assertion `elapsed < 5.0`
-    would pass on either tree and prove nothing.
+    governs". The UPPER bound is what keeps the derived number from simply
+    borrowing the peer's 30 s; that the deadline exists at all is the
+    `timed_out is not None` assertion, since an absent one would block forever
+    rather than trip a bound.
+
+    With the default headroom both bounds would be true on either tree, which
+    is what makes the monkeypatch load-bearing rather than decoration.
     """
 
     monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 3.0)
@@ -334,22 +357,15 @@ async def test_the_derived_budget_is_a_deadline_and_not_a_licence(
     started = time.monotonic()
     timed_out: TimeoutError | None = None
     try:
-        await client.call("execute", params, timeout=configured_s)
-    except TimeoutError as error:
-        timed_out = error
-    elapsed = time.monotonic() - started
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    poisoned_at_timeout = terminated.is_set()
-    # Every assertion is held until the pipes are closed, and that ordering is
-    # load-bearing rather than tidy: a timed-out call leaves a reader thread
-    # blocked on the response pipe (`asyncio.to_thread`), and this test's peer
-    # never answers, so an assertion raised before the fds are closed would
-    # leave that thread blocked and hang the event loop's own shutdown. Closing
-    # the WRITE end is what gives the blocked read its EOF.
-    for fd in (requests_read, requests_write, responses_read, responses_write):
-        os.close(fd)
+        try:
+            await client.call("execute", params, timeout=configured_s)
+        except TimeoutError as error:
+            timed_out = error
+        elapsed = time.monotonic() - started
+        poisoned_at_timeout = terminated.is_set()
+    finally:
+        # Before any assertion, and for every exception: see `_finish_peer`.
+        await _finish_peer(task, requests_read, requests_write, responses_read, responses_write)
     assert timed_out is not None, "the deadline did not fire at all"
     # LOWER bound: the call survived past `declared + headroom`, which the
     # configured 0.01 s budget would not have allowed -- on the tree without the

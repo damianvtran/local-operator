@@ -213,12 +213,15 @@ def test_the_cleanup_ceiling_is_the_protocols_and_is_stated_not_implied() -> Non
     assert declared_work_seconds(selected) == declared
     assert funded_timeout(60.0, selected) == declared + DECLARED_WORK_HEADROOM_S
 
-    # What the rescue path grants the same plan one action at a time
-    # (supervisor.py's `action.timeout_ms / 1000 * action.max_attempts`): the
-    # per-call bound when a single action is selected, which is 32 h, not 341
-    # days. Same aggregate work, different call granularity.
+    # What the rescue path grants the same plan one action at a time: the
+    # formula `supervisor.py:1414` uses is `action.timeout_ms / 1000 *
+    # action.max_attempts`, which for one maximal action declares 115_200 s and
+    # is funded at 115_230 s through this same `funded_timeout` (rescue's
+    # `_call_raw` goes through `RpcClient.call` too). So the per-call bound is
+    # 32 h, not 341 days -- the same aggregate work at a finer granularity.
     one = cleanup(huge, "a-000")
     assert declared_work_seconds(one) == MAX_CLEANUP_TIMEOUT_MS * MAX_CLEANUP_ATTEMPTS / 1000.0
+    assert declared_work_seconds(one) == 115_200.0
     assert funded_timeout(60.0, one) == 115_230.0
 
 
