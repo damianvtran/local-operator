@@ -111,6 +111,12 @@ class ExecArgs:
     control: bool = False
     team: str | None = None
     profile: str | None = None
+    #: Comma-separated tools this run may reach, and the only ones. Reaches the
+    #: session through ``exec_startup.apply_startup``, so a declaration holds for
+    #: the foreground CLI and for the detached worker alike (``STARTUP_FIELDS``
+    #: carries it across that boundary). ``None`` — the default — leaves the
+    #: session unrestricted, exactly as every run before this flag existed.
+    tools: str | None = None
     goal: str | None = None
     clear_goal: bool = False
     loop: int | None = None
