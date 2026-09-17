@@ -1755,9 +1755,14 @@ class ProjectionFold:
             self._activity_started_at = self._activity_anchor(phase, epoch, edge=edge)
         self._activity_phase = phase
         p.activity = label
-        self.refresh_activity_age()
+        if self._activity_started_at is None:
+            # No instant to date this phase from: publish the ABSENCE rather than
+            # a zero, which is the whole point of the nullable field.
+            p.activity_started_s = None
+        else:
+            self.redate_from_phase()
 
-    def refresh_activity_age(self) -> None:
+    def redate_from_phase(self) -> None:
         """Re-date the published band age from THIS fold's phase instant.
 
         ``activity_started_s`` is otherwise a number written when the phase last
@@ -1770,18 +1775,23 @@ class ProjectionFold:
         fabricated zero on the one surface this change is about (review round 3,
         MAJOR 1).
 
-        Called at every frame build rather than on a timer: the readers are the
-        runtime's own push (``RuntimeServer._projection_payload``) and the seed a
-        handle hands a viewer, which are the two moments the number becomes an
+        Called at every frame build (the runtime's push, the handle hand-off)
+        rather than on a timer: those are the moments the number becomes an
         answer to "how long has this been going". The client needs no change — a
         fresher number simply re-seeds it.
 
-        ``None`` is left alone, in both directions: an unknown instant stays
-        unknown rather than becoming a zero, which is the whole point of the
-        nullable field (``types.SessionProjection.activity_started_s``).
+        A fold that has never adopted a phase writes NOTHING here. Ownership is
+        the rule, and it is load-bearing: the projection object can be SHARED
+        with the fold that does own the age — the runtime builds its own
+        ``ProjectionFold`` over the handle's seed, and only the handle's fold is
+        ever fed events — so writing this fold's empty state over it would erase
+        a live age on every frame. That is exactly what review round 4's blocker
+        measured: a phone attached to the runtime was served ``null`` for every
+        phase, watched edges included. An unknown instant stays unknown because
+        ``_set_activity`` publishes that absence itself, not because a reader
+        clears it.
         """
         if self._activity_started_at is None:
-            self.projection.activity_started_s = None
             return
         self.projection.activity_started_s = round(time.monotonic() - self._activity_started_at, 1)
 

@@ -391,20 +391,24 @@ def test_the_phone_formatter_fixture_still_matches_the_tuis_formatter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_second_viewer_is_served_the_phases_true_age(
+async def test_the_hand_off_redates_the_bands_age_from_the_fold_that_is_fed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review round 3, MAJOR 1 — through the production attach path.
+    """Review round 3, MAJOR 1 — the hand-off half, through the attach path.
 
     The seed a viewer gets IS the object the runtime serializes, and it carries
     the age as of the phase's last edge. A second viewer — a reconnect, a second
     phone, "resume that session" — attaching to a live fold mid-phase therefore
     seeded on that stale number: at a known zero, `0s` counting from the new
     viewer's own mount, which is the operator-reported defect rendered as a
-    fabricated zero on the surface this PR exists for. The fold re-dates on the
-    way out of the seed, so both viewers get an answer that is true when they
-    read it: the first keeps counting from the phase's edge, and the second is
-    served the phase's real age.
+    fabricated zero on the surface this PR exists for.
+
+    `redate_from_phase` is the hand-off the runtime performs before it serializes
+    a frame, and it is deliberately NOT the seed property: that one is read for
+    identity too, and a mutating getter is what round 4's NIT 2 asked to remove.
+    The pushed-frame half of the same fix is pinned end to end, over a real
+    runtime and a real daemon dial, in
+    `tests/unit/session/runtime/test_server.py::test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach`.
 
     Driven with the fold's own clock, and with the deltas the reviewer measured
     this window with: prose streams them continuously, and none re-enters the
@@ -436,6 +440,8 @@ async def test_a_second_viewer_is_served_the_phases_true_age(
 
     clock.advance(45)
     session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
+    assert handle.session_projection_seed.activity_started_s == 0.0, "the stored snapshot is stale"
+    handle.redate_from_phase()  # what the runtime does before serializing a frame
     assert handle.session_projection_seed.activity_started_s == pytest.approx(
         45.0, abs=0.2
     ), "a viewer attaching 45s into the phase must be served the phase's age, not zero"

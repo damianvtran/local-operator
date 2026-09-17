@@ -727,7 +727,7 @@ class SessionProjection:
 
         Re-dating needs one thing this object cannot hold as a field: WHEN the
         reading was taken. ``None`` means "no reference" — a never-published
-        projection, a durable rebuild — and :func:`refresh_activity_age` then
+        projection, a durable rebuild — and :func:`advance_received_age` then
         leaves the value exactly as it found it. It is an instance attribute
         rather than a declared dataclass field because ``to_json`` is
         ``asdict``: a field would put a local monotonic instant on the wire, and
@@ -742,20 +742,28 @@ def stamp_activity_age(projection: SessionProjection) -> None:
     Called by the wire parser, so EVERY ingestor gets the reference rather than
     each consumer having to remember. A projection with no age (``None``) gets
     no reference: there is nothing to run forward, and absence stays absence.
+
+    The sibling of :func:`advance_received_age`, which spends the anchor.
     """
     age = projection.activity_started_s
     projection.activity_age_reference = None if age is None else (time.monotonic(), float(age))
 
 
-def refresh_activity_age(projection: SessionProjection) -> None:
-    """Publish this copy's band age AS OF NOW.
+def advance_received_age(projection: SessionProjection) -> None:
+    """Publish this copy's received band age AS OF NOW.
 
     The second half of :func:`stamp_activity_age`, and the same one-shot
     discipline ``monotonic_from_epoch`` uses for a producer's epoch: the part
     already elapsed came from the producer, and everything after it is counted
     on THIS process's monotonic clock, so a wall-clock adjustment cannot move a
     running counter. Idempotent — the reference stays the anchor, so repeated
-    refreshes recompute rather than accumulate.
+    calls recompute rather than accumulate.
+
+    Deliberately NOT called ``redate_from_phase`` (the fold's method, which
+    re-dates from a phase instant it took itself): these are two different
+    clocks over the same field — one walks forward from an instant a fold owns,
+    this one forward from a reading a wire delivered — and a reader who confuses
+    them silently gets the wrong arithmetic (review round 4, NIT 1).
 
     A projection with no reference is left untouched: a value the fold just
     computed is already as fresh as this call could make it.

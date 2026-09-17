@@ -1152,7 +1152,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     """
     from local_operator.harness.rows import completion_notice
     from local_operator.mobile.projection import cap_projection_frame
-    from local_operator.mobile.types import TranscriptEntry, refresh_activity_age
+    from local_operator.mobile.types import TranscriptEntry, advance_received_age
 
     # RE-DATE BEFORE SERIALIZING. The runtime re-dates its own frames, but this
     # copy is only as fresh as the frame it arrived on: during a long phase —
@@ -1163,7 +1163,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     # 1); the reference stamped at ingest says how long ago the reading was
     # taken, which is all the arithmetic needs. A projection with no reference
     # (a durable rebuild) is left as it is.
-    refresh_activity_age(projection)
+    advance_received_age(projection)
     data, degraded = cap_projection_frame(projection)
     attention = projection.attention
     data["attention"] = attention

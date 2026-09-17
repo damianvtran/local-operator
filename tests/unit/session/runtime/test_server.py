@@ -1325,6 +1325,105 @@ async def test_injected_sink_is_used_as_is() -> None:
         runtime.close()
 
 
+async def _until_push(reader: asyncio.StreamReader, want: object) -> dict[str, Any]:
+    """Read pushed projections until one carries ``want`` as the band's age.
+
+    A push is a whole repaint and several can be in flight for one change, so
+    waiting for the value under test is the only assertion that names the frame
+    it means; the failure message carries the last value seen.
+    """
+    last: object = "<no frame>"
+    for _ in range(30):
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=5)
+        except TimeoutError as exc:
+            raise AssertionError(
+                f"no pushed frame carried activity_started_s={want!r} (last {last!r})"
+            ) from exc
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        frame = json.loads(text)
+        if frame.get("op") != "projection":
+            continue
+        last = frame["data"].get("activity_started_s")
+        if last == want:
+            return frame
+    raise AssertionError(f"no pushed frame carried activity_started_s={want!r} (last {last!r})")
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4, BLOCKER 1 + MINOR 1: the PUSHED age, off the wire the daemon reads.
+
+    Every other band-age assertion in the tree drives the fold directly or reads
+    the handle's seed, and the runtime's own push path is where review round 4
+    found the blocker: it re-dated through ``self._projection_sink`` — in
+    production a SECOND fold the runtime builds over the handle's projection
+    object and never feeds — so the empty state of that fold overwrote the live
+    age with ``None`` on every frame build, and the phone withheld its clock for
+    every phase, watched edges included.
+
+    So this drives the production path end to end: a real ``TuiSessionHandle``
+    over a real session shape, a real ``RuntimeServer``, a real daemon-kind dial
+    (which is what builds the runtime's own sink), real harness events through
+    the handle's stream, and the age read off the frames the daemon receives.
+    """
+    import local_operator.mobile.projection as projection_module
+    from local_operator.harness.types import (
+        AgentEndEvent,
+        AgentStartEvent,
+        Message,
+        MessageUpdateEvent,
+    )
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from tests.unit.mobile.test_projection import _StubClock
+    from tests.unit.tui.test_app_pilot import FakeSession
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    session = FakeSession()
+    session.streaming = True
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        assert runtime.projection_sink is not None, "a daemon dial is what builds the sink"
+
+        session.emit(AgentStartEvent(generation=1))
+        session.emit(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+        frame = await _until_push(reader, 0.0)
+        assert frame["data"]["activity"] == "responding"
+        assert frame["data"]["activity_started_s"] == 0.0, "a watched edge publishes a KNOWN zero"
+
+        # 45 s of prose with no band event in it: the pushed age must be the
+        # PHASE's, not the runtime's own empty fold's state and not the last
+        # edge's zero.
+        clock.advance(45)
+        session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
+        await _until_push(reader, 45.0)
+
+        # An instant the fold cannot date still crosses as unknown, never as a zero.
+        session.emit(AgentEndEvent(generation=1))
+        await _until_push(reader, None)
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 def test_fold_property_rejects_a_foreign_sink() -> None:
     class Stub:
         def __init__(self, projection: SessionProjection) -> None:

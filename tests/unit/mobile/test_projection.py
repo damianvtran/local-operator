@@ -2342,15 +2342,18 @@ def test_refreshing_the_band_age_redates_a_frozen_snapshot(
     # the refresh is what a viewer attaching now must be served instead.
     clock.advance(300)
     assert fold.projection.activity_started_s == 0.0, "the stored snapshot does not move on its own"
-    fold.refresh_activity_age()
+    fold.redate_from_phase()
     assert fold.projection.activity_started_s == 300.0
 
-    # An UNKNOWN instant stays unknown through the same call — the refresh may
-    # not turn an absence into a zero.
+    # An UNKNOWN instant stays unknown through the same call, and a fold that
+    # owns no instant writes nothing at all: `_set_activity` published the
+    # absence, and this may neither turn it into a zero nor clear a value that
+    # belongs to another fold sharing the projection object (review round 4,
+    # BLOCKER 1).
     fold.fold_event(AgentEndEvent(generation=1))
     assert fold.projection.activity_started_s is None
     clock.advance(45)
-    fold.refresh_activity_age()
+    fold.redate_from_phase()
     assert fold.projection.activity_started_s is None
 
 
