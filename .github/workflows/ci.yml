@@ -104,6 +104,15 @@ jobs:
   # it. A base copy that is absent is not an error — fall back to the checked-in
   # copy in `--all` mode and warn.
   #
+  # `--root "$GITHUB_WORKSPACE"` is passed EXPLICITLY, and that is not
+  # decoration: the base copy is run from `$RUNNER_TEMP`, so a module that
+  # inferred its repository from `__file__` would look for the checkout one
+  # level above itself, `git diff` would exit 128, and the fail-open branch
+  # would set every flag true on every pull request — the gate would be correct
+  # and never engage. The module now also resolves its root from the git top
+  # level of the invocation directory, so the two fixes are independent: this
+  # flag keeps the workflow from depending on that resolution being right.
+  #
   # The flags are strings 'true'/'false', and every gate reads `!= 'false'`
   # rather than `== 'true'`. That is load-bearing: an output that was never
   # written is EMPTY, `'' == 'true'` is false, and a classifier that died would
@@ -147,11 +156,12 @@ jobs:
             git show "$base:scripts/ci_scope.py" > "$RUNNER_TEMP/ci_scope.py"
             python "$RUNNER_TEMP/ci_scope.py" \
               --event "$GITHUB_EVENT_NAME" --base "$base" \
+              --root "$GITHUB_WORKSPACE" \
               --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning title=Change classification unavailable::no classifier at the base commit, so this diff cannot be classified. Running every job rather than guessing."
-            python scripts/ci_scope.py --all --summary "$GITHUB_STEP_SUMMARY" \
-              --github-output "$GITHUB_OUTPUT"
+            python scripts/ci_scope.py --all --root "$GITHUB_WORKSPACE" \
+              --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
           fi
 
   # A feature PR must never carry a version bump. Releases are cut as ONE

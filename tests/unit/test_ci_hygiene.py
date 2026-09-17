@@ -15,6 +15,14 @@ These exist because three defects all produced a *silent* green:
   classifier (`scripts/ci_scope.py`) shared with `make check-changed`; the
   assertions below pin its predicates, its fail-open direction, and the wiring
   in `ci.yml` that reads it.
+- #1245 round 1: the classifier shipped with a default repository root derived
+  from `__file__`, and CI runs a COPY of it from `$RUNNER_TEMP` — so the root was
+  the checkout's PARENT, `git diff` exited 128, and the fail-open branch ran the
+  full job set on every pull request behind a `::warning::`. Every assertion
+  passed an explicit `--root`, so none of them saw it: correct code, dead gate,
+  green suite. The tests here now drive the real invocation shape (module copy in
+  a temp dir, a checkout as the working directory, no `--root`) and execute the
+  step's own shell to check WHICH copy of the module runs.
 
 A comment in ci.yml is not a test. Each assertion below is mutation-tested
 against the defect it claims to catch.
@@ -26,6 +34,7 @@ import itertools
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -159,6 +168,76 @@ def _executed_program(command: str) -> str:
             else:
                 break
     return tokens[index] if index < len(tokens) else ""
+
+
+def _makefile_recipe_blocks() -> dict[str, str]:
+    """target -> its recipe text (the tab-indented lines that follow it).
+
+    Distinct from `_makefile_recipes`, which loses the association: an assertion
+    that needs two facts of the SAME target (`--since` and `merge-base`, say)
+    cannot get them from a flat list, and the flat-list form of exactly that
+    assertion is what made A12's named mutation survive review (R4).
+    """
+    blocks: dict[str, str] = {}
+    current: str | None = None
+    for line in MAKEFILE.read_text().splitlines():
+        if line.startswith("\t"):
+            if current:
+                blocks[current] += "\n" + line.lstrip("\t")
+            continue
+        match = re.match(r"^([A-Za-z0-9_.-]+):", line)
+        current = match.group(1) if match else None
+        if current:
+            blocks.setdefault(current, "")
+    return blocks
+
+
+def _changes_run() -> str:
+    """The `run:` body of the `changes` job's classify step."""
+    steps = [step for step in _steps("changes") if step.get("id") == "classify"]
+    assert len(steps) == 1, "expected exactly one `classify` step in `changes`"
+    return str(steps[0].get("run") or "")
+
+
+def _git_run(repo: Path, *args: str) -> str:
+    """Run git in a throwaway repository; identity/signing are pinned per call so
+    a developer's global config cannot change the result."""
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=ci-scope@example.invalid",
+            "-c",
+            "user.name=ci-scope",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout
+
+
+def _make_repo(root: Path) -> Path:
+    """A throwaway git repository, so a test can exercise the module in a real
+    checkout without touching this one."""
+    repo = root / "checkout"
+    repo.mkdir(parents=True)
+    _git_run(repo, "init", "-q")
+    return repo
+
+
+def _commit_all(repo: Path, message: str) -> str:
+    _git_run(repo, "add", "-A")
+    _git_run(repo, "commit", "-q", "-m", message)
+    return _git_run(repo, "rev-parse", "HEAD").strip()
+
+
+def _read_flags(path: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
 
 
 def test_tui_e2e_does_not_need_the_unit_suite_or_pip_audit() -> None:
@@ -1122,9 +1201,17 @@ def test_local_commands_are_safe_and_track_the_ci_steps_they_mirror() -> None:
                 "local gate has drifted from CI"
             )
             program = _executed_program(command)
-            assert "/" in program or program in {"env", "uvx", "python", "python3"}, (
-                f"{job}: {command!r} execs `{program}` directly; a bare console "
-                "script is the #423 shebang path (rc=126, swallowed by a pipeline)"
+            name = Path(program).name
+            # Only the interpreter and the tool runners are acceptable, and the
+            # test is on the BASENAME deliberately: `_executed_program` returns
+            # the whole token, so `.venv/bin/flake8` and `/abs/path/black` used
+            # to pass the old `"/" in program` form — i.e. the one spelling that
+            # IS the #423 hazard was the one the guard could not see (QA Q3).
+            assert name == "uvx" or name == "env" or name.startswith("python"), (
+                f"{job}: {command!r} execs `{program}`. Only the interpreter "
+                "(`python -m …`) and `uvx` are safe spellings; a path-qualified "
+                "console script (`.venv/bin/flake8`, an absolute `black`) is the "
+                "#423 path — a stale shebang exits 126 and a pipeline reports 0."
             )
 
 
@@ -1137,7 +1224,10 @@ def test_ci_and_make_share_one_classifier_module() -> None:
     an output that does not exist.
 
     Mutations that must fail this: inline the mapping in the Makefile; add a
-    flag to the module and not to the `outputs:` block.
+    flag to the module and not to the `outputs:` block; replace the merge base
+    with `git rev-parse origin/main` (the assertion reads the target's whole
+    recipe, so that still has to fail — a bare `"--since" in recipe` check
+    could not see it).
     """
     scope = _scope()
     classify_run = "\n".join(str(step.get("run") or "") for step in _steps("changes"))
@@ -1150,18 +1240,24 @@ def test_ci_and_make_share_one_classifier_module() -> None:
         f"outputs-only={sorted(set(_ci_jobs()['changes']['outputs']) - set(scope.FLAGS))}, "
         f"module-only={sorted(set(scope.FLAGS) - set(_ci_jobs()['changes']['outputs']))}"
     )
-    recipes = _makefile_recipes()
-    assert any(CI_SCOPE_REL in recipe for recipe in recipes), (
-        "no Makefile recipe runs the shared classifier, so `make check-changed` "
-        "would be a second implementation of the mapping"
+    blocks = {
+        target: body for target, body in _makefile_recipe_blocks().items() if CI_SCOPE_REL in body
+    }
+    assert list(blocks) == ["check-changed"], (
+        "expected exactly one Makefile target invoking the shared classifier, "
+        f"found {sorted(blocks)}"
     )
-    assert any("--since" in recipe for recipe in recipes), (
-        "the classifier target must pass `--since <merge-base>` rather than "
-        "diffing against a moved origin/main"
+    recipe = blocks["check-changed"]
+    assert "merge-base" in recipe, (
+        "the classifier target must pass the MERGE BASE with `--since` rather "
+        "than `origin/main` itself: a two-dot diff against a moved origin/main "
+        "sweeps in every commit main landed since this branch was cut. "
+        f"recipe: {recipe!r}"
     )
-    assert any(
-        "--run" in recipe for recipe in recipes
-    ), "the classifier target must actually run the selected gates (--run)"
+    assert "--since" in recipe, f"no `--since` in the target: {recipe!r}"
+    assert (
+        "--run" in recipe
+    ), f"the classifier target must actually run the selected gates: {recipe!r}"
 
 
 def test_the_classifier_runs_from_the_base_revision_not_the_pull_request_copy(
@@ -1312,3 +1408,232 @@ def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None
         "on a docs-only diff the coverage job must be reported as skipped, "
         "because a skipped `test` skips it"
     )
+
+
+def test_the_classifier_resolves_its_repo_from_the_invocation_not_its_own_path(
+    tmp_path: Path,
+) -> None:
+    """R1/Q2. The classifier must classify in CI, from a copy run out of tree.
+
+    This is the assertion the first round did not have, and its absence is why
+    the gate shipped dead: the `changes` step runs the BASE revision's copy from
+    `$RUNNER_TEMP`, so a module that derived its repository from `__file__`'s
+    grandparent looked at `/home/runner/work` — one level ABOVE the checkout and
+    inside no repository. `root` is also the `cwd` of every git call, so
+    `git diff` exited 128, the fail-open branch fired, and EVERY pull request ran
+    the whole job set behind a `::warning::` annotation. Correct classifier,
+    never engaged.
+
+    The shape here is the CI one exactly: a real checkout as the invocation
+    directory, the module copied outside it, no `--root`. Both directions are
+    covered, because "always all true" would also pass a one-sided test: a code
+    diff must classify as every flag true, and a docs-only diff as every flag
+    false.
+
+    Mutations that must fail this: restore the `Path(__file__)…parent.parent`
+    default; or drop `--root` from the `changes` step while breaking the
+    default (the step passes it explicitly, and this test is what keeps the
+    default honest on its own).
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "probe.md").write_text("base\n")
+    docs_base = _commit_all(repo, "base")
+    (repo / "local_operator").mkdir()
+    (repo / "local_operator" / "probe.py").write_text("x = 1\n")
+    code_head = _commit_all(repo, "code")
+    (repo / "docs" / "notes.md").write_text("more\n")
+    _commit_all(repo, "docs on top of code")
+
+    # The module, copied OUT of the repository exactly as the step does it.
+    runner_temp = tmp_path / "_temp"
+    runner_temp.mkdir()
+    copied = runner_temp / Path(CI_SCOPE_REL).name
+    shutil.copyfile(REPO / CI_SCOPE_REL, copied)
+
+    def classify_out_of_tree(base: str, output: Path) -> dict[str, str]:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(copied),
+                "--event",
+                "pull_request",
+                "--base",
+                base,
+                "--github-output",
+                str(output),
+            ],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            "the classifier failed on a copy run from outside the checkout:\n"
+            f"{proc.stdout}\n{proc.stderr}"
+        )
+        assert "::warning" not in proc.stdout, (
+            "the classifier fell back to failing open, so it did not resolve the "
+            f"checkout as its repository:\n{proc.stdout}"
+        )
+        return _read_flags(output)
+
+    code = classify_out_of_tree(docs_base, tmp_path / "code-flags")
+    assert set(code) == set(_scope().FLAGS)
+    assert all(value == "true" for value in code.values()), (
+        f"a `local_operator/**` diff from a copy in $RUNNER_TEMP left {code!r} "
+        "false; this is the CI shape, where every flag must still be true"
+    )
+
+    docs = classify_out_of_tree(code_head, tmp_path / "docs-flags")
+    assert all(value == "false" for value in docs.values()), (
+        "a docs-only diff from a copy in $RUNNER_TEMP did not classify as inert "
+        f"({docs!r}); the whole point of the gate is this case"
+    )
+
+
+def test_the_step_executes_the_base_revision_copy(tmp_path: Path) -> None:
+    """Q4. WHICH copy of the classifier runs, tested by running the step.
+
+    A13's substring assertions could not see the realistic defect: swap the
+    invocation for the checked-in copy, keep the `git show … >
+    $RUNNER_TEMP/ci_scope.py` line, and every substring still matches while the
+    PR's own code decides its own gates. So this executes the step's shell body
+    in a throwaway repository where the two copies write different markers, and
+    asserts the BASE one ran.
+
+    Mutation that must fail this: change the invocation from
+    `python "$RUNNER_TEMP/ci_scope.py"` to the checked-in
+    `python scripts/ci_scope.py` (leaving the `git show` line alone).
+    """
+    repo = _make_repo(tmp_path)
+    marker = tmp_path / "marker.txt"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir()
+
+    def stub(tag: str) -> str:
+        # The step passes real flags; the stub ignores them and records which
+        # copy of the module the shell actually executed.
+        return (
+            "import os\n"
+            "with open(os.environ['CI_SCOPE_MARKER'], 'a') as handle:\n"
+            f"    handle.write({tag!r} + '\\n')\n"
+        )
+
+    (scripts_dir / "ci_scope.py").write_text(stub("base-copy"))
+    _commit_all(repo, "base")
+    (scripts_dir / "ci_scope.py").write_text(stub("head-copy"))
+    _commit_all(repo, "head")
+
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    # The step calls `python`, which on a runner is the interpreter
+    # setup-python just put on PATH.
+    (shim / "python").symlink_to(sys.executable)
+    runner_temp = tmp_path / "_temp"
+    runner_temp.mkdir()
+    env = {
+        **os.environ,
+        "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}",
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_OUTPUT": str(tmp_path / "github_output"),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "github_summary"),
+        "GITHUB_WORKSPACE": str(repo),
+        "CI_SCOPE_MARKER": str(marker),
+    }
+    proc = subprocess.run(
+        ["/bin/bash", "-c", _changes_run()],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"the step failed: {proc.stdout}\n{proc.stderr}"
+    assert marker.read_text().split() == ["base-copy"], (
+        "the step did not execute the BASE revision's classifier copy; a pull "
+        "request that edits the classifier could therefore disarm its own gates "
+        f"(marker: {marker.read_text()!r})"
+    )
+
+
+def test_the_cli_sanity_job_keeps_its_named_script_input() -> None:
+    """R2. `cli-sanity` is the only CI surface for the streaming-contract script.
+
+    `ci.yml` runs `python scripts/check_streaming_contract.py run.jsonl` inside
+    that job, and nothing else in the repository imports the script — so without
+    a named input the `cli` flag covers `{python, manifest, deps_lock, ci,
+    other}` and a scripts-only diff skips the only place the script is
+    exercised: the diff that changes a guard is the diff that skips it.
+
+    The named set rather than `scripts/**` in the predicate is deliberate (see
+    the module comment): widening would run both live-LLM jobs, with real spend,
+    on every scripts-only diff, which the per-class cost analysis rates as safe
+    to skip. The last assertion pins that the widening did NOT happen.
+
+    Mutation that must fail this: drop the script from `CLI_SANITY_SCRIPTS`.
+    """
+    scope = _scope()
+    script = "scripts/check_streaming_contract.py"
+    assert (REPO / script).is_file(), f"{script} is gone; this case is stale"
+    assert any(
+        script in str(step.get("run") or "") for step in _steps("cli-sanity")
+    ), f"cli-sanity no longer runs {script}; this assertion's premise is stale"
+
+    flags = scope.classify([script])
+    for flag in ("cli", "server", "audit", "lint", "types", "unit", "tui"):
+        assert flags[flag] is True, (
+            f"a {script}-only diff left {flag}=False; cli-sanity (and the pip-audit "
+            "it depends on) would skip their only surface for that script"
+        )
+    plan = scope.job_plan(flags)
+    assert plan["cli-sanity"] == "run" and plan["server-sanity"] == "run"
+
+    # The deliberate non-widening: some other script keeps the old behaviour.
+    other = scope.classify(["scripts/shard_tests.py"])
+    assert other["cli"] is False and other["audit"] is False, (
+        "the `cli`/`audit` predicate was widened to all of scripts/**; that runs "
+        "the live-LLM jobs on every scripts-only diff, which is the cost this "
+        "change exists to remove"
+    )
+
+
+def test_the_windows_input_set_covers_what_that_job_loads() -> None:
+    """R3. The Windows job loads more than the two test files it names.
+
+    Its pytest run imports the `conftest.py` chain, and the root conftest does
+    `from tests import shard_stall_watchdog` at module scope; pytest also imports
+    the `__init__.py` markers for both protected modules. A change to any of
+    them can change that job's behaviour without touching a file it lists, which
+    is the "flag narrower than the guard's real input" pattern this classifier
+    exists to avoid.
+
+    Mutation that must fail this: drop `tests/shard_stall_watchdog.py` from
+    `WINDOWS_LOADED_PATHS`.
+    """
+    scope = _scope()
+    loaded = (
+        "conftest.py",
+        "tests/conftest.py",
+        "tests/shard_stall_watchdog.py",
+        "tests/__init__.py",
+        "tests/unit/__init__.py",
+        "tests/unit/server/__init__.py",
+        "tests/unit/test_agent_import_boundary.py",
+        "tests/unit/server/test_edit_workspace_boundary.py",
+    )
+    conftest = (REPO / "conftest.py").read_text()
+    assert "from tests import shard_stall_watchdog" in conftest, (
+        "the root conftest no longer imports the watchdog; WINDOWS_LOADED_PATHS "
+        "can drop that name, and this assertion is why it must be revisited"
+    )
+    for path in loaded:
+        assert (REPO / path).is_file(), f"{path} is gone; this case is stale"
+        assert scope.classify([path])["windows"] is True, (
+            f"a {path} change would skip filesystem-boundaries-windows, which " "loads it"
+        )
+
+    # …and a test file with no relationship to that job still skips it: the
+    # point is a curated input set, not "anything under tests/".
+    assert scope.classify(["tests/unit/test_ci_hygiene.py"])["windows"] is False

@@ -310,9 +310,13 @@ make check-changed      # scripts/ci_scope.py --since <merge-base origin/main> -
 
 It selects its gates from the SAME module the workflow's `changes` job runs, so
 the local answer and CI's answer cannot drift into two opinions, and it runs
-only the jobs whose flags are true for your diff. Use the four commands above
-by hand when you want the whole-tree form regardless — a release PR, or a diff
-that touches `.github/**`, both of which set every flag true.
+only the jobs whose flags are true for your diff. **Three gated jobs are never
+part of a local run** — `filesystem-boundaries-windows` (native Windows
+junction semantics), `cli-sanity` and `server-sanity` (live-LLM: they need
+`OPENROUTER_API_KEY` and spend real tokens). `--run` prints each exclusion with
+its reason, so a local green is not evidence about those three. Use the four
+commands above by hand when you want the whole-tree form regardless — a release
+PR, or a diff that touches `.github/**`, both of which set every flag true.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
