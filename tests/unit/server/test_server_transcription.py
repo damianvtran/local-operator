@@ -554,6 +554,68 @@ async def test_create_transcription_radient_credential_rejection_blames_radient(
 
 
 @pytest.mark.asyncio
+async def test_create_transcription_radient_403_is_a_permission_answer(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """A 403 is not reported as a rejected credential, and does not ask for a login.
+
+    The daemon is already authenticated when a 403 arrives: the status says the
+    REQUEST was not permitted (an entitlement, a plan that excludes the
+    endpoint, an edge rule), so a sentence prescribing a re-login asserts a
+    cause the status cannot establish. It is also the one 4xx whose body
+    reliably names the real reason, so that has to survive.
+    """
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(
+            real_response(403, b'{"detail":"plan does not include transcription"}')
+        )
+    )
+
+    response = await _post_transcription(test_app_client, temp_audio_file, mock_radient_client)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "permission answer" in detail
+    assert "plan does not include transcription" in detail
+    assert "Sign in again" not in detail
+    assert "refused this app's credentials" not in detail
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_bodyless_4xx_names_no_culprit(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """A 4xx with no body names nobody, so the sentence must not pick a side.
+
+    The daemon authenticates to Radient and to no one else, so a bare status is
+    equally consistent with Radient's own edge and with the provider it relayed
+    to. Naming the provider here would be the incident's mistake in the other
+    direction: an assertion the evidence does not support.
+    """
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(real_response(400, b""))
+    )
+
+    response = await _post_transcription(
+        test_app_client, temp_audio_file, mock_radient_client, {"provider": "openai"}
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "no body saying by whom" in detail
+    assert "400" in detail
+    assert "provider rejected" not in detail
+
+
+@pytest.mark.asyncio
 async def test_create_transcription_radient_validation_rejection_blames_radient(
     test_app_client: Any,
     temp_audio_file: str,
