@@ -37,7 +37,10 @@ from local_operator.model.discovery import (
 )
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
-from local_operator.providers.qwencloud_console import QWENCLOUD_CONSOLE_PROVIDER
+from local_operator.providers.qwencloud_console import (
+    QWENCLOUD_CONSOLE_PROVIDER,
+    QWENCLOUD_TICKET_SECRET_NAME,
+)
 from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
@@ -57,6 +60,7 @@ from local_operator.providers.usage import (
 )
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
+    USAGE_FAILURE_BACKOFF_MS,
     USAGE_REPORT_TTL_MS,
     USAGE_UNAVAILABLE_RETRY_MS,
     UsageCacheStore,
@@ -95,6 +99,25 @@ EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 #: re-list nine providers. Boot and repaint paths keep the default 24h hard TTL
 #: (with an hourly background refresh) because there a request IS visible.
 PICKER_TTL_S = 15 * 60
+
+#: Notes for the two QwenCloud console-ticket states the user can ACT ON. Both
+#: are painted by ``usage_panel.py``'s body builder, which prefixes a two-cell
+#: indent and then truncates to ``_body_content_width()``.
+#:
+#: **The budget is 47 cells**, measured by rendering the real panel at a
+#: 60-column terminal rather than derived from the width constants: the app's
+#: own chrome means ``overlay.screen_size`` reports 58 for a 60-column
+#: terminal, so the arithmetic chain (panel 54, content 50, body 49, less the
+#: two-cell indent) starts two cells lower than the terminal width suggests.
+#: Deriving it from ``PANEL_*`` alone gives 49 and overflows by two.
+#:
+#: The budget belongs to the REMEDY: a note that overflows loses its trailing
+#: command and leaves the user a symptom with no action, which is the whole
+#: failure the note exists to prevent. Pinned by
+#: ``test_the_note_survives_truncation_at_60_columns``, which renders the
+#: panel rather than counting characters.
+QWENCLOUD_TICKET_LOCKED_NOTE = "console ticket locked — run `lop secret unlock`"
+QWENCLOUD_TICKET_ORPHAN_NOTE = "no ticket — run `lop qwencloud-ticket set`"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -922,8 +945,16 @@ class ProviderController:
             parts.append(fingerprint_secret(env_key))
         return fingerprint_accounts(parts)
 
-    def _qwencloud_console_creds(self, provider: str) -> dict[str, Any] | None:
-        """The stored console session cookie for QwenCloud Token Plan, if any.
+    def _qwencloud_console_creds(self, provider: str) -> tuple[dict[str, Any] | None, str | None]:
+        """The console session cookie for QwenCloud Token Plan, and why not.
+
+        Returns ``(creds, note)``. ``note`` is non-None only for a state the
+        user can ACT ON, and it becomes :attr:`UsageReport.notes` so the
+        provider block stays on screen with a reason instead of vanishing --
+        the same move ``usage.py``'s xAI path makes for an answering account
+        with no metered window. A silent ``None`` for a locked store would be
+        the "plausible degraded state" failure this class already warns about
+        at :class:`ProviderController`'s own 268-278.
 
         A SEPARATE namespace (``qwencloud-console``) rather than a row under
         ``alibaba-token-plan``, because :meth:`has_any_credential` matches on
@@ -935,18 +966,73 @@ class ProviderController:
 
         ``qwencloud-console`` is deliberately NOT in ``PROVIDER_REGISTRY``;
         it is a row namespace, following the ``mcp-oauth`` precedent.
+
+        The VALUE lives in the encrypted secret store; only its metadata is in
+        ``auth.db``. The retrieval is guarded on ``store_path().exists()``
+        because ``retrieve_secret`` against a base with no store SPAWNS A
+        BROKER DAEMON before failing -- measured, with a stray process left
+        behind, on the very common host that has never run ``lop secret set``.
         """
         if credential_provider_id(provider) != "alibaba-token-plan":
-            return None
+            return None, None
         try:
             rows = self.auth_store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
         except Exception:  # noqa: BLE001 — an unreadable store has no ticket
-            return None
+            # The METADATA store, not the secret store. This is the hint path,
+            # not the security gate: no row really does mean no ticket here.
+            return None, None
         for row in rows:
             data = getattr(row, "data", None)
-            if isinstance(data, dict) and data.get("ticket"):
-                return dict(data)
-        return None
+            if not isinstance(data, dict):
+                continue
+            if data.get("ticket"):
+                # Pre-migration row with the value still in plaintext. A user
+                # who has not run `lop qwencloud-ticket migrate` keeps a
+                # working /usage; do not break them to make a point.
+                return dict(data), None
+            if not data.get("secret_name"):
+                continue
+            # Imported INSIDE the function, not at module scope.
+            # `qwencloud_console.py` is stdlib-only so it is cycle-safe for
+            # this module, and `access.py` uses the same idiom for the same
+            # reason. A module-scope import here reintroduces the cycle the
+            # stdlib-only import list exists to protect.
+            from local_operator.secrets import access
+            from local_operator.secrets.client import BrokerDenied, BrokerLocked
+            from local_operator.secrets.errors import SecretNotFound, SecretStoreError
+            from local_operator.secrets.keys import store_path
+
+            if not store_path(None).exists():
+                # No secret store on this host. Returning here is what keeps a
+                # plain TUI user from spawning a daemon they have no use for
+                # on every refresh.
+                return None, None
+            try:
+                value = access.retrieve_secret(QWENCLOUD_TICKET_SECRET_NAME, None)
+            except (BrokerDenied, BrokerLocked):
+                # Caught BEFORE SecretStoreError: both subclass it. The store's
+                # own message on THIS path is the raw wire text ("no lop
+                # session is registered with the broker") -- the re-wording
+                # that names `lop secret unlock` lives in `master_key_for` and
+                # does not fire on the retrieval path. So the actionable
+                # message is ours.
+                return None, QWENCLOUD_TICKET_LOCKED_NOTE
+            except SecretNotFound:
+                return None, QWENCLOUD_TICKET_ORPHAN_NOTE
+            except (SecretStoreError, OSError):
+                return None, None
+            try:
+                ticket = value.decode()
+            except UnicodeDecodeError:
+                # A value that cannot decode was never sendable as a `cookie:`
+                # header, so it is the unreadable case, not a locked one.
+                return None, None
+            creds = dict(data)
+            creds.pop("secret_name", None)
+            creds.pop("length", None)
+            creds["ticket"] = ticket
+            return creds, None
+        return None, None
 
     def _expected_oauth_identities(self, provider: str) -> list[str]:
         """Stored OAuth identities for ``provider``, including refresh-failed.
@@ -1233,8 +1319,14 @@ class ProviderController:
         is also produced by this cycle (it is a fresh verdict, not last-good)
         but it is the opposite of a success, and passing it through the
         success path would clear the very flag it was created to carry.
+
+        A console-ticket note is the same shape of fresh non-success: it
+        carries a scheduled re-probe so the note clears itself once the user
+        runs the remedy, and ``_mark_account_success`` would null exactly that.
         """
         if report.credential_invalid:
+            return report
+        if report.notes and report.next_probe_at_ms is not None and not report.limits:
             return report
         return self._mark_account_success(report, now_ms)
 
@@ -1478,8 +1570,42 @@ class ProviderController:
                     # route below is dead code for this provider.
                     if console_attempted:
                         continue
-                    console = self._qwencloud_console_creds(provider)
+                    console, console_note = self._qwencloud_console_creds(provider)
                     if console is None:
+                        # Set on the ATTEMPT, not on success -- the flag's own
+                        # comment above says so, and the cost of not doing it
+                        # is not one wasted call. A locked store whose broker
+                        # cannot be started makes `retrieve_secret` poll to
+                        # `STARTUP_TIMEOUT_S` twice (client.py:71,254-259):
+                        # measured at 10 s per call, so leaving the flag False
+                        # re-runs that for EVERY expected identity -- three
+                        # dead grants froze the event loop for a measured 30 s
+                        # inside the `asyncio.gather` that paints the panel.
+                        console_attempted = True
+                        if console_note:
+                            # A state with a remedy keeps the provider block on
+                            # screen with the reason, rather than letting it
+                            # vanish into the generic empty string.
+                            report = UsageReport(
+                                provider=provider,
+                                fetched_at=now_ms,
+                                identity=identity,
+                                notes=console_note,
+                                # The remedy is a command the user runs in
+                                # ANOTHER terminal, so the note has to clear
+                                # itself once they have run it. Without a
+                                # scheduled probe this payload expires on the
+                                # full jittered 5-minute TTL and the note
+                                # survives `lop secret unlock` until it lapses
+                                # or the user presses `r` -- the "permanent
+                                # message the user cannot act their way out of"
+                                # polarity defect `_account_in_backoff` below
+                                # names, which this codebase has already paid
+                                # for once. Measured: re-probing an unlocked
+                                # store costs one sub-millisecond retrieval.
+                                next_probe_at_ms=now_ms + USAGE_FAILURE_BACKOFF_MS,
+                            )
+                            live[report_identity_key(report) or identity] = report
                         continue
                     console_attempted = True
                     try:
@@ -1540,14 +1666,27 @@ class ProviderController:
         # `_qwencloud_console_creds` is already guarded on the storage id and
         # returns None for every other provider, so this cannot widen any other
         # provider's fetch; verified by execution, not by reading.
+        console, console_note = self._qwencloud_console_creds(provider)
         try:
-            report = await self._fetch_one(
-                client, provider, access=None, extra_creds=self._qwencloud_console_creds(provider)
-            )
+            report = await self._fetch_one(client, provider, access=None, extra_creds=console)
         except Exception:  # noqa: BLE001
             return []
         if report is None:
+            if console_note:
+                # Same short re-probe as the dead-grant route above: the remedy
+                # runs in another terminal, so the note must clear itself
+                # rather than outlive the fix on the full TTL.
+                return [
+                    UsageReport(
+                        provider=provider,
+                        fetched_at=now_ms,
+                        notes=console_note,
+                        next_probe_at_ms=now_ms + USAGE_FAILURE_BACKOFF_MS,
+                    )
+                ]
             return []
+        if console_note and not report.notes:
+            report.notes = console_note
         return [self._mark_account_success(report, now_ms)]
 
     def _dedupe_targets(self, targets: list[str]) -> list[str]:
