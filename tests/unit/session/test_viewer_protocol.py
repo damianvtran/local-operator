@@ -1191,9 +1191,17 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # a LIVE owner to dial" half of ``is_cold``, split out because that property's
     # third disjunct is a mid-resync state: an owner ``Session`` has no client at
     # all, so the question does not exist for it.
-    assert len(viewer_only) == 59, (
+    #
+    # 59 → 61 is the read-without-an-owner rung, and it moves by TWO because the
+    # pair answers two different questions a cold read now reports separately:
+    # ``cold_reason`` is WHY (no pid holds the lease, one does and stayed silent,
+    # or it is finishing work in flight) and ``attaching`` is that an
+    # authenticated dial is retained and its state has not arrived. Both are on
+    # the wire, both are read off a duck-typed bound facade by the bridge, and
+    # neither exists for an owner ``Session`` — it has no dial to be silent on.
+    assert len(viewer_only) == 61, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 59, and the aggregate floor is set at 40 against that number. A "
+        "says 61, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

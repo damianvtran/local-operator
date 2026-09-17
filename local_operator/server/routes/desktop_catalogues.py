@@ -412,7 +412,11 @@ async def skills(
     from local_operator.skills import default_skill_roots, discover_skills
     from local_operator.skills.api import resolve_skill_url
 
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: every row here comes from the session's cwd on DISK (the roots are
+    # discovered locally and resolved by the in-process resolver), so a silent
+    # owner must not 503 a GET whose answer does not depend on one. The cwd comes
+    # from the facade, which serves it from the durable checkpoint when cold.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         cwd = bridge.remote.frontend_state.cwd
         discovered, warnings = await asyncio.to_thread(
@@ -441,7 +445,11 @@ async def skills(
 
 @router.get("/v1/desktop/sessions/{session_id}/failovers", response_model=CRUDResponse[Report])
 async def failovers(session_id: str, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: the selected/effective pair is a canonical FACADE field, and a cold
+    # facade holds it from the durable checkpoint; the chains are read from the
+    # local config store. Nothing here needs an owner to answer, so a silent one
+    # must not refuse the failover chips.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         state = bridge.remote.frontend_state
         from local_operator.settings_io import read_chains
@@ -473,7 +481,11 @@ async def entities(
     spec = slash_command_for("/" + command.removeprefix("/"))
     if spec is None:
         raise HTTPException(422, "Unknown command")
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: the rows are the local registries and catalogs, the current value is a
+    # canonical facade field, and the profile registries are resolved from config
+    # (with their own 503 when even those are unavailable — a durable verdict, not
+    # an owner-shaped one). A silent owner must not refuse the pickers.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         remote = bridge.remote
         assert remote is not None
         assert bridge.remote is not None
