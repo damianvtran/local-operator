@@ -5,6 +5,7 @@ streaming rows that update in place, subagent roster aggregation."""
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -39,6 +40,7 @@ from local_operator.mobile.projection import (
     _diff_counts,
     _image_refs,
     _summarize_args,
+    monotonic_from_epoch,
 )
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
@@ -1636,3 +1638,832 @@ def test_the_new_compose_fields_absent_on_the_wire_change_nothing() -> None:
     row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
     assert row.tool_state == "composing"
     assert fold.projection.activity == "dictating bash"
+
+
+# --- the attach clock: a producer's start instant dates work already in flight
+#
+# The operator's report: a phone that attaches (or a runtime resumed) onto a
+# session with work in flight restarted the elapsed timer from the moment of
+# attach, counting up from `0s` — a live tool row and the working band above it
+# both reading their own arrival as the work's start. The fold cannot derive
+# either instant from the events it sees, because it never saw the event that
+# began the work, so both come from the PRODUCER's folded state through
+# `reconcile_clocks` (or from the `started_at_epoch` a start event states).
+#
+# These tests drive the real arithmetic on real clocks — a `time.time()`-based
+# epoch 180s in the past, asserted against the age the projection publishes —
+# rather than pinning a mocked constant, because the defect lives in the
+# plumbing between the two clocks and not in a formula.
+
+
+class _ClockSession:
+    """A session publishing the folded instants an attach reads.
+
+    Both are real protocol members (`session/protocol.py`), answered the way
+    `Session` answers them: the phase with its zero in one call, and the
+    live-call map with `None` for a call whose producer stated no epoch.
+    """
+
+    def __init__(
+        self,
+        phase: tuple[str, float | None] = ("", None),
+        epochs: dict[str, float | None] | None = None,
+    ) -> None:
+        self._phase = phase
+        self._epochs = dict(epochs or {})
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        return self._phase
+
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
+        return dict(self._epochs)
+
+
+def _attached(session: Any = None) -> ProjectionFold:
+    """The fold a handle builds at attach: history, streaming, then the clocks.
+
+    Every step mirrors the real path in order — `fold_history`, then
+    `reconcile_streaming` (the flag a subscribing phone never witnessed), then
+    `reconcile_clocks` — because the defect is in what an ATTACH-time fold
+    lacks, and a fold built any other way would not reproduce it.
+    """
+    fold = make_fold()
+    fold.fold_history(
+        [
+            Message.user("what is left on the tenant rollup?"),
+            Message.assistant("Four rows. Let me check the table itself."),
+        ]
+    )
+    fold.reconcile_streaming(True)
+    if session is not None:
+        fold.reconcile_clocks(session)
+    return fold
+
+
+def test_a_late_tool_start_is_dated_from_the_producers_epoch() -> None:
+    """The reported band: an attach must not date a running call from itself.
+
+    A start event that reaches a fold built at attach states the call's own
+    start epoch, and BOTH readings the phone shows have to come off it — the
+    working band's elapsed clock and the row's duration at its end. Measured
+    before the fix: both read ~0s and counted up from the attach.
+    """
+    fold = _attached()
+    started = time.time() - 180.0
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            args={"command": "psql -c 'select count(*) from tenants'"},
+            intent="counting tenants",
+            started_at_epoch=started,
+        )
+    )
+    assert fold.projection.activity == "counting tenants"
+    assert fold.projection.activity_started_s == pytest.approx(180.0, abs=2.0)
+
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="4")], duration_s=200.0),
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "done"
+
+
+def test_a_call_that_started_before_the_fold_existed_measures_its_real_duration() -> None:
+    """The row's duration, when the fold never saw the call's start at all.
+
+    `live_tool_start_epochs` is the producer's own map for calls in flight, so
+    the fold seeds from it at attach; a call that began 180s before the phone
+    attached reports 180s when it ends, rather than the time since the attach.
+    The end event states no `duration_s` here on purpose: that is the path the
+    measurement is on, and it is the one the defect corrupted.
+    """
+    started = time.time() - 180.0
+    fold = _attached(_ClockSession(epochs={"c1": started}))
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="4")]),
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "done"
+    assert row.elapsed_s == pytest.approx(180.0, abs=2.0)
+
+
+def test_a_tool_start_the_fold_never_watched_withholds_the_band() -> None:
+    """Rule: never fabricate a start, on the band as well as the row (D7).
+
+    A producer that states no `started_at_epoch` (an older runtime) leaves this
+    fold with nothing to date a call it never watched begin: the start event
+    arrives late, so the fold's own arrival is not the call's start. Publishing
+    it as a KNOWN zero put `0s` counting from the phone's mount on the band while
+    the call's own row withheld its duration in the same frame — two answers to
+    one state on one screen, which is design round 3's D7. The band now withholds
+    too, and the ROW keeps the reading it always had: a call with no epoch and no
+    seed measures from this fold's observation of its start, which is the
+    behaviour round 1 accepted and pinned.
+    """
+    fold = _attached(_ClockSession(epochs={"c1": None}))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c2", tool_name="bash", args={}, intent="probing")
+    )
+    assert fold.projection.activity == "probing"
+    assert fold.projection.activity_started_s is None
+
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="")]),
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.elapsed_s == pytest.approx(0.0, abs=1.0), "a start with no epoch seeds no instant"
+
+
+def test_a_tool_start_without_an_epoch_the_fold_watched_still_zeroes_the_band() -> None:
+    """The other half of D7: a call the fold DID watch begin keeps its clock.
+
+    No `started_at_epoch` and a live edge are different states, and only the
+    second may publish a zero. Here the fold sees the model call begin and the
+    tool start on its own stream, so the call's start IS the event it is folding
+    and the band reads `0s` from that frame — `None` here would be the same
+    over-refusal review round 2 found on the phase arms.
+    """
+    fold = make_fold()
+    fold.reconcile_streaming(True)
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing")
+    )
+    assert fold.projection.activity == "probing"
+    assert fold.projection.activity_started_s == pytest.approx(0.0, abs=1.0)
+
+
+def test_a_call_already_in_flight_at_attach_is_settled_exactly_once() -> None:
+    """A seeded entry is consumed by its own end event, like an observed one.
+
+    The seed must not leave a second reading behind: the call's end pops the
+    instant it was seeded with, so a later end event for the same id measures
+    from its own start rather than from the stale seed. Driven with a real
+    second call to prove the pop, not with an internal assertion about the map.
+    """
+    first = time.time() - 180.0
+    fold = _attached(_ClockSession(epochs={"c1": first}))
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="done")]),
+        )
+    )
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="again")
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="done")]),
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.elapsed_s == pytest.approx(0.0, abs=1.0), "the second call is dated by its own start"
+
+
+def test_the_attach_phase_anchor_dates_a_phase_the_producer_holds() -> None:
+    """The half with no tool call behind it, on the arm a real stream reaches.
+
+    A phone that attaches mid-prose has no call to key an instant by, so the
+    working line would count from the attach. The producer's folded phase
+    instant dates it — and `responding` is where that lands in practice: the
+    prose edge is the first non-empty delta of a model call and the producer
+    zeroes it once, so a fold reading it at attach is reading the producer's own
+    number. (QA round 1's M4-B is this cell driven over a real socket.)
+    """
+    fold = _attached(_ClockSession(phase=("responding", time.time() - 180.0)))
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert fold.projection.activity == "responding"
+    assert fold.projection.activity_started_s == pytest.approx(180.0, abs=2.0)
+
+    # The same for the dictation phase: one zero per batch, held until the batch
+    # starts, so a label that revises the sentence still counts from the batch.
+    dictating = _attached(_ClockSession(phase=("composing", time.time() - 120.0)))
+    dictating.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="c1", tool_name="bash", argument_bytes=40, intent="counting tenants"
+        )
+    )
+    assert dictating.projection.activity == "counting tenants"
+    assert dictating.projection.activity_started_s == pytest.approx(120.0, abs=2.0)
+
+
+def test_a_thinking_label_never_adopts_the_attach_anchor() -> None:
+    """A phase the producer RE-ZEROES is never dated by a stale instant.
+
+    Every route this fold can take to a `thinking` label is an event at which
+    the producer restamps the phase (`message_start`, `turn_end`,
+    `tool_execution_end`, `agent_start`, and `message_end` for prose), so an
+    instant folded before the attach describes a thinking phase that has already
+    ended. Adopting it would pair one phase's zero with another phase's label —
+    the pairing `activity_phase_clock` exists to prevent — and the honest answer
+    there is the arrival instant, which is what the producer itself holds.
+
+    This is the reviewer's round-1 minor 2 answered in code rather than in
+    prose: the arm is not merely defensive, it is refused by rule, and the
+    refusal is pinned here on the event that would otherwise be a false 180s.
+    """
+    fold = _attached(_ClockSession(phase=("thinking", time.time() - 180.0)))
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    assert fold.projection.activity == "thinking"
+    # The refusal is a stale instant REFUSED, not a clock withheld: this event is
+    # the phase's own edge (the producer restamps `thinking` here), so the fold
+    # publishes a known zero — 0.0, not None — and the phone paints `0s` and
+    # counts up from it.
+    assert fold.projection.activity_started_s == pytest.approx(0.0, abs=1.0)
+    assert fold.projection.activity_started_s is not None
+
+
+def test_a_phase_mismatch_seeds_nothing() -> None:
+    """Rule: the phase must MATCH, or the anchor is not used at all.
+
+    The producer is mid-`thinking`; the fold is about to display a running
+    call. Pairing one phase's zero with another phase's label would print a
+    confident wrong age, so the mismatch adopts nothing and the clock starts
+    where today's code starts it.
+    """
+    fold = _attached(_ClockSession(phase=("thinking", time.time() - 180.0)))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing")
+    )
+    assert fold.projection.activity == "probing"
+    assert fold.projection.activity_started_s == pytest.approx(0.0, abs=1.0)
+
+
+def test_a_running_phase_edge_never_dates_a_call() -> None:
+    """D9: the running phase is dated by the call, not by the batch's edge.
+
+    `activity_phase_started_at` for `running` is the start of the batch's FIRST
+    call, so a batch that sheds a sibling (the first call finishes, a second
+    still runs) would report the shed call's age under the survivor's label.
+    The exclusion is why a start with no stated epoch keeps the arrival instant
+    even while the producer is folded into the running phase.
+    """
+    fold = _attached(_ClockSession(phase=("running", time.time() - 180.0)))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c2", tool_name="bash", args={}, intent="still going")
+    )
+    # No clock rather than the batch's: `running` is outside the adoptable set, so
+    # an attach with no stated epoch leaves this label undatable — which is also
+    # what the call's own row does in the same frame (design round 3, D7).
+    assert fold.projection.activity_started_s is None
+
+
+def test_the_attach_anchor_never_dates_the_next_turn() -> None:
+    """A retired anchor is how one turn's attach cannot date the next turn's.
+
+    The turn that was in flight at attach settles; the next turn's phases are
+    observed live, so its prose counts from its own delta. Without the
+    retirement the second turn would inherit the first turn's age.
+    """
+    fold = _attached(_ClockSession(phase=("responding", time.time() - 180.0)))
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert fold.projection.activity_started_s == pytest.approx(180.0, abs=2.0)
+
+    fold.fold_event(AgentEndEvent(generation=1))
+    assert fold.projection.activity == ""
+    fold.fold_event(AgentStartEvent(generation=2))
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="Again "))
+    assert fold.projection.activity == "responding"
+    assert fold.projection.activity_started_s == pytest.approx(0.0, abs=1.0)
+
+
+def test_every_live_call_in_the_producers_map_is_seeded() -> None:
+    """The batch seed: a resumed batch presents SEVERAL live ids at once.
+
+    The single-id tests leave the loop to inspection; a batch is the shape a
+    resumed session actually reports, and each call needs its OWN instant — the
+    older sibling's age under the newer call's end event is exactly the wrong
+    number this path exists to avoid.
+    """
+    fold = _attached(_ClockSession(epochs={"a": time.time() - 180.0, "b": time.time() - 60.0}))
+    for call_id in ("a", "b"):
+        fold.fold_event(
+            ToolExecutionEndEvent(
+                tool_call_id=call_id,
+                tool_name="bash",
+                result=ToolResult(tool_call_id=call_id, content=[TextContent(text="ok")]),
+            )
+        )
+    rows = {row.tool_call_id: row for row in fold.projection.transcript if row.kind == "tool"}
+    assert rows["a"].elapsed_s == pytest.approx(180.0, abs=2.0)
+    assert rows["b"].elapsed_s == pytest.approx(60.0, abs=2.0)
+
+
+def test_an_unusable_phase_answer_is_read_as_cannot_say() -> None:
+    """Rule: a probed read must survive a host that answers the WRONG SHAPE.
+
+    The accessor is probed, so what comes back is whatever the host returned —
+    `None`, a one-element tuple, a stand-in's own object. Unpacking that raises,
+    and the call sits on the unattended attach path (`RuntimeServer._serve`
+    ends the runtime on a raise; the app's rebind swallows it and leaves the
+    bridge unsubscribed), so a facade with a badly-shaped accessor would cost
+    the phone the session — a failure mode the pre-fix code could not have.
+    Each shape must be read as "cannot say": no raise, nothing seeded, today's
+    behaviour intact.
+    """
+    for answer in (None, ("only-one",), "responding", SimpleNamespace(phase="responding")):
+        session = _ClockSession(epochs={"c1": time.time() - 180.0})
+        session.activity_phase_clock = lambda answer=answer: answer  # type: ignore[assignment]
+        fold = _attached(session)
+        fold.fold_event(
+            ToolExecutionStartEvent(tool_call_id="c2", tool_name="bash", args={}, intent="probe")
+        )
+        assert fold.projection.activity == "probe", answer
+        # No instant AND no watched edge: a start the fold never saw begin is
+        # published without a clock rather than with one counted from the attach
+        # (design round 3, D7) — the same refusal the band owes any work it
+        # cannot date.
+        assert fold.projection.activity_started_s is None, answer
+
+    # ...and the map half still seeds, so a bad PHASE answer is not a dead
+    # accessor for the whole attach.
+    session = _ClockSession(epochs={"c1": time.time() - 180.0})
+    session.activity_phase_clock = lambda: None  # type: ignore[assignment]
+    fold = _attached(session)
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")]),
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.elapsed_s == pytest.approx(180.0, abs=2.0)
+
+
+def test_a_session_that_cannot_answer_seeds_nothing() -> None:
+    """The probed read: a reduced facade must not raise on attach.
+
+    An embedder, a test double or a legacy producer need not implement either
+    accessor. Attaching to one must leave today's behaviour in place rather
+    than faulting the fold on a phone subscribing mid-turn.
+    """
+    fold = _attached(SimpleNamespace())
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="probing")
+    )
+    assert fold.projection.activity == "probing"
+    # Without an accessor the fold cannot know whether this call began before it
+    # arrived, so no clock is published (D7). "Nothing seeded" is not "seeded
+    # with this fold's arrival": the latter is the fabricated start.
+    assert fold.projection.activity_started_s is None
+
+
+def test_the_phone_epoch_conversion_matches_the_tui_widgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second copy is a deliberate boundary, so pin the two equal.
+
+    `tui/widgets/tool_card.monotonic_from_epoch` and this module's copy must
+    divide, negate and clamp identically — a divergence would make one surface
+    report an age the other does not for the same producer instant, silently.
+    The TUI's helper cannot be imported by the phone (it lives in a Textual
+    widget module, and the phone daemon must not pull the widget tree in to
+    divide one number), so the coupling is a test: this table is the contract,
+    and the import is inside the test body for the same reason the module's own
+    Textual imports are call-time.
+
+    Both clocks are frozen — the wall clock too, not just the monotonic one —
+    because the two functions read `time.time()` themselves and two invocations
+    a microsecond apart differ in the last digits: the assertion is about the
+    ARITHMETIC, and only a frozen instant makes an inequality meaningful.
+    """
+    from local_operator.tui.widgets.tool_card import (
+        monotonic_from_epoch as tui_monotonic_from_epoch,
+    )
+
+    now_epoch = time.time()
+    epochs = [
+        now_epoch,
+        now_epoch - 0.4,
+        now_epoch - 45.0,
+        now_epoch - 180.0,
+        now_epoch - 3_602_400.0,
+        # a producer whose clock is AHEAD of ours: the clamp is the interesting
+        # half of the arithmetic and the half a future refactor would drop
+        now_epoch + 60.0,
+        # the epoch itself, for the guard against a value that never was one
+        0.0,
+    ]
+    frozen_clock = 1_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now_epoch)
+    for epoch in epochs:
+        assert monotonic_from_epoch(epoch, clock=lambda: frozen_clock) == tui_monotonic_from_epoch(
+            epoch, clock=lambda: frozen_clock
+        ), epoch
+
+
+class _StubClock:
+    """A `time` stand-in the test advances by hand.
+
+    The band's arithmetic has to be DRIVEN, not slept through: a test that waits
+    a real second to watch a counter tick costs the suite that second on every
+    run, and the repo's epoch tests inject a clock for the same reason. Both
+    entries the fold reads are here — `monotonic` for the age it publishes and
+    `time` for the epochs the producer stated, plus `time_ns` for the notice ids
+    the fold mints — because a stub that moved one without the other would make a
+    stamped start and the fold's own arrival disagree by the test's whole drift.
+    """
+
+    def __init__(self) -> None:
+        self._wall = time.time()
+        self._monotonic = 5_000.0
+
+    def advance(self, seconds: float) -> None:
+        self._monotonic += seconds
+        self._wall += seconds
+
+    def time(self) -> float:
+        return self._wall
+
+    def time_ns(self) -> int:
+        return int(self._wall * 1_000_000_000)
+
+    def monotonic(self) -> float:
+        return self._monotonic
+
+
+def _freeze(monkeypatch: pytest.MonkeyPatch) -> _StubClock:
+    """Point the projection module's `time` at a clock this test owns."""
+    import local_operator.mobile.projection as projection_module
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    return clock
+
+
+def test_a_watched_phase_edge_publishes_a_known_zero_that_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, MAJOR 1: a phase the phone WATCHED BEGIN keeps its clock.
+
+    The band's gate is "does an instant exist", not "is the instant greater than
+    zero". Every phase edge publishes 0.0, so a gate on the VALUE deleted the
+    clock for the whole life of any phase this fold watched begin — the ordinary
+    case, including the single running tool call the clock is most needed for.
+    The two states are told apart here: a fold's OWN edges publish a known zero
+    and count up from it, and
+    `test_a_phase_joined_mid_flight_with_no_stated_instant_is_published_without_a_clock`
+    below pins the refusal on the case it was meant for.
+    """
+    clock = _freeze(monkeypatch)
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    assert fold.projection.activity == "thinking"
+    assert fold.projection.activity_started_s == 0.0  # known, and not withheld
+
+    # The producer restamps `thinking` at every message_start, so the label is
+    # re-derived without moving its zero — and the number the phone reads now
+    # describes the phase, not the event that repainted it.
+    clock.advance(300)
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    assert fold.projection.activity_started_s == 300.0
+
+    # The prose edge is this fold's own edge, so it zeroes there too — and a
+    # later delta of the SAME phase neither re-dates it nor withholds it: the
+    # wire carries the phase's own zero, and the phone's 1 Hz tick runs it
+    # forward between repaints (the component test pins that half). This is the
+    # state the previous head rendered with no digits for the phase's whole
+    # life.
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert fold.projection.activity == "responding"
+    assert fold.projection.activity_started_s == 0.0
+
+    clock.advance(45)
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta=" more "))
+    assert fold.projection.activity_started_s == 0.0
+    assert fold.projection.activity_started_s is not None
+
+
+def test_a_phase_joined_mid_flight_with_no_stated_instant_is_published_without_a_clock() -> None:
+    """The attach case the withhold was FOR: no instant, so no digits.
+
+    A producer that names the phase it is in but states no instant for it leaves
+    the fold with nothing it can date the label from — that phase was already
+    running when this fold arrived, and the event the fold is folding is the
+    middle of it. `None` on the wire is that answer, and the phone renders it by
+    withholding the digits while keeping the reserved cells. The alternative, the
+    fold's own arrival instant, is the fabricated zero this path exists to
+    remove.
+    """
+    for phase, event in (
+        (
+            "responding",
+            MessageUpdateEvent(message=Message.assistant(), delta="mid-prose"),
+        ),
+        (
+            "composing",
+            ToolCallComposeEvent(
+                tool_call_id="compose:0", tool_name="bash", argument_bytes=8, intent="counting rows"
+            ),
+        ),
+    ):
+        fold = _attached(_ClockSession(phase=(phase, None)))
+        fold.fold_event(event)
+        assert fold.projection.activity_started_s is None, phase
+
+
+def test_the_queued_labels_carry_no_clock() -> None:
+    """TUI parity for the one arm that has no instant at all.
+
+    `frontend_state`'s own comment beside the phase constants is the rule: the
+    TUI's working line passes no clock for a call waiting to run, "because there
+    is no instant a 'waiting to run' age could honestly count from". Both
+    terminal dictation frames are dated `queued` — a phase the producer never
+    folds — and carry no number even on a fold that watched the whole batch
+    begin, because an announcement is not a start.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:0", tool_name="bash", argument_bytes=8, intent="counting"
+        )
+    )
+    assert fold.projection.activity == "counting"
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:0", tool_name="bash", argument_bytes=8, dictation_complete=True
+        )
+    )
+    assert fold.projection.activity == "waiting to run bash"
+    assert fold.projection.activity_started_s is None
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:1",
+            tool_name="grep",
+            argument_bytes=4,
+            not_run_reason="Duplicate call id: skipped",
+        )
+    )
+    assert fold.projection.activity == "Duplicate call id: skipped"
+    assert fold.projection.activity_started_s is None
+
+
+def test_a_second_call_in_a_batch_keeps_the_batchs_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clock belongs to the PHASE, which is the TUI's own rule.
+
+    `WorkingBlock`'s clock moves when the phase moves, so a batch relabelling
+    from its first call to its second keeps counting the batch rather than
+    restarting — and the producer folds exactly ONE zero for a batch, so a fresh
+    zero here would be a number that never existed anywhere. The fold tracks its
+    own phase for this: only a phase change, a forced edge, or the first label
+    may zero the clock.
+    """
+    clock = _freeze(monkeypatch)
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="first")
+    )
+    assert fold.projection.activity_started_s == 0.0
+
+    clock.advance(10)
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c2", tool_name="grep", args={}, intent="second")
+    )
+    assert fold.projection.activity == "second"
+    assert fold.projection.activity_started_s == 10.0
+
+    # A batch's later dictation announcement is the same phase and behaves the
+    # same way: the producer does not restamp `composing` either.
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")], is_error=False),
+        )
+    )
+    assert fold.projection.activity == "thinking"
+    assert fold.projection.activity_started_s == 0.0
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:0", tool_name="read", argument_bytes=8, intent="reading"
+        )
+    )
+    assert fold.projection.activity == "reading"
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:1", tool_name="read", argument_bytes=8, intent="reading too"
+        )
+    )
+    assert fold.projection.activity == "reading too"
+    assert fold.projection.activity_started_s == 0.0
+
+    # A PHASE change still zeroes it: the dictation gave way to the model call.
+    clock.advance(7)
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    assert fold.projection.activity == "thinking"
+    assert fold.projection.activity_started_s == 0.0
+
+
+def test_a_late_live_call_map_answer_is_read_as_cannot_say() -> None:
+    """Review round 2, MINOR 2: the map read is shape-checked, like the pair.
+
+    Both attach-time reads are PROBED, so what comes back is whatever the host
+    answered. The phase half was shape-checked in round 1; the live-call map was
+    not, and `dict(answer or {})` raised on every shape that is not a mapping —
+    on the same unattended path (`RuntimeServer._serve`), where a raise ends the
+    runtime. A non-mapping answer means "cannot say", and the phase half of the
+    same attach must still be read.
+    """
+    for answer in (None, 3.5, "ab", SimpleNamespace(tool_call_id="c1")):
+        session = _ClockSession(phase=("responding", time.time() - 180.0))
+        session.live_tool_start_epochs = lambda answer=answer: answer  # type: ignore[method-assign]
+        fold = _attached(session)
+        fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="attaching "))
+        assert fold.projection.activity == "responding", answer
+        assert fold.projection.activity_started_s == pytest.approx(180.0, abs=2.0), answer
+
+        # The map half seeds nothing, so a call this fold never saw start still
+        # measures from the fold's own arrival at the end event (today's
+        # behaviour) rather than raising before it gets there.
+        fold.fold_event(
+            ToolExecutionStartEvent(tool_call_id="c9", tool_name="bash", args={}, intent="probing")
+        )
+        fold.fold_event(
+            ToolExecutionEndEvent(
+                tool_call_id="c9",
+                tool_name="bash",
+                result=ToolResult(
+                    tool_call_id="c9", content=[TextContent(text="ok")], is_error=False
+                ),
+            )
+        )
+        row = [entry for entry in fold.projection.transcript if entry.tool_call_id == "c9"][-1]
+        assert row.elapsed_s == pytest.approx(0.0, abs=1.0), answer
+
+
+def test_refreshing_the_band_age_redates_a_frozen_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 3, MAJOR 1: the age is re-dated when a frame is built.
+
+    ``activity_started_s`` is written when the phase MOVES, and long phases are
+    exactly the ones with no band event in them — prose streams deltas that do
+    not re-enter the label's arm, and a running call has no arm at all. A frame
+    built mid-phase therefore carried the age as of the last edge, so a viewer
+    attaching then was served a stale number: at a known zero, `0s` counting from
+    its own mount — the operator-reported defect, on the surface this PR exists
+    for. Re-dating happens at the moment the number becomes an answer.
+    """
+    clock = _freeze(monkeypatch)
+    fold = make_fold()
+    fold.reconcile_streaming(True)
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert fold.projection.activity == "responding"
+    assert fold.projection.activity_started_s == 0.0
+
+    # Five minutes of prose with no band event: the stored reading is stale, and
+    # the refresh is what a viewer attaching now must be served instead.
+    clock.advance(300)
+    assert fold.projection.activity_started_s == 0.0, "the stored snapshot does not move on its own"
+    fold.redate_from_phase()
+    assert fold.projection.activity_started_s == 300.0
+
+    # An UNKNOWN instant stays unknown through the same call, and a fold that
+    # owns no instant writes nothing at all: `_set_activity` published the
+    # absence, and this may neither turn it into a zero nor clear a value that
+    # belongs to another fold sharing the projection object (review round 4,
+    # BLOCKER 1).
+    fold.fold_event(AgentEndEvent(generation=1))
+    assert fold.projection.activity_started_s is None
+    clock.advance(45)
+    fold.redate_from_phase()
+    assert fold.projection.activity_started_s is None
+
+
+def test_the_wire_runs_the_age_forward_from_its_arrival_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The COPY's half of the same fix: the daemon between the runtime's frames.
+
+    The daemon holds a deserialized projection — no fold, no producer instant —
+    so it cannot recompute the age. What it can do is remember WHEN the reading
+    arrived and run it forward on its own monotonic clock, which is the same
+    one-shot discipline ``monotonic_from_epoch`` applies to a producer's epoch:
+    only the interval already elapsed comes from the other process. Without it a
+    phone attaching to a session whose runtime has been quiet for minutes is
+    served the age from the last frame it sent.
+    """
+    import local_operator.mobile.daemon as daemon_module
+    import local_operator.mobile.types as types_module
+
+    clock = _StubClock()
+    monkeypatch.setattr(types_module, "time", clock)
+    record = SessionRecord(
+        pid=1,
+        kind="tui",
+        session_id="s1",
+        conversation_name="",
+        cwd="",
+        model_label="",
+        control_port=0,
+        control_key="",
+    )
+    ingested = _projection_from_json(
+        {"session_id": "s1", "pid": 1, "activity": "responding", "activity_started_s": 0.0},
+        record,
+    )
+    assert ingested.activity_started_s == 0.0
+    clock.advance(90)
+    frame = daemon_module._projection_frame(ingested)
+    assert frame["activity_started_s"] == pytest.approx(90.0, abs=0.1)
+
+    # A projection whose instant is UNKNOWN crosses unchanged: `None` is not a
+    # zero, and nothing on this path may invent one.
+    unknown = _projection_from_json(
+        {"session_id": "s1", "pid": 1, "activity": "responding", "activity_started_s": None},
+        record,
+    )
+    clock.advance(90)
+    assert daemon_module._projection_frame(unknown)["activity_started_s"] is None
+
+    # And a projection that never crossed a wire (a durable rebuild) has no
+    # reference to run from: its value is left exactly as it was found.
+    rebuilt = SessionProjection(
+        session_id="s1", pid=1, activity="responding", activity_started_s=12.0
+    )
+    clock.advance(90)
+    daemon_module._projection_frame(rebuilt)
+    assert rebuilt.activity_started_s == 12.0
+
+
+def test_a_roster_row_with_no_age_publishes_no_age() -> None:
+    """Design round 3, D8: a child the roster cannot date has NO age, not zero.
+
+    The drill-in renders ``SubagentRow.elapsed_s`` through the same
+    ``WorkingLine`` gate as the band, so a plain float made one value mean both
+    "the child began this instant" and "this roster has no age for it" — and the
+    phone painted `0s` counting from the viewer's own mount where the TUI
+    withholds the number (``transcript.py``: "the number is withheld rather than
+    invented — ``clock=False``"). The wire now carries the absence, and a child
+    whose row DOES have an age keeps it.
+    """
+    node = SimpleNamespace(
+        job_id="c1",
+        label="child",
+        parent_job_id=None,
+        session_id="s-child",
+        prompt="audit the rollout",
+        launch_message_id="m1",
+        effort="high",
+        agent_role="reviewer",
+    )
+
+    def lifecycle(age_s: float | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            job_id="c1",
+            label="child",
+            status="running",
+            age_s=age_s,
+            result_text=None,
+            error_text=None,
+        )
+
+    class Registry:
+        """The three members the roster fold reads, answering like the real one."""
+
+        def __init__(self, age_s: float | None) -> None:
+            self._age = age_s
+
+        def roster(self) -> list[Any]:
+            return [lifecycle(self._age)]
+
+        def nodes(self) -> list[Any]:
+            return [node]
+
+        def job(self, job_id: str) -> SimpleNamespace:
+            return SimpleNamespace(agent_role="reviewer", model_label="", latest_details={})
+
+    undated = make_fold()
+    undated.set_subagent_details(Registry(None))
+    assert undated.projection.subagents[0].elapsed_s is None
+
+    dated = make_fold()
+    dated.set_subagent_details(Registry(12.0))
+    assert dated.projection.subagents[0].elapsed_s == pytest.approx(12.0)

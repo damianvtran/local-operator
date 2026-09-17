@@ -66,6 +66,29 @@ afterEach(() => {
 });
 
 describe("AgentConversation", () => {
+	it("withholds the drill-in's clock when the roster has no age for the child", () => {
+		// Design round 3, D8. This surface renders the roster row's `elapsed_s`
+		// through the SAME WorkingLine gate as the band, so a plain float made one
+		// value mean both "the child began this instant" and "this roster has no
+		// age for it" — and an ageless child painted `0s` counting from the
+		// viewer's own mount where the TUI withholds the number. The wire now
+		// carries the absence, and both directions are pinned here.
+		const undated = fixture();
+		undated.detail.elapsed_s = null;
+		const { container: grey } = render(
+			<AgentConversation sessionId="root" jobId="current" projection={undated.projection} connected detail={undated.detail} />,
+		);
+		expect(grey.textContent).not.toMatch(/\d+(\.\d+)?s/);
+		cleanup();
+
+		const dated = fixture();
+		dated.detail.elapsed_s = 0;
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={dated.projection} connected detail={dated.detail} />,
+		);
+		expect(screen.getByText("0s")).toBeTruthy();
+	});
+
 	it("opens one Agents sheet with path, peers, and children, then navigates a row", () => {
 		const pushState = vi.spyOn(history, "pushState");
 		const { detail, projection } = fixture();

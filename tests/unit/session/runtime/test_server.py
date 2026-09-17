@@ -15,7 +15,7 @@ import json
 import statistics
 import threading
 import time
-from typing import Any, Coroutine, cast
+from typing import Any, Callable, Coroutine, cast
 
 import pytest
 
@@ -1319,6 +1319,134 @@ async def test_injected_sink_is_used_as_is() -> None:
         frame = await _until(reader, "projection")
         assert frame["data"]["model_label"] == "injected/model"
         assert runtime.projection_sinks_built == 0
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+async def _until_push(
+    reader: asyncio.StreamReader,
+    want: object,
+    *,
+    activity: str | None = None,
+    schedule: Callable[[], None] | None = None,
+    deadline_s: float = 60.0,
+) -> dict[str, Any]:
+    """Read pushed projections until one carries ``want`` as the band's age.
+
+    A push is a whole repaint and several can be in flight for one change, so
+    waiting for the value under test is the only assertion that names the frame
+    it means; the failure message carries the last value seen.
+
+    The wait drives its own deadline and RE-ASKS for a repaint (``schedule``)
+    rather than trusting one event's delivery, because the push is coalesced
+    onto the runtime's own loop: a single scheduling lost its frame on a loaded
+    CI shard (PR #1241, ``test (3.12, 1)``), and that is a property of the wait,
+    not of the age under test.
+
+    ``activity`` matches the BAND LABEL as well as the age, and it has to: two
+    phases in a row both start at a known zero (``thinking`` then
+    ``responding``), so "the first frame carrying 0.0" is not the edge a caller
+    means — the label is what names it.
+    """
+    last: object = "<no frame>"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while loop.time() < deadline:
+        if schedule is not None:
+            schedule()
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=2)
+        except TimeoutError:
+            continue
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        frame = json.loads(text)
+        if frame.get("op") != "projection":
+            continue
+        seen = frame["data"].get("activity")
+        last = frame["data"].get("activity_started_s")
+        if last == want and (activity is None or seen == activity):
+            return frame
+        last_pair = f"{seen!r}/{last!r}"
+        last = f"activity {last_pair}"
+    raise AssertionError(
+        f"no pushed frame carried activity_started_s={want!r}"
+        + (f" for phase {activity!r}" if activity else "")
+        + f" (last {last!r})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4, BLOCKER 1 + MINOR 1: the PUSHED age, off the wire the daemon reads.
+
+    Every other band-age assertion in the tree drives the fold directly or reads
+    the handle's seed, and the runtime's own push path is where review round 4
+    found the blocker: it re-dated through ``self._projection_sink`` — in
+    production a SECOND fold the runtime builds over the handle's projection
+    object and never feeds — so the empty state of that fold overwrote the live
+    age with ``None`` on every frame build, and the phone withheld its clock for
+    every phase, watched edges included.
+
+    So this drives the production path end to end: a real ``TuiSessionHandle``
+    over a real session shape, a real ``RuntimeServer``, a real daemon-kind dial
+    (which is what builds the runtime's own sink), real harness events through
+    the handle's stream, and the age read off the frames the daemon receives.
+    """
+    import local_operator.mobile.projection as projection_module
+    from local_operator.harness.types import (
+        AgentEndEvent,
+        AgentStartEvent,
+        Message,
+        MessageUpdateEvent,
+    )
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from tests.unit.mobile.test_projection import _StubClock
+    from tests.unit.tui.test_app_pilot import FakeSession
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    session = FakeSession()
+    session.streaming = True
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        assert runtime.projection_sink is not None, "a daemon dial is what builds the sink"
+
+        session.emit(AgentStartEvent(generation=1))
+        session.emit(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+        frame = await _until_push(
+            reader, 0.0, activity="responding", schedule=runtime._schedule_push
+        )
+        assert frame["data"]["activity"] == "responding"
+        assert frame["data"]["activity_started_s"] == 0.0, "a watched edge publishes a KNOWN zero"
+
+        # 45 s of prose with no band event in it: the pushed age must be the
+        # PHASE's, not the runtime's own empty fold's state and not the last
+        # edge's zero.
+        clock.advance(45)
+        session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
+        await _until_push(reader, 45.0, activity="responding", schedule=runtime._schedule_push)
+
+        # An instant the fold cannot date still crosses as unknown, never as a zero.
+        session.emit(AgentEndEvent(generation=1))
+        await _until_push(reader, None, schedule=runtime._schedule_push)
     finally:
         if writer is not None:
             writer.close()

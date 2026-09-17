@@ -601,6 +601,16 @@ def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.mono
     (a peer's clock ahead of ours, a stamp written by a machine whose clock
     was later corrected) means "age unknown, treat as new" rather than a
     negative elapsed time that would render as a nonsense duration.
+
+    THE PHONE HAS A SECOND COPY OF THIS RULE, deliberately:
+    ``mobile/projection.py``'s own ``monotonic_from_epoch``, because that module
+    is imported by the phone daemon and by an owned session's runtime, and this
+    one lives in a Textual widget module they must not pull in to divide one
+    number. Anything changed here has to change there — and
+    ``tests/unit/mobile/test_projection.py``
+    (``test_the_phone_epoch_conversion_matches_the_tui_widgets``) pins the two
+    equal across a frozen table, including the future-epoch clamp, so a
+    divergence fails rather than shipping.
     """
     return clock() - max(0.0, time.time() - epoch)
 
