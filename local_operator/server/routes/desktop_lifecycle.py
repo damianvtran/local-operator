@@ -210,7 +210,7 @@ async def mcp_status(session_id: str, request: Request):
     # same session answered 200 with no owner at all and 503 with a silent one.
     # The live branch is untouched: a bound owner still answers from its own
     # runtime.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
             from local_operator.mcp.config import (
@@ -246,7 +246,7 @@ async def mcp_status(session_id: str, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/mcp", response_model=CRUDResponse[Result])
 async def mcp_control(session_id: str, body: MCPControl, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         await bridge.remote.bind_runtime()
         result = await bridge.remote.route_shared_slash("desktop_mcp", body.model_dump_json())
@@ -265,7 +265,7 @@ async def mcp_control(session_id: str, body: MCPControl, request: Request):
     "/v1/desktop/sessions/{session_id}/mcp/credentials", response_model=CRUDResponse[Result]
 )
 async def mcp_credentials(session_id: str, body: MCPCredentials, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         await bridge.remote.bind_runtime()
         # Dedicated owner RPC; no command journal, request receipts, or session
@@ -282,7 +282,7 @@ async def mcp_credentials(session_id: str, body: MCPCredentials, request: Reques
 
 @router.post("/v1/desktop/sessions/{session_id}/credentials", response_model=CRUDResponse[Result])
 async def credential(session_id: str, body: Credential, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         await bridge.remote.bind_runtime()
         # Never enter the command receipt journal, transcript, or slash args.
@@ -311,7 +311,7 @@ async def variables(session_id: str, request: Request):
     control envelope: none can be served without an owner, and a refusal one of
     them did make has to say so.
     """
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
             # THE COLD PAYLOAD DEPENDS ON WHY IT IS COLD, because ``variables: []``
@@ -340,7 +340,7 @@ async def variables(session_id: str, request: Request):
 )
 async def create_variable(session_id: str, body: VariableCreate, request: Request):
     """Create a variable in the session's live interpreter namespace."""
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
             # Mutations never spawn a runtime and never spawn a kernel: a panel
@@ -359,7 +359,7 @@ async def create_variable(session_id: str, body: VariableCreate, request: Reques
 )
 async def update_variable(session_id: str, key: str, body: VariableUpdate, request: Request):
     """Replace an existing variable's value, refusing when no such key is stored."""
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
             refuse_variables("runtime_cold")
@@ -375,7 +375,7 @@ async def update_variable(session_id: str, key: str, body: VariableUpdate, reque
 )
 async def delete_variable(session_id: str, key: str, request: Request):
     """Remove one variable from the session's live interpreter namespace."""
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
             refuse_variables("runtime_cold")
@@ -387,7 +387,7 @@ async def delete_variable(session_id: str, key: str, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/fork", response_model=CRUDResponse[Result])
 async def fork(session_id: str, body: Fork, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             assert bridge.remote is not None
@@ -425,11 +425,11 @@ async def stop(body: Stop, request: Request):
         # Resolve every target before stopping any. A stale picker selection
         # must not produce a half-applied batch merely because its bad row was last.
         for target in dict.fromkeys(body.targets):
-            async with errors(), host(request).session(target):
+            async with errors(request), host(request).session(target):
                 pass
         rows = []
         for target in dict.fromkeys(body.targets):
-            async with errors(), host(request).session(target) as bridge:
+            async with errors(request), host(request).session(target) as bridge:
                 assert bridge.remote is not None
                 # A stop never engages a cold runtime merely to shut it down.
                 if bridge.remote.is_cold:
@@ -441,7 +441,7 @@ async def stop(body: Stop, request: Request):
                     )
         return {"data": {"sessions": rows}}
 
-    async with errors():
+    async with errors(request):
         # THE ORDERING ASK, distinct from the door below and the reason it is a
         # SECOND call rather than a redundant one: this handler claims a durable
         # receipt (`receipts(request).run`) BEFORE `execute` takes a bridge, and a
@@ -480,7 +480,7 @@ async def aside(session_id: str, body: AsideInput, request: Request):
     turns.append(Message.user(body.text))
     entry: Aside | None = None
     try:
-        async with errors(), host(request).session(session_id) as bridge:
+        async with errors(request), host(request).session(session_id) as bridge:
             # THE STATE MOVES IN HERE, AFTER THE DOOR, and that ordering is the
             # whole reason this handler is written this way: ``values[...]`` and
             # ``previous.adopted`` are the aside store's admission, they used to be
@@ -564,13 +564,13 @@ async def adopt(session_id: str, aside_id: str, body: Adopt, request: Request):
         # Latch before the first await, including bridge acquisition: separate
         # request IDs can otherwise both pass the check and duplicate history.
         entry.adopted = True
-        async with errors(), host(request).session(session_id) as bridge:
+        async with errors(request), host(request).session(session_id) as bridge:
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
             await bridge.remote.adopt_aside(entry.turns)
         return {"data": {"aside_id": aside_id, "status": "adopted"}}
 
-    async with errors():
+    async with errors(request):
         # The ordering ask, for the reason spelled out on ``stop`` above: this
         # route claims its receipt before ``execute`` reaches the door, and a
         # claimed-but-unfinished receipt is indeterminate for the client's retry.

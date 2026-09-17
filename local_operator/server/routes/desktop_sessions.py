@@ -66,6 +66,11 @@ from local_operator.server.utils.desktop_sessions import (
     move_session,
     resolve_working_directory,
 )
+from local_operator.server.utils.store_failures import (
+    StoreFailure,
+    sqlite_store_failure,
+    store_failure,
+)
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import MoveIndeterminate, SessionStoreUnavailable
@@ -947,8 +952,59 @@ async def _join_owned(operation: "asyncio.Task[dict[str, Any]]") -> dict[str, An
     return result
 
 
+def store_root(request: Request) -> pathlib.Path:
+    """The config root whose volume a store failure is about.
+
+    Read from the APP's config manager rather than from the process's env
+    default so the answer is about the volume the stores actually live on: a
+    backend started against a relocated root, or a test that mounted the app on
+    a ``tmp_path``, must not have its free space measured somewhere else.
+    """
+    manager = getattr(request.app.state, "config_manager", None)
+    directory = getattr(manager, "config_dir", None)
+    if directory is not None:
+        # ``pathlib`` rather than ``Path``: this module imports FastAPI's ``Path``
+        # for path parameters, and the name is taken.
+        return pathlib.Path(directory)
+    from local_operator.paths import config_dir
+
+    return config_dir()
+
+
+def _store_refusal(request: Request, failure: StoreFailure, error: BaseException) -> HTTPException:
+    """Log what really happened, and build the client's vetted refusal.
+
+    THE LOG RECORD IS THE DELIVERABLE, not a courtesy. This ladder used to raise
+    ``from None`` with no record at all, so a store that could not be written
+    left the operator a sentence about a busy read state and an empty log to
+    check: attributing the 2026-09-17 disk-full incident took an hour of log
+    archaeology through a runtime log that had recorded the same condition three
+    other times. The exception is logged where it is still live, with the route
+    and the session, because the client's copy may never carry it (a store error
+    names file paths -- the rule the ConnectionError arm below states at length).
+    """
+    session_id = request.path_params.get("session_id")
+    logger.log(
+        failure.level,
+        "desktop store failure %s at %s %s%s",
+        failure.code,
+        request.method,
+        request.url.path,
+        f" (session {session_id})" if session_id else "",
+        exc_info=error,
+    )
+    return HTTPException(failure.status, {"code": failure.code, "message": failure.message})
+
+
 @asynccontextmanager
-async def errors() -> AsyncIterator[None]:
+async def errors(request: Request) -> AsyncIterator[None]:
+    """The control plane's shared failure ladder.
+
+    ``request`` is taken rather than reached for, the way ``host(request)`` and
+    ``receipts(request)`` beside it are: two arms below must name the route they
+    failed on and the volume the store lives on, and a ladder shared by six
+    route modules cannot invent either.
+    """
     try:
         yield
     except DaemonRetiring as error:
@@ -1056,13 +1112,20 @@ async def errors() -> AsyncIterator[None]:
             # store had refused (the `code` field of its control error).
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
-    except sqlite3.Error:
-        # Contention on the shared receipt store is transient and retryable, so
-        # it gets a vetted sentence rather than a bare 500 carrying SQLite's own
-        # wording. The text is NOT echoed for the same reason the ConnectionError
-        # ladder below refuses to echo: a store error can name file paths.
-        raise HTTPException(
-            503, "Read state is busy right now. It will catch up on its own."
+    except sqlite3.Error as error:
+        # THREE CONDITIONS, THREE ANSWERS, and the split is the point: this arm
+        # used to answer all of them (contention, a full disk, an unopenable
+        # store, a corrupt one) with the CONTENTION sentence, raised ``from
+        # None`` and logged nowhere. On a full volume that told the operator a
+        # read state was momentarily busy and would heal itself, over the one
+        # condition no amount of retrying clears -- and the client's hint is
+        # exactly "send it again". ``server/utils/store_failures`` owns the
+        # classification and the copy; ``_store_refusal`` owns the log record.
+        #
+        # The text is still NOT echoed for the reason the ConnectionError arm
+        # below refuses to echo: a store error can name file paths.
+        raise _store_refusal(
+            request, sqlite_store_failure(error, store_root(request)), error
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
@@ -1096,6 +1159,28 @@ async def errors() -> AsyncIterator[None]:
         raise HTTPException(
             503, {"code": RUNTIME_UNREACHABLE, "message": RUNTIME_UNREACHABLE_MESSAGE}
         ) from None
+    except OSError as error:
+        # THE LAST ARM, and only for the disk. Placed here rather than beside the
+        # sqlite arm because ``ConnectionError`` -- caught above, with its own
+        # vetted copy -- is an ``OSError``, and because
+        # ``SessionStoreUnavailable`` (the third arm, an ``OSError`` subclass
+        # whose sentence is about a store that could not be WALKED) must keep
+        # winning for its own condition.
+        #
+        # Everything this ladder cannot classify is RE-RAISED untouched: it sits
+        # under every desktop control-plane route, and answering for arbitrary
+        # ``OSError``s would swallow the failures whose own routes have better
+        # words for them -- ``move_session`` answers a bad target with a 409
+        # naming the path precisely because this ladder has no OSError clause.
+        #
+        # What it does answer is ENOSPC. The non-sqlite writes on the send path
+        # (the transcript append, the attachment store) raise this rather than a
+        # sqlite error, and a message that could not be persisted is the same
+        # condition to the user as a store that could not be written.
+        failure = store_failure(error, store_root(request))
+        if failure is None:
+            raise
+        raise _store_refusal(request, failure, error) from None
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
@@ -1105,7 +1190,7 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
     # a bare 500. The decoration is already omitted per row inside `list()`;
     # this ladder covers anything else the pool can raise — including the store
     # it could not walk, which is now a typed 503 rather than an empty 200.
-    async with errors():
+    async with errors(request):
         # THE STATUS STAMPS, read WITHOUT constructing the feed. `getattr`
         # rather than `feed(request)` is deliberate: `feed()` BUILDS the
         # singleton (and the poller that comes with it), so calling it here
@@ -1194,7 +1279,7 @@ async def search_sessions(
     characters because the query is only ever a user's typing, and an unbounded
     one would be projected into every digest comparison.
     """
-    async with errors():
+    async with errors(request):
         return reply(
             {
                 "sessions": await host(request).search(q, limit),
@@ -1255,7 +1340,7 @@ async def create_session(body: CreateSession, request: Request):
         )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
-    async with errors():
+    async with errors(request):
         # REFUSED BEFORE ANYTHING IS CLAIMED OR ADMITTED — before the receipt is
         # claimed and before the draft's own admissions (the working directory, the
         # model spec, the target registry) run: a refused request must leave no
@@ -1402,7 +1487,7 @@ async def preview_session(body: DraftPreview, request: Request):
         )
         return {"frontend": sync_wire_payload(sync)}
 
-    async with errors():
+    async with errors(request):
         return reply(await preview())
 
 
@@ -1413,7 +1498,7 @@ async def snapshot(session_id: str, request: Request):
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
     # ``cold_reason``; the previous envelope answered 503 "Session owner is
     # unavailable" after ~17 s for a runtime whose loop was merely busy.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.snapshot())
 
 
@@ -1425,7 +1510,7 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     # READ, for the same reason as ``snapshot`` beside it.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.history(before_id=before_id, limit=limit))
 
 
@@ -1457,7 +1542,7 @@ async def child_transcript(
     Read-only in the strongest sense: no bridge, no runtime, no message
     admission — a paused conversation answers exactly like a running one.
     """
-    async with errors():
+    async with errors(request):
         return reply(
             await host(request).child_transcript(
                 session_id, child_id, before_id=before_id, limit=limit
@@ -1491,7 +1576,7 @@ async def child_attachment(
     desktop surface; what this route must not become is a way to reach a child
     that is not the named session's, which ``_contained_child_dir`` refuses.
     """
-    async with errors():
+    async with errors(request):
         data, mime_type = await host(request).child_attachment(session_id, child_id, digest)
     return Response(
         content=data,
@@ -1569,7 +1654,7 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
       ``image/gif``. Harmless for real images (the bytes decide what renders),
       but the two values are not a matched pair.
     """
-    async with errors():
+    async with errors(request):
         data, mime_type = await host(request).attachment(session_id, digest)
     return Response(
         content=data,
@@ -1609,7 +1694,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
     on the latch and not on the record: an announced daemon is still the only
     place its client can work (``server/retire.py``).
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def admit():
             assert bridge.remote is not None
@@ -1736,7 +1821,7 @@ async def command(session_id: str, body: Command, request: Request):
         # — the `/mcp logout` / `/login openai` class where a control was accepted
         # as a message while the route would still have run it.
         raise HTTPException(422, refusal)
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             if (
@@ -1868,7 +1953,7 @@ async def answer(session_id: str, body: Answer, request: Request):
     handler's first statement: a stale-epoch answer on a latched daemon must not
     get a refusal that suggests retrying against this process.
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, "This answer belongs to an earlier session owner")
@@ -1886,7 +1971,7 @@ async def answer(session_id: str, body: Answer, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[AttentionState])
 async def seen(session_id: str, body: Seen, request: Request):
-    async with errors():
+    async with errors(request):
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
 
 
@@ -1907,7 +1992,7 @@ async def notified(session_id: str, body: Notified, request: Request):
     no runtime is started, and neither ``unseen`` nor the read watermark moves.
     Notifying is not reading.
     """
-    async with errors():
+    async with errors(request):
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
 
@@ -1968,7 +2053,7 @@ async def pin(session_id: str, body: Pin, request: Request):
     difference between the two, and inventing a code for it would be a
     distinction with no remedy behind it.
     """
-    async with errors():
+    async with errors(request):
         return reply(await host(request).set_pin(session_id, body.pinned))
 
 
@@ -1980,7 +2065,7 @@ async def watch(session_id: str, body: Watch, request: Request):
     # made the panel report a lost connection for a session that was running.
     # The visible lease this beat carries still CREATES residency (through
     # ``bridge.watch`` and its lease-warm loop); read mode bounds only the attach.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         await bridge.watch(body.subscription_id, visible=body.visible, can_notify=body.can_notify)
         return reply({"lease_seconds": 45})
 
@@ -2040,7 +2125,7 @@ async def warm(session_id: str, body: Warm, request: Request):
     for.
     """
     del body
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         return reply({"state": await bridge.warm()})
 
@@ -2225,7 +2310,7 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
     Origin, 503 a desktop capability that is not configured or an owner that
     cannot be reached (``ConnectionError``/``RuntimeError``/``TimeoutError``).
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             assert bridge.remote is not None
@@ -2371,7 +2456,7 @@ async def move(session_id: str, body: MoveSession, request: Request):
     rolled back — restoring the old marker there would overwrite a committed move
     with a stale one.
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             try:
@@ -2420,7 +2505,7 @@ async def events(
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     context = host(request).session(session_id, read=True)
-    async with errors():
+    async with errors(request):
         bridge: DesktopSessionBridge = await context.__aenter__()
         try:
             # ADDITIVE NEGOTIATION (contract §C). ``frontend_replace=1`` says
