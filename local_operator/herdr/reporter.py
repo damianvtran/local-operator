@@ -202,10 +202,10 @@ inherited. A ``lop`` window opened from a shell inside another pane — a split,
 a nested session, an ``ssh`` landing on a host whose login environment was
 captured in a pane — carries the marker of the pane it was started FROM, and
 the detection above reads it as "this process is in that pane". Herdr will not
-correct it for us: ``pane.report_agent`` accepts any ``--pane`` from any
-caller and performs no validation server-side (``src/app/api/panes.rs`` in
-0.9.0 and 0.9.1), so nothing rejects a report about a pane the caller is not
-in.
+correct it for us: the ``pane.report_agent`` socket API performs no check that
+the caller is in the pane it names (``src/app/api/panes.rs`` in 0.9.0 and
+0.9.1), and the CLI passes the pane id positionally, so nothing rejects a
+report about a pane the caller is not in.
 
 What that produced, measured in an isolated Herdr server: TWO writers on one
 ``(pane, source)`` row — the real session and the interloper — each running
@@ -231,14 +231,41 @@ THREE-VALUED and the third value is the one that matters. Identifying
 ourselves in the payload is OWNED: we are the shell, or we share the pane's
 foreground group, or we are one of its foreground processes, or our ancestry
 reaches its shell (the backgrounded-in-the-pane case, which is what ``lop``
-is). A payload that parsed and rules all of that out is FOREIGN, and only then
-does ``start_reporter`` return None — one bounded call, once per process, at
-session adoption.
+is). A payload for a DIFFERENT pane than the one asked about is UNKNOWN rather
+than a verdict about ours, since Herdr echoes the pane id on every call.
+
+FOREIGN is the narrow case and only ``start_reporter`` returning None rests on
+it: the payload parsed, it named at least one identity field, and every
+comparison that field made possible actually happened and came back negative —
+our pid against ``shell_pid`` and against ``foreground_processes``, our process
+group against ``foreground_process_group_id``. A payload that names only a
+process group, on a process whose own group could not be read, compared
+nothing and is UNKNOWN.
+
+That rule is the module's doctrine in both directions, and the deliberate
+cost is on one side of it: where ``ps`` cannot answer or the walk runs out of
+budget, an interloper reports again — the ~2/min flap could come back on such
+a host. The walk of a process STARTED inside the pane terminates at a readable
+pid 1 within a few hops, so a real interloper still reads FOREIGN and the cost
+is narrow; silencing a legitimate row is not narrow, and it is the failure
+this module's contract forbids.
+
+The check is one bounded call: a :data:`PANE_PROBE_TIMEOUT_S` probe plus an
+:data:`ANCESTRY_BUDGET_S` walk, and its verdict is MEMOIZED per process keyed
+by the pane id, so adopting a session again or swapping sessions does not
+re-ask. It runs INLINE on the calling thread — which is the app's event loop,
+at session adoption — so that budget is worst-case loop time: ~1 s against a
+wedged ``herdr`` socket, ~3 s with a wedged ``ps`` behind it. The common case
+measured on 0.9.0 is ~10 ms. Moving it off the loop (``asyncio.to_thread``,
+as ``mobile.peer_send`` does for its own walk) is a follow-up, and it needs an
+awaitable caller at ``app._adopt_session`` before it is possible at all.
 
 Everything else is UNKNOWN, AND UNKNOWN FAILS OPEN: a probe that failed or
 timed out, a non-zero exit, ``pane_not_found``, an unparsable payload, a
-missing ``process_info``, a payload naming no process at all, a ``ps`` that
-cannot walk the tree. Reporting anyway is deliberate. Herdr being unreachable
+missing ``process_info``, a payload naming no identity field at all, an
+ancestry walk that could not finish (``ps`` missing, a lookup that answered
+nothing, the hop or time budget spent), an exception out of the probe or the
+rule. Reporting anyway is deliberate. Herdr being unreachable
 is not evidence that this process is somewhere else, and the failure this
 module's contract forbids is SILENCING a legitimate row: a ``lop`` session
 that never reports leaves the panel showing whatever screen detection guessed,
@@ -273,7 +300,7 @@ import subprocess
 import threading
 import time
 import weakref
-from typing import Callable, Literal, Mapping, Sequence, cast
+from typing import Callable, Literal, Mapping, Sequence, TypeAlias, cast
 
 from local_operator.terminals import HERDR_BIN_ENV, HERDR_PANE_ENV, is_herdr
 
@@ -301,9 +328,12 @@ HERDR_AGENT = "local-operator"
 #: session opened in a pane whose Agents row belongs to something else.
 _ENV_DISABLE = "LOCAL_OPERATOR_NO_HERDR"
 
-#: How long one ``herdr`` call may take before it is abandoned. The TUI never
-#: waits on it (the worker does), but a wedged socket must not leak a process
-#: per transition either. The same figure as ``multiplexer.cmux.CALL_TIMEOUT_S``.
+#: How long one ``herdr`` DELIVERY call may take before it is abandoned. These
+#: run on the reporter's worker thread, never the caller's, and a wedged socket
+#: must not leak a process per transition either. The same figure as
+#: ``multiplexer.cmux.CALL_TIMEOUT_S``. The ownership probe is the one ``herdr``
+#: call that does NOT run on the worker and it has its own, much shorter budget
+#: — :data:`PANE_PROBE_TIMEOUT_S`.
 CALL_TIMEOUT_S = 5.0
 
 #: Backoff between delivery attempts for ONE queued call, in seconds; its
@@ -316,19 +346,34 @@ RETRY_BACKOFF_S: tuple[float, ...] = (0.5, 2.0, 8.0)
 #: reporter so tests do not wait on it. See "WHY A HEARTBEAT" above.
 RESYNC_INTERVAL_S = 30.0
 
-#: How long ``ps`` may take while walking our own ancestry. The walk is one
-#: ``ps`` per hop and the check runs once per process, at session adoption, so
-#: this bounds a pathological tree rather than a steady cost. The same figure
-#: ``mobile.peer_send._parent_pid`` uses; that helper is private to its module
-#: and duplicated here rather than shared: that helper is private to a
-#: module this change does not touch, and sharing it would mean a second way
-#: of asking the same question beside an established one.
+#: How long ``ps`` may take for ONE hop of the ancestry walk. The walk itself
+#: is bounded separately — see :data:`ANCESTRY_BUDGET_S` — because a per-call
+#: timeout multiplied by the hop bound is not a bound anybody can reason about.
+#: The same figure ``mobile.peer_send._parent_pid`` uses; that helper is
+#: private to a module this change does not touch, so the shape is duplicated
+#: here rather than imported. Unifying the two is a follow-up.
 PARENT_LOOKUP_TIMEOUT_S = 2.0
+
+#: How long the WHOLE ancestry walk may take. Exceeding it is UNKNOWN, not
+#: "not an ancestor": a process tree this slow to read is one we cannot
+#: conclude anything from, and the module's rule is that a legitimate row is
+#: never silenced on an unanswerable question.
+ANCESTRY_BUDGET_S = 2.0
+
+#: How long one ``herdr pane process-info`` may take. This is the one ``herdr``
+#: call that does NOT run on the reporter's worker — it runs inline in
+#: :func:`start_reporter`, on whatever thread adopts a session — so its budget
+#: is set from the measured cost of the call rather than from
+#: :data:`CALL_TIMEOUT_S`: a unix-socket round trip on herdr 0.9.0 measured at
+#: ~12 ms, which makes 1 s three orders of magnitude of headroom and still
+#: three orders under the five times longer figure this used to borrow.
+PANE_PROBE_TIMEOUT_S = 1.0
 
 #: Bounded so a pathological or looping process tree cannot turn the
 #: ownership check into a walk, and because a process more than a few hops up
 #: is not plausibly the pane's shell. Mirrors
-#: ``mobile.peer_send._ANCESTRY_MAX_HOPS``.
+#: ``mobile.peer_send._ANCESTRY_MAX_HOPS``. Running out of hops is UNKNOWN
+#: rather than negative — see :func:`_reaches_ancestor`.
 _ANCESTRY_MAX_HOPS = 8
 
 #: Worst-case delay a user can experience at interpreter exit because of the
@@ -360,13 +405,17 @@ Clock = Callable[[], int]
 #: mint counter that makes a stale read harmless without the lock.
 StateProvider = Callable[[], HerdrState]
 
-#: ``(pane_id, binary) -> stdout of ``herdr pane process-info``, or ``None``
-#: on ANY failure``. The answer to "which processes are in this pane", used
-#: to decide whether the marker environment may be believed. Injectable
-#: because the alternative — spawning ``herdr`` for real — is what every test
-#: in this module exists to avoid, and because a probe that raises has to be
-#: survivable. See "WHY THE PANE ID IS NOT TRUSTED".
-PaneProbe = Callable[[str, str], str | None]
+#: ``(pane_id, binary) -> stdout`` of the pane process-info call, or ``None``
+#: on ANY failure: the answer to "which processes are in this pane", used to
+#: decide whether the marker environment may be believed. Injectable because
+#: the alternative — spawning ``herdr`` for real — is what every test in this
+#: module exists to avoid. A probe that RAISES is survivable by contract: the
+#: caller reads any exception out of it as UNKNOWN and reports anyway.
+#:
+#: ``TypeAlias`` is spelled out here because the alias carries a union in its
+#: return position, which pyright will not infer as a type alias from the bare
+#: assignment the sibling aliases use.
+PaneProbe: TypeAlias = Callable[[str, str], str | None]
 
 
 def _default_clock() -> int:
@@ -905,13 +954,16 @@ def _default_pane_probe(pane_id: str, binary: str) -> str | None:
     ``{"error":{"code":"pane_not_found"...}}`` on STDERR with ``rc=1``, so
     reading stdout only on ``rc == 0`` covers it, and an unparsable stdout is
     the parser's problem rather than this function's.
+
+    The timeout is :data:`PANE_PROBE_TIMEOUT_S` and not :data:`CALL_TIMEOUT_S`
+    because this call runs inline on the adopting thread: see that constant.
     """
     try:
         completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
             [binary, "pane", "process-info", "--pane", pane_id],
             capture_output=True,
             text=True,
-            timeout=CALL_TIMEOUT_S,
+            timeout=PANE_PROBE_TIMEOUT_S,
             check=False,
         )
     except Exception:  # noqa: BLE001 — unknown, and unknown fails open
@@ -1025,20 +1077,37 @@ def _foreground_pids(value: object) -> frozenset[int]:
     return frozenset(pids)
 
 
-def _reaches_ancestor(pid: int, target: int, parent_of: Callable[[int], int | None]) -> bool:
-    """Whether ``pid``'s ancestry reaches ``target`` within the hop bound.
+def _reaches_ancestor(pid: int, target: int, parent_of: Callable[[int], int | None]) -> bool | None:
+    """Whether ``pid``'s ancestry reaches ``target``: True, False, or None.
 
-    Bounded and cycle-safe: a tree that loops (or a ``parent_of`` that
-    answers wrongly) must not spin here, so a parent already visited ends the
-    walk, as does a parent at or below pid 1. Only a strict ancestor counts —
-    a process is not its own ancestor, which is why the walk starts from the
-    parent rather than from ``pid``.
+    THREE-VALUED, and the difference between the last two is the whole point
+    of this function's shape. **False** means the tree was walked to its end
+    and the target was not on the way — a parent at or below pid 1, or a
+    cycle that proves the chain loops — which is a real answer. **None** means
+    the walk could not be finished: a parent lookup that failed or answered
+    nothing (``ps`` missing, a process that exited, a busybox that prints
+    nothing), or the hop bound running out without reaching either the target
+    or pid 1. Reading that second case as "not an ancestor" is what the
+    reviewer caught: on a host where ``ps`` is unusable it turned the ancestry
+    arm into a negative, and an ancestry-only lop — the backgrounded-in-the-
+    pane case this arm exists for — would be silenced. UNKNOWN keeps the arm
+    from voting, and the verdict caller fails open on it.
+
+    Bounded twice over: ``_ANCESTRY_MAX_HOPS`` hops, and an overall
+    :data:`ANCESTRY_BUDGET_S` so eight slow-but-not-hanging lookups cannot add
+    up to eight times the per-hop timeout. Running out of either is UNKNOWN.
+    Cycle-safe, and a process is never its own ancestor.
     """
     seen = {pid}
     current = pid
+    deadline = time.monotonic() + ANCESTRY_BUDGET_S
     for _hop in range(_ANCESTRY_MAX_HOPS):
+        if time.monotonic() >= deadline:
+            return None
         parent = parent_of(current)
-        if parent is None or parent <= 1:
+        if parent is None:
+            return None
+        if parent <= 1:
             return False
         if parent == target:
             return True
@@ -1046,7 +1115,7 @@ def _reaches_ancestor(pid: int, target: int, parent_of: Callable[[int], int | No
             return False
         seen.add(parent)
         current = parent
-    return False
+    return None
 
 
 def _pane_ownership(
@@ -1055,15 +1124,40 @@ def _pane_ownership(
     pid: int,
     pgid: int,
     parent_of: Callable[[int], int | None],
+    pane_id: str | None = None,
 ) -> bool | None:
     """Whether this process is in the pane the payload describes.
 
     Tri-state, and the third value is the point: **True** = in the pane,
-    **False** = provably NOT in it, **None** = could not tell. ``False`` is
-    returned only when the payload parsed and named at least one process —
-    every other outcome is ``None``, because an absent identity field is
-    missing information and reading it as "not mine" would silence the row of
-    a process that is exactly where it says.
+    **False** = provably NOT in it, **None** = could not tell.
+
+    ``False`` requires TWO things, and the second is what the reviewer's
+    counter-example was missing. The payload must have named at least one
+    identity field, AND every comparison that field made possible must have
+    actually happened and been negative:
+
+    * our pid — against ``shell_pid``, and against ``foreground_processes``;
+    * our process group — against ``foreground_process_group_id``, which
+      requires that OUR group be readable. A payload naming only a group, on a
+      process whose own group ``os.getpgid`` could not read, compared nothing
+      and is UNKNOWN rather than FOREIGN.
+
+    And the ancestry arm only votes when it FINISHES: a walk that reached the
+    tree's root or proved a cycle is negative evidence, while one that could
+    not finish is ``None`` and makes the whole verdict ``None`` (see
+    :func:`_reaches_ancestor`). The accepted cost of that rule: on a host
+    where ``ps`` cannot answer, an interloper reports again. It is a narrow
+    cost — the chain of a process started inside the pane terminates at a
+    readable pid 1 within a few hops, so the real interloper still reads
+    FOREIGN — and it is the right side of the trade for a module whose
+    contract forbids silencing a legitimate row.
+
+    ``pane_id`` is the pane we ASKED about, when the caller knows it. Herdr
+    echoes it in ``process_info.pane_id`` on every call (measured), so a
+    payload describing some other pane is UNKNOWN: its pids and groups are
+    answers about a pane we did not ask about, which is exactly the case where
+    a comparison would be meaningless and a FOREIGN verdict would silence a
+    legitimate row.
 
     The four positive signals, weakest last:
 
@@ -1080,22 +1174,98 @@ def _pane_ownership(
     info = _process_info(payload)
     if info is None:
         return None
+    payload_pane = info.get("pane_id")
+    if (
+        pane_id is not None
+        and isinstance(payload_pane, str)
+        and payload_pane
+        and payload_pane != pane_id
+    ):
+        return None
     shell_pid = _as_pid(info.get("shell_pid"))
     foreground_pgid = _as_pid(info.get("foreground_process_group_id"))
     foreground_pids = _foreground_pids(info.get("foreground_processes"))
     if shell_pid is None and foreground_pgid is None and not foreground_pids:
         # Nothing to compare against. A payload that parsed but names no
-        # process is not evidence of foreignness.
+        # identity field is not evidence of foreignness.
         return None
+    # What a FOREIGN verdict is allowed to rest on: a comparison of our pid,
+    # which we always have, or a comparison of our group, which needs both
+    # sides. Neither is available from a payload that names only a group when
+    # our own group is unreadable.
+    compared_a_pid = shell_pid is not None or bool(foreground_pids)
+    compared_a_group = pgid > 0 and foreground_pgid is not None
     if shell_pid is not None and pid == shell_pid:
         return True
-    if pgid > 0 and foreground_pgid is not None and pgid == foreground_pgid:
+    if compared_a_group and pgid == foreground_pgid:
         return True
     if pid in foreground_pids:
         return True
-    if shell_pid is not None and _reaches_ancestor(pid, shell_pid, parent_of):
-        return True
+    if shell_pid is not None:
+        ancestry = _reaches_ancestor(pid, shell_pid, parent_of)
+        if ancestry is True:
+            return True
+        if ancestry is None:
+            # The walk could not finish, and it was the last thing that might
+            # have said yes. UNKNOWN: report anyway.
+            return None
+    if not (compared_a_pid or compared_a_group):
+        return None
     return False
+
+
+#: Verdicts already computed in this process, keyed by pane id. A one-element
+#: tuple so a cached ``None`` — which is a real verdict here, UNKNOWN — is
+#: distinguishable from a miss. A plain dict with no lock: each operation is a
+#: single dict method under the GIL, the key is an immutable ``str``, and two
+#: threads racing on one key can only compute the same answer twice. There is
+#: no invariant for a lock to protect, and holding one across the probe would
+#: serialise every session adoption behind the slowest ``herdr`` call.
+_OWNERSHIP_CACHE: dict[str, tuple[bool | None]] = {}
+
+
+def _ownership_verdict(
+    pane_id: str,
+    binary: str,
+    probe: PaneProbe,
+    parent_of: Callable[[int], int | None],
+) -> bool | None:
+    """The memoized ownership verdict for ``pane_id``. Never raises.
+
+    MEMOIZED per process, keyed by the pane id, because the check is not free
+    and its callers are cheap to repeat: ``app._adopt_session`` runs on every
+    session swap, and ``_start_herdr_reporter`` returns early only when a
+    reporter EXISTS — so on the FOREIGN path, which is the path this module's
+    fix creates, every later swap would ask again. One ask per pane per
+    process is what "once per process" in the prose actually means.
+
+    No lock around the dict, and it does not need one: the memo only has to
+    avoid re-running a subprocess, and two adopters racing on the same key can
+    only compute the same answer twice.
+
+    An exception out of the probe OR out of the rule is UNKNOWN, not silence.
+    That is a nested ``try`` rather than the caller's outer handler, which
+    logs and returns None: a check that could not run is "could not tell", and
+    "could not tell" reports anyway. The default probe swallows its own
+    failures, so this only fires for an injected or future probe, which is
+    exactly the case the :data:`PaneProbe` contract calls survivable.
+    """
+    if pane_id in _OWNERSHIP_CACHE:
+        return _OWNERSHIP_CACHE[pane_id][0]
+    try:
+        payload = probe(pane_id, binary)
+        verdict = _pane_ownership(
+            payload,
+            pane_id=pane_id,
+            pid=os.getpid(),
+            pgid=_process_group(0),
+            parent_of=parent_of,
+        )
+    except Exception:  # noqa: BLE001 — a check that could not run is UNKNOWN
+        logger.debug("pane ownership check failed for pane %s", pane_id, exc_info=True)
+        verdict = None
+    _OWNERSHIP_CACHE[pane_id] = (verdict,)
+    return verdict
 
 
 def start_reporter(
@@ -1121,8 +1291,11 @@ def start_reporter(
 
     ``pane_probe`` and ``parent_of`` exist so tests can answer the ownership
     question without spawning anything; production takes the two module
-    defaults. See "WHY THE PANE ID IS NOT TRUSTED" for why the marker is
-    checked at all, and why UNKNOWN reports anyway.
+    defaults. The answer is MEMOIZED per process keyed by pane id, so a test
+    that injects them clears :data:`_OWNERSHIP_CACHE` between cases (this
+    module's own suite does it with an autouse fixture) — the memo is real
+    behaviour, not a test seam. See "WHY THE PANE ID IS NOT TRUSTED" for why
+    the marker is checked at all, and why UNKNOWN reports anyway.
     """
     try:
         source = _source(env)
@@ -1135,19 +1308,15 @@ def start_reporter(
             logger.debug("inside Herdr but no herdr binary is resolvable; not reporting")
             return None
         pane_id = (source.get(HERDR_PANE_ENV) or "").strip()
-        # One bounded call, once per process, and only for a pane id there is
-        # something to ask about. `False` is the ONLY verdict that stops here;
-        # `True` and `None` both proceed, because a `herdr` that cannot answer
-        # is not evidence that this process is somewhere else.
+        # One bounded, memoized call, and only for a pane id there is something
+        # to ask about. `False` is the ONLY verdict that stops here; `True` and
+        # `None` both proceed, because a `herdr` that cannot answer is not
+        # evidence that this process is somewhere else.
         if pane_id:
-            probe = pane_probe or _default_pane_probe
-            ownership = _pane_ownership(
-                probe(pane_id, binary),
-                pid=os.getpid(),
-                pgid=_process_group(0),
-                parent_of=parent_of or _default_parent_pid,
+            verdict = _ownership_verdict(
+                pane_id, binary, pane_probe or _default_pane_probe, parent_of or _default_parent_pid
             )
-            if ownership is False:
+            if verdict is False:
                 logger.debug(
                     "not reporting for Herdr pane %s: this process is not in that pane",
                     pane_id,
