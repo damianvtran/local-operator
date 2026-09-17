@@ -346,6 +346,20 @@ class Worker:
         helper as every other string this process emits: the reason is a worker
         literal today, but ``_dispatch`` re-raises an adapter-supplied
         ``RpcProtocolError`` unchanged, so nothing here may assume that.
+
+        NOT AUTHENTICATED, AND IT CANNOT BE. The adapter is loaded in-process
+        and ``main`` redirects fd 1 to fd 2, so the adapter writes the very
+        stderr the supervisor drains: an adapter that printed this exact prefix
+        could put a look-alike line beside this one. There is no in-band fix --
+        one fd, one process, no secret the adapter lacks. What bounds the
+        damage is where the line lands: ``episode._adapter_stderr_section``
+        presents it under ``--- adapter stderr tail ---``, the section is the
+        adapter's own account rather than harness output, and ``_control_safe``
+        maps every non-printable character to a space so a forged reason cannot
+        fabricate extra lines or a section header of its own. Read a line here
+        as a claim by the worker PROCESS, not as a record this harness wrote;
+        a separate diagnostics descriptor would be the only way to authenticate
+        it, and is not worth a second protocol fd for one line.
         """
 
         reason = _redacted(str(error), MAX_DETAIL_MESSAGE, self._redactions)

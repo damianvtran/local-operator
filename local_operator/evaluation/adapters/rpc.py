@@ -380,7 +380,11 @@ def _timeout_detail(
     the correlation ids last. ``elapsed`` is SAMPLED rather than assumed equal
     to ``timeout``: timer granularity, a busy loop, or an executor in the way
     all push the actual firing time past the deadline, and a gap that is not
-    the deadline is worth recording rather than rounding away.
+    the deadline is worth recording rather than rounding away. It is measured
+    from BEFORE the request frame is written (see ``call``), so it is the
+    caller's wall time for the whole call -- ``wait_for``'s own deadline begins
+    a moment later -- which is the reading "exceeded its budget after N s"
+    claims.
     """
 
     rendered_operation = f"; operation_id {operation_id[:MAX_DETAIL_NAME]}" if operation_id else ""
@@ -388,6 +392,26 @@ def _timeout_detail(
         f"{method} exceeded its {timeout:g}s budget after {elapsed:.1f}s "
         f"(request {request_id}{rendered_operation})"
     )
+
+
+def _attributed_channel_death(error: OSError, detail: str) -> OSError:
+    """Rebuild a failed WRITE as its own error type, carrying ``detail``.
+
+    WHY THE TYPE SURVIVES. ``episode._diagnostic_code`` derives the bundle's
+    ``diagnostic_code`` from the exception TYPE name, so a worker death has to
+    stay ``brokenpipeerror`` -- the bucket the campaign's readouts already
+    group on, and the one an operator greps by when the process tree is gone.
+    Only the human-readable half is replaced; the errno is rebuilt in the same
+    two-argument form ``os.write`` raises it in, so ``str()`` still leads with
+    the cause (``[Errno 32] ...``) rather than discarding the one part of the
+    original message that named anything. A write that failed WITHOUT an errno
+    (``IncrementalWriter``'s own zero-byte guard) keeps the one-argument form
+    instead of rendering an errno-less ``[Errno None]`` prefix.
+    """
+
+    if error.errno is None:
+        return type(error)(detail)
+    return type(error)(error.errno, detail)
 
 
 class RpcClient:
@@ -453,9 +477,17 @@ class RpcClient:
                 method=method,
                 params=params.model_dump(mode="json"),
             )
+            # Started BEFORE the request is written, deliberately: ``elapsed``
+            # is the caller's wall time for the whole call -- the frame going
+            # out included -- not ``wait_for``'s deadline overshoot, which
+            # begins only once ``wait_for`` is entered. A write that queued
+            # behind a full pipe is time this call took, so charging it is the
+            # honest reading of "exceeded its budget after N s"; sampling
+            # after the write would understate a call whose time went into the
+            # channel.
             started = time.monotonic()
             try:
-                self._writer.write(canonical_line(request))
+                self._write_request(request, method)
                 response = await asyncio.wait_for(
                     asyncio.to_thread(self._read_response, request_id, method),
                     funded_timeout(timeout, params),
@@ -473,6 +505,24 @@ class RpcClient:
                         )
                     )
                     await asyncio.sleep(1)
+                except OSError as error:
+                    # The same death seen from the timeout branch: the worker
+                    # that outran its budget is GONE, so the cancel cannot be
+                    # delivered. The timeout detail is what the readouts want
+                    # most and it leads for the same truncation reason; the
+                    # write's own type is what propagates, so the bucket an
+                    # operator greps for does not move. The ``finally`` below
+                    # still poisons with the timeout as the cause.
+                    detail = _timeout_detail(
+                        method,
+                        timeout=timeout,
+                        elapsed=elapsed,
+                        request_id=request_id,
+                        operation_id=operation_id,
+                    )
+                    raise _attributed_channel_death(
+                        error, f"{detail}; the cancel was not delivered"
+                    ) from error
                 finally:
                     await asyncio.shield(
                         self._poison(f"a timeout on {method}, request {request_id}")
@@ -508,6 +558,43 @@ class RpcClient:
             assert response.result is not None
             return response.result
 
+    def _write_request(self, request: RpcRequest, method: AdapterMethod) -> None:
+        """Send one request frame, attributing a dead channel to the call.
+
+        THE WRITE IS WHERE A BETWEEN-STEPS WORKER DEATH IS USUALLY FIRST SEEN.
+        ``supervisor.launch`` closes the parent's own copies of the request and
+        response pipes right after spawn, so a worker that has already exited
+        makes the NEXT write raise EPIPE immediately, and the only other
+        liveness check is ``process.poll()`` inside ``terminate()`` -- which
+        nothing consults until a later call has failed. Re-raised raw, that
+        fatal read ``BrokenPipeError: [Errno 32] Broken pipe``: the mirror
+        image of the READ defect this file fixes elsewhere, naming neither the
+        call nor the request, and the last thing a 6000 s bundle would say
+        about the step it died on.
+
+        The frame limit is attributed here too. It is the same write that could
+        not be completed, the read side already words its own frame faults this
+        way (``_read_response``), and "RPC message exceeds one MiB" alone leaves
+        an operator unable to say which call asked for a frame that size --
+        reachable from a legal batch, since ``MAX_TEXT_LENGTH`` per action times
+        ``MAX_BATCH_SIZE`` is well past ``MAX_RPC_BYTES``.
+        """
+
+        try:
+            data = canonical_line(request)
+        except RpcProtocolError as error:
+            raise RpcProtocolError(
+                f"{error} (while sending {method}, request {request.id})"
+            ) from error
+        try:
+            self._writer.write(data)
+        except OSError as error:
+            raise _attributed_channel_death(
+                error,
+                f"{method} was not sent: the adapter worker closed the channel "
+                f"(request {request.id})",
+            ) from error
+
     def _read_response(self, request_id: int, method: AdapterMethod) -> RpcResponse:
         """Read one reply, attributed to the call it answers.
 
@@ -536,9 +623,17 @@ class RpcClient:
             ) from error
         assert isinstance(parsed, RpcResponse)
         if parsed.id != request_id or parsed.method != method:
+            # What ARRIVED leads and what was expected follows, because the
+            # received ids are this message's distinguishing token and the
+            # readouts cut at 110-160 characters. "expected inspect_requirements
+            # id 1" is shared by every call of that method, so behind the cut it
+            # left a row unable to say which reply failed to answer. One rule
+            # for both messages: the token that separates THIS failure from a
+            # neighbouring one goes before the cut -- method and budget for a
+            # timeout (``_timeout_detail``), the mismatched reply here.
             raise RpcProtocolError(
-                "RPC response ID or method differs from the in-flight call: "
-                f"expected {method} id {request_id}, got {parsed.method} id {parsed.id}"
+                "RPC reply does not match the in-flight call: "
+                f"got {parsed.method} id {parsed.id}, expected {method} id {request_id}"
             )
         return parsed
 

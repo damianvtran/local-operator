@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import time
 from typing import Any
@@ -28,7 +29,7 @@ from local_operator.evaluation.adapters.rpc import (
     parse_canonical_line,
 )
 from local_operator.evaluation.evidence.models import canonical_digest
-from local_operator.evaluation.protocol import ActionBatch
+from local_operator.evaluation.protocol import MAX_TEXT_LENGTH, ActionBatch, TypeAction
 
 
 def request_line() -> bytes:
@@ -106,7 +107,7 @@ async def test_wrong_response_id_or_method_poison_and_terminate() -> None:
         IncrementalWriter(responses_write).write(canonical_line(response))
 
     task = asyncio.create_task(peer())
-    with pytest.raises(RpcProtocolError, match="ID or method") as excinfo:
+    with pytest.raises(RpcProtocolError, match="does not match the in-flight call") as excinfo:
         await client.call("inspect_requirements", InspectRequirementsParams(), timeout=1)
     await task
     assert terminated.is_set()
@@ -114,6 +115,13 @@ async def test_wrong_response_id_or_method_poison_and_terminate() -> None:
     # not tell a reader of the artifact which id was expected or which arrived.
     assert "expected inspect_requirements id 1" in str(excinfo.value)
     assert "got inspect_requirements id 2" in str(excinfo.value)
+    # The reply that did NOT answer is the distinguishing half of this message,
+    # so it leads: the readouts cut the line at 110-160 characters, and
+    # "expected inspect_requirements id 1" is the same for every call of the
+    # method.
+    message = str(excinfo.value)
+    assert message.index("got inspect_requirements id 2") < 110
+    assert message.index("got inspect_requirements id 2") < message.index("expected")
     for fd in (requests_read, requests_write, responses_read, responses_write):
         os.close(fd)
 
@@ -604,6 +612,158 @@ async def test_a_malformed_reply_names_both_the_cause_and_the_call() -> None:
             os.close(fd)
 
 
+@pytest.mark.asyncio
+async def test_a_write_to_a_dead_worker_names_the_call_that_was_not_sent() -> None:
+    """The WRITE side of a channel death, the mirror of the read-side fix.
+
+    ``supervisor.launch`` closes the parent's own copies of the pipes right
+    after spawn, and ``process.poll()`` is only consulted inside
+    ``terminate()``, so a worker that died between steps is normally first
+    observed HERE -- as EPIPE on the next write. That raise used to reach the
+    artifact as ``BrokenPipeError: [Errno 32] Broken pipe``: no method and no
+    request, on the most likely first observation of a dead worker, which made
+    it the widest hole left in the parent-to-worker audit.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    # The worker is gone: this write end has no reader left anywhere.
+    os.close(requests_read)
+    try:
+        with pytest.raises(BrokenPipeError) as excinfo:
+            await client.call("observe", ObserveParams(episode_id="episode"), timeout=5)
+        error = excinfo.value
+        # The TYPE is what ``episode._diagnostic_code`` derives the bundle's
+        # diagnostic_code from, so the bucket an operator greps for is
+        # unchanged, and the errno is the only part of the original message
+        # that named anything at all.
+        assert type(error) is BrokenPipeError
+        assert error.errno == errno.EPIPE
+        message = str(error)
+        assert message.startswith("[Errno 32]")
+        assert "observe was not sent: the adapter worker closed the channel (request 1)" in message
+        # Method and request id are readable inside the narrowest readout width.
+        assert f"{type(error).__name__}: {message}".index("observe was not sent") < 110
+        assert "\n" not in message
+        assert terminated.is_set()
+        # The death still poisons: a later call must not reuse the channel, and
+        # the poison names what killed it and the call it did not send.
+        with pytest.raises(RpcProtocolError) as followup:
+            await client.call("close", CloseParams(operation_id="close-1"), timeout=5)
+        assert "poisoned by BrokenPipeError on observe, request 1" in str(followup.value)
+        assert "close was not sent" in str(followup.value)
+    finally:
+        for fd in (requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_that_cannot_be_delivered_still_names_the_timeout() -> None:
+    """The timeout branch writes too, and its worker can be gone by then.
+
+    A worker that outran its budget is exactly the worker that may have died
+    while it was busy, so the cancel frame can fail on EPIPE. The fatal then
+    has to keep the timeout detail (the truth about this call, and what the
+    readouts bucket on) while still naming the death -- and it must keep the
+    write's own type, so which bucket records the episode does not move.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+
+    async def dying_peer() -> None:
+        await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+        # It took the request and then died: nothing will ever read the cancel.
+        os.close(requests_read)
+
+    peer = asyncio.create_task(dying_peer())
+    try:
+        with pytest.raises(BrokenPipeError) as excinfo:
+            await client.call("close", CloseParams(operation_id="close-1"), timeout=0.25)
+        error = excinfo.value
+        assert type(error) is BrokenPipeError
+        message = str(error)
+        assert "close exceeded its 0.25s budget after" in message
+        assert "(request 1; operation_id close-1)" in message
+        assert "the cancel was not delivered" in message
+        # The timeout detail leads for the same truncation reason as the
+        # timeout-only message it replaces on this path.
+        assert message.index("exceeded its 0.25s budget") < message.index("the cancel")
+        assert terminated.is_set()
+        await peer
+        # The poison is still the timeout: the call was never answered, so a
+        # later call must not read the reply the worker may still produce.
+        with pytest.raises(RpcProtocolError) as followup:
+            await client.call("observe", ObserveParams(episode_id="episode"), timeout=0.25)
+        assert "poisoned by a timeout on close, request 1" in str(followup.value)
+    finally:
+        # ``requests_read`` is deliberately absent: the peer closed it, and
+        # closing it twice raises out of the teardown that is running anyway.
+        for fd in (requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_an_oversize_request_names_the_call_that_could_not_be_sent() -> None:
+    """The request that cannot be framed is the same write that never happens.
+
+    ``MAX_TEXT_LENGTH`` per action times ``MAX_BATCH_SIZE`` is far past
+    ``MAX_RPC_BYTES``, so a LEGAL batch can exceed the frame limit and end the
+    episode on a channel-killing protocol error. "RPC message exceeds one MiB"
+    alone leaves the operator unable to say which call asked for it, which is
+    the read side's own standard (``_read_response``) applied one line earlier.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    batch = ActionBatch(
+        protocol_version="1.0",
+        task_id="task",
+        episode_id="episode",
+        observation_id="obs-1",
+        actions=tuple(
+            TypeAction(observation_id="obs-1", text="x" * MAX_TEXT_LENGTH) for _ in range(12)
+        ),
+    )
+    params = ExecuteParams(
+        operation_id="exec-1",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+    try:
+        # The limit is the real one and the batch is a real legal batch: the
+        # frame cannot be built, which is what makes this path reachable.
+        assert len(params.to_canonical_json()) > MAX_RPC_BYTES
+        with pytest.raises(RpcProtocolError) as excinfo:
+            await client.call("execute", params, timeout=5)
+        message = str(excinfo.value)
+        assert "RPC message exceeds one MiB" in message
+        assert "(while sending execute, request 1)" in message
+        assert terminated.is_set()
+        with pytest.raises(RpcProtocolError) as followup:
+            await client.call("observe", ObserveParams(episode_id="episode"), timeout=5)
+        assert "poisoned by RpcProtocolError on execute, request 1" in str(followup.value)
+    finally:
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
 
 
 def test_error_detail_stays_within_the_line_framing_and_bounds() -> None:
