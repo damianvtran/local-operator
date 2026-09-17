@@ -71,3 +71,66 @@ The transcript box is one row shorter (97x20) exactly where a row is shown, and
 back to 97x21 where it is not: the picker is docked above the composer and takes
 its row from the transcript, which is the same trade the command picker makes.
 The composer (92x1) and the band are unmoved in every frame.
+
+## Round 1 remediation (`round-1-remediation/`)
+
+The five cases above were re-captured after the review round and are
+**byte-identical** to the committed ones (`git status` reports no change to the
+SVGs), which is the evidence for the fix's central claim: `alert=True` on the
+two rows changes the GATE and not one pixel — the row is always `selected`, and
+`command_picker._argument_row` skips the danger tint on the selected row by
+design. The one defect that re-capture did fix was the script itself: it now
+WAITS for session adoption before assigning the buffer, because the `--clear`
+row's gate reads `self._session.goal`, which is empty until the app has adopted
+its session (QA Q1: three runs gave `[True, True, False]`, and an earlier batch
+wrote a row-less `goal-set` frame at 6716 B against the committed 7464 B).
+Three runs per case now reproduce the published geometry exactly.
+
+The frames here are the round-1 remediation delta, captured from
+`cef6a4c4e` (before) and the remediation head (after) with the two scripts added
+in this round:
+
+```sh
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+    docs/evidence/slash-goal-loop-clear/shot_slash_flag_flow.py DIR CASE
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+    docs/evidence/slash-goal-loop-clear/shot_slash_help_row.py OUT.svg 80x50
+```
+
+| frame | case | what it shows |
+| --- | --- | --- |
+| `after/goal-fill.svg` | `shot_slash_flag_flow.py DIR goal-fill` | ONE Enter on `/goal ` FILLS — buffer `/goal --clear`, `goal='land the OAuth refresh fix'`, no receipt. Before the fix the same keystroke cleared the goal (design D1 / UX U1 / code MAJOR-1). |
+| `after/goal-run.svg` | `shot_slash_flag_flow.py DIR goal-run` | The SECOND Enter runs it: `goal=''` and the receipt reads `goal cleared: land the OAuth refresh fix` — the echo the design round asked for (D4 / U3), visible in the frame. |
+| `after/picker-40x30.svg` | `shot_slash_flag_flow.py DIR narrow` | The row at a 40-column terminal (38 painted): `❯  --clear   Clear the standing…`. Before, the shared collapse rule dropped the label and the row was bare `❯  --clear` (UX U5). |
+| `after/help-80x50.svg` | `shot_slash_help_row.py` | `/loop`'s new description on ONE painted line at 80 columns. |
+| `before/help-80x50.svg` | the same script, from `cef6a4c4e` | `--stop or` wrapped with `--clear` orphaned in the command column (D2's phantom command) — the row this edit fixes. |
+| `before/picker-40x30.svg` | `shot_slash_flag_flow.py DIR narrow`, from `cef6a4c4e` | the bare row at 38 painted columns (label dropped, U5's defect). |
+
+There is deliberately no `before` frame for the fill/run pair: at `cef6a4c4e` the
+one-Enter behaviour is the script's own assertion failing, and the base tree has
+no row to fill at all. What the pair proves is the AFTER, plus the measured
+observation the two `before` frames and the earlier rounds carry — `/goal ` +
+Enter left `goal=''` with the notice `goal cleared`, and `/loop ` + Enter set
+`_loop_cancelled=True` where the base refused with `a loop is already running`.
+
+Measured rows (printed by the scripts, through the real compositor /
+`render_rows`, never a width arithmetic of our own):
+
+```
+# /help, painted row for /loop, 80 columns
+before: '  /loop               Loop toward a goal: /loop <goal>, /loop <n>, --stop or'  (76 cells)
+        '  --clear'                                                                    (9 cells, orphan)
+after:  '  /loop               Loop toward a goal: /loop <goal>, <n>; --stop cancels'   (75 cells, one line)
+
+# the argument row, `render_rows(width)` for `/goal ` with a goal set
+before: 100/80/60/44 -> '❯  --clear     Clear the standing goal' ; 40 and 38 -> '❯  --clear'
+after:  100/80/60/44/40 -> '❯  --clear     Clear the standing goal' ; 38 -> '❯  --clear     Clear the standing g…'
+```
+
+`after/help-80x50.svg` is the only frame captured without a settled pair: the
+`/help` table is static text with no arrival animation, unlike the picker row,
+whose first painted frame is checked against its settled duplicate by the
+sibling script (`cmp` on each pair reports no difference).
+
+The PNGs of the earlier cases are separate rasterizations (`rsvg-convert X.svg
+-o X.png`); the two scripts here write SVG plus `.geometry.json` only.

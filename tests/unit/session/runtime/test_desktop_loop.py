@@ -219,3 +219,73 @@ async def test_loop_stop_forms_cancel_the_driver(tmp_path, argument):
         await until(lambda: not handle._prompt_queue)
     finally:
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument", ["--stop ", "--stop\t", "cancel "])
+async def test_a_trailing_space_still_stops_the_loop(tmp_path, argument):
+    """The wire carries `Command.args` verbatim, and the flags match WHOLE.
+
+    Unstripped, `/loop --stop ` fell through the flag comparisons to the count
+    parser and answered `loop_busy` while the driver kept running — a stop that
+    silently did nothing, on the one host where the loop is real work (round 1,
+    reviewer MAJOR-2). The TUI strips the same argument before its handler, so
+    the two hosts disagreed about one word.
+    """
+    session = LoopSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        driver = handle._loop_driver()
+        driver.start("2", session.goal)
+        await until(lambda: len(session.prompt_calls) == 1)
+        result = await handle.run_slash_authoritative("loop", argument, [])
+        assert result["kind"] == "block", result
+        assert not driver.running
+        session.prompt_release.set()
+        await until(lambda: not handle._prompt_queue)
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument", ["--clear ", "--clear\t"])
+async def test_a_trailing_space_on_clear_never_starts_a_loop(tmp_path, argument):
+    """Unstripped this started a PAID unbounded goal-mode loop toward `--clear`.
+
+    That is the worst shape of the same defect: a word that promises to tidy a
+    snapshot away, answered with a loop toward its own literal text.
+    """
+    session = LoopSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        result = await handle.run_slash_authoritative("loop", argument, [])
+        assert result["kind"] == "block", result
+        assert result["data"]["status"] == "idle"
+        assert not handle._loop_driver().running
+        # The idle snapshot is the replaced one, not a loop's state.
+        assert result["data"] == {"type": "loop", "status": "idle", "completed": 0}
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument", ["--stopx", "--clearx", "--clera"])
+async def test_a_bare_unknown_flag_is_refused_instead_of_starting_a_loop(tmp_path, argument):
+    """Two flag vocabularies are taught, so a mixed-up one is the expected typo.
+
+    The documented whole-argument rule sent anything else down the GOAL branch,
+    so `/loop --stopx` started an unbounded paid loop toward the literal flag
+    text (round 1, reviewer NIT-5 / UX U6).
+    """
+    session = LoopSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        result = await handle.run_slash_authoritative("loop", argument, [])
+        assert result["kind"] == "error", result
+        assert result["data"]["code"] == "loop_invalid"
+        assert f"unknown flag {argument}" in result["text"]
+        assert "/loop --stop cancels" in result["text"]
+        assert not handle._loop_driver().running
+        assert session.prompt_calls == []
+    finally:
+        await handle.dispose()

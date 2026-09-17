@@ -104,10 +104,13 @@ async def test_the_clear_flag_never_becomes_the_goal_body(entry):
     try:
         if entry == "authoritative":
             result = await handle.run_slash_authoritative("goal", "--clear", None)
-            assert result["text"] == "goal cleared"
+            # The receipt NAMES what went, on this host too: the runtime's answer
+            # is rendered by a viewer that may have no other sight of the goal
+            # (design D4 / UX U3).
+            assert result["text"] == "goal cleared: existing goal"
             assert not result.get("data")
         else:
-            assert await getattr(handle, entry)("goal", "--clear") == "goal cleared"
+            assert await getattr(handle, entry)("goal", "--clear") == "goal cleared: existing goal"
         await asyncio.sleep(0)
         assert session.goal == ""
         assert session.prompt_calls == []
@@ -129,5 +132,36 @@ async def test_a_goal_body_opening_with_the_flag_is_still_a_goal():
         result = await handle.run_slash_authoritative("goal", "--clear the flaky job", None)
         assert result["data"]["type"] == "goal_set"
         assert session.goal == "--clear the flaky job"
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
+@pytest.mark.parametrize("arg", ["--stop", "--reset", "--cli"])
+async def test_a_bare_unknown_flag_is_refused_instead_of_becoming_the_goal(entry, arg):
+    """Two flag vocabularies are taught, so mixing them is the expected mistake.
+
+    The flags are matched as the WHOLE argument, so an unrecognised one used to
+    be stored: `/goal --stop` made the standing objective `--stop` and submitted
+    a turn carrying it (round 1: UX U6, reviewer NIT-5). The refusal names the
+    forms, and the goal is left alone.
+    """
+    session = GoalSession()
+    session.set_goal("existing goal")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        if entry == "authoritative":
+            result = await handle.run_slash_authoritative("goal", arg, None)
+            assert result["kind"] == "notice"
+            assert result["style"] == "warning"
+            assert f"unknown flag {arg}" in result["text"]
+        else:
+            receipt = await getattr(handle, entry)("goal", arg)
+            assert f"unknown flag {arg}" in receipt
+        await asyncio.sleep(0)
+        assert session.goal == "existing goal"
+        assert session.prompt_calls == []
+        assert session.steer_calls == []
     finally:
         await handle.dispose()
