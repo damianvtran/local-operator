@@ -272,7 +272,7 @@ def _entries(show_subagents: bool = SHOW_SUBAGENTS) -> list[CatalogEntry]:
     return entries
 
 
-def _serve_fixture_to_app_poll() -> None:
+def _serve_fixture_to_app_poll() -> list[str]:
     """Answer the app's own catalog re-poll from the fixture the list is seeded with.
 
     `ctrl+a`/`ctrl+o` post `SubagentLayerToggled`, and the app answers by
@@ -285,10 +285,15 @@ def _serve_fixture_to_app_poll() -> None:
     Handing that poll the fixture is what lets the chord's OWN re-poll land for
     real: the jump `ctrl+o` arms is landed by the `set_entries` this poll
     delivers, against the rows a real store holding this fixture would supply.
-    Only the three store READERS the refresh path calls are redirected — the
-    path itself (generation check, `current_id`, `set_entries`, `set_pins`)
-    runs unchanged, so nothing here hand-sets the state a chord produces, which
-    is the thing this knob's contract forbids.
+    Only the store the refresh path reads and the pin store the pin chord
+    writes are redirected — the path itself (generation check, `current_id`,
+    `set_entries`, `set_pins`) runs unchanged, so nothing here hand-sets the
+    state a chord produces, which is the thing this knob's contract forbids.
+
+    Returns the pin store itself, so the caller can assert the frame's pins
+    against the STORE's rather than against the seed: a chord is allowed to
+    change the pinned set (`f10` does), and only a reset behind its back is the
+    defect this knob has to be able to see.
     """
     from local_operator.tui import session_catalog, sidebar_pins
 
@@ -306,9 +311,33 @@ def _serve_fixture_to_app_poll() -> None:
         # there is no third case to model.
         return _entries(include_subagents)
 
+    fixture_pins = list(PINS)
+
+    def read_pins(directory: Path) -> list[str]:
+        return list(fixture_pins)
+
+    def toggle_pin(directory: Path, session_id: str) -> bool:
+        """`sidebar_pins.toggle_pin`'s contract, over the fixture's own store.
+
+        Pin when absent, unpin when present, newest first, returning the new
+        state. `f10` reaches `action_toggle_pin`, which reads and writes pins;
+        a reader that always answered `PINS` would swallow the toggle, and the
+        capture would report a key that demonstrably fired as one that never
+        reached its action. The real function writes the capture's isolated
+        config file, which the fixture store does not include, so its own
+        `read_pins` answers `[]` and every toggle there would look like a pin.
+        """
+        if session_id in fixture_pins:
+            fixture_pins.remove(session_id)
+            return False
+        fixture_pins.insert(0, session_id)
+        return True
+
     session_catalog.load_catalog = load_catalog
     session_catalog.subagent_population = lambda directory: SUBAGENT_TOTAL
-    sidebar_pins.read_pins = lambda directory: list(PINS)
+    sidebar_pins.read_pins = read_pins
+    sidebar_pins.toggle_pin = toggle_pin
+    return fixture_pins
 
 
 async def _await_sidebar_poll(app: OperatorApp, pilot: Pilot[None]) -> None:
@@ -357,8 +386,15 @@ def _pin_spinner(sidebar: SessionSidebar) -> None:
 
 
 def _widget_state(sidebar: SessionSidebar) -> tuple[object, ...]:
-    """Everything a chord under capture is allowed to move, as one comparison."""
+    """Everything a chord under capture is allowed to move, as one comparison.
+
+    Focus is in here because it is DRAWN — the row caret is
+    `self.has_focus and entry.id == self.cursor_id`, and the footer lead flips
+    to `esc return` — so `f9` is a chord whose effect this has to be able to
+    see rather than report as a chord that never reached its binding.
+    """
     return (
+        sidebar.has_focus,
         sidebar.show_subagents,
         sidebar.cursor_id,
         sidebar._offset,
@@ -426,7 +462,7 @@ async def main() -> None:
             # chord's own `_refresh_sidebar()` is DROPPED while one is pending
             # (`app.py`, `if ... or self._sidebar_refresh_pending: return`), and
             # a dropped re-poll is a jump with no rows to land on. Settle first.
-            _serve_fixture_to_app_poll()
+            fixture_pins = _serve_fixture_to_app_poll()
             await _await_sidebar_poll(app, pilot)
             _pin_spinner(sidebar)
             before = _widget_state(sidebar)
@@ -465,9 +501,10 @@ async def main() -> None:
                 f"no row of the {len(members)}-row list: the frame would draw "
                 "no caret at all"
             )
-            assert tuple(sidebar._pins) == PINS, (
-                f"the app's re-poll dropped the pins {PINS!r} for "
-                f"{sidebar._pins!r}: the frame would lose the ★ Pinned section"
+            assert tuple(sidebar._pins) == tuple(fixture_pins), (
+                f"the sidebar shows pins {sidebar._pins!r} against the store's "
+                f"{tuple(fixture_pins)!r}: the poll reset them behind the "
+                "chord's back, and the frame would lose its ★ Pinned rows"
             )
             # A frame whose caret row is off the DRAWN page paints no caret at
             # all, and a reader cannot tell that frame apart from a chord that
