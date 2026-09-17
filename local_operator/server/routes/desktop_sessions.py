@@ -780,6 +780,17 @@ class Prompt(Input):
         if len(self.model_dump_json().encode()) > 900_000:
             raise ValueError("Message exceeds the canonical control-frame limit")
         command = whole_draft_command(self.text)
+        # The sentence is GENERIC on purpose, and one row is why it must stay
+        # that way: `/credential` is a whole-draft command whose text belongs to
+        # the masked form, so "move it below your text" would name exactly the
+        # prose form that still reaches the model (`MESSAGE_DRAFTS` pins those two
+        # forms as messages). Latent rather than live, because the app's shaper
+        # publishes "The request has invalid fields." for every body-validation 422
+        # (`server/app.py`), so this text reaches no wire — an in-process caller
+        # only, while the route keeps the masked-form instruction. Giving this row
+        # its own sentence here is a behaviour change and does not belong in a
+        # comment-only pass; if that shaper ever starts publishing validator
+        # detail, this row needs one first.
         if command is not None:
             raise ValueError(
                 f"/{command[0].name} is a command, not a message. "
@@ -1665,11 +1676,19 @@ async def command(session_id: str, body: Command, request: Request):
     if spec is None or not spec.desktop_destination:
         raise HTTPException(422, "Unknown command")
     if spec.name == "credential" and body.args:
-        # The ONE command whose trailing text the desktop never consumes: the
-        # secret is entered in the masked form (`argument_shape` is NONE), so any
-        # text here is prose the caller sent to the wrong route. Left as its own
-        # check because the sentence is about the FORM, not about a shape the
-        # admission rule reads.
+        # The ONE command whose trailing text this route REFUSES rather than
+        # consumes, because the secret is entered in the masked form. Left as its
+        # own check because the sentence is about the FORM, not about a shape
+        # `command_argument_refusal` validates.
+        #
+        # It is NOT a row the admission rule calls prose, and that is the half
+        # this comment used to get wrong: the registry publishes
+        # `argument_shape=ANY` for it, so the messages endpoint reads a
+        # whole-draft `/credential <secret>` as the command and answers 422 too.
+        # The two 422s are one policy — the text belongs to the masked form —
+        # and the registry's `ANY` is what keeps the secret out of a paid turn
+        # for a client whose command surface is off and which therefore plans
+        # every draft as `send`.
         raise HTTPException(
             422, "Enter credentials in the masked credential form, not command text"
         )

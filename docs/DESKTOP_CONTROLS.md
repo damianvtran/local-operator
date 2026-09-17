@@ -41,12 +41,27 @@ endpoint's admission rule and the composer's planner both read:
     shape applies, so text after the word is a message (`/compact hello`, which
     the desktop runs and silently discards).
 
+  A third kind of row publishes `any` for a text NOTHING consumes: the command
+  route REFUSES it, so the text is neither prose nor a handler's input
+  (`/credential <key> <value>`, answered with "Enter credentials in the masked
+  credential form, not command text"). `none` there is what let a whole-draft
+  `/credential <secret>` be admitted as a MESSAGE on `/messages` while the route
+  refused the identical text.
+
   **Precedence**: `consumes_prompt` and `prefixes_text` decide FIRST and are the
   whole answer when either is true; the shape is asked after them for text
   neither can describe. A row the booleans carry publishes `any` rather than
   `none`, so reading the shape alone, or OR-ing all three, gives the same answer
   — `none` never means "ask the booleans". The field is emitted on every row
   (never omitted), so no consumer has to infer a default.
+
+  **A row that offers a value list does not publish `none`.** `ArgumentMode`
+  (`arguments` on the wire) says a space here opens a list, so the command takes
+  text and the shape must name where that text goes. The two fields disagreeing —
+  `optional` beside `none` — is what admitted a whole-draft `/credential
+  <secret>` as a MESSAGE while the command route refused the identical text,
+  which is a raw credential on a paid turn for any client that plans prose from
+  this field. Pinned for every row, so a future entry cannot reintroduce it.
 
 A renderer applying those fields reaches the endpoint's own decision; one that
 does not read them keeps its own derivation instead (both keys are additive).
@@ -171,7 +186,12 @@ the one the desktop client reads): nothing is rolled back, the
   for store, confirmed=true for forget. It calls the runtime's `credential_op`. Values
   never enter the command receipt database or transcript; only key names are
   journalled by the existing runtime. `/credential <anything>` is rejected rather
-  than accidentally recording a secret. Names-only listing does not expose values.
+  than accidentally recording a secret — on BOTH routes, and for the same reason:
+  `/commands` answers it with "Enter credentials in the masked credential form,
+  not command text", and `/messages` refuses the whole-draft form as a command
+  because the catalogue publishes `argument_shape: any` for the row. So the text
+  reaches the masked form or nothing; it is never a message. Names-only listing
+  does not expose values.
 - `POST /mcp/credentials`: the MCP-only encrypted write, `{name, values:
   Record<secretId, SecretStr>, confirmed_replace: string[]}`. It is deliberately a
   SEPARATE route from `POST /credentials` above, which is the provider/session
