@@ -83,6 +83,20 @@ APP_SCREEN_INSET = 2
 #: regression, not a feature working.
 REQUESTED_SPINNER_DELAY_S = 0.15
 
+#: How long a `ctrl+o` jump stays armed waiting for the rows it asked for.
+#:
+#: The chord cannot land its own jump from a layer-OFF sidebar: `load_catalog`
+#: filters the hidden population out at the load site, so the rows only exist
+#: once the re-poll the chord posts comes back. The intent therefore has to
+#: outlive the keystroke — but only just. Sized UNDER the app's 2 s catalog
+#: tick (`app.py`, `_sidebar_timer`) so a routine poll can never be the one
+#: that fires it: what lands the jump is the re-poll this chord triggered,
+#: which is a local store scan and returns in milliseconds. Past this the
+#: intent is dropped, because a layer that came back empty is a store with no
+#: subagent runs in it, and a delegated run starting later must not yank the
+#: cursor out from under whatever the user is doing by then.
+PENDING_SUBAGENT_JUMP_S = 1.0
+
 #: Blank cells between the list and the conversation it sits beside.
 #:
 #: The list's right-hand age column ("6m", "23h", "1d") ended one cell from the
@@ -311,6 +325,9 @@ class SessionSidebar(Widget, can_focus=True):
         self.show_subagents: bool = False
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
+        #: Monotonic deadline for a `ctrl+o` jump armed before its rows
+        #: existed, or 0.0 for none. See `_land_pending_jump`.
+        self._pending_jump_until: float = 0.0
         self.display = False
 
     @property
@@ -534,6 +551,10 @@ class SessionSidebar(Widget, can_focus=True):
         self.entries = ordered
         self._catalog_loading = False
         self.error = ""
+        # Before the re-adopt below, never after: a landed jump must be the
+        # cursor that branch sees, or it would restore the pre-chord row over
+        # it. See `_land_pending_jump`.
+        self._land_pending_jump(ordered)
         if not any(entry.id == self.cursor_id for entry in ordered):
             # `current_id` is adopted only when it is a row in THIS list. The
             # attached session is not necessarily a catalog row, and adopting
@@ -811,20 +832,72 @@ class SessionSidebar(Widget, can_focus=True):
         With the layer hidden this SHOWS it and then jumps, rather than doing
         nothing: asking to go somewhere is asking to see it, and a chord that
         no-ops with no feedback is indistinguishable from a chord that is
-        broken. The rows arrive with the app's re-poll, so the jump itself
-        lands on the next frame; this call only moves the cursor if the rows
-        are already here.
+        broken.
+
+        One press does both. From a layer-off sidebar the rows do not exist
+        yet — `load_catalog` filters the hidden population at the load site,
+        so they arrive only with the re-poll the message below triggers. The
+        jump is therefore ARMED here and landed by `_land_pending_jump` from
+        the `set_entries` that delivers them; it used to be attempted once
+        against rows that could not be there, which left the reveal done and
+        the jump undone and made a SECOND press the thing that landed it.
         """
+        revealed = False
         if not self.show_subagents:
             self.show_subagents = True
+            revealed = True
             self.refresh()
             self.post_message(self.SubagentLayerToggled(True))
         target = next((entry for entry in self.entries if entry.subagent), None)
-        if target is None:
-            # Genuinely nothing to jump to — either the store holds no subagent
-            # runs, or the re-poll above has not delivered them yet.
+        if target is not None:
+            # The rows are already here, so the jump lands now and nothing is
+            # left pending. This is also the no-op path: with the layer on and
+            # the cursor already on the first subagent row, both assignments
+            # are writes of the value already there.
+            self._pending_jump_until = 0.0
+            self.cursor_id = target.id
+            self._reveal()
             return
+        # Nothing to jump to yet. Arm the intent only when THIS call turned
+        # the layer on, i.e. only when a re-poll is genuinely inbound. With
+        # the layer already on, the rows the catalog holds are already here
+        # and their absence means the store has no subagent runs — arming
+        # there would hand the cursor to an unrelated poll that happens to be
+        # the one a delegated run first appears in.
+        self._pending_jump_until = time.monotonic() + PENDING_SUBAGENT_JUMP_S if revealed else 0.0
+
+    def _land_pending_jump(self, ordered: Sequence[CatalogEntry]) -> None:
+        """Land a `ctrl+o` jump armed before its rows existed.
+
+        Called from `set_entries` against the new order and BEFORE the
+        membership-safe re-adopt below it, which is what makes the two
+        cooperate rather than fight: the chord leaves `cursor_id` naming a row
+        the layer-off list no longer has, and the re-adopt exists precisely to
+        replace such a cursor (QA D3). Landing first means `cursor_id` already
+        names a row in `ordered` by the time that branch tests it, so it
+        correctly does nothing; when the rows still have not arrived, the
+        cursor is left exactly as it was and the re-adopt still runs in full.
+        """
+        if not self._pending_jump_until:
+            return
+        if time.monotonic() >= self._pending_jump_until:
+            # The window closed. A layer that came back with no subagent rows
+            # is a store with none in it, and a run starting minutes later is
+            # not this keystroke's business.
+            self._pending_jump_until = 0.0
+            return
+        target = next((entry for entry in ordered if entry.subagent), None)
+        if target is None:
+            # Still waiting: this poll crossed the chord, or carried the
+            # layer-off population. Stay armed until the deadline.
+            return
+        self._pending_jump_until = 0.0
         self.cursor_id = target.id
+        # Same reveal the immediate path does: the ⌥ section is the LAST one,
+        # so on any real list the row it lands on is below the fold and a
+        # cursor there without a scroll is a cursor the user cannot see. Safe
+        # before `set_entries`'s own offset clamp, which only lowers the
+        # offset to `len - page_size` and so cannot push the row back out.
         self._reveal()
 
     def _entry_at(self, y: int) -> CatalogEntry | None:
