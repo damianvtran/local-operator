@@ -98,6 +98,20 @@ STORE_OUT_OF_SPACE = "store_out_of_space"
 #: The store could not be opened, read or written for any other reason, and
 #: again nothing became durable for the request. "Retrying will not help" is
 #: literal: the condition is not going to clear between two identical sends.
+#:
+#: THE TOKEN IS KEPT DELIBERATELY, against a rename this tree already made once.
+#: ``session/errors.py``'s ``SessionStoreUnavailable`` is ``session_store_unavailable``
+#: precisely because a bare ``store_unavailable`` is ALREADY the MCP credentials
+#: tool's answer for a failure to write a SECRET (that docstring states the
+#: collision at length, and it is the reason the sibling got the
+#: ``<subsystem>_unavailable`` spelling). This ladder's token therefore collides
+#: too, on a fourth store. It is kept because the desktop contract pins it
+#: VERBATIM -- the renderer in ``local-operator-ui`` withholds its retry hint by
+#: matching this exact string, and both sides were pinned before the collision
+#: was noticed. Renaming it now is a coordinated two-repo change, not a tidy-up:
+#: an unmatched code silently reinstates the retry hint the incident was about.
+#: Recorded in the PR thread as a follow-up; changing it here alone would be the
+#: silent divergence the contract exists to prevent.
 STORE_UNAVAILABLE = "store_unavailable"
 
 #: Unchanged, and only the contention case carries it now. The shipped app
@@ -181,6 +195,14 @@ class StoreFailure:
     #: which is the point -- the record this module exists to produce must be
     #: there in the log the operator is already reading.
     level: int
+    #: Whether the record carries the exception's traceback. TRUE for the two
+    #: conditions an operator has to act on, where the stack -- which store,
+    #: which statement -- IS the finding. FALSE for contention: a lock that clears
+    #: on its own is a routine event, and a full traceback per retry is noise that
+    #: buries the records worth reading (review round 1, R5). The record still
+    #: names the code, the route and the session either way, so a contention that
+    #: does NOT clear is still attributable from the log.
+    traceback: bool
 
 
 def display_root(root: str | Path | None) -> str:
@@ -220,15 +242,19 @@ def unavailable_message(root: str | Path | None = None) -> str:
 
 
 def _busy() -> StoreFailure:
-    return StoreFailure(503, STORE_BUSY, BUSY_MESSAGE, logging.WARNING)
+    return StoreFailure(503, STORE_BUSY, BUSY_MESSAGE, logging.WARNING, traceback=False)
 
 
 def _out_of_space(root: str | Path | None = None) -> StoreFailure:
-    return StoreFailure(507, STORE_OUT_OF_SPACE, out_of_space_message(root), logging.ERROR)
+    return StoreFailure(
+        507, STORE_OUT_OF_SPACE, out_of_space_message(root), logging.ERROR, traceback=True
+    )
 
 
 def _unavailable(root: str | Path | None = None) -> StoreFailure:
-    return StoreFailure(500, STORE_UNAVAILABLE, unavailable_message(root), logging.ERROR)
+    return StoreFailure(
+        500, STORE_UNAVAILABLE, unavailable_message(root), logging.ERROR, traceback=True
+    )
 
 
 def volume_is_full(root: str | Path | None) -> bool:
