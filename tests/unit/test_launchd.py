@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -261,6 +262,7 @@ class _FakeLaunchd:
         register_on_bootstrap: bool = True,
         bytes_stderr: bool = False,
         release_after_polls: int = 0,
+        register_after_polls: int | None = None,
     ) -> None:
         self.loaded = loaded
         self.calls: list[tuple[str, ...]] = []
@@ -273,6 +275,12 @@ class _FakeLaunchd:
         #: How many ``print`` probes after the bootout still resolve, which is
         #: the teardown the reload is supposed to wait out.
         self._polls_left = release_after_polls
+        #: How many probes AFTER a zero-exit bootstrap still report the label as
+        #: absent — a load launchd has not caught up with yet. Gated on
+        #: ``_bootstrapped`` so the RELEASE-WAIT probes before it (which see
+        #: the same code path) do not consume the delay.
+        self._register_after = register_after_polls
+        self._bootstrapped = False
 
     def __call__(self, *args: str) -> _Result:
         self.calls.append(args)
@@ -281,6 +289,11 @@ class _FakeLaunchd:
             if self._polls_left:
                 self._polls_left -= 1
                 return _Result(0, stdout="state = not running")
+            if self._register_after is not None and self._bootstrapped and not self.loaded:
+                if self._register_after > 0:
+                    self._register_after -= 1
+                    return _Result(1)
+                self.loaded = True
             return _Result(0 if self.loaded else 1, stdout="state = running" if self.loaded else "")
         if verb == "bootout":
             self.loaded = False
@@ -290,10 +303,43 @@ class _FakeLaunchd:
                 self._failures_left = max(0, self._failures_left - 1)
                 stderr: object = BOOTSTRAP_EIO.encode() if self._bytes else BOOTSTRAP_EIO
                 return _Result(5, stderr=stderr)  # type: ignore[arg-type]
-            if self._register:
+            self._bootstrapped = True
+            if self._register and self._register_after is None:
                 self.loaded = True
             return _Result(0)
         return _Result(0)
+
+    @property
+    def verbs(self) -> list[str]:
+        return [call[0] for call in self.calls]
+
+    def attempts(self, verb: str) -> int:
+        return self.verbs.count(verb)
+
+
+class _WedgedLaunchd:
+    """A launchctl that stops answering — wedged, or killed mid-sequence.
+
+    ``wedge_after_bootout`` is the shape R6 named: the bootout LANDS and only
+    then does launchd stop answering, so the caller is left with a daemon that
+    is DOWN. Either way the runner raises ``TimeoutExpired``, which is what an
+    installer's ``subprocess.run(..., timeout=15|20)`` does.
+    """
+
+    def __init__(self, *, wedge_after_bootout: bool = False) -> None:
+        self._inner = _FakeLaunchd()
+        self._wedge_after_bootout = wedge_after_bootout
+        self.calls: list[tuple[str, ...]] = []
+        self.booted_out = False
+
+    def __call__(self, *args: str) -> _Result:
+        self.calls.append(args)
+        if args[0] == "bootout" and self._wedge_after_bootout:
+            self.booted_out = True
+            return self._inner(*args)
+        if self._wedge_after_bootout and not self.booted_out:
+            return self._inner(*args)
+        raise subprocess.TimeoutExpired(["launchctl", *args], 15)
 
     @property
     def verbs(self) -> list[str]:
@@ -438,12 +484,18 @@ class TestReloadJob:
     def test_a_success_that_leaves_no_registered_job_is_a_failure(
         self, clock: _FrozenClock
     ) -> None:
-        """A zero exit is launchd's claim, and the caller is about to repeat it."""
+        """A zero exit is launchd's claim, and the caller is about to repeat it.
+
+        The verification re-probes on a backoff, so this pins both halves: it
+        still reports a failure when the label never resolves, and it stops
+        probing on its own budget instead of spinning.
+        """
         fake = _FakeLaunchd(register_on_bootstrap=False)
         result = launchd.reload_job(label=PLIST, path=self._path(), runner=fake)
 
         assert result.outcome == "failed"
         assert "is not registered" in result.detail, result.detail
+        assert fake.attempts("print") <= 8, fake.calls
 
     def test_stderr_captured_as_bytes_is_still_reported(self, clock: _FrozenClock) -> None:
         """The tunnel's helper decodes bytes; a caller may hand over either."""
@@ -480,3 +532,69 @@ class TestReloadJob:
         )
         assert failure.kind == "not-addressable"
         assert failure.warning() == ""
+
+    def test_a_wedged_launchctl_returns_a_failure_instead_of_raising(
+        self, clock: _FrozenClock
+    ) -> None:
+        """The contract is "never raises", and a raise on the FIRST call is the
+        easy half: the caller must get launchd's reason, not a traceback."""
+        wedged = _WedgedLaunchd()
+        result = launchd.reload_job(label=PLIST, path=self._path(), runner=wedged)
+
+        assert result.outcome == "failed"
+        assert "did not answer" in result.detail, result.detail
+        assert "TimeoutExpired" in result.detail, result.detail
+        failure = result.as_refresh_failure(
+            name="mobile", path=self._path(), recovery="lop mobile install"
+        )
+        assert "STOPPED" in failure.detail
+        assert "run `lop mobile install` to reinstall it" in failure.detail
+
+    def test_a_wedge_after_the_bootout_still_names_the_recovery(self, clock: _FrozenClock) -> None:
+        """The hard half: launchd answers the bootout and then goes silent, so
+        the daemon is already DOWN when the reload gives up."""
+        wedged = _WedgedLaunchd(wedge_after_bootout=True)
+        result = launchd.reload_job(label=PLIST, path=self._path(), runner=wedged)
+
+        assert wedged.verbs[0] == "bootout", wedged.verbs
+        assert result.outcome == "failed"
+        assert "did not answer" in result.detail, result.detail
+        failure = result.as_refresh_failure(
+            name="mobile", path=self._path(), recovery="lop mobile install"
+        )
+        assert "run `lop mobile install` to reinstall it" in failure.detail
+
+    def test_a_load_that_registers_one_probe_late_is_not_a_failure(
+        self, clock: _FrozenClock
+    ) -> None:
+        """A single verification probe reported a good reload as STOPPED.
+
+        The fake's bootstrap exits 0 and the label resolves only after two more
+        probes — the shape the reviewer measured, and the reason the bootstrap
+        itself retries.
+        """
+        fake = _FakeLaunchd(register_after_polls=2)
+        result = launchd.reload_job(label=PLIST, path=self._path(), runner=fake)
+
+        assert result.ok is True, result
+        assert result.detail == ""
+        assert fake.attempts("bootstrap") == 1, fake.calls
+        # One release-wait probe, then the late ones the verification had to wait
+        # out — and it stayed inside its own budget rather than failing.
+        assert fake.attempts("print") >= 4, fake.calls
+        assert sum(clock.sleeps) <= launchd._REGISTRATION_DEADLINE_S + 0.2, clock.sleeps
+
+    def test_an_unreadable_passwd_entry_says_so(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """R3: a broken host is not a sandbox, and an installer that declines
+        must say which of the two it hit."""
+        monkeypatch.setattr(launchd, "real_home", lambda: None)
+        path = Path("/sandbox/Library/LaunchAgents") / f"{PLIST}.plist"
+
+        def explode(*args: object, **kwargs: object) -> object:
+            raise AssertionError("an unreadable passwd entry must not reach launchd")
+
+        result = launchd.reload_job(label=PLIST, path=path, runner=explode)
+
+        assert result.outcome == "not-addressable"
+        assert f"passwd entry for uid {os.getuid()}" in result.detail, result.detail
+        assert "reinstall" not in result.detail
