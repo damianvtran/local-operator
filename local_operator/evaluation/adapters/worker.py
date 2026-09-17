@@ -320,12 +320,59 @@ class Worker:
             except EOFError:
                 await self._cancel_pending_line()
                 return 0
-            except RpcProtocolError:
+            except RpcProtocolError as error:
                 self._state = "POISONED"
                 await self._cancel_pending_line()
+                self._report_protocol_error(error)
                 return 70
         await self._cancel_pending_line()
         return 0 if self._state == "CLOSED" else 70
+
+    def _report_protocol_error(self, error: RpcProtocolError) -> None:
+        """Carry the reason for a channel-killing fault onto stderr.
+
+        A protocol error is answered by tearing the channel down, not by an
+        error frame -- that asymmetry is deliberate (see the begin_rescue path
+        below, which raises an adapter error precisely so the parent can
+        attribute it) -- so the parent's read fails and it can name the CALL
+        that died but not WHY. The worker is the only party holding the reason,
+        and stderr is already the diagnostic channel that reaches the bundle
+        (``episode._adapter_stderr_section`` folds the supervisor's bounded tail
+        into the failure artifact), so one line here is what turns "worker
+        closed the channel before replying to execute" into an attributable
+        fault.
+
+        Redaction reuses the worker's own canary set and the same fail-closed
+        helper as every other string this process emits: the reason is a worker
+        literal today, but ``_dispatch`` re-raises an adapter-supplied
+        ``RpcProtocolError`` unchanged, so nothing here may assume that.
+
+        NOT AUTHENTICATED, AND IT CANNOT BE. The adapter is loaded in-process
+        and ``main`` redirects fd 1 to fd 2, so the adapter writes the very
+        stderr the supervisor drains: an adapter that printed this exact prefix
+        could put a look-alike line beside this one. There is no in-band fix --
+        one fd, one process, no secret the adapter lacks. What bounds the
+        damage is where the line lands: ``episode._adapter_stderr_section``
+        presents it under ``--- adapter stderr tail ---``, the section is the
+        adapter's own account rather than harness output, and ``_control_safe``
+        maps every non-printable character to a space so a forged reason cannot
+        fabricate extra lines or a section header of its own. Read a line here
+        as a claim by the worker PROCESS, not as a record this harness wrote;
+        a separate diagnostics descriptor would be the only way to authenticate
+        it, and is not worth a second protocol fd for one line.
+        """
+
+        reason = _redacted(str(error), MAX_DETAIL_MESSAGE, self._redactions)
+        try:
+            print(
+                f"adapter worker: protocol error: {reason}; exiting 70",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            # stderr may be closed (the parent is gone). A diagnostic that can
+            # itself raise would replace an attributable fault with a crash.
+            pass
 
     async def _cancel_pending_line(self) -> None:
         task = self._pending_line
@@ -624,9 +671,12 @@ class Worker:
                 #
                 # Raised as an ADAPTER error, not RpcProtocolError: a protocol
                 # error tears the channel down without a reply, so the parent
-                # only ever sees an opaque TimeoutError and the operator loses
-                # the reason. This path must name itself all the way out to the
-                # sweep entry, which is the whole point of failing loudly.
+                # sees a channel death rather than this reason -- now an
+                # attributed one, with the reason on stderr
+                # (``_report_protocol_error``), but still not an answered call
+                # the sweep entry can act on. This path must name itself all the
+                # way out to the sweep entry, which is the whole point of
+                # failing loudly.
                 raise AdapterRescueUnsupported("adapter does not implement begin_rescue")
             result = await self._adapter.begin_rescue(params)
             return cast(ProtocolModel, result)
