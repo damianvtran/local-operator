@@ -176,9 +176,45 @@ Structural tests, each driven in the direction that FAILS before being trusted
 | `test_a_bridge_awaiting_its_first_acquire_is_not_evicted` | the handout dropped from `_evictable` → the handed-out bridge is evicted |
 | `test_a_failed_open_leaves_no_reservation_behind` | the handout never released → the reservation leaks |
 
-Gate results for the remediation head `529c290f6` — the commit the round-1 review's
-five findings and QA's two are answered in. It is the same tree the six commands
-below were run against, `git status` clean at capture:
+Gate results for the rebased head `65f42db36` — the branch tip when CI ran it —
+which sits on the code commit `959ebac4c` (the rebased `529c290f6`, answering the
+round-1 review's five findings and QA's two). The rebase onto `2da2c15b8` is the
+one place this branch's content changed, and it changed one commit — see the PR's
+rebase note for the range-diff. The documentation-and-comment commits that follow
+(`0c6796c0e`, `65f42db36` and the one carrying this sentence) change no code. The
+local commands below were run on the rebased tree:
+
+```
+.venv/bin/python -m flake8 .                                → rc=0 (clean)
+uvx --from black==26.1.0 black --check .                    → 1459 files unchanged
+uvx isort==5.13.2 --check .                                 → rc=0
+.venv/bin/python -m pyright --pythonpath .venv/bin/python . → 0 errors, 0 warnings
+.venv/bin/python -m pytest tests/unit/server/test_desktop_sessions.py -q -n0 -p no:randomly
+                                                           → 190 passed
+```
+
+**The two full suites were run by CI on `65f42db36`, and that is the suite
+evidence for this head** — all sixteen checks pass, the five `test (3.12, N)`
+shards and both `tui-e2e` legs included, which is the same suite the local run
+below exercised:
+
+```
+cli-sanity · context-budget · coverage-report (3.12) · filesystem-boundaries-windows
+lint · pip-audit · server-sanity · test (3.12, 0-4) · tui-e2e (macos-latest)
+tui-e2e (ubuntu-latest) · type-check · version-bump-guard   → all PASS, 0 failures
+```
+
+The local full unit suite could not be run on the rebased head — this machine's
+data volume was at 100% (289 MiB free of 460 GiB) and pytest died in
+`pytest_sessionstart` with `OSError: [Errno 28] No space left on device` from
+`pytest_textual_snapshot`'s `TemporaryDirectory()`, before a single test ran. The
+earlier local numbers below are therefore the pre-rebase ones, and this paragraph
+says so rather than quoting them as if they covered the merged code.
+
+Gate results for the remediation commit `529c290f6` (pre-rebase; its rebased twin
+is `959ebac4c`, whose tree the rebase changed only in `session()`'s signature, the
+attach call and the two test stubs) — the tree the six commands below were run
+against, `git status` clean at capture:
 
 ```
 .venv/bin/python -m flake8 .                              → rc=0 (clean)
@@ -190,9 +226,11 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e 
                                                           → 168 passed, 7 skipped in 17:34
 ```
 
-The full unit suite is **green here**, which is the stronger half of the flake
-claim below: the five failures the first head saw did not recur on a head that
-contains the same code plus a comment reflow and one new test.
+The full unit suite was **green there**, which is the stronger half of the flake
+claim below: the five failures the first head saw passed that run, and the one
+test this round added accounts for the rest of the collected-count difference —
+22833 collected (22828 + 5 failed) against 22834, so the delta is one test, not
+six. The head SHA is the identity here, not the count.
 
 Gate results for the SIX-commit tree round 1 read (`bf67bf699` + the six commits
 before the bench-harness output change — the review's own scope line names the
@@ -211,9 +249,9 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e 
 .venv/bin/python -m pytest tests/unit -q                  → 22828 passed, 22 skipped, 5 failed
 ```
 
-The counts of those two unit runs differ by the six tests this round added or
-re-pinned; the head SHA is the identity here, not the count — QA's finding on the
-drifted figure is why the paragraph names a commit.
+The counts of those two unit runs differ for two reasons, not one: the ONE test
+this round added, and the five failures the first head saw passing on the second
+run. 22833 collected against 22834 is the test-count delta.
 
 **The five unit failures are pre-existing load flakes, and that is a measurement
 rather than an assertion.** Two full-suite runs on this branch failed DIFFERENT

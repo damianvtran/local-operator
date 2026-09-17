@@ -611,9 +611,13 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     operator's store that is **2286.7 ms of construction and 2059.5 ms for the
     read** on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one — the
     before column of the A/B in ``docs/evidence/session-load-central-cache``,
-    measured with ``scripts/bench_session_page.py`` (median of 3 samples per
-    operation, host load average 179-260, recorded per worker in the output)
-    against a clean ``origin/main`` worktree at ``bf67bf699``.
+    whose raw run is committed beside it as ``bench_ab.json``: median of 3 samples
+    per operation, on the clean ``origin/main`` worktree the artifact's own
+    ``trees.base`` records (``bf67bf699``, ``dirty: false``). That artifact
+    carries ONE load figure for the whole run — ``176.87 273.00 312.10`` at
+    completion — while the 179-260 range the README quotes with it is the same
+    run's console log, which is not committed: the harness only learned to record
+    a load per worker after this run.
     Two of those callers are on the desktop OPEN path — ``DesktopSessions.
     session().locate()`` when a session carries no ``desktop.json`` marker, and
     ``_persisted_children`` — so a cold open paid seconds of JSON decode for one

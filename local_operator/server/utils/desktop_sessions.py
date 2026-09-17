@@ -2961,10 +2961,14 @@ class DesktopSessions:
         """The cold LOOKUP for ``session_id``, shared by every concurrent caller.
 
         Call under the pool lock, so two callers cannot both decide they are the
-        leader. ``locate`` is the caller's own closure (it is defined beside the
-        path it resolves), and the task is created on the RUNNING loop — an entry
-        whose loop is not this one is treated as absent rather than awaited, see
-        ``_locate_flights``.
+        leader. IT MUST STAY AWAIT-FREE AND NON-BLOCKING: the caller holds the
+        pool-wide lock across this call, so an ``await`` or a blocking syscall
+        added here would hold every other session's open behind one session's
+        cold lookup — the defect this method exists to remove, reintroduced one
+        level down. ``locate`` is the caller's own closure (it is defined beside
+        the path it resolves), and the task is created on the RUNNING loop — an
+        entry whose loop is not this one is treated as absent rather than
+        awaited, see ``_locate_flights``.
         """
         loop = asyncio.get_running_loop()
         entry = self._locate_flights.get(session_id)

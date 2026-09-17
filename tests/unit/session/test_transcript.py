@@ -1528,14 +1528,16 @@ async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> 
 # ``read_latest_custom_entry``/``read_latest_custom`` exist because seven call
 # sites answered a ONE-ROW question by constructing a whole ``Transcript`` — a
 # full JSON decode of the journal. Measured against a clean ``origin/main``
-# worktree at ``bf67bf699`` with ``scripts/bench_session_page.py`` (median of 3
-# samples per operation, host load average 179-260, recorded per worker in the
-# output — the full table is in ``docs/evidence/session-load-central-cache``):
-# 2286.7 ms to construct and 2059.5 ms to read on the 261 MB conversation,
-# 580.7/546.3 ms on the 96 MB one, and two of those seven sites are on the
-# desktop OPEN path. Two things make the swap safe and both are tested here: the
-# DIFFERENTIAL (it must answer exactly what the resident object answered) and the
-# STRUCTURAL cost (it must not pay for the rows above its match).
+# worktree at ``bf67bf699`` — the ``trees.base`` side of the committed
+# ``bench_ab.json`` (median of 3 samples per operation; the artifact carries one
+# load figure for the whole run at completion, and the per-worker range is the
+# README's prose, not a field in it) — the full table being in
+# ``docs/evidence/session-load-central-cache``: 2286.7 ms to construct and
+# 2059.5 ms to read on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one,
+# and two of those seven sites are on the desktop OPEN path. Two things make the
+# swap safe and both are tested here: the DIFFERENTIAL (it must answer exactly
+# what the resident object answered) and the STRUCTURAL cost (it must not pay for
+# the rows above its match).
 
 
 #: Sentinel for "this key is absent from the row" — distinct from any real value,

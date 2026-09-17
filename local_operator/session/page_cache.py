@@ -276,7 +276,7 @@ class TranscriptPageCache:
         # ``payload`` is a plain dict, so this is a contract on callers, not a
         # type guarantee — and freezing the entry type would not buy it either,
         # because freezing forbids attribute assignment, not dict mutation. A
-        # future caller that mutates a row must copy first;``_DisplayWindowCache``
+        # future caller that mutates a row must copy first; ``_DisplayWindowCache``
         # copies for exactly that reason, over pydantic models rendering does
         # annotate. A page is therefore hundreds of kilobytes of JSON parsed once
         # per switch rather than once per request, which is the whole point.
