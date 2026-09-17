@@ -257,7 +257,11 @@ driver's input thread, raised by three raw coordinate bytes), and those pty
 members are what makes it observable. It uses no API key, so its CI job
 carries **no fork gate** — unlike `cli-sanity`/`server-sanity`, whose live-LLM
 secrets force one. That is deliberate: the resume-liveness assertion is the
-regression guard, so it has to run on every PR including forks.
+regression guard, so it has to run on every PR whose diff is not inert,
+**including forks**, and the macOS leg below is mandatory. Change-scope gating
+narrows it in exactly one direction — a diff confined to `docs/**` or to
+`local_operator/mobile/web/**` does not run it — because nothing the stage
+exercises reads either tree.
 
 **It runs on a `[ubuntu-latest, macos-latest]` matrix, and the macOS leg is the
 one that makes it a regression guard.** The deadlock is a macOS/BSD property —
@@ -272,12 +276,20 @@ green against the exact commit it exists to catch.
 The `tui-e2e` job must not `need` the unit `test` job or `pip-audit`. It exists
 because a green unit suite did not catch #401; gating it on `test` skipped the
 freeze guard on every red unit run (observed on PR #426, which *fixed* a
-deadlock while `tui-e2e` reported `skipping`). It needs only `lint` and
-`type-check` — cheap syntax gates. A flake or a newly-published CVE must not
-disarm the macOS resume-liveness assertion.
+deadlock while `tui-e2e` reported `skipping`). It needs only `changes` (the
+scope classifier, which always runs), `lint` and `type-check` — cheap syntax
+gates. A flake or a newly-published CVE must not disarm the macOS
+resume-liveness assertion.
 
-Gates, all of which must be clean before a PR. **Run them over the whole tree,
-exactly as CI does** — these are the commands from `.github/workflows/ci.yml`:
+Its `tui` scope flag is deliberately **equal** to the unit matrix's `unit` flag,
+and that equality is load-bearing: `tests/e2e/test_fork_e2e.py` and
+`test_mcp_failure_reaches_the_viewer_e2e.py` import `scripts.*`, so a `scripts/`
+change is an input to this stage, and a flag narrower than the unit matrix would
+re-create the #426 disarm in a new costume. `tests/unit/test_ci_hygiene.py`
+asserts the implication (`types(tui-e2e) => types(lint)`), not the comment.
+
+Gates, all of which must be clean before a PR. These are the four command-shaped
+jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
 
 ```sh
 .venv/bin/python -m flake8 .
@@ -285,6 +297,22 @@ uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
 .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
+
+**CI no longer runs all four over the whole tree on every PR.** Each job is
+gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
+diff and skips work a change provably cannot affect — a one-line `docs/**` edit
+runs two cheap checks instead of sixteen. The local equivalent of the whole CI
+job set is:
+
+```sh
+make check-changed      # scripts/ci_scope.py --since <merge-base origin/main> --run
+```
+
+It selects its gates from the SAME module the workflow's `changes` job runs, so
+the local answer and CI's answer cannot drift into two opinions, and it runs
+only the jobs whose flags are true for your diff. Use the four commands above
+by hand when you want the whole-tree form regardless — a release PR, or a diff
+that touches `.github/**`, both of which set every flag true.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
@@ -602,6 +630,14 @@ admins hold a configured bypass (see "Who may merge: two tiers"), so an
 `version-bump-guard` as a stop signal rather than an obstacle to route around:
 the job is the reviewer's missing memory, not a lock.
 
+**A release PR's green is narrow.** Change-scope gating classifies a diff
+that is nothing but the `version =` line as a release bump, and a release
+bump runs *only* `changes` and `version-bump-guard` — two checks, not a
+matrix. That is the intended disposition (the classifier's `release_bump`
+rule is asserted in `tests/unit/test_ci_hygiene.py`), but it means "CI is
+green" on a release PR is evidence about the version line and nothing else.
+The code being released was gated on the PR that landed it, not on this one.
+
 Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
 `404 Branch not protected` here. That endpoint reports only **legacy** branch
 protection and 404s even while a modern ruleset is actively enforcing the
@@ -632,8 +668,12 @@ version that no longer existed. None of that work needed a distinct version;
 it needed to land.
 
 So: **the owner of a PR merges it the moment its review rounds are clean and
-fresh and CI is green** — no release queue, no waiting for a predecessor, no
-handing the "next number" to whoever is behind you. A merged PR that has not
+fresh and CI is green** — and "green" means reading the run's
+classification report: it names every flag, every changed path's category and
+which jobs ran. **A skipped job is not evidence.** A guard nothing ran is
+indistinguishable from no guard, which is why the `changes` job writes that
+report into the step summary. No release queue, no waiting for a predecessor,
+no handing the "next number" to whoever is behind you. A merged PR that has not
 been released yet is the normal state of `main`, not a problem to fix.
 
 ### One release owner per window
@@ -731,6 +771,14 @@ it landed.
    The owner replies with the remediation comment and merges. A bump commit
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
+
+   **Expect two checks on this PR, not a matrix.** A version-only
+   `pyproject.toml` diff classifies as a release bump, so only `changes` and
+   `version-bump-guard` run — the whole job set would be gating code this PR
+   does not touch. Do not read that short check list as a truncated pipeline,
+   and do not "fix" it by adding an always-run job: the narrow green is the
+   design (`scripts/ci_scope.py`, `release_bump`), and the code being released
+   was gated on the PR that landed it.
 4. **Tag and publish** from the merge commit of that bump, then install and
    smoke (mechanics below). The release notes cover **every PR in the
    window**, grouped in the house style of the existing releases (a headline
@@ -1149,6 +1197,9 @@ running on the owner's machine and under their account, which is
 the normal case here — the standing agent review gate **is** the approval. A
 clean, fresh, independent agent review round plus green CI is sufficient to
 merge; the agent does not need to find a second human to click approve.
+Green here is the *classified* green: read the `changes` job's summary
+before treating the check list as evidence, because a job this diff skipped
+appears there as a skip rather than as a pass.
 
 **Tier 2 — the PR is anyone else's.** An outside contributor's PR needs **both**
 an approving review **and** a clean agent review round. The approval is the
@@ -1166,7 +1217,9 @@ here pushes as the owner's account, so an agent-authored PR the owner created
 can never be *clicked* approved by the account that opened it. The ruleset
 anticipates exactly this: the admin-role bypass is the **sanctioned** way the
 owner's reviewed PR completes, not a hole. So, concretely, for an agent acting
-for the owner with a clean independent round and green CI: try the
+for the owner with a clean independent round and green CI (the `changes`
+job's classification summary, not just the tick list — a skipped job is not
+evidence): try the
 normal merge first (a collaborator may already have approved); if the ruleset
 refuses because nobody else has approved, complete it with `--admin` **and
 disclose that on the PR** in the terms below. Do not sit on finished, reviewed
@@ -2067,8 +2120,9 @@ than widening the bound. Do not merge a red head on the assumption that it is
 ### Two things this section cannot do for you
 
 **There is no `pytest-timeout` in this suite.** A test that waits forever hangs
-its CI job until the workflow's `timeout-minutes` reclaims the runner (40 min
-for `test`, and that ceiling exists because a job once held a slot for 3h38m).
+its CI job until the workflow's `timeout-minutes` reclaims the runner
+(`timeout-minutes: 20` for `test` in `.github/workflows/ci.yml` — quoted from
+the file, and that ceiling exists because a job once held a slot for 3h38m).
 So an unbounded wait is not merely slow, it is expensive for everyone queued
 behind it — which is the other half of why `wait_for` carries
 `DEADLOCK_GUARD_S`.
