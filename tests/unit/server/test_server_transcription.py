@@ -32,7 +32,12 @@ def temp_audio_file():
 
 @pytest.mark.asyncio
 async def test_create_transcription_success(test_app_client, temp_audio_file):
-    """Test successful transcription creation."""
+    """Test successful transcription creation.
+
+    `model` and `provider` are deliberately NOT sent: the daemon must let
+    Radient's configured default govern, so both must reach the client as None
+    (the client then omits them from the upstream multipart body entirely).
+    """
     mock_radient_client = MagicMock()
     mock_transcription_response = RadientTranscriptionResponseData(
         text="This is a test transcription.",
@@ -51,10 +56,8 @@ async def test_create_transcription_success(test_app_client, temp_audio_file):
         with open(temp_audio_file, "rb") as f:
             files = {"file": (SAMPLE_FILE_NAME, f, "audio/mpeg")}
             data = {
-                "model": "gpt-4o-transcribe",
                 "response_format": "json",
                 "temperature": 0.0,
-                "provider": "openai",
             }
             response = await test_app_client.post("/v1/transcriptions", files=files, data=data)
     finally:
@@ -67,10 +70,10 @@ async def test_create_transcription_success(test_app_client, temp_audio_file):
     # Check that the temp file path was passed to create_transcription
     call_args = mock_radient_client.create_transcription.call_args[1]
     assert "file_path" in call_args
-    assert call_args["model"] == "gpt-4o-transcribe"
+    assert call_args["model"] is None
     assert call_args["response_format"] == "json"
     assert call_args["temperature"] == 0.0
-    assert call_args["provider"] == "openai"
+    assert call_args["provider"] is None
 
 
 @pytest.mark.asyncio
@@ -246,7 +249,12 @@ async def test_create_transcription_unexpected_error(test_app_client, temp_audio
 
 @pytest.mark.asyncio
 async def test_create_transcription_with_all_optional_params(test_app_client, temp_audio_file):
-    """Test successful transcription creation with all optional parameters."""
+    """Test successful transcription creation with all optional parameters.
+
+    The counterpart to `test_create_transcription_success`: an explicitly
+    requested model/provider pair is forwarded to the client verbatim, so a
+    caller that does need to pin a backend still can.
+    """
     mock_radient_client = MagicMock()
     mock_transcription_response = RadientTranscriptionResponseData(
         text="This is a detailed test transcription.",
