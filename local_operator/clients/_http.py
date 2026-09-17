@@ -216,6 +216,48 @@ def scrub_secrets(text: str, secrets: Iterable[Optional[str]] = ()) -> str:
     return text
 
 
+def scrub_details(value: Any, secrets: Iterable[Optional[str]] = ()) -> Any:
+    """The STRUCTURED counterpart of :func:`scrub_secrets`, for a refusal's details.
+
+    WHY A SECOND ENTRY POINT: a refusal's ``details`` are a JSON object and not a
+    sentence, so the masker has to walk them instead of being handed one string --
+    but they are the SAME credential shapes, and re-deriving the patterns for them
+    is how the two places drift. The values in there are what a client RENDERS
+    (``details.rule``, ``details.field``) and what the desktop app builds a
+    sentence from, so a credential an upstream put in one of them reaches the
+    operator by exactly the route the message half was already fixed for.
+
+    Recursive because the shape is the upstream's, not ours: ``categories`` is a
+    list, and an arm that meets a nested object should walk it rather than skip it
+    -- a field this module has no shape for is where an unscrubbed string hides.
+
+    KEYS are deliberately left alone. A key is the part of the contract a renderer
+    switches on (``field``, ``rule``, ``existing_agent_id``), so masking one would
+    break a reader to protect against a value no upstream has been seen to put in a
+    key. Non-string scalars pass through unchanged, so ``owned_by_caller`` and
+    ``limit_bytes`` keep being the boolean and the number they were: the details
+    are machine-readable by design, and a masker that stringified them would break
+    the callers this exists to keep working.
+
+    Args:
+        value: The details value about to be surfaced, at any nesting depth.
+        secrets: Credential values to remove exactly, in addition to the shapes.
+
+    Returns:
+        The same shape, with every recognised credential replaced by the marker.
+    """
+
+    if isinstance(value, str):
+        return scrub_secrets(value, secrets)
+    if isinstance(value, dict):
+        return {key: scrub_details(item, secrets) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(scrub_details(item, secrets) for item in value)
+    if isinstance(value, list):
+        return [scrub_details(item, secrets) for item in value]
+    return value
+
+
 class APIError(RuntimeError):
     """An upstream refusal that keeps its machine-readable half.
 
@@ -228,7 +270,9 @@ class APIError(RuntimeError):
         code: The upstream's stable error code, or ``None`` when it did not send
             one (an intermediary's HTML error page, a 500 with prose only).
         details: The upstream's structured details, always a dict (empty when it
-            sent none). Never the raw body.
+            sent none). Never the raw body, and never a credential: the string
+            values are masked on the way in (see :func:`scrub_details`), so this
+            attribute does not hold one for a caller to surface later.
     """
 
     def __init__(
@@ -315,9 +359,17 @@ def api_error_from_response(
         return APIError(fallback_message, status_code=None)
 
     message, code, details = error_payload(response.content.decode(errors="replace"))
+    # ``details`` goes through the masker here, at the point the upstream's body
+    # enters the package, for the same reason ``message`` does: what leaves this
+    # module is a value object other code surfaces, and the fix that made the body
+    # readable for every client is what put a credential-shaped string into a field
+    # nothing was masking (a hub is free to put one in ``details``, and an arm that
+    # forwards the dict verbatim publishes it). Masking the VALUE rather than the
+    # response keeps the property for every consumer of the attribute, including
+    # the ones that do not exist yet.
     return APIError(
         scrub_secrets(message or f"{fallback_message} (HTTP {response.status_code})", secrets),
         status_code=response.status_code,
         code=code,
-        details=details,
+        details=scrub_details(details, secrets),
     )

@@ -35,7 +35,7 @@ from local_operator.agent_profiles import (
     profile_from_agent,
 )
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
-from local_operator.clients._http import APIError
+from local_operator.clients._http import APIError, scrub_details
 from local_operator.clients.radient import (
     InstructionSetError,
     RadientClient,
@@ -722,9 +722,25 @@ def _publication_detail(
     was wrong, which built-in reserved the name, which moderation categories were
     cited -- and holds no prose, so a client that renders only ``message`` still
     reads correctly.
+
+    THIS IS THE BOUNDARY, so the masker runs HERE rather than at each arm that
+    builds a detail. What a caller receives is this body and nothing else, and
+    ``message``/``details`` both carry upstream text -- a hub is free to reflect
+    the request it refused into either, and ``details.rule``/``details.field`` are
+    values this app RENDERS. Masking here rather than at the call sites means the
+    property holds for the arm that forwards the hub's ``details``, for the arm
+    that substitutes a code, and for the LOCAL validation arm, and it does not rest
+    on how the :class:`APIError` was built: the client masks the value it raises
+    (``_http.api_error_from_response``, which is what knows the machine's own key
+    and can remove it exactly), while this masks the body it answers with, for the
+    case where the exception came from somewhere else.
     """
 
-    return {"code": code, "message": message, "details": dict(details or {})}
+    return {
+        "code": code,
+        "message": scrub_details(message),
+        "details": scrub_details(dict(details or {})),
+    }
 
 
 def _publication_http_error(exc: APIError) -> HTTPException:
@@ -751,16 +767,37 @@ def _publication_http_error(exc: APIError) -> HTTPException:
     # and a 403 nothing in the vocabulary explains. The hub's own status travels
     # through, so an expired key reads as 401 rather than as a 502 about reach.
     #
-    # ``details`` is NOT passed through here, unlike the known-code arm: an
-    # unrecognised refusal's details are the one part of that body we have no shape
-    # for, and an auth refusal has never needed more than its code and sentence.
+    # The hub's ``details`` are NOT passed through here, unlike the known-code arm:
+    # an unrecognised refusal's details are the one part of that body we have no
+    # shape for, and an auth refusal has never needed more than its code and
+    # sentence. The hub's own CODE is a different thing and IS carried, under
+    # ``hub_code``: ``hub_unauthorized`` says which side refused and what to do
+    # about it, and it is also the one thing that loses the distinction the hub did
+    # make -- a 401 for an EXPIRED key and a 401 for a REVOKED one both answer with
+    # this code, so a renderer that switches on ``code`` alone cannot tell the two
+    # apart. Publishing the hub's code as the OUTWARD ``code`` is the change that
+    # was rightly rejected (a closed set in the renderer, and an invented member it
+    # has no treatment for -- the same objection that keeps the 429 on the retry
+    # arm). Inside ``details`` it is ADDITIVE: the outward code, and every renderer
+    # that keys on it, is untouched. local-operator-ui#285 reads ``details`` by
+    # NAME (``field``, ``rule``, ``existing_agent_id``, ``categories``, ...) and
+    # never enumerates it, so an unfamiliar key is carried and unread; and its
+    # ``publicationErrorFromBody`` does not yet list ``hub_unauthorized`` in
+    # ``PUBLICATION_ERROR_CODES``, so it takes its prose fallback for this whole
+    # arm today -- i.e. this addition cannot change what an existing renderer
+    # paints, in either direction. It is also absent when the hub sent no code, so
+    # the live hub's prose-only 401 answers exactly as it did before.
     if exc.status_code in (401, 403):
         logger.warning(
             "Radient Agent Hub refused this machine's credential: HTTP %s", exc.status_code
         )
         return HTTPException(
             status_code=exc.status_code,
-            detail=_publication_detail(HUB_UNAUTHORIZED_CODE, str(exc)),
+            detail=_publication_detail(
+                HUB_UNAUTHORIZED_CODE,
+                str(exc),
+                {"hub_code": exc.code} if exc.code else None,
+            ),
         )
     logger.warning(
         "Radient Agent Hub returned an unrecognised publication failure: HTTP %s",
