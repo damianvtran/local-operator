@@ -1271,6 +1271,51 @@ def test_a_base_that_accepts_a_file_is_never_reported_as_out_of_space(
     assert clipboard_module._classify_scratch_failure(None) == SCRATCH_UNAVAILABLE
 
 
+def test_the_probe_writes_and_cleans_up_after_itself(tmp_path, monkeypatch) -> None:
+    """The WRITE, not just the create, is what the probe has to perform.
+
+    `tempfile`'s own probe writes before it unlinks, and that is the half a
+    size-limited or full filesystem refuses: a create only proves the directory
+    accepts a NAME. So the write is asserted rather than assumed, and the
+    cleanup is asserted with it — a probe that left a file behind in `$TMPDIR`
+    on every paste would be its own defect.
+    """
+    _only_these_bases(monkeypatch, tmp_path)
+    real_write = os.write
+    written: list[bytes] = []
+
+    def recording(fd, data):
+        written.append(data)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(clipboard_module.os, "write", recording)
+    assert clipboard_module._probe_scratch_errno() is None
+    assert written and all(data for data in written), "a create alone is not the probe"
+    assert list(tmp_path.iterdir()) == [], "the probe's file must not outlive the probe"
+
+
+def test_a_write_that_the_kernel_refuses_is_reported_as_no_space(tmp_path, monkeypatch) -> None:
+    """The gap the write closes, staged directly: a kernel that ALLOWS the
+    create and refuses the allocation behind it answers ENOSPC, and ENOSPC is
+    the whole reason this probe exists — without the write the refusal would
+    have been invisible here and the notice would have said "unavailable".
+
+    The refusal is injected rather than produced, because on the APFS volume
+    this was tried against, a create on a full disk fails first and the write is
+    never reached (review round 1, NIT-4). What the probe does with a refused
+    write is still real code with a real answer, so it is pinned here.
+    """
+    _only_these_bases(monkeypatch, tmp_path)
+
+    def refusing(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(clipboard_module.os, "write", refusing)
+    assert clipboard_module._probe_scratch_errno() == errno.ENOSPC
+    assert clipboard_module._classify_scratch_failure(errno.ENOSPC) == SCRATCH_NO_SPACE
+    assert list(tmp_path.iterdir()) == [], "a refused write still leaves no file behind"
+
+
 def test_an_unallocatable_scratch_directory_returns_a_reason_instead_of_raising(
     tmp_path, monkeypatch
 ) -> None:
@@ -1357,11 +1402,23 @@ def test_the_windows_text_backend_hands_the_reason_to_its_caller(monkeypatch, wh
     assert failed == [SCRATCH_UNAVAILABLE]
 
 
+@pytest.mark.parametrize(
+    ("platform", "env", "binary"),
+    [
+        pytest.param("linux", {"DISPLAY": ":0"}, "xclip", id="linux-x11"),
+        # The platform of the incident, and the reason this test is
+        # parametrised at all: until review round 1 the darwin dispatch sat
+        # ABOVE the guard, so a raise escaped from the one backend the operator
+        # actually uses while the same raise on linux became a notice.
+        pytest.param("darwin", {}, "osascript", id="darwin"),
+    ],
+)
 def test_an_exception_escaping_a_backend_is_reported_rather_than_raised(
-    monkeypatch, which_all, caplog
+    platform: str, env: dict[str, str], binary: str, monkeypatch, which_all, caplog
 ) -> None:
     """Rule 1 is enforced by construction now, not by auditing every backend
-    each time one is added.
+    each time one is added — on EVERY platform, not only the one the guard
+    happened to wrap.
 
     A backend is the most likely thing to grow a raise — the incident was a
     scratch allocation rather than a backend, which is precisely why auditing
@@ -1369,14 +1426,19 @@ def test_an_exception_escaping_a_backend_is_reported_rather_than_raised(
     an OSError, to prove it is not a band-aid for the one failure that got
     reported. The traceback still reaches the log: the keystroke stays a
     keystroke, and the detail a maintainer needs is not thrown away with it.
+
+    The raise is injected at the seam every backend shares, which is also where
+    a real machine fails: `Popen` raising `OSError(EMFILE)` under load is an
+    ordinary condition, and QA staged exactly that against the real TUI, where
+    the pre-fix tree exited `rc=1` with no `Clipboard read failed` line at all.
     """
 
     def exploding(argv, kwargs):
         raise RuntimeError("a backend that forgot the contract")
 
     with caplog.at_level("ERROR", logger="local_operator.clipboard"):
-        _install(monkeypatch, {"xclip": exploding})
-        contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+        _install(monkeypatch, {binary: exploding})
+        contents = read_clipboard(BIG, platform=platform, env=env)
 
     assert contents.read_failed == SCRATCH_UNAVAILABLE
     assert contents.image is None and contents.text == ""

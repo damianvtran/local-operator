@@ -112,8 +112,12 @@ Every backend obeys the same four rules, which is what makes them substitutable:
    directories that plainly existed. Two guards now hold the rule by
    construction: every scratch allocation goes through
    :func:`_open_scratch_dir`, which reports a reason instead of raising, and
-   :func:`read_clipboard` wraps the whole backend dispatch, so a future hole
-   on any platform is caught rather than shipped.
+   :func:`read_clipboard` wraps the whole read — the refusal check, the
+   deadline and every platform's dispatch, darwin included — so a future hole
+   on any platform is caught rather than shipped. The darwin dispatch sat
+   outside that guard until review round 1 and was the last audited path
+   rather than an enforced one, which is exactly the decay this rule keeps
+   being violated by.
 2. **Bounded by :data:`CLIPBOARD_TIMEOUT_S`.** Each backend shells out, and a
    wedged clipboard daemon (a hung ``wl-paste``, an X11 selection owner that
    never answers, a stalled AppleScript) would otherwise hold the process
@@ -724,8 +728,23 @@ def _classify_scratch_failure(errno_value: int | None) -> str:
     return SCRATCH_UNAVAILABLE
 
 
+#: What the probe WRITES into each scratch base, and the size is the point.
+#: `tempfile`'s own writability probe writes exactly these four bytes (its
+#: private ``_text``) before unlinking, because a create only proves the
+#: directory accepts a NAME — it is the ALLOCATION behind the write that a
+#: full volume or an exhausted quota refuses, which is the failure this probe
+#: exists to name. A create-only probe is therefore strictly weaker than the
+#: check whose refusal it is reporting, and could answer "unavailable" where
+#: "no space" was the recoverable truth. That gap is latent rather than
+#: reproduced: on a real APFS volume filled to zero bytes free the create
+#: itself fails with Errno 28 (review round 1, NIT-4), so today this costs
+#: nothing and closes a hole a size-limited or per-file-capped filesystem
+#: would open.
+_SCRATCH_PROBE_WRITE = b"blat"
+
+
 def _probe_scratch_errno() -> int | None:
-    """The errno a real create against the scratch bases gives, or ``None``.
+    """The errno a real create-and-write against the scratch bases gives, or ``None``.
 
     **For NAMING only — never for allocating.** ``tempfile`` discards the cause
     before it raises: ``_get_default_tempdir`` collapses every refusal
@@ -736,24 +755,43 @@ def _probe_scratch_errno() -> int | None:
     one piece of information the user's move depends on, and this is the only
     place it can be recovered.
 
-    One create-and-write per base, stopped at the first refusal — the first
-    refusal is the interesting one, and a base that accepts a file proves the
-    filesystem had room, which is itself an answer.
+    One create-and-write per base, stopped at the first base that ANSWERS —
+    which is either a refusal, whose errno describes this host, or an accepted
+    file, which proves the filesystem had room and is an answer for the same
+    reason: it is what forbids reporting "no space". Both halves are real
+    system calls, so the answer is the kernel's and not this module's.
     """
     for base in _scratch_probe_bases():
         try:
             handle, name = tempfile.mkstemp(prefix="lo-clip-probe-", dir=base)
         except OSError as exc:
+            # `mkstemp` opens before it returns, so a raising open left no path
+            # behind and there is nothing to unlink below.
             return exc.errno
-        os.close(handle)
+        try:
+            try:
+                # The write is load-bearing: see `_SCRATCH_PROBE_WRITE`.
+                os.write(handle, _SCRATCH_PROBE_WRITE)
+            finally:
+                os.close(handle)
+        except OSError as exc:
+            # A refusal on the WRITE is the same answer as one on the create,
+            # and it is the more honest one, because the write is what needs
+            # the room.
+            failed_with: int | None = exc.errno
+        else:
+            failed_with = None
         try:
             os.unlink(name)
         except OSError:
             # A file left behind by a failed unlink is not a failure of this
             # probe, and must not be reported as one.
             pass
-        return None
-    return None
+        # Answered, so the loop ends here: asking the next base would re-ask a
+        # question the kernel has already settled, and the bases are in
+        # `tempfile`'s own order, so this is also the base a healthy host would
+        # have used.
+        return failed_with
 
 
 def _open_scratch_dir() -> tuple[tempfile.TemporaryDirectory[str] | None, str]:
@@ -1312,67 +1350,89 @@ def read_clipboard(
     host — this module's whole failure mode was a platform assumption that only
     one developer's environment could disprove.
 
-    **Never raises, and that is enforced rather than audited.** The dispatch
-    below runs inside one guard: any exception a backend or a future edit lets
-    escape is reported as a read that did not happen
+    **Never raises, and that is enforced rather than audited.** The WHOLE read
+    runs inside one guard — the SSH refusal, the deadline, and every platform's
+    dispatch — so an exception a backend or a future edit lets escape is
+    reported as a read that did not happen
     (:attr:`ClipboardContents.read_failed`) and logged with its traceback, so
     the failure is diagnosable from the log while the keystroke that caused it
     stays a keystroke. Rule 1 of the module docstring explains the incident
     that made the difference between those two outcomes a crashed session.
+
+    "The whole read" is load-bearing rather than rhetorical, and it is a
+    review-round-1 correction: the darwin dispatch used to sit above the guard,
+    which left the platform of the incident — a screenshot on macOS is the
+    gesture this module exists for — as the one path still audited, with an
+    `OSError(EMFILE)` or any new raise in :func:`_read_macos` ending the app at
+    `rc=1`. Nothing in this function is outside the guard except the plain
+    attribute read of ``system`` that its own log line needs.
 
     Wayland is chosen over X11 by ``WAYLAND_DISPLAY`` rather than by
     distribution: a Wayland session commonly also runs XWayland, so ``DISPLAY``
     is set in both, and testing ``DISPLAY`` first would route a Wayland session
     to ``xclip`` and read XWayland's separate, usually empty selection.
     """
-    if not clipboard_reads_are_local(env):
-        return ClipboardContents(refused_remote=True)
-
-    deadline = _Deadline(CLIPBOARD_TIMEOUT_S)
+    # Resolved OUTSIDE the guard because the guard's own log line names it: a
+    # handler reading a variable first assigned inside the `try` would raise
+    # `NameError` on the one path it exists for. It is a plain attribute read
+    # and a conditional with no raise path of its own — unlike `_Deadline`
+    # below, which does have one and is therefore inside with everything else.
     system = sys.platform if platform is None else platform
-    source = os.environ if env is None else env
-
-    if system == "darwin":
-        # One spawn answers both shapes; see `_MACOS_CLIPBOARD_SCRIPT` for why
-        # the spawn count is the latency here.
-        contents = _read_macos(max_bytes, deadline)
-        # A found payload is a SUCCESS even if the budget expired on the way
-        # out, so the flag is only attached to an empty-handed result. Reporting
-        # "the read timed out" beside an attached image would be a notice about
-        # a failure that did not happen.
-        #
-        # `not contents.read_failed` for the same reason, and it is the more
-        # specific of the two: a read that never happened cannot also have run
-        # out of time, and the failure is the answer that tells the user what
-        # to do, so it must not be reported beside a timeout.
-        if (
-            contents.image is None
-            and not contents.paths
-            and not contents.text
-            and not contents.text_too_large
-            and not contents.read_failed
-        ):
-            return replace(contents, timed_out=deadline.hit)
-        return contents
-
-    image: ClipboardImage | None = None
-    text = ""
-    # Carries "the clipboard held text we refused as too large" back out of
-    # whichever backend ran, so an over-budget payload is reported as itself
-    # rather than as an empty clipboard (code round 2, F7).
-    oversized: list[bool] = []
-    # Carries "the scratch directory could not be allocated, so the clipboard
-    # was never read" back out of the Windows backends, whose return types
-    # cannot express it. macOS reports the same thing on its result directly.
-    scratch_failed: list[str] = []
-    # RULE 1 IS ENFORCED HERE, not audited. Every backend obeys never-raise by
-    # its own construction, but "every backend" is a claim that decays with
-    # every edit — and the path that killed the operator's session was not in a
-    # backend at all, it was a scratch allocation in the keystroke handler
-    # (module docstring, rule 1). One guard around the whole dispatch means a
-    # future hole on any platform costs a notice instead of the session, and the
-    # traceback still reaches the log where a maintainer can see it.
+    # RULE 1 IS ENFORCED HERE, not audited — and the guard has to cover the
+    # WHOLE read for that to be true. Review round 1 / QA Q1: the darwin
+    # dispatch used to sit ABOVE this `try`, so the platform that produced the
+    # incident was still audited rather than enforced — an `OSError(EMFILE)`
+    # out of the subprocess seam, or any future raise in `_read_macos`, ended
+    # the app with rc=1 exactly as the scratch allocation did, which is the
+    # contradiction the module docstring's "enforced, not audited" claim could
+    # not survive. The SSH refusal and the deadline construction are in here
+    # too: both run on the keystroke, and a claim that holds only over the code
+    # someone remembered to enumerate is the audit this rule exists to replace.
+    #
+    # The refusal still refuses WITHOUT reading (it is the first statement, and
+    # nothing in this block can spawn before it), and the darwin tail keeps
+    # attaching `timed_out` to an empty-handed result only.
     try:
+        if not clipboard_reads_are_local(env):
+            return ClipboardContents(refused_remote=True)
+
+        deadline = _Deadline(CLIPBOARD_TIMEOUT_S)
+        source = os.environ if env is None else env
+
+        if system == "darwin":
+            # One spawn answers both shapes; see `_MACOS_CLIPBOARD_SCRIPT` for
+            # why the spawn count is the latency here.
+            contents = _read_macos(max_bytes, deadline)
+            # A found payload is a SUCCESS even if the budget expired on the way
+            # out, so the flag is only attached to an empty-handed result.
+            # Reporting "the read timed out" beside an attached image would be a
+            # notice about a failure that did not happen.
+            #
+            # `not contents.read_failed` for the same reason, and it is the more
+            # specific of the two: a read that never happened cannot also have
+            # run out of time, and the failure is the answer that tells the user
+            # what to do, so it must not be reported beside a timeout.
+            if (
+                contents.image is None
+                and not contents.paths
+                and not contents.text
+                and not contents.text_too_large
+                and not contents.read_failed
+            ):
+                return replace(contents, timed_out=deadline.hit)
+            return contents
+
+        image: ClipboardImage | None = None
+        text = ""
+        # Carries "the clipboard held text we refused as too large" back out of
+        # whichever backend ran, so an over-budget payload is reported as itself
+        # rather than as an empty clipboard (code round 2, F7).
+        oversized: list[bool] = []
+        # Carries "the scratch directory could not be allocated, so the
+        # clipboard was never read" back out of the Windows backends, whose
+        # return types cannot express it. macOS reports the same thing on its
+        # result directly.
+        scratch_failed: list[str] = []
         if system == "win32":
             image = _read_windows_image(max_bytes, deadline, scratch_failed)
             # The text read is skipped when the scratch failed: it needs the same

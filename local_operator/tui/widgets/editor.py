@@ -1412,8 +1412,11 @@ class EditorPasteEmpty(Message):
       exception escaping a backend and caught by the guard in
       :func:`~local_operator.clipboard.read_clipboard`. One value for all of
       them because the distinction is not one this code can establish, and the
-      honest thing to say is exactly what it knows: the clipboard was not read,
-      so paste again.
+      honest thing for the app to say is exactly what it knows: the clipboard
+      was not read. The remedy is the PATH route, not a retry — half of this
+      value is a permanent refusal (a read-only or missing scratch base) where
+      a retry cannot work, and pasting a file path never touches the clipboard
+      at all (review round 1, NIT-5 / QA Q2).
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
     card to the app; this only says which of them happened.
