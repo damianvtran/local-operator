@@ -418,13 +418,13 @@ def backfill_analytics_session_daily(
                 break
             derived += 1
         if rebucket:
-            # Publish the new zone ONLY if this pass re-labelled the entire span
-            # the worklist handed us. A short pass (a failure above) leaves the
-            # recorded zone untouched, so the gate keeps refusing and the next
-            # launch starts over — never a table holding two zones while the meta
-            # names one.
-            if plan.days and derived == len(plan.days):
-                store.commit_session_daily_rebucket(oldest_day=plan.days[-1])
+            # Publish the new zone ONLY if this pass re-labelled the ledger's
+            # whole span (``span_complete``, and every day committed). A short
+            # pass leaves the recorded zone untouched, so the gate keeps refusing
+            # and the next launch starts over — never a table holding two zones
+            # while the meta names one.
+            if plan.span_complete and plan.days and derived == len(plan.days):
+                store.commit_session_daily_rebucket(oldest_day=plan.days[-1], top_day=plan.days[0])
             return derived
         if plan.days and derived >= plan.recent_count:
             # The recent window — the whole range a stale writer could have added

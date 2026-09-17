@@ -835,11 +835,17 @@ def test_a_zone_change_is_recovered_by_the_rebucket_pass(tmp_path, monkeypatch):
     assert store.last_aggregate_source == "rollup"
 
     # The environment, not a monkeypatched helper: TZ plus tzset is what a
-    # ``TZ=``-prefixed command actually does to this process.
-    monkeypatch.setenv("TZ", "America/Denver")
+    # ``TZ=``-prefixed command actually does to this process. The zone is picked
+    # to DIFFER from the recorded one rather than hard-coded, because a process
+    # already running under that TZ has no zone change to recover from — the
+    # same environment-dependence class this round's R10 was about.
+    other_zone = next(
+        zone for zone in ("America/Denver", "UTC", "Pacific/Auckland") if zone != recorded
+    )
+    monkeypatch.setenv("TZ", other_zone)
     time.tzset()
     try:
-        assert _local_zone_key() != recorded
+        assert _local_zone_key() == other_zone != recorded
         store.aggregate()
         assert store.last_aggregate_source == "ledger"
         assert store.last_aggregate_refusal == "zone-changed"
