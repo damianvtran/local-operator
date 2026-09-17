@@ -100,24 +100,52 @@ EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 #: (with an hourly background refresh) because there a request IS visible.
 PICKER_TTL_S = 15 * 60
 
-#: Notes for the two QwenCloud console-ticket states the user can ACT ON. Both
-#: are painted by ``usage_panel.py``'s body builder, which prefixes a two-cell
+#: Notes for the QwenCloud console-ticket states the user can ACT ON. All are
+#: painted by ``usage_panel.py``'s body builder, which prefixes a two-cell
 #: indent and then truncates to ``_body_content_width()``.
 #:
-#: **The budget is 47 cells**, measured by rendering the real panel at a
-#: 60-column terminal rather than derived from the width constants: the app's
-#: own chrome means ``overlay.screen_size`` reports 58 for a 60-column
-#: terminal, so the arithmetic chain (panel 54, content 50, body 49, less the
-#: two-cell indent) starts two cells lower than the terminal width suggests.
-#: Deriving it from ``PANEL_*`` alone gives 49 and overflows by two.
+#: **The budget is a ladder, not a number, and 47 cells is only its top rung.**
+#: Measured by rendering the real panel, never derived from the width
+#: constants — the app's own chrome means ``overlay.screen_size`` reports 58
+#: for a 60-column terminal, so the arithmetic chain (panel 54, content 50,
+#: body 49, less the two-cell indent) starts two cells lower than the terminal
+#: width suggests and gives 49 where the frame gives 47.
 #:
-#: The budget belongs to the REMEDY: a note that overflows loses its trailing
-#: command and leaves the user a symptom with no action, which is the whole
-#: failure the note exists to prevent. Pinned by
-#: ``test_the_note_survives_truncation_at_60_columns``, which renders the
-#: panel rather than counting characters.
-QWENCLOUD_TICKET_LOCKED_NOTE = "console ticket locked — run `lop secret unlock`"
-QWENCLOUD_TICKET_ORPHAN_NOTE = "no ticket — run `lop qwencloud-ticket set`"
+#: Rendered budget by terminal width: 60→47, 58→45, 55→42, 50→37, 45→32,
+#: 40→27, and 36 and below→25, where ``PANEL_MIN_WIDTH`` floors the card. An
+#: earlier 47-cell locked note therefore fit ONLY at 60+: it lost its remedy
+#: at every width from 32 to 59, which is most of the range a split pane
+#: actually gets. Sizing to the top rung is the same mistake as deriving it.
+#:
+#: The budget belongs to the REMEDY: a truncated command still looks like an
+#: instruction and then fails when followed, which is worse than no command —
+#: ``_fit_status_note``'s own ladder says so for the dead-grant note. So each
+#: string here is sized to survive as far DOWN the ladder as its remedy can be
+#: spelled, and the state is dropped before the command is. Pinned by
+#: ``test_the_note_survives_truncation_at_narrow_widths``, which renders the
+#: panel at each width rather than counting characters.
+#:
+#: No backticks: the panel's own remedy note is ``sign-in expired — /login
+#: kimi``, and a backtick costs two cells that buy no clarity in a dim,
+#: unstyled row.
+QWENCLOUD_TICKET_LOCKED_NOTE = "locked — lop secret unlock"
+QWENCLOUD_TICKET_ORPHAN_NOTE = "no ticket — lop qwencloud-ticket set"
+
+#: The three states above are the user's own to fix. These two are the store
+#: telling the operator something is WRONG with it, and both docstrings
+#: (:class:`~local_operator.secrets.errors.InsecurePermissions`,
+#: :class:`~local_operator.secrets.errors.BrokerIncompatible`) forbid
+#: swallowing them: the first says the exposure already happened and the
+#: operator needs to know, the second that "live but unusable" laundered into
+#: "unreachable" is what silently disarmed the redaction notice. A silent
+#: ``None`` here is exactly that laundering, one layer up.
+#:
+#: Both remedies were run against a throwaway store rather than assumed:
+#: ``lop secret status`` prints the offending path with its ``chmod 0600``
+#: fix, and ``lop secret broker restart`` exists for version skew and is what
+#: the broker's own mismatch error names.
+QWENCLOUD_TICKET_EXPOSED_NOTE = "unsafe modes — lop secret status"
+QWENCLOUD_TICKET_BROKER_NOTE = "old broker — lop secret broker restart"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -945,7 +973,9 @@ class ProviderController:
             parts.append(fingerprint_secret(env_key))
         return fingerprint_accounts(parts)
 
-    def _qwencloud_console_creds(self, provider: str) -> tuple[dict[str, Any] | None, str | None]:
+    async def _qwencloud_console_creds(
+        self, provider: str
+    ) -> tuple[dict[str, Any] | None, str | None]:
         """The console session cookie for QwenCloud Token Plan, and why not.
 
         Returns ``(creds, note)``. ``note`` is non-None only for a state the
@@ -972,6 +1002,18 @@ class ProviderController:
         because ``retrieve_secret`` against a base with no store SPAWNS A
         BROKER DAEMON before failing -- measured, with a stray process left
         behind, on the very common host that has never run ``lop secret set``.
+
+        **Async for the retrieval hop, not for the arithmetic.** The blocking
+        work is off-loaded to :func:`asyncio.to_thread` below; the overhead of
+        the hop measured at noise (-0.1 ms against a warm store), and what it
+        buys is the 10 s case. A broker that will not start makes
+        ``retrieve_secret`` poll to ``STARTUP_TIMEOUT_S`` twice, and this runs
+        inside the ``asyncio.gather`` that paints the panel on an auto-refresh
+        the user never asked for -- so without the hop the whole TUI is frozen
+        for it, which is the shape of blocking call ``client.py``'s own #401
+        note records this codebase already freezing the TUI with. The freeze
+        and the note are not alternatives: the hardened-locked path now
+        RETURNS a note, so a user who sees it waited the full stall first.
         """
         if credential_provider_id(provider) != "alibaba-token-plan":
             return None, None
@@ -999,7 +1041,12 @@ class ProviderController:
             # stdlib-only import list exists to protect.
             from local_operator.secrets import access
             from local_operator.secrets.client import BrokerDenied, BrokerLocked
-            from local_operator.secrets.errors import SecretNotFound, SecretStoreError
+            from local_operator.secrets.errors import (
+                BrokerIncompatible,
+                InsecurePermissions,
+                SecretNotFound,
+                SecretStoreError,
+            )
             from local_operator.secrets.keys import store_path
 
             if not store_path(None).exists():
@@ -1008,7 +1055,13 @@ class ProviderController:
                 # on every refresh.
                 return None, None
             try:
-                value = access.retrieve_secret(QWENCLOUD_TICKET_SECRET_NAME, None)
+                # The one blocking call on this path, and the reason the method
+                # is async at all -- see the docstring. `store_path().exists()`
+                # above stays on the loop: it is a single stat, and hopping for
+                # it would cost more than it saves.
+                value = await asyncio.to_thread(
+                    access.retrieve_secret, QWENCLOUD_TICKET_SECRET_NAME, None
+                )
             except (BrokerDenied, BrokerLocked):
                 # Caught BEFORE SecretStoreError: both subclass it. The store's
                 # own message on THIS path is the raw wire text ("no lop
@@ -1019,7 +1072,44 @@ class ProviderController:
                 return None, QWENCLOUD_TICKET_LOCKED_NOTE
             except SecretNotFound:
                 return None, QWENCLOUD_TICKET_ORPHAN_NOTE
+            except InsecurePermissions:
+                # The store is readable by another account. Its own docstring
+                # calls this "a condition to stop on, not one to quietly
+                # repair -- the exposure already happened and the operator
+                # needs to know", so swallowing it into a vanished window is
+                # precisely the prohibited behaviour. `lop secret status`
+                # prints the offending path and its `chmod 0600` fix; verified
+                # by running it against a 0644 throwaway store rather than
+                # assumed.
+                return None, QWENCLOUD_TICKET_EXPOSED_NOTE
+            except BrokerIncompatible:
+                # A daemon left running across a runtime update. This class
+                # exists BECAUSE collapsing "live but unusable" into
+                # "unreachable" silently disarmed a safety property (its own
+                # round-4 Q4 note), and answering a silent None here repeats
+                # that collapse one layer up. It is also self-inflicted and
+                # trivially fixable, which is what makes it worth a row.
+                return None, QWENCLOUD_TICKET_BROKER_NOTE
             except (SecretStoreError, OSError):
+                # Deliberately still silent, and deliberately NOT given a note.
+                # The two classes that dominate this clause are
+                # `BrokerUnavailable` and `SecretCorrupt`, and neither has a
+                # remedy this note could name:
+                #
+                # - `BrokerUnavailable` is transient by construction -- the
+                #   daemon starts lazily and exits on its own idle timer, so
+                #   "nothing answered" is usually a race the next auto-refresh
+                #   wins. A note telling the user to act on it would ask them
+                #   to fix something that has already fixed itself.
+                # - `SecretCorrupt` has no repair verb at all. Measured against
+                #   a store with one tampered record: `set` raises
+                #   `SecretExists`, `update` and even `lop secret rm` raise
+                #   `SecretCorrupt` and exit 2, and the record survives. Naming
+                #   any of them would be a remedy that fails when followed,
+                #   which `_fit_status_note` calls worse than no command.
+                #
+                # A note is a promise the user can act; where there is nothing
+                # to run, silence is the honest answer.
                 return None, None
             try:
                 ticket = value.decode()
@@ -1570,7 +1660,7 @@ class ProviderController:
                     # route below is dead code for this provider.
                     if console_attempted:
                         continue
-                    console, console_note = self._qwencloud_console_creds(provider)
+                    console, console_note = await self._qwencloud_console_creds(provider)
                     if console is None:
                         # Set on the ATTEMPT, not on success -- the flag's own
                         # comment above says so, and the cost of not doing it
@@ -1666,7 +1756,7 @@ class ProviderController:
         # `_qwencloud_console_creds` is already guarded on the storage id and
         # returns None for every other provider, so this cannot widen any other
         # provider's fetch; verified by execution, not by reading.
-        console, console_note = self._qwencloud_console_creds(provider)
+        console, console_note = await self._qwencloud_console_creds(provider)
         try:
             report = await self._fetch_one(client, provider, access=None, extra_creds=console)
         except Exception:  # noqa: BLE001
@@ -1685,9 +1775,24 @@ class ProviderController:
                     )
                 ]
             return []
+        report = self._mark_account_success(report, now_ms)
         if console_note and not report.notes:
             report.notes = console_note
-        return [self._mark_account_success(report, now_ms)]
+            # AFTER `_mark_account_success`, which sets `next_probe_at_ms` to
+            # None: attaching the note before it let the success path null the
+            # schedule and re-armed the exact staleness defect the other two
+            # note branches exist to avoid. Measured on the un-fixed order:
+            # `next_probe_at_ms=None` and the payload expiring in 358890 ms --
+            # the full jittered TTL, not 10 s -- so a user with a valid
+            # `api_key` row plus a locked ticket read "run `lop secret unlock`",
+            # ran it, and watched the note outlive the fix by ~6 minutes.
+            # `_settle_live_report`'s guard does not cover this path.
+            #
+            # This report is a genuine 200 whose NOTE is stale-able, which is
+            # why it needs the schedule despite being a success: the remedy
+            # runs in another terminal and nothing else brings the panel back.
+            report.next_probe_at_ms = now_ms + USAGE_FAILURE_BACKOFF_MS
+        return [report]
 
     def _dedupe_targets(self, targets: list[str]) -> list[str]:
         """Keep one id per storage row so alias providers don't double-fetch."""
