@@ -27,6 +27,13 @@ them:
 ink moves per theme and the decision that it stays legible and stays distinct
 from the prompt's ``signal`` is a claim about every palette, not about one.
 
+Set ``RAIL_SHOT_OFF=1`` to capture with ``display.rail`` OFF. The flag is
+forced on the CONSUMING module rather than by writing a config file, the same
+seam the unit tests use, so the frame shows what a user who turned the setting
+off would see without this capture leaving state behind in their config. The
+rail-OFF frame is not decoration: "off restores the pre-rail build" is a claim
+about a rendered frame, and the pair is what lets a reviewer check it.
+
 ``SURFACE`` (default ``transcript``) selects WHICH surface is captured.
 ``subagent`` renders the delegated-job page instead, and it is not optional
 coverage: the rail appears there by design, and that page is the one where the
@@ -53,6 +60,9 @@ from scripts.visual_capture import (  # noqa: E402
 
 isolate_capture()
 
+import os  # noqa: E402
+
+import local_operator.tui.widgets.assistant as _assistant_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
@@ -132,7 +142,22 @@ async def _open_subagent(app: OperatorApp, pilot: Any, job_id: str) -> None:
         await pilot.pause()
 
 
+def _force_rail_off() -> None:
+    """Pin ``display.rail`` OFF for this capture only.
+
+    Patched on the module that READS it, delegating every other key to the real
+    reader, so the frame differs from its ON counterpart in the rail and in
+    nothing else.
+    """
+    real = _assistant_mod.settings_get
+    _assistant_mod.settings_get = lambda key, default=None: (  # type: ignore[assignment]
+        False if key == "display.rail" else real(key, default)
+    )
+
+
 async def main() -> None:
+    if os.environ.get("RAIL_SHOT_OFF") == "1":
+        _force_rail_off()
     out = sys.argv[1]
     size = (100, 30)
     if len(sys.argv) > 2:

@@ -37,6 +37,18 @@ from typing import Any
 #: :func:`_defaults`); this dict is not consulted at runtime.
 _DEFAULT_NOTES: dict[str, Any] = {
     "display.shimmer": True,
+    # A rule down the left edge of the assistant's answer, in the `label`
+    # token, matching the two cells the user prompt's rule spends. Default ON:
+    # the rail exists to fix a reported problem — the prompt was delineated and
+    # the answer, the half a reader actually scrolls back to, was not — and the
+    # users who reported it will not know a setting exists to turn it on.
+    # OFF restores pre-rail rendering EXACTLY, not merely an unpainted gutter:
+    # the fold width, the copy gutter and the selection slice are all read at
+    # the same rate as the paint, so the prose is not left indented two cells
+    # by a rail that is not there. A mid-session flip DOES reach blocks already
+    # on screen — `display.*` runs `retheme`, which re-enters `_apply_rows`,
+    # which is where the rail is painted and where the flag is read.
+    "display.rail": True,
     # One padding row above and below a tool row and a user prompt
     # (`.comfortable-rows` in the stylesheet). Default ON was changed to OFF
     # by the maintainer.
