@@ -529,6 +529,17 @@ def build_wake_edit(
                 "id": target.id,
                 "fired_count": target.fired_count,
                 "created_at": target.created_at,
+                # THE ORIGIN RIDES ALONG TOO, for the same reason the three above
+                # do and one more: `build_wake_schedule` builds a FRESH row, so
+                # without this an edit ERASES which request armed the row. An edit
+                # is not an arm, so it must not overwrite the origin — and clearing
+                # it is worse than overwriting it, because the writer's identity
+                # machinery keys on that field: `_roll_back` would stop recognising
+                # the row as this request's, keep it, and tell the journal a retry
+                # was safe, leaving one intent standing twice (review round 5,
+                # R10 — the one strip site in the tree; advance/load/update/re-arm
+                # all preserve it).
+                "request_id": target.request_id,
             }
         )
     }

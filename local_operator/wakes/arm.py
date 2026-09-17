@@ -532,6 +532,27 @@ def _is_ours(row: WakeSchedule, intent: str, our_version: WakeSchedule) -> bool:
     return row.id == our_version.id and row.message == our_version.message
 
 
+def _survives(
+    row: WakeSchedule,
+    ours: dict[str, WakeSchedule],
+    before_by_id: dict[str, WakeSchedule],
+    intent: str,
+) -> bool:
+    """Whether ``row`` is still something of THIS request, in the list just written.
+
+    The question `_roll_back`'s return answers, asked of one row. A row THIS WRITE
+    WROTE counts when :func:`_is_ours` says so — and "wrote" is `ours` minus the
+    base, because ``ours`` holds the whole list we wrote, most of which we merely
+    inherited. ANY row counts when it carries this request's identity, which is what
+    catches a row of the same request under a different row id: the one shape the
+    previous predicate could not see, and the reason it could never be False.
+    """
+    written = ours.get(row.id)
+    if written is not None and written != before_by_id.get(row.id):
+        return _is_ours(row, intent, written)
+    return bool(intent) and row.request_id == intent
+
+
 def _settled(
     before: list[WakeSchedule],
     after: list[WakeSchedule],
@@ -581,14 +602,26 @@ def _settled(
         return None
 
     latest_by_id = {row.id: row for row in latest}
+    before_by_id = {row.id: row for row in before}
     settled_id = ""
     settled_due: int | None = None
     for row in after:
-        # A row this write added OR changed: the base holds it as we left it. Both
-        # are content questions by nature — the write's intent is the value itself —
-        # which is why the identity path above exists separately.
         current = latest_by_id.get(row.id)
-        if current is None or current != row:
+        if current is None:
+            return None
+        if row.id in before_by_id:
+            # A row this write CHANGED: the value IS the intent, so the base has to
+            # hold the value we set. A different one means a peer changed it again
+            # and re-applying would overwrite that change.
+            if current != row:
+                return None
+        elif not _is_ours(current, "", row):
+            # A row this write CREATED and cannot identify by request id: the SAME
+            # test the rollback uses (id plus message), deliberately not full
+            # equality (review round 5, MINOR-5). Equality read a peer's persist
+            # that merely RE-TIMED our row as "not landed", so the loop armed a
+            # second row for one intent on its own verify retry — one module
+            # answering one question two ways is what produced it.
             return None
         settled_id, settled_due = row.id, current.next_due_at
     for row in before:
@@ -611,10 +644,11 @@ async def _refusal_after_undoing(
     ``written`` is None when nothing was appended (the attempt-0 case), and the
     refusal is returned untouched. Otherwise the rollback is what lets the refusal
     be RELEASED by the journal — a retry re-runs and can succeed, which is what
-    these sentences promise — so when the undo is not COMPLETE the refusal has to
-    say so instead: ``wrote=True`` makes the journal record it, and the sentence
-    becomes one that never claims nothing was written (round 4, MINOR-3), because
-    here that is exactly what cannot be guaranteed.
+    these sentences promise — so when the rollback reports that the list it wrote
+    still carries something of this request, the refusal has to say so instead:
+    ``wrote=True`` makes the journal record it, and the sentence becomes one that
+    never claims nothing was written (round 4, MINOR-3), because here that is
+    exactly what cannot be guaranteed.
     """
     if written is None:
         return refusal
@@ -662,10 +696,26 @@ async def _roll_back(
     rewriting it would delete a row a writer that does not take this lock appended
     between our two moments.
 
-    Returns whether the undo is COMPLETE — whether nothing of this request is still
-    in effect in the list just written. That is what ``wrote`` reports, so it
-    answers "are our bytes still standing?" rather than "did the call raise?": the
-    two differ exactly when the rollback wrote a list that still carries our row.
+    RETURNS WHETHER THE LIST IT JUST WROTE STILL CARRIES ANYTHING OF THIS REQUEST, and
+    that is all it returns — a check on the bytes this call wrote, never a proof
+    about the durable state afterwards. The paragraph here used to claim the two
+    differed "exactly when the rollback wrote a list that still carries our row",
+    which is unsatisfiable (review round 5, MINOR-4): the drop rule is TOTAL over
+    this request's rows — the ones this write wrote, when they are ours, and any row
+    bearing this request's identity that the base did not hold — so today no path
+    makes it False without raising, and a peer that restores a row after the return
+    is beyond any check this module can make (the recorded Q15 case).
+
+    It is kept, and named as what it is, because ``False`` IS reachable and the case it
+    marks is the dangerous one: a row bearing this request's identity that the BASE
+    already held is left standing deliberately (a live owner holding it in memory
+    would restore it anyway — see the drop rule), which happens when a peer restores
+    our row between the settle that found the base clear and this rollback. There the
+    truthful answer is "something of this request is still in effect", so the refusal
+    is RECORDED and a retry replays instead of arming a duplicate. It is also the
+    tripwire for an edit that breaks the drop rule's totality: with that clause
+    removed, this returns ``False`` on the shape whose row of ours sits under another
+    row id, which is exactly how it was caught in review.
     """
     latest = await asyncio.to_thread(_read_rows, session_dir)
     ours = {row.id: row for row in after}
@@ -674,10 +724,21 @@ async def _roll_back(
     for row in latest:
         our_version = ours.get(row.id)
         if our_version is None:
-            restored.append(row)  # a row this write never touched
+            # A row this write did not write. It is still THIS REQUEST'S if it
+            # carries this request's identity and the base we read did not hold it
+            # — the same request's row that an earlier attempt, or an owner
+            # re-persisting a list that had absorbed it, put back. Dropped for the
+            # reason the rows we wrote are dropped: this request is being refused,
+            # so nothing of it may stand. A row the BASE held is left alone: this
+            # write did not put it there, and a live owner holding it in memory
+            # would only restore it on its next persist, so removing it would be a
+            # write against a writer the lock does not serialise.
+            if intent and row.request_id == intent and row.id not in before_by_id:
+                continue
+            restored.append(row)
             continue
         if row.id not in before_by_id and _is_ours(row, intent, our_version):
-            continue  # our own creation: dropped, re-timed or not
+            continue  # our own creation: dropped, re-timed, edited or not
         previous = before_by_id.get(row.id)
         if previous is not None and previous != our_version and row == our_version:
             restored.append(previous)  # our edit, still standing: undone
@@ -689,11 +750,7 @@ async def _roll_back(
         if row.id in present or row.id in ours:
             continue
         restored.insert(min(index, len(restored)), row)
-    complete = not any(
-        row.id not in before_by_id and _is_ours(row, intent, ours[row.id])
-        for row in restored
-        if row.id in ours
-    )
+    complete = not any(_survives(row, ours, before_by_id, intent) for row in restored)
     if restored != latest:
         await _append(session_dir, restored)
     return complete

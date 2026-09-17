@@ -920,3 +920,127 @@ async def test_a_refusal_that_could_not_be_undone_never_claims_nothing_was_writt
     assert refused.value.wrote is True
     assert str(refused.value) == UNSETTLED_MESSAGE
     assert "Nothing was written" not in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_an_edit_keeps_the_rows_origin_and_a_reissue_still_settles(root: Path) -> None:
+    """Review round 5, R10 — an edit must not ANONYMISE the row it rewords.
+
+    ``build_wake_schedule`` builds a fresh row, so a re-pin that carries only
+    ``id``/``fired_count``/``created_at`` clears ``request_id`` — and the identity the
+    writer's settle and rollback key on goes with it. Every later R9-class race on an
+    edited row is then unprotected, and the row stops answering its own arming
+    request: a re-issued arm falls through to a fresh id and a SECOND row for one
+    intent. The field is documented as "the request that ARMED this row", and an edit
+    is not an arm, so it rides along with the three the re-pin already carries.
+    """
+    session_dir = _session(root, "origin01", [])
+    request = {"message": "standup", "in": "45m"}
+    await arm_wake(root, "origin01", request, request_id="REQ-1")
+    assert _rows_from_transcript(session_dir)[0]["request_id"] == "REQ-1"
+
+    await edit_wake(root, "origin01", "w1", {"message": "standup (edited)"})
+
+    edited = _rows_from_transcript(session_dir)[0]
+    assert edited["id"] == "w1"
+    assert edited["message"] == "standup (edited)"
+    assert edited["request_id"] == "REQ-1", "the edit cleared the row's origin"
+    before = _snapshot_count(session_dir)
+
+    again = await arm_wake(root, "origin01", request, request_id="REQ-1")
+
+    assert again.wake_id == "w1", "the re-issue armed a second row for one intent"
+    assert _snapshot_count(session_dir) == before
+    assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
+
+
+@pytest.mark.asyncio
+async def test_a_retimed_copy_of_an_intentless_row_does_not_arm_again(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 5, MINOR-5 — one rule for "our row", used by both halves.
+
+    A row armed by the agent's tool or the CLI carries no request id, so the settle
+    falls back to content. It asked for FULL equality there while the rollback asked
+    for id-plus-message, so a peer persist that merely RE-TIMED our row (the firing,
+    in miniature) read as "not landed" and the loop armed a second row for the same
+    intent on its own verify retry. Both halves now use ``_is_ours``: identity when
+    there is one, id plus message when there is not, and the message is what says the
+    row is this intent's. Full equality stays where the VALUE is the intent — a row
+    this write changed.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    session_dir = _session(root, "retimed02", [_row("w1")])
+    original_append = arm_module._append
+    appends: list[int] = []
+
+    async def append_then_fire_and_retime(directory: Path, rows: list[WakeSchedule]) -> str:
+        appends.append(len(rows))
+        entry = await original_append(directory, rows)
+        if len(appends) == 1:
+            await original_append(
+                directory,
+                [
+                    (
+                        row.model_copy(
+                            update={"next_due_at": row.next_due_at + 1_000, "fired_count": 1}
+                        )
+                        if row.message == "raced"
+                        else row
+                    )
+                    for row in rows
+                ],
+            )
+        return entry
+
+    monkeypatch.setattr(arm_module, "_append", append_then_fire_and_retime)
+    before = _snapshot_count(session_dir)
+
+    outcome = await arm_wake(root, "retimed02", {"message": "raced", "in": "45m"})
+
+    assert outcome.wake_id == "w2"
+    landed = _rows_from_transcript(session_dir)
+    assert sum(1 for row in landed if row["message"] == "raced") == 1, landed
+    assert _snapshot_count(session_dir) - before == 2, "the request armed a second row"
+    assert len(appends) == 1, f"the mutation re-applied instead of settling: {appends}"
+
+
+@pytest.mark.asyncio
+async def test_the_rollback_drops_a_row_of_ours_under_another_row_id(root: Path) -> None:
+    """Review round 5, MINOR-4 — the one shape the completeness check could not see.
+
+    The predicate read ``restored`` for rows whose id this write wrote, so a row
+    carrying THIS REQUEST's id under a DIFFERENT row id was kept and not counted: it
+    survived a rollback that reported the write withdrawn. Dropping is now decided by
+    identity as well as by the row ids this attempt wrote, which is what makes the
+    check able to mean something rather than being true by construction.
+    """
+    import local_operator.wakes.arm as arm_module
+    from local_operator.harness.wake import WakeSchedule
+
+    session_dir = _session(root, "blindspot01", [_row("w1")])
+    ours = WakeSchedule(
+        id="w2",
+        message="raced",
+        next_due_at=1_789_000_000_000,
+        created_at=1_700_000_000_000,
+        request_id="REQ-B",
+    )
+    peer_copy = ours.model_copy(update={"id": "w9"})
+    # The state under test: the same request's row standing under an id this attempt
+    # never wrote — what an earlier attempt, or an owner re-persisting a list that had
+    # absorbed the row, leaves behind.
+    await arm_module._append(session_dir, [WakeSchedule.model_validate(_row("w1")), peer_copy])
+
+    complete = await arm_module._roll_back(
+        session_dir,
+        before=[WakeSchedule.model_validate(_row("w1"))],
+        after=[WakeSchedule.model_validate(_row("w1")), ours],
+        intent="REQ-B",
+    )
+
+    assert complete is True, "the rollback must not claim a state it left standing"
+    final = _rows_from_transcript(session_dir)
+    assert [row["id"] for row in final] == ["w1"], final
+    assert not any(row.get("request_id") == "REQ-B" for row in final)
