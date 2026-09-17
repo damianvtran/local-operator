@@ -447,8 +447,10 @@ class DesktopFeed:
         #: True) — a SECTION move whose pair is byte-identical, reproduced through
         #: the real writers with the comparison gated and ZERO frames published. So
         #: the key is derived for every candidate the tick sees, before the gate: one
-        #: ``entry_for`` build per candidate per tick (~1 µs, against a catalogue
-        #: probe measured at 5-9 ms over a real store), never per row per frame, and
+        #: ``entry_for`` build per candidate per tick (measured ``order_key_of``
+        #: 1.0 µs per candidate = +0.50 ms per tick over 485 candidates, against
+        #: the 3.50 ms 1 Hz membership probe this tick already pays on the same
+        #: store), never per row per frame, and
         #: the once-per-tick coalescing below is unchanged.
         #:
         #: THE DIAL, if a flapping wake index ever makes this too eager: compare
