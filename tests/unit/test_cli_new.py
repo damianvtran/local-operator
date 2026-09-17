@@ -2633,15 +2633,24 @@ def test_migrate_is_dispatched(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [store]
 
 
-def test_migrate_stub_fails_honestly(capsys: pytest.CaptureFixture[str]) -> None:
-    """B13: the stub exits NON-ZERO.
+def test_migrate_with_no_ticket_is_a_quiet_no_op(capsys: pytest.CaptureFixture[str]) -> None:
+    """E1: nothing stored is a SUCCESS, not the stub's honest failure.
 
-    A migration verb that returns 0 without moving anything tells the user
-    their plaintext ticket is now encrypted while it is still in `auth.db` —
-    a stub that returns 0 is a stub that ships.
+    Replaces `test_migrate_stub_fails_honestly` (slice B), which asserted the
+    stub's exit 2 / "not yet available" and which slice E breaks by design.
+
+    `_QwenRowStore` is reused rather than widened: it defines `list_credentials`
+    and nothing else — no `_conn` — so it can only drive the one path that
+    returns before the VACUUM step, which is exactly this one. Every other
+    migrate test uses a real `AuthStore` in `tests/unit/test_cli_migrate.py`.
+
+    The last two assertions are what discriminate against the stub: an exit
+    code alone would not, since both a no-op and a refusal can be non-zero.
     """
-    assert cli._qwencloud_ticket_migrate(_QwenRowStore()) == 2
-    assert "not yet available" in capsys.readouterr().err
+    assert cli._qwencloud_ticket_migrate(_QwenRowStore()) == 0
+    out = capsys.readouterr()
+    assert "nothing to migrate" in out.out
+    assert "not yet available" not in out.err
 
 
 def test_migrate_is_registered_in_the_parser() -> None:
