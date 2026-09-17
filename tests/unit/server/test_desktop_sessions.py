@@ -504,10 +504,21 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
     from local_operator.session.runtime.launch import ActionableConnectionError
 
     generic = "Session owner is unavailable. Reconnect and reconcile before retrying."
+    # The ladder takes its request now (it logs the route and the volume the
+    # store lives on), so this drives it the way a route does.
+    request = cast(
+        Any,
+        SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace()),
+            method="POST",
+            url=SimpleNamespace(path="/v1/desktop/sessions/abc/messages"),
+            path_params={"session_id": "abc"},
+        ),
+    )
 
     async def relay(error: BaseException) -> dict[str, Any]:
         with pytest.raises(HTTPException) as raised:
-            async with errors():
+            async with errors(request):
                 raise error
         assert raised.value.status_code == 503
         # ``HTTPException.detail`` is declared ``str``; this ladder answers a

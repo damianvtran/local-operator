@@ -260,7 +260,7 @@ async def list_wakes(
     request).
     """
     root = request.app.state.config_manager.config_dir
-    async with errors():
+    async with errors(request):
         return reply(await asyncio.to_thread(_collect_listing, root, limit, include_dormant))
 
 
@@ -346,7 +346,7 @@ async def create_wake(body: WakeCreate, request: Request):
             root, session_id, outcome.wake_id, outcome.next_due_at, outcome.index_written, True
         )
 
-    async with errors():
+    async with errors(request):
         result = await receipts(request).run(
             "create-wake:" + body.request_id,
             body.model_dump(by_alias=True, exclude_unset=True),
@@ -383,7 +383,7 @@ async def edit_wake_route(session_id: str, wake_id: WakeId, body: WakeEdit, requ
     idempotent — applying the same PATCH twice ends in the same row — so there
     is no duplicate side effect for a journal to prevent.
     """
-    async with errors():
+    async with errors(request):
         try:
             return reply(
                 await _mutate(
@@ -413,7 +413,7 @@ async def delete_wake_route(session_id: str, wake_id: WakeId, request: Request):
     empty one, which is also what releases the cleanup reap guard the session
     held while it had something scheduled.
     """
-    async with errors():
+    async with errors(request):
         try:
             return reply(
                 await _mutate(request, session_id, op="cancel", wake_id=wake_id, wake_request={})
