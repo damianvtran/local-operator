@@ -142,13 +142,15 @@ the `Promotion route` row above must not be read as "our promote workflow publis
 this": it did not, and the record is the audit artifact that has to survive that
 question.
 
-**The publication window, and why the listing's date reads a day earlier.** Three
-probes print the store's fields. Every timestamp in this paragraph is that of the
-workflow's own log line — the instant the store was actually read, a few tens of
-seconds after each run was created — so that no reader has to guess which basis a
-given time is on. Two of them, with 0.1.17 still in review, printed the same fields —
-run [35164942781](https://github.com/damianvtran/local-operator/actions/runs/35164942781)
-at 00:04:01Z and run [35167032053](https://github.com/damianvtran/local-operator/actions/runs/35167032053)
+**The publication window, and why the listing's date reads a day earlier.**
+Three probes on 2026-09-17 print the store's fields. Every timestamp in this
+paragraph is that of the workflow's own log line — the instant the store was
+actually read, a few tens of seconds after each run was created — so that no
+reader has to guess which basis a given time is on. Two of them, with 0.1.17
+still in review, printed the same fields — run
+[35164942781](https://github.com/damianvtran/local-operator/actions/runs/35164942781)
+at 00:04:01Z and run
+[35167032053](https://github.com/damianvtran/local-operator/actions/runs/35167032053)
 at 00:33:44Z:
 
 ```text
