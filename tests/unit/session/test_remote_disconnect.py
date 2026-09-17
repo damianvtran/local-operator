@@ -731,7 +731,11 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[AttachedSession, list[f
 
     dials: list[float] = []
 
-    async def silent_dial(record: Any) -> Any:
+    async def silent_dial(record: Any, *, deadline: float | None = None) -> Any:
+        # ``deadline`` is the READ envelope's bound on the whole attempt, which
+        # this double ignores on purpose: the subject here is recovery's verdict
+        # on a silent owner, and this viewer is a terminal one that never takes
+        # the read envelope at all.
         dials.append(_time.monotonic())
         # The REAL `_dial` stamps the identity on entry, before the sync it
         # will never get; without this the `_runtime_pid` assertion below is
@@ -1018,7 +1022,7 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
     )
     remote._ready_for_events = True
 
-    async def refusing_dial(record: Any) -> Any:
+    async def refusing_dial(record: Any, *, deadline: float | None = None) -> Any:
         raise ConnectionError("connection refused")
 
     monkeypatch.setattr(remote, "_dial", refusing_dial)
