@@ -7,17 +7,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator.harness.types import (
+    AgentStartEvent,
+    Message,
+    MessageUpdateEvent,
+    TextContent,
+    ToolExecutionEndEvent,
+    ToolResult,
+)
 from local_operator.mobile.tui_handle import (
     TuiSessionHandle,
     _DetailChangedDuringHydration,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+#: The generated formatter fixture, one directory up from the bundle it pins.
+FORMATTER_PARITY = (
+    Path(__file__).resolve().parents[3] / "local_operator/mobile/web/src/lib/format.parity.json"
+)
 
 
 @pytest.mark.asyncio
@@ -292,3 +306,160 @@ def test_the_started_hook_is_wired_and_reseeded_on_rebind(tmp_path) -> None:
     handle._app = _App(noted)  # type: ignore[assignment]
     handle.rebind()
     assert registrant.resets == [True, False, False]
+
+
+@pytest.mark.asyncio
+async def test_the_attach_seeds_a_live_calls_duration_from_the_owner() -> None:
+    """The WIRING, not just the fold: attaching must hand over the instants.
+
+    ``ProjectionFold.reconcile_clocks`` consuming a producer's start instant is
+    pinned in ``test_projection.py``, and that is not enough on its own: the
+    seed lives at the CALL SITE, beside ``reconcile_streaming``, so a refactor
+    that drops the call leaves every fold test green while the reported defect —
+    a phone attaching onto work in flight measuring it from the attach — comes
+    straight back.
+
+    So this drives the real handle over the real attach path and asserts the
+    reading ONLY the seed can produce: the call ends with no ``duration_s`` of
+    its own (optional on the wire), which leaves the fold measuring from the
+    instant the attach seeded. Without the seed that reading is ~0s.
+    """
+
+    class Epochs(FakeSession):
+        """A session publishing the two folded anchors, as ``Session`` does."""
+
+        epochs: dict[str, float | None] = {}
+        phase: tuple[str, float | None] = ("", None)
+
+        def live_tool_start_epochs(self) -> dict[str, float | None]:
+            return dict(self.epochs)
+
+        def activity_phase_clock(self) -> tuple[str, float | None]:
+            return self.phase
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    session = Epochs()
+    session.streaming = True
+    session.epochs = {"c1": time.time() - 180.0}
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    handle.subscribe(lambda: None)
+
+    session.emit(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="4")]),
+        )
+    )
+    row = [entry for entry in handle.session_projection_seed.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "done"
+    assert row.elapsed_s == pytest.approx(
+        180.0, abs=2.0
+    ), "a call that began before the phone attached must not be measured from the attach"
+
+
+def test_the_phone_formatter_fixture_still_matches_the_tuis_formatter() -> None:
+    """The other half of the formatter bridge (review round 2, MINOR 4).
+
+    `local_operator/mobile/web/src/lib/format.ts::formatElapsed` is a port of
+    `tui/widgets/tool_card.py::format_duration`, and the phone's band, its tool
+    rows and its subagent rows all print its output. The two are pinned by ONE
+    generated artifact — `local_operator/mobile/web/src/lib/format.parity.json`,
+    written by `scripts/generate_clock_format_parity.py` — which the vitest suite
+    asserts `formatElapsed` against and this test asserts `format_duration`
+    against. So a change to either formatter fails a suite in its own tree, and
+    re-aligning them means regenerating the fixture and then making the other
+    side agree; neither can drift in silence while both suites stay green.
+
+    The fixture lives under the web bundle on purpose: that path is the
+    mobile-web workflow's own filter, so regenerating it is what makes the vitest
+    half run in CI.
+    """
+    from local_operator.tui.widgets.tool_card import format_duration
+
+    fixture = json.loads(FORMATTER_PARITY.read_text())
+    cases = fixture["cases"]
+    assert len(cases) > 40, "the fixture must keep covering every branch and crossing"
+    for seconds, expected in cases:
+        assert format_duration(float(seconds)) == expected, seconds
+
+
+@pytest.mark.asyncio
+async def test_the_hand_off_redates_the_bands_age_from_the_fold_that_is_fed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 3, MAJOR 1 — the hand-off half, through the attach path.
+
+    The seed a viewer gets IS the object the runtime serializes, and it carries
+    the age as of the phase's last edge. A second viewer — a reconnect, a second
+    phone, "resume that session" — attaching to a live fold mid-phase therefore
+    seeded on that stale number: at a known zero, `0s` counting from the new
+    viewer's own mount, which is the operator-reported defect rendered as a
+    fabricated zero on the surface this PR exists for.
+
+    `redate_from_phase` is the hand-off the runtime performs before it serializes
+    a frame, and it is deliberately NOT the seed property: that one is read for
+    identity too, and a mutating getter is what round 4's NIT 2 asked to remove.
+    The pushed-frame half of the same fix is pinned end to end, over a real
+    runtime and a real daemon dial, in
+    `tests/unit/session/runtime/test_server.py::test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach`.
+
+    Driven with the fold's own clock, and with the deltas the reviewer measured
+    this window with: prose streams them continuously, and none re-enters the
+    label's arm, so the stored snapshot does not move on its own.
+    """
+    import local_operator.mobile.projection as projection_module
+    from tests.unit.mobile.test_projection import _StubClock
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    session = FakeSession()
+    session.streaming = True
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    handle.subscribe(lambda: None)
+
+    # The fold watches this turn begin, so the prose edge is one it witnessed —
+    # its own true zero, not a number counted from the attach.
+    session.emit(AgentStartEvent(generation=1))
+    session.emit(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert handle.session_projection_seed.activity == "responding"
+    assert handle.session_projection_seed.activity_started_s == 0.0, "the viewer's own edge"
+
+    clock.advance(45)
+    session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
+    assert handle.session_projection_seed.activity_started_s == 0.0, "the stored snapshot is stale"
+    handle.redate_from_phase()  # what the runtime does before serializing a frame
+    assert handle.session_projection_seed.activity_started_s == pytest.approx(
+        45.0, abs=0.2
+    ), "a viewer attaching 45s into the phase must be served the phase's age, not zero"
+
+
+def test_the_formatter_fixture_is_what_its_generator_produces() -> None:
+    """Review round 3, NIT 1: the fixture is pinned to its GENERATOR, not just
+    to its content.
+
+    Both suites assert the fixture's content against their own formatter, which
+    catches a formatter drifting but says nothing about the FILE: a hand edit
+    that rewrote the cases while keeping the list longer than the suites' ``>40``
+    bound would shrink coverage with every test still green. ``render()`` is the
+    generator's own bytes, so comparing against it is the provenance half — and
+    it is here rather than only behind the script's ``--check`` flag because CI
+    runs this suite.
+    """
+    from scripts.generate_clock_format_parity import FIXTURE, render
+
+    assert FORMATTER_PARITY == FIXTURE, "the generator writes the file this suite reads"
+    assert FORMATTER_PARITY.read_text() == render()

@@ -286,7 +286,28 @@ class TuiSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection skeleton: identity fields the runtime folds onto.
+
+        A pure read, deliberately: the runtime reads this for IDENTITY (to stamp
+        ``kind``, and to build its own sink fold over the object), and a getter
+        that also mutates is the shape that has twice produced this PR's defects
+        — a reader changing state it did not know it touched (review round 4,
+        NIT 2). Re-dating is :meth:`redate_from_phase`, called where the age
+        becomes a frame.
+        """
         return self._projection
+
+    def redate_from_phase(self) -> None:
+        """Re-date the band's age through the fold the EVENTS ARE FED into.
+
+        The runtime calls this on the frame it is about to serialize (probing for
+        the member, so a reduced handle without a fold simply has none): the age
+        is written when the phase moves, so a viewer — or a push — arriving
+        mid-phase must be served the phase's age AT THAT MOMENT rather than the
+        number from the last edge (review round 3, MAJOR 1 and round 4's BLOCKER,
+        both on this hand-off).
+        """
+        self._fold.redate_from_phase()
 
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         self._on_projection = on_projection
@@ -325,6 +346,13 @@ class TuiSessionHandle(SessionHandle):
         # events (start/end/turn-end) are the sole authority — see
         # ``_reconcile_streaming`` for why per-event reads are poison.
         self._reconcile_streaming()
+        # And seed the CLOCKS from the same attach, for the same reason: a phone
+        # subscribing mid-turn never witnessed the ``tool_execution_start`` (or
+        # the phase edge) either, so the fold's first event would date work that
+        # is already running from the phone's arrival — the reported band
+        # reading ``0s`` and counting up. One-shot, and probed: a session that
+        # cannot answer seeds nothing. See ``ProjectionFold.reconcile_clocks``.
+        self._fold.reconcile_clocks(session)
         self._refresh_state()
         self._warm_subagent_details()
         self._unsubscribe = unsubscribe

@@ -481,7 +481,21 @@ class SubagentRow:
     agent: str = "task"
     status: SubagentStatus = "running"
     progress: str = ""  # latest step line while running
-    elapsed_s: float = 0.0
+    #: The child's age, or ``None`` when this roster has NO age for it.
+    #:
+    #: ``None`` is not the same state as ``0.0``, and the drill-in's clock must
+    #: tell them apart (design round 3, D8): the roster computes an age only for
+    #: a child whose job row carries a start (``harness/comms.py``:
+    #: ``age = (now - started) if started else None``), so a live child with no
+    #: ``start_time`` arrives here at 0.0 — indistinguishable, for a plain float,
+    #: from a child that began this instant. The phone then painted ``0s``
+    #: counting up from its own mount where the TUI withholds the number
+    #: (``transcript.py``: "the number is withheld rather than invented —
+    #: ``clock=False``"), and the drill-in — which renders it through the same
+    #: ``WorkingLine`` gate as the band — lost its withholding path entirely.
+    #: Same discipline as ``activity_started_s``: a nullable number, absent when
+    #: unknown.
+    elapsed_s: float | None = None
     model_label: str = ""
     result_text: str = ""  # settled outcome, one line
     error_text: str = ""
@@ -647,7 +661,17 @@ class SessionProjection:
     activity: str = ""
     # Monotonic-ish seconds since the activity began, for the clock next to
     # the label. Server-computed so every phone paints the same age.
-    activity_started_s: float = 0.0
+    #
+    # ``None`` is "this fold has no instant it can honestly date the phase
+    # from" — a label joined mid-flight whose producer stated none — and it is
+    # published AS absence rather than as a zero. A float, ``0.0`` included, is
+    # a KNOWN zero (the phase edge the fold watched begin), which the phone
+    # paints ``0s`` and counts up from; one field carries both because the
+    # client's question is exactly "is there an instant", and a value-plus-flag
+    # pair could disagree with itself. Same discipline as
+    # ``ToolExecutionStartEvent.started_at_epoch`` and the session's folded
+    # ``activity_phase_started_at``.
+    activity_started_s: float | None = None
     # Why streaming last stopped: "completed" (turn finished) or "aborted"
     # (the user/agent stopped it) — the phone's "interrupted — tap to resume"
     # affordance reads THIS, never an inference from streaming flipping,
@@ -689,6 +713,66 @@ class SessionProjection:
         data = asdict(self)
         data["pending"] = self.pending.to_json() if self.pending else None
         return data
+
+    def __post_init__(self) -> None:
+        """Give the copy its re-dating reference — deliberately NOT a field.
+
+        ``activity_started_s`` is a DERIVED reading: the phase's age at the
+        instant some process computed it. Every later reader of a COPY (the
+        daemon, between the runtime's frames) otherwise serves that stale number
+        to whoever attaches next, and a viewer attaching mid-phase then paints
+        the stale value — at a known zero, ``0s`` counting from its own mount,
+        which is the operator-reported defect on this very surface (review round
+        3, MAJOR 1).
+
+        Re-dating needs one thing this object cannot hold as a field: WHEN the
+        reading was taken. ``None`` means "no reference" — a never-published
+        projection, a durable rebuild — and :func:`advance_received_age` then
+        leaves the value exactly as it found it. It is an instance attribute
+        rather than a declared dataclass field because ``to_json`` is
+        ``asdict``: a field would put a local monotonic instant on the wire, and
+        this is a property of THIS COPY, not of the projection.
+        """
+        self.activity_age_reference: tuple[float, float] | None = None
+
+
+def stamp_activity_age(projection: SessionProjection) -> None:
+    """Anchor a freshly ingested copy's band age to its arrival instant.
+
+    Called by the wire parser, so EVERY ingestor gets the reference rather than
+    each consumer having to remember. A projection with no age (``None``) gets
+    no reference: there is nothing to run forward, and absence stays absence.
+
+    The sibling of :func:`advance_received_age`, which spends the anchor.
+    """
+    age = projection.activity_started_s
+    projection.activity_age_reference = None if age is None else (time.monotonic(), float(age))
+
+
+def advance_received_age(projection: SessionProjection) -> None:
+    """Publish this copy's received band age AS OF NOW.
+
+    The second half of :func:`stamp_activity_age`, and the same one-shot
+    discipline ``monotonic_from_epoch`` uses for a producer's epoch: the part
+    already elapsed came from the producer, and everything after it is counted
+    on THIS process's monotonic clock, so a wall-clock adjustment cannot move a
+    running counter. Idempotent — the reference stays the anchor, so repeated
+    calls recompute rather than accumulate.
+
+    Deliberately NOT called ``redate_from_phase`` (the fold's method, which
+    re-dates from a phase instant it took itself): these are two different
+    clocks over the same field — one walks forward from an instant a fold owns,
+    this one forward from a reading a wire delivered — and a reader who confuses
+    them silently gets the wrong arithmetic (review round 4, NIT 1).
+
+    A projection with no reference is left untouched: a value the fold just
+    computed is already as fresh as this call could make it.
+    """
+    reference = projection.activity_age_reference
+    if reference is None:
+        return
+    stamped_at, age = reference
+    projection.activity_started_s = round(age + (time.monotonic() - stamped_at), 1)
 
 
 #: Transcript cap for a projection push — the tail the phone renders without
@@ -766,6 +850,10 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         projection.pending = PendingRequest(**pending_kwargs)
     else:
         projection.pending = None
+    # The band's age is anchored to ITS arrival here, once, for every ingestor:
+    # the value is a reading taken by another process, and the age it names is
+    # only valid as of the instant this copy received it.
+    stamp_activity_age(projection)
     return projection
 
 

@@ -1755,7 +1755,22 @@ class ServingSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection skeleton: identity fields the runtime folds onto.
+
+        A pure read; see :meth:`redate_from_phase` for the hand-off that dates
+        the band's age, and the TUI handle's same pair for why they are separate
+        (review round 4, NIT 2).
+        """
         return self._projection
+
+    def redate_from_phase(self) -> None:
+        """Re-date the band's age through the fold the EVENTS ARE FED into.
+
+        The runtime calls this on every frame it serializes: the age is written
+        when the phase moves, so a viewer or a push arriving mid-phase is
+        otherwise served the number from the last edge (review round 3, MAJOR 1).
+        """
+        self._fold.redate_from_phase()
 
     # -- v4 full-TUI capability --------------------------------------------------
     # These three are what makes ``RuntimeServer`` advertise
@@ -1854,6 +1869,15 @@ class ServingSessionHandle(SessionHandle):
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
         self._reconcile_streaming()
+        # Seed the CLOCKS from the same attach, and for the same reason: this
+        # fold was built for the attachment, so it witnessed neither the
+        # ``tool_execution_start`` of a call already in flight nor the phase
+        # edge of a model call already streaming, and its first event would
+        # date both from this process's arrival — the reported band reading
+        # ``0s`` and counting up. The producer's own folded instants date them
+        # instead; a session that cannot answer seeds nothing
+        # (``ProjectionFold.reconcile_clocks``).
+        self._fold.reconcile_clocks(self._session)
         # Seed the state (and with it the child roster) ONCE at attach. Until
         # the next event arrives this push is all a freshly attached phone
         # renders, and a settled turn never sends another: without this an
