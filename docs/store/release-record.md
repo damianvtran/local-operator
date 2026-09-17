@@ -68,7 +68,7 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 | Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.17` once the store reports the revision `STAGED` |
 | Store state | `PENDING_REVIEW` at 100% — the store reports `submittedItemRevisionStatus` `state=PENDING_REVIEW`, `crxVersion=0.1.17`, `deployPercentage=100` |
 | State last checked | 2026-09-15T23:47:46Z (the run's own timestamp) — promote run [35037244157](https://github.com/damianvtran/local-operator/actions/runs/35037244157), created 23:47:46Z, ended 23:50:05Z having refused at gate 1 and printed the store's own fields |
-| Approval timestamp | *pending — append when the review completes* |
+| Approval timestamp | ***Not directly observable — no run in our history records it.*** The version went live inside the bounded window **2026-09-17T00:33:44Z–2026-09-17T06:33:08Z** (see the post-release addendum below); the approval instant itself appears in no run we hold, so it is recorded as a bound rather than a timestamp. The outcome is verified independently on the public listing: the URL above reads **"Version 0.1.17"**, **"Updated September 16, 2026"** (checked 2026-09-17) |
 | Previously published | v0.1.15, `PUBLISHED` at 100% (state confirmed by the probe above; the *publication date* is not evidenced by any run — see the promotion-route note) |
 
 **One number, one tree — but read this before citing a SHA for 0.1.17.** The rule
@@ -110,6 +110,83 @@ operator or session this checkout holds no record of. Our documented sequence
 ("wait for `STAGED`, then promote") is not implicated, but it is also not what
 happened, twice — worth resolving in the runbook rather than re-deriving per
 release.
+
+**Post-release addendum (appended 2026-09-17).** This entry was written while the
+version sat in review. It has since gone live **without any successful
+`chrome-web-store-promote.yml` run behind it** — the third occurrence of the gap
+already recorded under v0.1.12 and v0.1.15 — and the store now reports it
+**`PUBLISHED` at 100%**: `publishedItemRevisionStatus` `state=PUBLISHED`,
+`crxVersion=0.1.17`, `deployPercentage=100`, with `submittedItemRevisionStatus`
+`<absent>`. Five rows above and the heading are consequently stale — `Promotion
+route`, `Store state`, `State last checked`, `Source commit` and `Artifact size` —
+and the heading's "pending review" is superseded by this addendum. The heading is
+left standing rather than rewritten, because this file does not rewrite a shipped
+entry: what the entry records is what we intended to ship at submission time, and
+the corrections belong here.
+
+**The promotion route, for the third time, was not the documented one.** Eight
+promote dispatches landed between 2026-09-15T23:47:46Z (minutes after the submission)
+and 2026-09-17T06:32:41Z — both run-creation times, as `gh run list` reports them —
+and every one of them failed; the last of them, run
+[35190293922](https://github.com/damianvtran/local-operator/actions/runs/35190293922),
+being the very probe whose output shows the version already `PUBLISHED`. The last
+successful promote anywhere remains 0.1.10's (run 34610983340, 2026-09-11). Google's
+publish reference says `STAGED_PUBLISH` stages on approval and is then published *by
+the developer* (against `DEFAULT_PUBLISH`, which publishes on approval), so an
+approved staged revision does not go live by itself: the publication was an explicit
+developer action taken from the dashboard or an out-of-band API call, by an operator
+or session this checkout holds no record of. Our documented sequence ("wait for
+`STAGED`, then promote") is not implicated, but it is also not what happened, three
+times now — worth resolving in the runbook rather than re-deriving per release. So
+the `Promotion route` row above must not be read as "our promote workflow published
+this": it did not, and the record is the audit artifact that has to survive that
+question.
+
+**The publication window, and why the listing's date reads a day earlier.**
+Three probes on 2026-09-17 print the store's fields. Every timestamp in this
+paragraph is that of the workflow's own log line — the instant the store was
+actually read, a few tens of seconds after each run was created — so that no
+reader has to guess which basis a given time is on. Two of them, with 0.1.17
+still in review, printed the same fields — run
+[35164942781](https://github.com/damianvtran/local-operator/actions/runs/35164942781)
+at 00:04:01Z and run
+[35167032053](https://github.com/damianvtran/local-operator/actions/runs/35167032053)
+at 00:33:44Z:
+
+```text
+submitted state=PENDING_REVIEW distributionChannels=[crxVersion=0.1.17 deployPercentage=100]; published state=PUBLISHED distributionChannels=[crxVersion=0.1.15 deployPercentage=100]
+```
+
+and the 06:33:08Z reading (run
+[35190293922](https://github.com/damianvtran/local-operator/actions/runs/35190293922),
+the one recorded in `State last checked`) printed:
+
+```text
+submitted <absent>; published state=PUBLISHED distributionChannels=[crxVersion=0.1.17 deployPercentage=100]
+```
+
+So 0.1.17 went live **between 2026-09-17T00:33:44Z and 2026-09-17T06:33:08Z** — the
+latest reading still showing `crxVersion=0.1.15` published, and the first showing
+`0.1.17` — and the approval instant itself appears in no run we hold: it is recorded
+as a bound, not invented as a timestamp. The listing's own `Updated` string says
+**September 16, 2026**, which is not a contradiction as far as we can tell: that
+whole window falls on September 16 in US Pacific time (00:33:44–06:33:08Z =
+17:33:44–23:33:08 PDT), so the store's date and our UTC bound agree once the store's
+day boundary is allowed for. That reading is an inference from the two sources, not
+a field the store exposes, and it is written here so a later reader does not read
+the pairing as an error. The listing's own page is the check that stands behind the
+live claim — it reads **"Version 0.1.17"** and **"Updated September 16, 2026"**
+(checked 2026-09-17) — not a workflow's success.
+
+**Two row corrections, recorded here rather than applied to the rows.** `Source
+commit` named the runtime release that had landed since dispatch, which was true when
+written; what matters to a reader is the invariant behind it — nothing under
+`extension/` has been committed since `ae560d4d8`
+(`git log --oneline ae560d4d8..origin/main -- extension/` is empty at this head), so
+`git rev-parse origin/main:extension` still returns the recorded tree hash
+`bc3cfba6c13623b036588afd67cb109426821056`. And `Artifact size` omits the size the
+store listing now reports: **119KiB**, against the 13 files the zip contains. Both
+statements supersede the rows above; the rows themselves are left as written.
 
 ## v0.1.15 — on `main`, NOT submitted (as of 2026-09-14)
 
