@@ -63,13 +63,17 @@ async def test_subagent_latch_ignores_watch_firings_while_parked_at_top(
         import importlib
 
         module = importlib.import_module(original)
-        real_read = module.read_transcript_page
+        real_read = module.load_transcript_page
 
-        def counting_read(*args: Any, **kwargs: Any) -> Any:
+        # The seam is the shared ASYNC page read (``load_transcript_page``), so
+        # the wrapper is a coroutine: what this test counts is LOADS, and a
+        # cached page still costs one call to the seam — it is the disk read and
+        # the decode that a hit removes, not the view's decision to ask.
+        async def counting_read(*args: Any, **kwargs: Any) -> Any:
             reads["n"] += 1
-            return real_read(*args, **kwargs)
+            return await real_read(*args, **kwargs)
 
-        monkeypatch.setattr(original + ".read_transcript_page", counting_read)
+        monkeypatch.setattr(original + ".load_transcript_page", counting_read)
         reads["n"] = 0
 
         # FIRST crossing at the top: one load, latch consumed.
@@ -127,13 +131,13 @@ async def test_subagent_latch_does_not_rearm_while_a_page_is_in_flight(
         import importlib
 
         module = importlib.import_module(SubagentView.__module__)
-        real_read = module.read_transcript_page
+        real_read = module.load_transcript_page
 
-        def counting_read(*args: Any, **kwargs: Any) -> Any:
+        async def counting_read(*args: Any, **kwargs: Any) -> Any:
             reads["n"] += 1
-            return real_read(*args, **kwargs)
+            return await real_read(*args, **kwargs)
 
-        monkeypatch.setattr(SubagentView.__module__ + ".read_transcript_page", counting_read)
+        monkeypatch.setattr(SubagentView.__module__ + ".load_transcript_page", counting_read)
         reads["n"] = 0
 
         # Cross into the top: the load starts (loading=True) but has not

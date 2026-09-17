@@ -47,7 +47,6 @@ down.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import reprlib
 from collections import Counter
@@ -73,6 +72,7 @@ from local_operator.harness.comms import (
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
+from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -80,7 +80,6 @@ from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     TranscriptEntry,
     TranscriptPage,
-    read_transcript_page,
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
@@ -2333,8 +2332,13 @@ class SubagentView(Vertical):
 
         async def load() -> None:
             try:
-                page = await asyncio.to_thread(
-                    read_transcript_page,
+                # Through the shared page seam, not a bare ``to_thread`` around
+                # the reader: the speculative re-look below asks for the SAME
+                # page the settled refresh just read, so a re-look that finds an
+                # unchanged journal should cost a dict lookup rather than a
+                # second decode. The view's own module-level seam stays — the
+                # tests drive slow and failing reads through it.
+                page = await load_transcript_page(
                     directory,
                     before_id=cursor,
                     limit=HISTORY_PAGE_ROWS,
