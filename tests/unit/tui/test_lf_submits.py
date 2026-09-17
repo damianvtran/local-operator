@@ -24,20 +24,23 @@ The composer is not the only reader of the byte. ``Editor._on_key`` normalises
 the name it gates on, but it also hands the EVENT to the app's live-prompt
 router (``OperatorApp.route_key_to_live_prompt``), which compares ``event.key``
 itself — so a rewrite of the local name alone left an LF spelled ``ctrl+j``
-there. With an answer key held that fell through to
-``editor.insert(held.character)``, and this method then submitted the restored
-character as a CHAT PROMPT while the question stayed up unanswered: measured as
-``prompts == ["y"]`` with the approval card still mounted, against CR's
-answered prompt. That is a regression on the pre-fix behaviour, where the inert
-byte left the hold timer to commit the answer, and it is deterministic for
-integration delivery — both bytes of one ``"y\\n"`` write land inside the hold
-window by construction, not by timing luck. So the byte is normalised on the
-EVENT as well, and the router is pinned here beside the composer.
+there, and ``ctrl+j`` is not that router's ``enter`` branch. The router
+cancelled the held answer key, restored its character into the composer, and the
+composer then submitted that character as a CHAT PROMPT while the question
+stayed up unanswered: measured as ``prompts == ["y"]`` with the approval card
+still mounted, against CR's answered prompt. The end state matched the pre-fix
+path, which did the same thing for the same reason; what it diverged from is CR.
+It is deterministic rather than a race, because both events of one ``"y\\n"``
+write arrive in the same parse pass, so the terminator is always the key that
+cancels the hold. So the byte is normalised on the EVENT as well, and the router
+is pinned here beside the composer.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import pytest
 from textual import events
@@ -239,7 +242,9 @@ async def test_a_bracketed_paste_with_a_newline_does_not_submit() -> None:
         assert submitted == []
 
 
-async def _answered_from_bytes(deliver) -> dict:  # type: ignore[no-untyped-def]
+async def _answered_from_bytes(
+    deliver: Callable[[Any, OperatorApp, Editor], Awaitable[None]],
+) -> dict[str, Any]:
     """Run a live approval with the composer focused, then deliver BYTES.
 
     ``deliver(pilot, app, editor)`` is the only difference between the cases:
@@ -281,10 +286,10 @@ async def _answered_from_bytes(deliver) -> dict:  # type: ignore[no-untyped-def]
         }
 
 
-async def _held_answer_after_byte(byte: str) -> dict:
+async def _held_answer_after_byte(byte: str) -> dict[str, Any]:
     """Hold the `y` answer key, then deliver ``byte`` from the driver."""
 
-    async def deliver(pilot, app, editor) -> None:  # type: ignore[no-untyped-def]
+    async def deliver(pilot: Any, app: OperatorApp, editor: Editor) -> None:
         await pilot.press("y")
         await pilot.pause()
         assert app._held_answer_key is not None, "precondition: the answer key is held"
@@ -293,7 +298,7 @@ async def _held_answer_after_byte(byte: str) -> dict:
     return await _answered_from_bytes(deliver)
 
 
-async def _single_write_after(text: str) -> dict:
+async def _single_write_after(text: str) -> dict[str, Any]:
     """Deliver the answer key AND its terminator in ONE write.
 
     This is the shape an integration produces: sidekick.nvim, tmux and every
@@ -302,7 +307,7 @@ async def _single_write_after(text: str) -> dict:
     in which a human's inter-key interval could intervene.
     """
 
-    async def deliver(pilot, app, editor) -> None:  # type: ignore[no-untyped-def]
+    async def deliver(pilot: Any, app: OperatorApp, editor: Editor) -> None:
         await _feed(app, text)
 
     return await _answered_from_bytes(deliver)
