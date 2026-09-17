@@ -730,8 +730,9 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     except OSError as error:
         # A path on an unmounted volume, or a symlink loop. The TUI answers this
         # class of case in the same words (``_apply_move``), and it is NOT left to
-        # the route's ``errors()`` ladder: that ladder has no OSError clause, so
-        # an unmounted volume would reach the user as a 500.
+        # the route's ``errors()`` ladder: that ladder's ``OSError`` arm claims
+        # ONLY the disk-full errnos (ENOSPC/EDQUOT) and re-raises the rest, so
+        # this one would reach the user as a 500 rather than as the path it is.
         raise HTTPException(409, f"cannot move to {requested}: {error}") from None
 
     resolved = str(directory)

@@ -255,21 +255,26 @@ async def test_the_ladder_logs_the_real_exception_with_route_and_session(
     Its absence is the reason the incident took an hour of log archaeology: the
     same condition had been recorded elsewhere in the runtime log three times
     while the request that refused the user left nothing behind.
+
+    Driven with a GAINED store error (a real ``SQLITE_NOTADB`` from a real file
+    that is not a database), the class whose traceback is the finding. The
+    routine contention class is the opposite case and is pinned separately
+    below (review round 1, R5).
     """
     monkeypatch.setattr(
         store_failures.shutil, "disk_usage", lambda _root: SimpleNamespace(free=10**12)
     )
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.ERROR):
         with pytest.raises(HTTPException) as raised:
             async with errors(ladder_request(tmp_path)):
-                raise locked_database_error(tmp_path)
+                raise corrupt_database_error(tmp_path)
     failure = raised.value
-    assert failure.status_code == 503
-    assert cast("dict[str, Any]", failure.detail)["code"] == STORE_BUSY
+    assert failure.status_code == 500
+    assert cast("dict[str, Any]", failure.detail)["code"] == STORE_UNAVAILABLE
 
     (record,) = [entry for entry in caplog.records if "desktop store failure" in entry.message]
-    assert record.levelno == logging.WARNING
-    assert "store_busy" in record.getMessage()
+    assert record.levelno == logging.ERROR
+    assert "store_unavailable" in record.getMessage()
     assert "/v1/desktop/sessions/0123456789ab/messages" in record.getMessage()
     assert "0123456789ab" in record.getMessage()
 
@@ -282,10 +287,67 @@ async def test_the_ladder_logs_the_real_exception_with_route_and_session(
     # while the very same record still rendered its traceback into the report.
     rendered = caplog.text
     assert "Traceback (most recent call last)" in rendered
-    assert "sqlite3.OperationalError" in rendered
+    assert "sqlite3.DatabaseError" in rendered
+    assert "file is not a database" in rendered
     # And it names the route, not just the error: the archaeology this exists to
     # prevent was "which request logged this?" as much as "what failed?".
     assert "desktop_sessions.py" in rendered
+
+
+async def test_routine_contention_is_logged_without_a_traceback(tmp_path, caplog):
+    """Contention is routine, so its record carries no stack (review round 1, R5).
+
+    A lock that clears on its own is not a finding, and a full traceback per
+    retry is log noise that buries the records worth reading. The line is still
+    emitted -- code, route and session -- so a contention that does NOT clear
+    stays attributable; what it drops is only the stack.
+    """
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(HTTPException) as raised:
+            async with errors(ladder_request(tmp_path)):
+                raise locked_database_error(tmp_path)
+    assert raised.value.status_code == 503
+    (record,) = [entry for entry in caplog.records if "desktop store failure" in entry.message]
+    assert record.levelno == logging.WARNING
+    assert "store_busy" in record.getMessage()
+    assert "/v1/desktop/sessions/0123456789ab/messages" in record.getMessage()
+    assert "Traceback (most recent call last)" not in caplog.text
+
+
+def test_every_ladder_call_site_passes_the_request() -> None:
+    """The ladder takes a REQUIRED request: prove no call site omits it.
+
+    This is the guard for the exact failure a rebase can smuggle in (QA round 1,
+    Q1): upstream added call sites while this branch made the parameter
+    required, the textual conflict resolved to code that still compiles, and a
+    call site that omits the argument raises ``TypeError`` at REQUEST time --
+    invisible to a green unit run and to a reviewer reading the diff, visible
+    only when somebody opens that route.
+
+    A walk rather than a grep, so a call broken across lines or written with
+    keyword arguments is inspected the same way, and it asserts it FOUND call
+    sites at all: an empty walk would otherwise pass vacuously if the helper were
+    renamed.
+    """
+    import ast
+    from pathlib import Path
+
+    routes = Path(__file__).resolve().parents[3] / "local_operator" / "server" / "routes"
+    calls: list[tuple[str, int, int]] = []
+    for path in sorted(routes.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "errors"
+            ):
+                calls.append((path.name, node.lineno, len(node.args)))
+    # 53 at the time of writing, across six modules: a floor rather than an exact
+    # count so an unrelated route does not fail this test, but high enough that a
+    # walk which silently stopped finding them cannot pass.
+    assert len(calls) >= 50, calls
+    assert [call for call in calls if call[2] != 1] == []
 
 
 async def test_a_full_volume_answers_out_of_space_and_says_what_to_do(

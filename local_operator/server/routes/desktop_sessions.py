@@ -991,7 +991,11 @@ def _store_refusal(request: Request, failure: StoreFailure, error: BaseException
         request.method,
         request.url.path,
         f" (session {session_id})" if session_id else "",
-        exc_info=error,
+        # The traceback rides only the two conditions an operator has to act on,
+        # where the stack IS the finding; contention is routine and clears on its
+        # own, so a traceback per retry is noise that buries the records worth
+        # reading (review round 1, R5). The line itself is emitted either way.
+        exc_info=error if failure.traceback else None,
     )
     return HTTPException(failure.status, {"code": failure.code, "message": failure.message})
 
@@ -1170,8 +1174,10 @@ async def errors(request: Request) -> AsyncIterator[None]:
         # Everything this ladder cannot classify is RE-RAISED untouched: it sits
         # under every desktop control-plane route, and answering for arbitrary
         # ``OSError``s would swallow the failures whose own routes have better
-        # words for them -- ``move_session`` answers a bad target with a 409
-        # naming the path precisely because this ladder has no OSError clause.
+        # words for them -- ``move_session`` answers a bad target (an unmounted
+        # volume, a symlink loop: ENOENT/ELOOP/ENOTDIR) with a 409 naming the
+        # path, and that clause returns ``None`` for exactly those, so the
+        # ladder must let them past rather than answer in its own voice.
         #
         # What it does answer is ENOSPC. The non-sqlite writes on the send path
         # (the transcript append, the attachment store) raise this rather than a
