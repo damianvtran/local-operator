@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import errno
 import os
+import re
 import time
 from typing import Any
 
@@ -477,8 +478,8 @@ async def test_a_funded_call_reports_the_budget_it_exceeded_not_the_callers_cons
     ``test_the_derived_budget_is_a_deadline_and_not_a_licence`` uses, because
     at its default 30 s a funded call cannot be made to time out inside a test.
     0.05 s of declared waiting funds to 0.5 s here against a 0.01 s caller's
-    budget, so the two candidates are 50x apart and the elapsed floor is a wide
-    margin rather than a race.
+    budget, so the two candidates are 50x apart and the elapsed the message
+    renders separates them by a wide margin rather than a race.
     """
 
     monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 0.45)
@@ -493,11 +494,9 @@ async def test_a_funded_call_reports_the_budget_it_exceeded_not_the_callers_cons
     client = RpcClient(requests_write, responses_read, terminate=terminate)
     params = _declaring_execute(int(declared_s * 1000))
     peer = asyncio.create_task(_silent_peer(requests_read))
-    started = time.monotonic()
     try:
         with pytest.raises(TimeoutError) as excinfo:
             await client.call("execute", params, timeout=configured_s)
-        elapsed = time.monotonic() - started
         message = str(excinfo.value)
     finally:
         peer.cancel()
@@ -510,10 +509,28 @@ async def test_a_funded_call_reports_the_budget_it_exceeded_not_the_callers_cons
     # the defect: a message carrying both would still tell the reader the wrong
     # budget, so its absence is asserted rather than its position.
     assert f"its {configured_s:g}s budget" not in message
-    # The SAME number governed the wait: the call outlived the caller's budget
-    # by 50x. A detail wired to the funded value while the wait_for stayed on
-    # the constant satisfies every message assertion above and fails here.
-    assert elapsed >= funded_s
+    # THE WAIT IS PINNED ON THE NUMBER THE SENTENCE ITSELF RENDERS, never on a
+    # stopwatch out here. Sampling `elapsed` around `client.call` measures the
+    # deadline PLUS the timeout branch's 1 s cancel grace, so any floor on it is
+    # satisfied by construction: this test used to assert `elapsed >= funded_s`
+    # and it PASSED against a mutant whose `wait_for` stayed on the caller's
+    # 0.01 s constant while only the detail was funded -- the exact split it is
+    # documented to catch. The elapsed field in the message is sampled BEFORE
+    # the grace (see `call`), so it is the deadline's own firing time.
+    match = re.search(r"after (\d+\.\d)s \(request 1; operation_id exec-declared\)$", message)
+    assert match is not None, f"the elapsed field moved out of the message contract: {message!r}"
+    rendered_elapsed = float(match.group(1))
+    # LOWER bound: the deadline that fired is the funded one, 50x the caller's
+    # constant. A `wait_for` left on the constant fires at 0.01 s and renders
+    # ~0.0s here, which is what makes this -- and not the budget string, which
+    # the mutant keeps funded -- the assertion that catches that wiring.
+    assert rendered_elapsed >= funded_s
+    # UPPER bound, so the floor is not satisfied by a number that is merely
+    # large: the sample is taken before the grace, so the rendered value is the
+    # firing time rather than the firing time plus teardown. The 0.5 s allowance
+    # is slack for a busy loop, comfortably inside the whole second the grace
+    # would add.
+    assert rendered_elapsed < funded_s + 0.5
     # Cancel for this request, one second of grace, poison, correlation ids:
     # unchanged by which number the sentence names.
     assert "(request 1; operation_id exec-declared)" in message
@@ -779,6 +796,76 @@ async def test_a_cancel_that_cannot_be_delivered_still_names_the_timeout() -> No
 
 
 @pytest.mark.asyncio
+async def test_a_funded_call_whose_cancel_cannot_be_delivered_names_its_own_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other `_timeout_detail` call site, with a request that declares work.
+
+    The cancel-not-delivered arm is a SECOND site the reconciliation moved onto
+    ``effective_budget``, and no test saw the difference: the only test that
+    reaches it drives ``close``, whose request declares nothing, so
+    ``funded_timeout`` returns the caller's constant there and a call site wired
+    to that constant stays green. It is also the arm an operator meets most
+    often, because a worker that died between taking the request and the
+    deadline firing is exactly the worker that cannot read the cancel.
+
+    Type and errno are asserted for the same reason as the close-shaped test:
+    the detail is prepended to a write error whose TYPE is the bundle's
+    diagnostic bucket (``brokenpipeerror``), so this arm cannot buy legibility
+    with either.
+    """
+
+    monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 0.45)
+    declared_s, headroom_s, configured_s = 0.05, 0.45, 0.01
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    params = _declaring_execute(int(declared_s * 1000))
+
+    async def dying_peer() -> None:
+        await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+        # Took the request and then died: nothing will ever read the cancel.
+        os.close(requests_read)
+
+    peer = asyncio.create_task(dying_peer())
+    funded_s = declared_s + headroom_s
+    try:
+        with pytest.raises(BrokenPipeError) as excinfo:
+            await client.call("execute", params, timeout=configured_s)
+        error = excinfo.value
+        assert type(error) is BrokenPipeError
+        assert error.errno == errno.EPIPE
+        message = str(error)
+        # The FUNDED number, which is the only number that distinguishes this
+        # arm from its close-shaped sibling: the caller's 0.01 s constant is
+        # absent for the same reason it is absent on the main raise.
+        assert f"execute exceeded its {funded_s:g}s budget after" in message
+        assert f"its {configured_s:g}s budget" not in message
+        assert "(request 1; operation_id exec-declared)" in message
+        assert "the cancel was not delivered" in message
+        # The timeout detail still leads for the same truncation reason as the
+        # timeout-only message it replaces on this path.
+        assert message.index(f"exceeded its {funded_s:g}s budget") < message.index("the cancel")
+        assert terminated.is_set()
+        await peer
+        # The poison is still the timeout: the call was never answered, so a
+        # later call must not read the reply the worker may still produce.
+        with pytest.raises(RpcProtocolError) as followup:
+            await client.call("observe", ObserveParams(episode_id="episode"), timeout=configured_s)
+        assert "poisoned by a timeout on execute, request 1" in str(followup.value)
+    finally:
+        # ``requests_read`` is deliberately absent: the peer closed it, and
+        # closing it twice raises out of the teardown that is running anyway.
+        for fd in (requests_write, responses_read, responses_write):
+            os.close(fd)
+
+
+@pytest.mark.asyncio
 async def test_an_oversize_request_names_the_call_that_could_not_be_sent() -> None:
     """The request that cannot be framed is the same write that never happens.
 
@@ -827,6 +914,72 @@ async def test_an_oversize_request_names_the_call_that_could_not_be_sent() -> No
     finally:
         for fd in (requests_read, requests_write, responses_read, responses_write):
             os.close(fd)
+
+
+def test_the_longest_legal_budget_renders_in_plain_units() -> None:
+    """The budget is a number an operator reads, at every magnitude the protocol admits.
+
+    ``:g`` emits six significant digits, so the sentence's own budget leaves
+    fixed notation from 1e6 s -- nine maximal cleanup actions -- and the
+    protocol's ceiling is 256 of them. Both magnitudes are asserted, because
+    "reachable in principle" is what a legibility NIT is called when nobody
+    computes the top: nine actions is the first crossing, and 29_491_230 s is
+    the largest deadline a legal call can declare. The band BELOW the crossing
+    is asserted byte-identical in the same test: those strings are what the
+    campaign's readouts quote and what the other tests in this file assert
+    (0.05s/0.25s for ``close``, 180s/0.5s/31.5s for ``execute`` and
+    ``cleanup``), so a fix that re-rendered them would churn approved evidence.
+    """
+
+    from local_operator.evaluation.adapters.rpc import (
+        _EXPONENT_FORM_AT_S,
+        _rendered_budget,
+        _timeout_detail,
+    )
+    from local_operator.evaluation.deadlines import DECLARED_WORK_HEADROOM_S
+    from local_operator.evaluation.lifecycle import (
+        MAX_CLEANUP_ATTEMPTS,
+        MAX_CLEANUP_TIMEOUT_MS,
+    )
+    from local_operator.evaluation.receipts import MAX_DECLARATIONS
+
+    # The band the renderer's own comment states, checked rather than trusted:
+    # fixed point one second below it, exponent form at it.
+    assert f"{_EXPONENT_FORM_AT_S - 1.0:g}" == "999999"
+    assert f"{_EXPONENT_FORM_AT_S:g}" == "1e+06"
+
+    # One maximal cleanup action -- an hour, 32 attempts -- from the protocol's
+    # own bounds rather than a number chosen here.
+    per_action = MAX_CLEANUP_TIMEOUT_MS / 1000.0 * MAX_CLEANUP_ATTEMPTS
+    assert per_action == 115_200.0
+    nine_actions = 9 * per_action + DECLARED_WORK_HEADROOM_S
+    assert nine_actions == 1_036_830.0
+    assert f"{nine_actions:g}" == "1.03683e+06"
+    assert _rendered_budget(nine_actions) == "1036830"
+    maximal = MAX_DECLARATIONS * per_action + DECLARED_WORK_HEADROOM_S
+    assert maximal == 29_491_230.0
+    assert _rendered_budget(maximal) == "29491230"
+
+    # The sentence an artifact carries, not just the field: the readouts fold
+    # this whole line into the failure.
+    detail = _timeout_detail(
+        "cleanup",
+        timeout=maximal,
+        elapsed=1_036_831.0,
+        request_id=42,
+        operation_id="cleanup-9f2c1a4b8d3e",
+    )
+    assert "cleanup exceeded its 29491230s budget after 1036831.0s" in detail
+
+    # The untouched band, at the values the existing evidence quotes.
+    for value, expected in (
+        (0.05, "0.05"),
+        (0.25, "0.25"),
+        (180.0, "180"),
+        (0.5, "0.5"),
+        (31.5, "31.5"),
+    ):
+        assert _rendered_budget(value) == expected
 
 
 def test_error_detail_stays_within_the_line_framing_and_bounds() -> None:
