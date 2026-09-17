@@ -117,6 +117,13 @@ _build_pair = _buildwatch.build_pair
 _build_prefix = _buildwatch.build_prefix
 _build_settle_seconds = _buildwatch.build_settle_seconds
 _build_stagger_seconds = _buildwatch.build_stagger_seconds
+#: Added with the exit-time build pair (2026-09-17): the same reading the drain
+#: uses to detect a move, asked again at the EXIT so the reason names the build
+#: the process is actually leaving for. Aliased here rather than reached through
+#: ``_buildwatch`` for the reason the block above exists — this module is RUN as
+#: ``__main__``, so its own names are the stable seam for tests and for any
+#: reader, and the call site should not depend on the attribute being reachable.
+_handover_build = _buildwatch.handover_build
 
 #: A runtime must not refuse the same newer build FOREVER. ``_should_refresh``
 #: only acts on an instant where nothing would be lost, so a session busy for
@@ -490,24 +497,89 @@ def _tree_is_replaceable() -> bool:
     return kind not in (update_mod.InstallKind.EDITABLE, update_mod.InstallKind.UNKNOWN)
 
 
-def _drain_detail(poll: _BuildPoll, boot: "BuildStamp | None") -> str:
-    """The parenthetical riding with the retirement cause.
+def _drain_reasons(poll: _BuildPoll) -> tuple[str, ...]:
+    """WHY NOW, as the phrases the retirement's why-now carries.
+
+    Split out of :func:`_drain_detail` because the reason it names is a fact
+    about the LATCH — this runtime was declining a settled newer build, or its
+    tree was gone — and it stays true of the exit however long the work in
+    between took. The build PAIR is the half that can go stale, so the two are
+    composed separately (see :func:`_drain_detail_at_exit`).
+
+    EACH PHRASE NAMES ITS SUBJECT. ``declined 3x`` was read against the build
+    it followed ("a newer build ... declined", i.e. refused) when the runtime
+    was the party declining to hand over — and it was read by the operator, so
+    the ambiguity cost something (design round 1, D2).
+    """
+    reasons: list[str] = []
+    if poll.files_gone:
+        reasons.append("the loaded module tree is gone")
+    if poll.declines:
+        reasons.append(f"the runtime declined to hand over {poll.declines}x")
+    if not reasons:
+        reasons.append("hard-stale")
+    return tuple(reasons)
+
+
+def _drain_detail(
+    reasons: "tuple[str, ...]", boot: "BuildStamp | None", newer: "BuildStamp | None"
+) -> str:
+    """The why-now riding with the retirement, for the runtime LOG.
 
     Names WHICH build the runtime left for and WHY NOW, because "the runtime
     retired" alone is not actionable to whoever reads the log later, and the
     why-now is the part an investigation cannot reconstruct after the fact: a
     build pair says what changed, the trigger says whether this runtime was
     still working or had lost its tree.
+
+    IT IS NOT A TURN'S REASON, and that is the round-1 correction: a retirement
+    that latched through :meth:`ServingSessionHandle.begin_retire` proved nothing
+    was in flight, so there is no cut for it to label — the string is logged at
+    the exit (``serving.ServingSessionHandle.begin_retire``) and nowhere else.
+    See ``process._drain_detail_at_exit`` for the pair's own re-read.
+
+    ``newer`` is the build on disk at the moment the pair is being read, so a
+    caller that has one in hand from a poll and a caller re-reading the disk at
+    its exit both come through here — one spelling of the pair, and therefore
+    one sentence shape, whichever moment it describes.
     """
-    reasons: list[str] = []
-    if poll.files_gone:
-        reasons.append("the loaded module tree is gone")
-    if poll.declines:
-        reasons.append(f"declined {poll.declines}x")
-    if not reasons:
-        reasons.append("hard-stale")
-    pair = _build_pair(boot, poll.newer) if poll.newer is not None else ""
+    pair = _build_pair(boot, newer) if newer is not None else ""
     return f"{', '.join(reasons)}{pair}"
+
+
+def _drain_detail_at_exit(drain: "_Drain") -> str:
+    """The why-now the EXIT logs, with its build pair RE-READ.
+
+    WHY NOT ``drain.detail``. That string was composed at the latch, and the
+    gap between the latch and the exit is exactly the wait this runtime's work
+    buys — hours, on a busy session. Two ``lop-update`` runs fit in that gap,
+    and replaying the latch's pair then asserts a transition the process has
+    already left: measured on the reporting host, five latches at 01:58 named
+    ``(0.56.2 → 0.56.6)`` and the record that replayed one of them at 09:56
+    named that same pair while 0.56.9 was the install on disk (2026-09-17). A
+    log line naming a build that has not been on disk for hours is its own
+    false report, and the operator's request was to stop backend updates from
+    producing false traces.
+
+    The honest pair at the exit is boot → whatever the install names NOW, which
+    is what :func:`local_operator.buildwatch.handover_build` answers. ``None``
+    from it asserts no transition at all — the install is back to the boot
+    stamp, the stamp cannot be resolved into a build, or there is no install to
+    compare against (:func:`handover_build`'s own three shapes, one of which is
+    a build strictly OLDER than the boot stamp) — and that is the same rule the
+    drain already follows before it acts on a move. ANSWERING THE ROLLBACK EDGE
+    (QA round 1, Q3): with the pair dropped, the exit keeps only the reasons,
+    which is a statement about what this runtime declined and not a promise
+    that a newer build is on disk; the exit's own log line carries it, and the
+    durable row this used to feed no longer exists (a retirement that proved
+    nothing was in flight brands no turn — see
+    ``ServingSessionHandle._note_retirement_cut_off``).
+
+    The REASONS are deliberately still the latch's: this runtime was declining
+    three settled builds, or its tree was gone, and neither fact expires. See
+    :func:`_drain_reasons`.
+    """
+    return _drain_detail(drain.reasons, drain.boot, _handover_build(drain.boot))
 
 
 def _viewer_attached(runtime: object) -> bool:
@@ -845,6 +917,25 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         # checks it, so from here the admissions REFUSE and the claim is true by
         # construction (design §5.1).
         begin_retire = getattr(handle, "begin_retire", None)
+        # THIS RUNG PROVES NOTHING WAS IN FLIGHT, and the cut-off note now says
+        # so by construction rather than by an argument here: the note is
+        # written only for a turn the disposal is about to ABORT
+        # (``ServingSessionHandle._note_retirement_cut_off``), and the grace
+        # loop above only falls through with the whole residency predicate
+        # holding — no turn, no job, no gate parked on the user — while the
+        # latch refuses admissions from the same instant, so no turn can appear
+        # between them either. Arming a cause at the LATCH (what this branch did
+        # until 2026-09-17) claimed the opposite, and the claim was not free:
+        # the note is consumed by whichever run end comes next, and the teardown
+        # synthesises one for a run whose outcome was never published — so a
+        # quiet update that caught nothing published a durable "error" row for a
+        # run that had already ended, rendered as an unexplained cut-off because
+        # ``idle-exit`` is a retirement label and not a cause in
+        # ``incidents.CUT_OFF_CAUSES``. Six such rows on the reporting host
+        # (2026-09-17); the one read in full is session ``1ee642a5a098``, whose
+        # last turn row is 09:57:24 and whose ``error`` row was published at
+        # 09:59:31 against the run that had already ended. The retirement is
+        # still latched — the refusal and the log line need it.
         if callable(begin_retire) and not begin_retire("idle-exit"):
             logger.info("session runtime: work arrived as the idle drain closed; keeping")
             continue
@@ -948,6 +1039,15 @@ class _Drain:
     to: str
     reason: str
     stagger_until: float
+    #: The reasons half of ``detail``, kept so the EXIT can render its own
+    #: parenthetical (:func:`_drain_detail_at_exit`) without parsing the latch's
+    #: string back apart: the phrases are the latch's facts and outlive it, the
+    #: build pair in ``detail`` does not.
+    reasons: "tuple[str, ...]" = ()
+    #: The stamp this process booted from, so the exit can ask the disk what it
+    #: has moved to SINCE — the pair the reason is allowed to assert. ``None``
+    #: is a process that never had a comparable stamp, which asserts no pair.
+    boot: "BuildStamp | None" = None
     #: The token this departure latches and names itself with at the exit. Two
     #: values, because the two triggers make different claims: ``runtime-retired``
     #: is the build vocabulary every viewer-driven retirement already carried
@@ -997,7 +1097,8 @@ async def _begin_drain(
     """
     boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
     to = poll.newer.label() if poll.newer is not None else ""
-    detail = _drain_detail(poll, boot)
+    reasons = _drain_reasons(poll)
+    detail = _drain_detail(reasons, boot, poll.newer)
     if poll.files_gone:
         reason = "retiring: the build this process loaded is gone from disk"
     elif to:
@@ -1016,6 +1117,8 @@ async def _begin_drain(
         cause="runtime-retired",
         stagger_s=random.uniform(0, _build_stagger_seconds()),  # noqa: S311 — jitter, not security
         leaving=LEAVING_FOR_BUILD,
+        reasons=reasons,
+        boot=boot,
     )
 
 
@@ -1044,6 +1147,8 @@ async def _commit_to_leaving(
     cause: str = "runtime-retired",
     stagger_s: float = 0.0,
     leaving: str = "",
+    reasons: "tuple[str, ...]" = (),
+    boot: "BuildStamp | None" = None,
 ) -> "_Drain | None":
     """Announce a departure, then stop admitting work. ``None``: not ours.
 
@@ -1182,6 +1287,8 @@ async def _commit_to_leaving(
         reason=reason,
         stagger_until=time.monotonic() + delay,
         cause=cause,
+        reasons=reasons,
+        boot=boot,
     )
 
 
@@ -1207,13 +1314,18 @@ async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: async
     The exit commits through ``begin_retire``, so the last instant still says
     "idle" by construction and the cut-off note a retirement owes is written by
     the rung that owns it. Retried every ``REAP_CHECK_S`` until it lands.
+
+    THE DETAIL IS RE-READ HERE rather than replayed from the latch
+    (:func:`_drain_detail_at_exit`): this path's whole shape is that the exit
+    waits for hours of work, and a reason that names the build pair of the
+    latch asserts a transition the install left long ago.
     """
     if time.monotonic() < drain.stagger_until:
         return False
     if not _idle_for_refresh(handle):
         return False
     begin_retire = getattr(handle, "begin_retire", None)
-    if callable(begin_retire) and not begin_retire(drain.cause, drain.detail):
+    if callable(begin_retire) and not begin_retire(drain.cause, _drain_detail_at_exit(drain)):
         logger.info("session runtime: work arrived as the drain closed; keeping")
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
@@ -1404,6 +1516,11 @@ async def _drain_for_signal(
         loaded=_drain_loaded_label(runtime),
         cause=SIGNAL_DRAIN_CAUSE,
         leaving=LEAVING_ON_SIGNAL,
+        # The detail is the whole parenthetical on this trigger — a signal makes
+        # no claim about any build — so it is carried as the one phrase the
+        # exit re-renders, with no boot stamp (:func:`_drain_detail_at_exit`
+        # then asserts no pair, which is what this path means).
+        reasons=(f"{sig_name}: drained to the end of the turn in flight",),
     )
     if drain is None:
         if stop.is_set() or getattr(handle, "_disposing", False):
