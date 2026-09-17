@@ -6240,6 +6240,21 @@ MESSAGE_DRAFTS = [
         "can you review and fix that issue,\n"
         "replicate it and then fix and test end to end"
     ),
+    # The credential RESIDUAL, pinned rather than left to the PR body: only a
+    # WHOLE-DRAFT invocation is refused, so a draft that MENTIONS the word, or
+    # puts the word on its own line, is still a message — deliberately. The shape
+    # answers "is the text after this word the command's own", and a draft whose
+    # FIRST word is not the command has no such text; refusing it would refuse
+    # ordinary prose that talks ABOUT the command, which is the operator's
+    # original report (`/mcp logout seems to cause a crash`, two rows up). The
+    # inline gesture is closed by the composer's own capture, not by this rule.
+    #
+    # Pinned because the shape change hands a future author a new argument for
+    # widening the rule ("another surface owns that text"), and widening it here
+    # would silently re-break #1180. So the boundary is asserted on the side that
+    # stays a message, with the residual named out loud rather than implied.
+    "please /credential sk-CANARY-not-a-real-secret",
+    "/credential\nsk-CANARY-not-a-real-secret",
 ]
 
 #: Drafts that, as a WHOLE, are a command and so belong on the command endpoint.

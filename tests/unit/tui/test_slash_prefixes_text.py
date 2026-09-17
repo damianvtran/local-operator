@@ -19,8 +19,10 @@ THREE tables, one per source of "text after this word is the command's argument"
   free-text prompt, or a value chosen from a list). This is the pair of booleans
   the composer derives ``consumesText`` from.
 * ``ARGUMENT_SHAPE_POLICY`` — the desktop VALIDATES or FORWARDS the text without
-  either a prompt or a list: a provider id, an MCP subcommand, a selector, a
-  path, a title. Adding only the first two was this PR's round-1 MAJOR: 17
+  either a prompt or a list (a provider id, an MCP subcommand, a selector, a
+  path, a title), or REFUSES it because another surface owns it (``/credential``,
+  whose typed text the command route answers with the masked-form sentence).
+  Adding only the first two was this PR's round-1 MAJOR: 17
   whole-draft controls the desktop runs (``/mcp logout``, ``/login openai``,
   ``/rename x``, ``/usage on`` …) were accepted as messages, so a client whose
   command surface is off would have spent a paid turn on each.
@@ -128,15 +130,17 @@ PREFIXES_TEXT_POLICY = {
 }
 
 
-#: The THIRD source: the shape trailing text must have for the desktop to use it
+#: The THIRD source: the shape trailing text must have for the desktop to OWN it
 #: as this command's argument, where neither a prompt nor an inline list applies.
 #:
 #: The rule these entries encode: text after the word is the command's argument
 #: when the desktop's own path USES it — a handler that reads it, a form field it
-#: pre-fills, a selection/filter it forwards. A sentence is never one of those, so
-#: `/usage on` (a view selector) is the command while `/usage more prose` is a
-#: message, and `/mcp logout` is the command while `/mcp logout seems to cause a
-#: crash` is a message.
+#: pre-fills, a selection/filter it forwards — OR REFUSES it because another
+#: surface owns it (`/credential` below: the route answers typed text with the
+#: masked-form sentence, so the text is not prose either). A sentence is never one
+#: of those, so `/usage on` (a view selector) is the command while `/usage more
+#: prose` is a message, and `/mcp logout` is the command while `/mcp logout seems
+#: to cause a crash` is a message.
 ARGUMENT_SHAPE_POLICY = {
     # --- shapes: text the desktop validates or forwards -----------------------
     # ONE selector token, forwarded as the picker's `selected`/`selection`/

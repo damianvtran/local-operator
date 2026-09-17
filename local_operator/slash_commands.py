@@ -704,14 +704,17 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # unsafe direction: the messages endpoint's admission rule agreed with it
         # and admitted a whole-draft `/credential <secret>` as a MESSAGE, so a
         # client whose composer plans that draft as prose posted a raw credential
-        # to the model. Measured on the released code: `/credential <canary>`,
-        # `/cred <canary>` and even `please /credential <canary>` all reached a
-        # transcript as a `type=message, role=user` record.
+        # to the model. Measured on the released code: `/credential <canary>` and
+        # `/cred <canary>` reached a transcript as a `type=message, role=user`
+        # record — the whole-draft forms this shape now refuses.
         #
         # ANY rather than WORD because the refusal is about the text, not its
         # token count: a secret is arbitrary text, and a single-token shape would
         # leave `/credential my pass phrase` admitted as a message — the same leak
-        # for the multi-token case.
+        # for the multi-token case. The INLINE form is the composer's own capture
+        # route rather than this predicate's subject, so `please /credential
+        # <secret>` stays a message here by the whole-draft rule — measured, and
+        # pinned in `MESSAGE_DRAFTS`.
         argument_shape=ArgumentShape.ANY,
         desktop_destination="session.credential",
     ),

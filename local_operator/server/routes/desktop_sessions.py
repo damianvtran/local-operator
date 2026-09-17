@@ -754,6 +754,17 @@ class Prompt(Input):
         if len(self.model_dump_json().encode()) > 900_000:
             raise ValueError("Message exceeds the canonical control-frame limit")
         command = whole_draft_command(self.text)
+        # The sentence is GENERIC on purpose, and one row is why it must stay
+        # that way: `/credential` is a whole-draft command whose text belongs to
+        # the masked form, so "move it below your text" would name exactly the
+        # prose form that still reaches the model (`MESSAGE_DRAFTS` pins those two
+        # forms as messages). Latent rather than live, because the app's shaper
+        # publishes "The request has invalid fields." for every body-validation 422
+        # (`server/app.py`), so this text reaches no wire — an in-process caller
+        # only, while the route keeps the masked-form instruction. Giving this row
+        # its own sentence here is a behaviour change and does not belong in a
+        # comment-only pass; if that shaper ever starts publishing validator
+        # detail, this row needs one first.
         if command is not None:
             raise ValueError(
                 f"/{command[0].name} is a command, not a message. "
