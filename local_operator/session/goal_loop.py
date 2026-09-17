@@ -189,6 +189,27 @@ LOOP_STOP_ARGS = frozenset({"stop", "cancel", "abort", "--stop"})
 #: things and only one is available while the loop runs: stopping cancels the
 #: driver, clearing resets the snapshot a dismissed surface was left holding.
 #: Collapsing them would make ``--clear`` cancel live work by accident.
+#:
+#: ONE word, and while a loop RUNS it deliberately means two things depending on
+#: which host owns the session (round 1: reviewer MINOR-1 — recorded as designed
+#: rather than left to look like an accident). The owner runtime PUBLISHES
+#: ``frontend.loop``, and that snapshot is the record a loop still driving turns
+#: exists: clearing it mid-flight would leave provider turns arriving with
+#: nothing on any surface saying what was spending them, and would lose the state
+#: a viewer is watching. So there ``--clear`` is refused with the
+#: ``loop_running`` code — the route answers 409 and the sentence names
+#: ``/loop --stop`` — see ``serving._route_shared_slash`` and
+#: ``GoalLoop.clear``, which returns ``False`` for exactly this caller.
+#:
+#: A TUI publishes no loop state at all: its loop lives in the app-local
+#: ``_loop_running`` flag and is written nowhere, so its only loop-readable
+#: meaning of ``--clear`` is "end the loop this terminal is running", which is
+#: what both of its handlers do (``app._cmd_loop`` / ``_loop_slash_result``).
+#: Refusing there instead would make the flag the palette and the picker row
+#: advertise read as a no-op or a typo. The two answers are therefore the same
+#: word meaning what each host can actually mean by it, not a disagreement to be
+#: normalised away; ``docs/DESKTOP_CONTROLS.md`` states the split for the desktop
+#: readership.
 LOOP_CLEAR_ARGS = frozenset({"--clear"})
 
 _BOTCHED_COUNT_RE = re.compile(r"\d[A-Za-z0-9.]*$")

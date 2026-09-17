@@ -2,7 +2,9 @@
 
 The sibling script (``shot_slash_flag_picker.py``) captures the row standing
 still. This one captures what the row does when it is accepted, because that is
-the behaviour round 1 turned on and the property a still cannot show.
+the behaviour round 1 turned on and the property a still cannot show. Like its
+siblings it drops the inherited ``CMUX_*``/``LOP_*`` variables before any product
+import, so it cannot touch the operator's real cmux workspaces or session.
 
 Why it exists: the row is the PRE-SELECTED row and usually the only match, so
 ``Editor._picker_choice_is_unambiguous`` ran it on one Enter — which turned
@@ -31,8 +33,21 @@ label at all.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
+
+# Drop every multiplexer identifier and harness override BEFORE any application
+# import, the same scrub both sibling shot scripts do. Two reasons, both of them
+# recorded incidents rather than hygiene: a headless pilot that inherits the
+# operator's live ``CMUX_WORKSPACE_ID`` has renamed their real cmux workspaces
+# (``scripts/probe_isolation.py``), and the ``LOP_*`` family carries runtime
+# behaviour — ``LOP_RUNTIME_ADOPT_SESSION`` adopts, ``LOP_MODEL_SELECTION_OVERRIDE``
+# pins a model — so an inherited export steers a probe at a real session.
+# ``visual_capture.isolate_capture()`` re-homes HOME and the config dir but
+# deliberately leaves these alone.
+for _key in [key for key in os.environ if key.startswith(("CMUX_", "LOP_"))]:
+    os.environ.pop(_key)
 
 # This script lives in ``scripts/``, one level under the repo root — the same
 # depth the sibling shot scripts assume. Retarget this if it ever moves again.

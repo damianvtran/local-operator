@@ -293,7 +293,7 @@ loop status/count/reason. A viewer detach does not stop/restart it; runtime tear
 cancels it, and a replaced runtime labels a retained active checkpoint interrupted
 rather than automatically spending more tokens.
 
-`/goal --clear` unsets the standing goal (the bare words `clear|none|reset` still
+`/goal --clear` clears the standing goal (the bare words `clear|none|reset` still
 work). It is stored nowhere and starts no turn: the receipt is the whole effect — and
 it NAMES the goal it removed, because a standing goal is invisible in the UI and
 there is no undo — and the argument is matched as a WHOLE, so `/goal --clear the

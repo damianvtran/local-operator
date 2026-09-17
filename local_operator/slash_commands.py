@@ -978,8 +978,25 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
 #: The forms the unknown-flag refusal names, per command — the flag spelled
 #: beside words the user can actually type, so the sentence teaches the vocabulary
 #: rather than only complaining about what it received.
+#:
+#: ``clears it``, not a synonym, and the two clauses stay in the flag's own
+#: command form: the palette row already reads "/goal --clear clears it", the
+#: picker says "Clear the standing goal" and the receipt says "goal cleared", so
+#: a fourth verb here was the odd one out beside a flag literally spelled
+#: ``--clear`` (round 2: design D5, UX U7, reviewer NIT-5).
+#:
+#: The rest of the sentence is spelled to the WRAP BUDGET rather than to the
+#: roomier "sets a goal": the refusal paints inside a notice whose body budget at
+#: an 80-column terminal is 70 cells, and the ``unknown flag <token> — `` prefix
+#: spends 22 of them on a ``--stop``-shaped token. "sets a goal" is 4 cells
+#: longer than "sets it", which puts the sentence at 71: it then wraps with the
+#: pronoun ALONE on the second row — the shape D5 captured, and the reason the
+#: shorter clause was chosen rather than D5's own three-word suggestion, which
+#: dangles a two-word tail in the same place. As written the sentence is 67 cells
+#: for ``--stop`` and 69 for ``--clearx``: one painted row at 80 columns for
+#: both, measured through a real ``NoticeBlock``.
 _FLAG_FORMS: dict[str, str] = {
-    "goal": "/goal <text> sets a goal, /goal --clear unsets it",
+    "goal": "/goal <text> sets it, /goal --clear clears it",
     "loop": "/loop <goal> loops toward a goal, /loop <n> runs n turns, /loop --stop cancels",
 }
 
