@@ -21323,8 +21323,12 @@ class OperatorApp(App[None]):
         """True when ``display.narration`` is OFF — narration is removed at finalize.
 
         Read at the moment a message finalizes rather than cached, so a
-        mid-session flip governs every message from that point on. It applies
-        FORWARD ONLY by construction: blocks already mounted are never revisited.
+        mid-session flip governs every message from that point on.
+
+        The forward-only property does not come from this helper: it holds
+        because nothing re-projects the transcript when the flag changes, so
+        blocks already mounted are never revisited. See ``on_settings_changed``,
+        whose ``display.`` arm repaints without rebuilding.
         """
         return not settings_get("display.narration", DEFAULT_NARRATION)
 

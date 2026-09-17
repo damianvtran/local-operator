@@ -859,6 +859,11 @@ class EventController:
         message = event.message
         # `getattr` with a default on both: reduced event producers and
         # synthetic test messages do not always carry these fields.
+        #
+        # The fallback DIRECTION is deliberate: a missing `tool_calls` degrades
+        # to `has_tool_calls=False`, which classifies as "not narration" and
+        # KEEPS the prose. A producer we cannot interrogate must never cost the
+        # user a message.
         self._post(
             AssistantMessageEnd(
                 text,

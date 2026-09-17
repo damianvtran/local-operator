@@ -130,9 +130,20 @@ def test_tool_calls_alone_classify_as_narration() -> None:
     assert is_intermediate_narration(stop_reason=None, has_tool_calls=True) is True
 
 
-def test_the_stop_reason_alone_classifies_as_narration() -> None:
-    """And one that reports the stop reason before the calls are parsed."""
-    assert is_intermediate_narration(stop_reason="toolUse", has_tool_calls=False) is True
+def test_the_stop_reason_alone_is_not_enough_to_hide_the_prose() -> None:
+    """``toolUse`` with NO calls must KEEP the prose (review MAJOR-1).
+
+    Reachable, not hypothetical: ``providers/clients.py`` maps
+    ``finish_reason`` to ``stop_reason`` before the calls are assembled and
+    ``harness/loop.py`` assigns the two independently, so a provider reporting
+    ``finish_reason=tool_calls`` whose arguments fail to assemble lands here.
+
+    Accepting the reason alone removed the prose while the tool loop mounted
+    nothing and ``assistant_stop_notice`` returned None for ``toolUse`` — the
+    user's prompt followed by silence. Hiding narration is only justified when
+    tool activity supersedes it; with no calls, nothing does.
+    """
+    assert is_intermediate_narration(stop_reason="toolUse", has_tool_calls=False) is False
 
 
 def test_a_plain_answer_is_not_narration() -> None:
@@ -194,6 +205,34 @@ async def test_narration_stays_when_the_toggle_is_on() -> None:
         await _stream(pilot, app, NARRATION, stop_reason="toolUse", has_tool_calls=True)
         remaining = _assistant_blocks(app)
         assert len(remaining) == 1
+        assert remaining[0].text().strip() == NARRATION
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_promised_calls_but_made_none_still_says_something(
+    narration_hidden,
+) -> None:
+    """MAJOR-1, at the FRAME: this turn must not render as silence.
+
+    The pure classification test above pins the rule; this pins the
+    consequence, which is the thing the user actually suffered. Nothing else
+    rescues this shape — the tool loop has no calls to mount and
+    ``assistant_stop_notice`` returns None for ``toolUse`` — so if the prose
+    goes, the prompt is followed by nothing at all.
+
+    Asserted as "the prose is on screen" rather than "a block exists": a turn
+    that mounted an EMPTY block would satisfy the weaker claim and still show
+    the user nothing.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = app.query_one(TranscriptView)
+        view.append_block(UserBlock("what is the gate timeout?"))
+        await pilot.pause()
+        await _stream(pilot, app, NARRATION, stop_reason="toolUse", has_tool_calls=False)
+        remaining = _assistant_blocks(app)
+        assert len(remaining) == 1, "the only thing the turn produced was swept"
         assert remaining[0].text().strip() == NARRATION
 
 
