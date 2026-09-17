@@ -145,8 +145,48 @@ SUBAGENT_TOTAL = int(os.environ.get("LO_SIDEBAR_SHOT_TOTAL") or 438)
 #: way to see the D12 fix on a real frame. Default unset, i.e. unfocused.
 FOCUS_LIST = os.environ.get("LO_SIDEBAR_SHOT_FOCUS") == "1"
 
+#: Which rows are pinned. ``LO_SIDEBAR_SHOT_PINS`` is a comma-separated id
+#: list, or the literal ``none`` for an unpinned list — the baseline a user
+#: sees before pinning anything, which the fixed ``PINNED_IDS`` above cannot
+#: frame. Unset reproduces ``PINNED_IDS`` byte-identically.
+_PINS_ENV = os.environ.get("LO_SIDEBAR_SHOT_PINS")
+if _PINS_ENV is None:
+    PINS: tuple[str, ...] = PINNED_IDS
+elif _PINS_ENV.strip().lower() in {"none", ""}:
+    PINS = ()
+else:
+    PINS = tuple(part.strip() for part in _PINS_ENV.split(",") if part.strip())
 
-def _entries() -> list[CatalogEntry]:
+#: The ⌥ layer. ``LO_SIDEBAR_SHOT_LAYER=0`` captures it OFF — the default
+#: state of `tui.sidebar_show_subagents`, and the only way to frame that the
+#: footer chip counts the hidden population whether or not the layer is drawn.
+#: Unset leaves it ON, as the existing frames have it.
+SHOW_SUBAGENTS = os.environ.get("LO_SIDEBAR_SHOT_LAYER") != "0"
+
+#: Which row the cursor sits on. ``LO_SIDEBAR_SHOT_CURSOR`` takes an id so a
+#: pinned row can be put under the cursor and the `›`-displaces-`★` handoff
+#: captured. Unset keeps the current/cursor row at the first seeded id.
+CURSOR_ID = os.environ.get("LO_SIDEBAR_SHOT_CURSOR") or "aaaaaaaaaaa1"
+
+#: Keys pressed AFTER the rows are seeded and the spinner pinned, as a
+#: comma-separated list (``ctrl+o``). This is how a CHORD is captured as the
+#: user actually fires it rather than by setting the state it produces by
+#: hand — a frame of the outcome is not evidence that the binding reaches it.
+#: Pressed last so the seeded catalog is already in place. Unset presses
+#: nothing.
+_CHORD_ENV = os.environ.get("LO_SIDEBAR_SHOT_CHORD") or ""
+CHORDS = tuple(part.strip() for part in _CHORD_ENV.split(",") if part.strip())
+
+#: ``LO_SIDEBAR_SHOT_NEUTRAL_CWD=1`` runs the app from the isolated HOME so the
+#: status band paints ``~`` instead of the operator's real checkout path. The
+#: sidebar itself is unaffected; this only keeps a published frame free of a
+#: personal absolute path, which matters at the WIDE widths where the band has
+#: room to spell the whole thing out. Same fixture device as `pages_shot.py`,
+#: whose note calls a stable cwd fixture data rather than a layout change.
+NEUTRAL_CWD = os.environ.get("LO_SIDEBAR_SHOT_NEUTRAL_CWD") == "1"
+
+
+def _entries(show_subagents: bool = SHOW_SUBAGENTS) -> list[CatalogEntry]:
     entries = [
         CatalogEntry(
             SessionRow(
@@ -169,6 +209,13 @@ def _entries() -> list[CatalogEntry]:
         )
         for session_id, name, age, state, kind in UNSEEN_ROWS
     ]
+    # What the LAYER-OFF catalog actually supplies. `load_catalog` takes
+    # `include_subagents=show_subagents`, and with it False the hidden
+    # population is filtered out at the LOAD site -- except for PINNED ids,
+    # which are exempt from that filter (and from the cap) so a pinned run
+    # still resolves. Handing all three rows in regardless would render a
+    # layer-off frame that the product never produces.
+    subagent_rows = [row for row in SUBAGENT_ROWS if show_subagents or row[0] in PINS]
     entries += [
         CatalogEntry(
             SessionRow(id=session_id, mtime=NOW - age * 60, name=""),
@@ -176,7 +223,7 @@ def _entries() -> list[CatalogEntry]:
             label=label,
             agent=agent,
         )
-        for session_id, label, agent, age in SUBAGENT_ROWS
+        for session_id, label, agent, age in subagent_rows
     ]
     return entries
 
@@ -187,6 +234,10 @@ async def main() -> None:
     if len(sys.argv) > 2:
         cols, rows = sys.argv[2].split("x")
         size = (int(cols), int(rows))
+
+    if NEUTRAL_CWD:
+        os.environ["HOME"] = str(Path(os.environ["HOME"]).resolve())
+        os.chdir(os.environ["HOME"])
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
@@ -219,12 +270,12 @@ async def main() -> None:
         # The ⌥ layer ON, so the capture shows all four sections at once. The
         # rows are handed in directly (as every other row here is) rather than
         # loaded, so this never touches the developer's real store.
-        sidebar.show_subagents = True
-        sidebar.set_pins(PINNED_IDS)
+        sidebar.show_subagents = SHOW_SUBAGENTS
+        sidebar.set_pins(PINS)
         sidebar.set_subagent_total(SUBAGENT_TOTAL)
         sidebar.set_entries(_entries())
         sidebar.current_id = "aaaaaaaaaaa1"
-        sidebar.cursor_id = "aaaaaaaaaaa1"
+        sidebar.cursor_id = CURSOR_ID
         # Pin the animation: a capture is only comparable frame-to-frame if the
         # spinner is at a known phase in both.
         #
@@ -249,6 +300,41 @@ async def main() -> None:
         # determinism claim is false silently poisons every future comparison
         # captured from it.
         assert sidebar._frame == 2, f"spinner phase drifted to {sidebar._frame}"
+
+        for chord in CHORDS:
+            await pilot.press(chord)
+            await pilot.pause()
+        if CHORDS:
+            # The chord's own effect on the WIDGET is the thing under capture,
+            # and it has already happened. But `ctrl+a`/`ctrl+o` also post
+            # `SubagentLayerToggled`, and the app answers that by re-polling
+            # the catalog off disk — which, in an isolated capture, is EMPTY.
+            # Left alone the frame reads "No conversations yet" and shows the
+            # chord working on nothing. Re-seed the same fixture so the frame
+            # shows the state the chord produced over a populated list, which
+            # is what the user sees against a real store.
+            #
+            # Assert the chord actually landed BEFORE repainting, so a chord
+            # that silently failed to reach its action cannot be papered over
+            # by the re-seed.
+            after_cursor = sidebar.cursor_id
+            assert sidebar.show_subagents, (
+                f"chord {CHORDS!r} did not turn the ⌥ layer on "
+                f"(show_subagents={sidebar.show_subagents})"
+            )
+            # The layer is ON now, so the re-poll would return the hidden
+            # population the chord just asked for.
+            sidebar.set_entries(_entries(sidebar.show_subagents))
+            sidebar.cursor_id = after_cursor
+            # A chord can restart the spinner through `_sync_animation`; re-pin
+            # it so a before/after chord pair still differs only where the
+            # chord acted.
+            if sidebar._timer is not None:
+                sidebar._timer.stop()
+                sidebar._timer = None
+            sidebar._frame = 2
+            sidebar.refresh()
+            await pilot.pause()
 
         save_capture(app, out)
         conversation = app.query_one("#session-conversation")
