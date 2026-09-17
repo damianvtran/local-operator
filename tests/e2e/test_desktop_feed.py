@@ -663,3 +663,119 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
             reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reader
+
+
+@pytest.mark.asyncio
+async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
+    desktop_server, workspace: Path
+):
+    """THE CROSS-SURFACE DOORBELL, over the real stack.
+
+    A pin made in the TUI has to reach the desktop app with no manual refresh, and
+    the only vehicle for that is the ``catalogue`` frame this feed publishes — the
+    sidebar re-runs its catalogue fetch once per frame. So the pin file is in the
+    probe's invalidation token, and this is the test that says the token actually
+    moves: a unit test of the key string cannot, because the failure it guards
+    against (a probe that never notices, leaving the app on its 30 s safety poll)
+    lives entirely in the timing between a write and a frame.
+
+    Three claims, each needing the HTTP layer:
+
+    1. a pin WRITE publishes exactly one catalogue frame, within the probe interval;
+    2. a QUIET window publishes none — otherwise the feed would refetch every
+       sidebar on the machine once a second for nothing;
+    3. a client connecting AFTER the write is not REPLAYED it, because the frame is
+       an invalidation and the newcomer's ``open`` snapshot already carries the
+       counter it would have announced.
+    """
+    root, client = desktop_server
+    session_id = await _create(client, workspace, "44444444-4444-4444-8444-444444444401")
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        opened = await _next_frame(lines, lambda f: f["type"] == "open")
+        assert opened["payload"]["catalogue_revision"] is not None
+
+        # A READER TASK, not a bounded read per window: cancelling an
+        # `aiter_lines()` iteration closes the response it is reading, so a
+        # windowed read tears the subscription down and every later window reads
+        # nothing at all — a harness failure that reads exactly like the product
+        # bug under test. The same idiom the presence matrix below uses.
+        streamed: list[dict[str, Any]] = []
+
+        async def pump() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed.append(json.loads(line[6:]))
+
+        reader = asyncio.create_task(pump())
+
+        def catalogues(since: int) -> list[dict[str, Any]]:
+            return [frame for frame in streamed[since:] if frame["type"] == "catalogue"]
+
+        try:
+            # The feed's own first probe publishes one catalogue frame as the
+            # token is established, so it is DRAINED rather than asserted away:
+            # the windows below have to be attributable to the pin.
+            await asyncio.sleep(2.5)
+
+            # (2) A quiet window publishes NOTHING catalogue-shaped.
+            quiet_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert catalogues(quiet_from) == [], streamed[quiet_from:]
+
+            # (1) The write, and the frame it owes within the probe interval plus
+            # slack (a little over 2 x CATALOGUE_PROBE_INTERVAL_S).
+            pinned = await client.post(
+                f"/v1/desktop/sessions/{session_id}/pin", json={"pinned": True}
+            )
+            assert pinned.status_code == 200, pinned.text
+            assert (root / "sidebar-pins.json").read_text() == json.dumps([session_id])
+
+            wrote_from = len(streamed)
+            await asyncio.sleep(2.5)
+            published = catalogues(wrote_from)
+            assert len(published) == 1, streamed[wrote_from:]
+            revision = published[0]["payload"]["revision"]
+
+            # ...and nothing follows it while the pin file sits still.
+            after_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert catalogues(after_from) == [], streamed[after_from:]
+        finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader
+
+    # (3) A LATER subscriber is not replayed the invalidation: its own `open`
+    # snapshot is the answer, and a replayed frame would make every reconnecting
+    # client refetch a catalogue nothing has changed.
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        streamed_later: list[dict[str, Any]] = []
+
+        async def pump_later() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed_later.append(json.loads(line[6:]))
+
+        later_reader = asyncio.create_task(pump_later())
+        try:
+            # Read the open frame out of the PUMP's list rather than off `lines`:
+            # two concurrent iterations of one async generator is a RuntimeError,
+            # and the `open` snapshot is the only frame this leg wants to see.
+            for _ in range(200):
+                if streamed_later:
+                    break
+                await asyncio.sleep(0.05)
+            assert streamed_later and streamed_later[0]["type"] == "open", streamed_later
+            await asyncio.sleep(2.5)
+        finally:
+            later_reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await later_reader
+
+    assert streamed_later[0]["payload"]["catalogue_revision"] == revision
+    assert [frame for frame in streamed_later if frame["type"] == "catalogue"] == []

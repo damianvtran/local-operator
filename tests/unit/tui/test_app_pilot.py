@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -13134,6 +13135,184 @@ async def test_f10_unpins_a_pinned_row(tmp_path, monkeypatch) -> None:
                 break
         assert read_pins(tmp_path) == []
         assert sidebar._pins == ()
+
+
+# -- the cross-surface round trip: one config root, two front ends ----------------
+#
+# THE PROOF THE FEATURE EXISTS FOR, in both directions and against ONE config root.
+# Ben's tests above drive the TUI's chord against the store; these drive the store
+# through the DESKTOP's HTTP route and back, because the claim under test is not
+# "the TUI can pin" — it is "the two surfaces share one file". A design with a
+# separate pin table on the desktop side would pass every store test and fail here.
+
+
+def _seed_listable_sessions(config_dir: Path, ids: Sequence[str]) -> None:
+    """Real, LISTABLE sessions — unlike ``_seed_session_dirs`` above, which only
+    satisfies ``read_pins``' prune.
+
+    The catalog lists a directory only once it carries the markers a session is
+    made of (an empty ``sessions/<id>/`` is invisible), and these tests read the
+    catalog through the app's own refresh rather than setting entries by hand, so
+    the markers have to be written for real.
+    """
+    for session_id in ids:
+        directory = config_dir / "sessions" / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "created_at.json").write_text("1700000000")
+        (directory / "desktop.json").write_text(
+            json.dumps({"version": 1, "cwd": str(config_dir), "name": session_id})
+        )
+
+
+@contextlib.contextmanager
+def _desktop_backend(config_dir: Path):
+    """The real ``local_operator.server.app``, with ``config_dir`` as its root.
+
+    The real app object rather than a bespoke router: this leg exists to prove
+    the wire contract the desktop app consumes, so the auth boundary, the
+    response models and the ``DesktopSessions`` adapter all have to be the ones
+    the product boots. Same shape as ``test_desktop_sessions.py``'s search test —
+    ``TestClient`` runs the lifespan, and the state the app needs is assigned
+    explicitly because these tests have no config file to resolve it from.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app as server_app
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+    server_app.state.config_manager = SimpleNamespace(config_dir=config_dir)
+    server_app.state.desktop_sessions = DesktopSessions(config_dir)
+    with TestClient(server_app) as client:
+        client.headers["Authorization"] = "Bearer pins-pilot-token"
+        yield client
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_pin_shows_in_the_tui_and_a_tui_pin_shows_on_the_desktop(
+    tmp_path, monkeypatch
+) -> None:
+    """Direction A: a pin written over HTTP is the TUI's ``★ Pinned`` row.
+    Direction B: a pin written by the TUI's own chord is on
+    ``GET /v1/desktop/sessions``.
+
+    Asserted against the PAINTED section (``_section_of``) rather than against
+    ``read_pins``, because the file proves the store and only the section proves
+    the surface. Direction B additionally asserts the row SET, which catches a
+    route that reported every session as pinned.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+
+    from local_operator.tui.sidebar_pins import read_pins
+
+    api_id, chord_id, other_id = "aaaaaaaaaaa1", "aaaaaaaaaaa2", "aaaaaaaaaaa3"
+    _seed_listable_sessions(tmp_path, (api_id, chord_id, other_id))
+
+    with _desktop_backend(tmp_path) as desktop:
+        # --- Direction A's write, over the real route -----------------------------
+        pinned = desktop.post(f"/v1/desktop/sessions/{api_id}/pin", json={"pinned": True})
+        assert pinned.status_code == 200, pinned.text
+        assert pinned.json()["result"] == {"session_id": api_id, "pinned": True}
+        # A retry of the same request must not disturb anything: the chord's pin
+        # lands after it and must stay ahead of it (asserted at the end).
+        retry = desktop.post(f"/v1/desktop/sessions/{api_id}/pin", json={"pinned": True})
+        assert retry.status_code == 200 and retry.json()["result"]["pinned"] is True
+        assert read_pins(tmp_path) == [api_id]
+
+        # --- Direction A's read: the TUI, on the SAME root -------------------------
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # The real path: `_set_sidebar_open` calls `_refresh_sidebar`, which
+            # re-reads the pins and the catalog from `config_dir()` in a worker.
+            app._set_sidebar_open(True)
+            sidebar = app._session_sidebar
+            for _ in range(120):
+                await pilot.pause()
+                if len(sidebar.entries) == 3 and sidebar._pins:
+                    break
+
+            sections = {entry.id: sidebar._section_of(entry) for entry in sidebar.entries}
+            assert set(sections) == {api_id, chord_id, other_id}, sections
+            # 0 is `pinned`; the other two must be in ordinary sections, which is
+            # the half that catches a widget that decided everything was pinned.
+            assert sections[api_id] == 0
+            assert sections[chord_id] != 0 and sections[other_id] != 0
+            painted = [kind for kind, _entry in sidebar._display_rows()]
+            assert "header:pinned" in painted, painted
+            assert sidebar._pins == (api_id,), "the section and the pin set disagree"
+
+            # --- Direction B: the TUI's own chord, then read it over HTTP ---------
+            sidebar.focus()
+            await pilot.pause()
+            sidebar._hover_id = ""
+            sidebar.cursor_id = chord_id
+            await pilot.press("f10")
+            for _ in range(120):
+                await pilot.pause()
+                if len(read_pins(tmp_path)) == 2:
+                    break
+            assert set(read_pins(tmp_path)) == {api_id, chord_id}
+
+            listed = desktop.get("/v1/desktop/sessions")
+            assert listed.status_code == 200, listed.text
+            rows = listed.json()["result"]["sessions"]
+            by_id = {row["id"]: row["pinned"] for row in rows}
+            assert by_id == {api_id: True, chord_id: True, other_id: False}, by_id
+            # The row SET, not just the flags: a route that pinned on every call
+            # would show `other_id: True` here.
+            assert {row["id"] for row in rows if row["pinned"]} == {api_id, chord_id}
+
+            # And the TUI's own view of the same write, so both surfaces are known
+            # to agree at the END of the round trip rather than only at the start.
+            assert set(sidebar._pins) == {api_id, chord_id}
+
+        # --- the inverse, so the section is not merely "everything pinned" -------
+        cleared = desktop.post(f"/v1/desktop/sessions/{api_id}/pin", json={"pinned": False})
+        assert cleared.json()["result"]["pinned"] is False
+        assert read_pins(tmp_path) == [chord_id]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_run_the_desktop_cannot_list_produces_no_row(tmp_path, monkeypatch) -> None:
+    """The §9.2 limitation, PINNED rather than latent.
+
+    ``DesktopSessions.list`` calls ``load_catalog`` with ``include_subagents``
+    defaulting to False, so a delegated run the TUI pins has no desktop row at
+    all. The pin is real and the route accepts it (see ``test_desktop_pins.py``);
+    what this asserts is that the desktop's LIST does not silently claim the
+    pinned set is complete. Documented, not fixed, per the design: the union
+    belongs to a separate change.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+    from local_operator.tui.sidebar_pins import read_pins, toggle_pin
+
+    user_id, run_id = "aaaaaaaaaaa1", "bbbbbbbbbbb1"
+    _seed_listable_sessions(tmp_path, (user_id,))
+    _seed_listable_sessions(tmp_path, (run_id,))
+    mark_session_origin(tmp_path / "sessions" / run_id, ORIGIN_SUBAGENT)
+    toggle_pin(tmp_path, run_id)
+
+    with _desktop_backend(tmp_path) as desktop:
+        rows = desktop.get("/v1/desktop/sessions").json()["result"]["sessions"]
+
+    assert read_pins(tmp_path) == [run_id], "the pin itself is real"
+    assert run_id not in {row["id"] for row in rows}, (
+        "a delegated run has no desktop row while the subagent layer is off, so the "
+        "desktop's pinned section under-reports — documented, not silenced"
+    )
+    assert all(row["pinned"] is False for row in rows)
 
 
 @pytest.mark.asyncio
