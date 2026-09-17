@@ -52,6 +52,7 @@ from local_operator.session.frontend_state import (
 from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import DESKTOP_MARKER_NAME
 from local_operator.session.runtime import registry
+from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     Transcript,
@@ -2890,6 +2891,45 @@ class DesktopSessions:
                         row["status_revision"] = revision
                 result.append(row)
             return result
+
+        return await asyncio.to_thread(rows)
+
+    async def search(self, query: str, limit: int) -> list[dict[str, Any]]:
+        """Past conversations matching ``query``, each carrying its pin state.
+
+        The projection lives here rather than in the route for the reason
+        :meth:`list`'s does: the adapter is what owns the config root, and this
+        is the only place that knows a row's wire shape needs the pin store read
+        at all.
+
+        ONE ``read_pins`` PER REQUEST — a membership test per match, not a file
+        read per match — and both reads sit in the SAME worker thread as the
+        scan, so a request costs one store walk and one pin-file read however
+        many rows it answers. ``read_pins`` already applies the store's read-time
+        prune (an id whose directory is gone is not a pin) and the id-shape rule,
+        so neither is re-implemented here, and a pinned-but-unresolvable id
+        simply does not match anything to begin with.
+        """
+
+        def rows() -> list[dict[str, Any]]:
+            matches = search_store(self.root, query, limit=limit)
+            pins = set(read_pins(self.root))
+            return [
+                {
+                    "id": match.row.id,
+                    "name": match.row.name,
+                    "mtime": match.row.mtime,
+                    "forked": match.row.forked,
+                    "rank": match.rank,
+                    "body_match": match.body_match,
+                    # ALWAYS PRESENT, BOTH VALUES — see `SessionSearchRow.pinned`:
+                    # a client synthesising a row from this answer reads an
+                    # absent key as "no claim", and a pinned conversation would
+                    # then render outside the Pinned section with no way back.
+                    "pinned": match.row.id in pins,
+                }
+                for match in matches
+            ]
 
         return await asyncio.to_thread(rows)
 

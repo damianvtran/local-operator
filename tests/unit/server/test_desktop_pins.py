@@ -96,6 +96,23 @@ async def pins_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         await app.state.desktop_sessions.close()
 
 
+async def _speak(root: Path, session_id: str, text: str = "retention sweep notes") -> None:
+    """Give a seeded session a REAL transcript, written through the real writer.
+
+    Required by the SEARCH tests and not by the list ones: ``load_catalog``
+    lists a directory carrying only the session markers, while the search scans
+    ``recent_session_rows``, which needs something actually said. A fixture that
+    skimped on this would assert that a pinned conversation is findable by
+    asking the search about a session it cannot see.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    await Transcript(root / "sessions" / session_id).append_message(
+        Message(role="user", content=[TextContent(text=text)])
+    )
+
+
 def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return payload["result"]["sessions"]
 
@@ -263,6 +280,8 @@ async def test_a_pinned_id_whose_directory_is_gone_produces_no_row(pins_api) -> 
     live_id, gone_id = "aaaaaaaaaaa1", "aaaaaaaaaaa2"
     _session(root, live_id)
     gone = _session(root, gone_id)
+    await _speak(root, live_id)
+    await _speak(root, gone_id)
     toggle_pin(root, gone_id)
     toggle_pin(root, live_id)
     assert set(read_pins(root)) == {live_id, gone_id}
@@ -321,6 +340,150 @@ async def test_the_body_is_closed(pins_api) -> None:
     assert missing.status_code == 422, missing.text
     assert extra.status_code == 422, extra.text
     assert read_pins(root) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ['{"pinned": "yes"}', '{"pinned": 1}', '{"pinned": "true"}'])
+async def test_only_a_real_boolean_is_accepted(pins_api, body: str) -> None:
+    """``StrictBool``, matching every other boolean on this plane.
+
+    A bare ``bool`` coerces these: ``"yes"``, ``1`` and ``"true"`` would all
+    answer 200 and pin the session, so a client whose serialiser is emitting the
+    wrong type gets no signal at all and the fault surfaces later as a pin that
+    came from nowhere. Every neighbour on this plane (``PresenceWindow``,
+    ``PresenceBeat``, ``Watch``, ``Answer``) refuses that shape, and a pin is
+    durable state rather than a display hint.
+    """
+    client, root = pins_api
+    session_id = "aaaaaaaaaaa1"
+    _session(root, session_id)
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{session_id}/pin",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert read_pins(root) == [], "a coerced truthy value must not pin anything"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_session_beyond_the_clients_page_carries_pinned_in_search(pins_api) -> None:
+    """THE SEARCH ROW'S ``pinned``, and why it is not optional.
+
+    A client that synthesises a row from a search hit — which the app does, for a
+    conversation beyond the 500 rows its own page holds — renders the row in an
+    ordinary section when the answer omits the flag, with no Pinned section and a
+    pin control whose press is an idempotent no-op that cannot repair it (the pin
+    is already true server-side). This is that conversation: pinned, off the
+    client's page, and answered by the search.
+    """
+    client, root = pins_api
+    ids = [f"aaaaaaaaaa{index:02x}" for index in range(6)]
+    for session_id in ids:
+        _session(root, session_id)
+        await _speak(root, session_id)
+
+    full = _rows((await client.get("/v1/desktop/sessions")).json())
+    pinned_id = full[-1]["id"]  # the last row, so a one-row page cannot hold it
+    assert toggle_pin(root, pinned_id) is True
+
+    page = _rows((await client.get("/v1/desktop/sessions", params={"limit": 1})).json())
+    assert pinned_id not in {row["id"] for row in page}, "the fixture is not the state under test"
+
+    answer = await client.get("/v1/desktop/sessions/search", params={"q": pinned_id})
+
+    assert answer.status_code == 200, answer.text
+    rows = answer.json()["result"]["sessions"]
+    assert [row["id"] for row in rows] == [pinned_id]
+    assert rows[0]["pinned"] is True
+
+
+@pytest.mark.asyncio
+async def test_every_search_row_carries_pinned_both_values(pins_api) -> None:
+    """The other half: the ``false`` rows carry the key too.
+
+    Answered over the raw JSON for the reason the list's version is: the model
+    would make the whole response fail rather than drop a key, and what the
+    client needs is the key being PRESENT — an absent one is read as "no claim",
+    which is what leaves a stale optimistic pin in place.
+    """
+    client, root = pins_api
+    ids = [f"aaaaaaaaaa{index:02x}" for index in range(3)]
+    for session_id in ids:
+        _session(root, session_id)
+        await _speak(root, session_id)
+    toggle_pin(root, ids[1])
+
+    answer = await client.get("/v1/desktop/sessions/search", params={"q": "aaaaaaaaaa"})
+
+    assert answer.status_code == 200, answer.text
+    rows = answer.json()["result"]["sessions"]
+    assert {row["id"] for row in rows} == set(ids)
+    assert all("pinned" in row for row in rows), rows
+    assert {row["id"] for row in rows if row["pinned"]} == {ids[1]}
+    assert sum(1 for row in rows if row["pinned"] is False) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_id_whose_directory_is_gone_is_not_searchable(pins_api) -> None:
+    """The store's read-time prune, seen from the search: no row, no 500.
+
+    The pin file still names the id and the search INDEX may still describe it,
+    so this is the assertion that the answer is driven by what the store can
+    still resolve rather than by what the pin file remembers."""
+    client, root = pins_api
+    gone_id, live_id = "aaaaaaaaaa01", "aaaaaaaaaa02"
+    _session(root, live_id)
+    gone = _session(root, gone_id)
+    toggle_pin(root, gone_id)
+    toggle_pin(root, live_id)
+
+    _remove(gone)
+
+    answer = await client.get("/v1/desktop/sessions/search", params={"q": gone_id})
+
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["result"]["sessions"] == []
+    assert read_pins(root) == [live_id]
+
+
+@pytest.mark.asyncio
+async def test_both_projections_read_the_pin_file_once_per_request(pins_api, monkeypatch) -> None:
+    """ONE ``read_pins`` per request, not one per row.
+
+    Asserted by COUNTING, because the property is a cost the answer cannot
+    betray: a per-row read returns exactly the same JSON for a fixture this size,
+    and it is the store walk it is attached to that made the field worth sending
+    at all. Both routes are checked, since both grew the same read.
+    """
+    from local_operator.server.utils import desktop_sessions as module
+
+    client, root = pins_api
+    ids = [f"aaaaaaaaaa{index:02x}" for index in range(5)]
+    for session_id in ids:
+        _session(root, session_id)
+        await _speak(root, session_id)
+    toggle_pin(root, ids[0])
+
+    calls: list[Path] = []
+    original = module.read_pins
+
+    def counted(config_dir):
+        calls.append(config_dir)
+        return original(config_dir)
+
+    monkeypatch.setattr(module, "read_pins", counted)
+
+    assert (await client.get("/v1/desktop/sessions")).status_code == 200
+    assert len(calls) == 1, calls
+
+    calls.clear()
+    listed = await client.get("/v1/desktop/sessions/search", params={"q": "aaaaaaaaaa"})
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()["result"]["sessions"]) == 5, "the fixture must answer several rows"
+    assert len(calls) == 1, calls
 
 
 @pytest.mark.asyncio
