@@ -1729,13 +1729,15 @@ async def test_every_paste_notice_fits_the_toast_on_one_line() -> None:
         budget = toast.content_cells
         for reason in reasons:
             # DISMISS BETWEEN ITERATIONS, and assert the card took the slot.
-            # Without the dismissal this loop proves nothing after its first
-            # pass: `show` is called with `yield_to_actionable=True`, every
-            # paste notice is actionable (`TOAST_FAILURE_MS`), and
-            # `toast.py` DEFERS an actionable card while another is up — so
-            # iterations 2..n re-read iteration 1's message and the loop would
-            # agree with itself while measuring one of eight strings. The
-            # generation counter is the check that catches a future edit
+            # Without the dismissal this loop proves little after its second
+            # pass: `show` is called with `yield_to_actionable=True`, so a
+            # paste notice stands down while an actionable card is up, and
+            # every notice but the first is actionable (`TOAST_FAILURE_MS`).
+            # Iteration 2 is still measured — the first reason, `nothing`,
+            # takes the courtesy duration and so does not hold the slot — but
+            # from iteration 3 on the loop re-reads iteration 2's message and
+            # would agree with itself while measuring two of the eight strings.
+            # The generation counter is the check that catches a future edit
             # reintroducing that: it moves only on a show that TOOK the slot.
             toast.dismiss_toast()
             generation = toast.generation
