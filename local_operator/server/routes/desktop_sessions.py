@@ -1846,12 +1846,21 @@ async def pin(session_id: str, body: Pin, request: Request):
     better than putting it on the ``ReceiptConflict`` 409 ladder.
 
     LAST WRITER WINS across processes, accepted and documented rather than
-    fixed: a TUI f10 and a desktop press in the same instant mean the second
-    ``os.replace`` is what the file holds, and neither reader ever sees a torn
-    file — only an older one. A cross-process lock for a small index has no
-    precedent in this codebase, and the only visible consequence is that a user
-    who presses both within one animation sees their second press's outcome,
-    which is the correct reading of their own two actions.
+    fixed, and the unit of arbitration is the WHOLE LIST rather than this one id:
+    every write is a read-modify-write of the entire index, so two presses
+    landing inside one window do not merely arbitrate over the conversation they
+    share — the later ``os.replace`` is what the file holds, and anything the
+    earlier writer added in that same window is gone. That can be a pin to a
+    DIFFERENT conversation, which is the case this route is what makes reachable:
+    before it there was one writer surface (the TUI), and now a TUI and an app
+    write the same file at once. A cross-process lock for a small index has no
+    precedent in this codebase, the store's own docstring records why, and the
+    only consequence a user can observe is that two presses within one animation
+    resolve to the second — which is the correct reading of their own two
+    actions. Stated rather than left to the store's comment because the client
+    reconciles its row on this answer: until the next catalogue read agrees, a
+    pin the app just made is not yet durable, and it never is on a config root
+    the backend cannot write.
 
     ID SHAPE AND IS-DIR ONLY. Deliberately NOT the ``is_user_session`` check its
     neighbour ``/seen`` applies: the sidebar pins delegated runs, and a route

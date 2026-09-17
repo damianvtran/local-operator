@@ -449,6 +449,43 @@ async def test_a_pinned_id_whose_directory_is_gone_is_not_searchable(pins_api) -
     assert read_pins(root) == [live_id]
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="root writes to unwritable directories anyway")
+@pytest.mark.asyncio
+async def test_a_read_only_root_still_answers_200_and_writes_nothing(pins_api) -> None:
+    """The ONE case where the response is not a durability claim, pinned.
+
+    ``_write_pins`` swallows its ``OSError`` by the never-raise contract the
+    store inherits from ``toggle_pin``, so on a config root this process cannot
+    write the route answers success over a file that did not change. The client
+    reconciles its row on that answer, so the pin stays on screen until the next
+    catalogue read contradicts it.
+
+    ASSERTED RATHER THAN LEFT AS PROSE, because both of the alternatives were
+    considered and rejected on the record: escaping the failure breaks the
+    contract ``toggle_pin``'s own tests pin, and a read-back would reintroduce
+    the race between two writers that the store documents as accepted. This is
+    what the code does, so a future change to it has to fail here and argue with
+    the reasoning rather than discover the behaviour in production.
+    """
+    client, root = pins_api
+    session_id = "aaaaaaaaaaa1"
+    _session(root, session_id)
+    root.chmod(0o500)
+    try:
+        response = await client.post(
+            f"/v1/desktop/sessions/{session_id}/pin", json={"pinned": True}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["pinned"] is True
+        assert not (root / PINS_FILE).exists(), "nothing was written, and nothing may be claimed"
+        # And the list does NOT agree, which is the half the client relies on to
+        # settle the row it optimistically pinned.
+        rows = _rows((await client.get("/v1/desktop/sessions")).json())
+        assert {row["id"]: row["pinned"] for row in rows} == {session_id: False}
+    finally:
+        root.chmod(0o700)
+
+
 @pytest.mark.asyncio
 async def test_both_projections_read_the_pin_file_once_per_request(pins_api, monkeypatch) -> None:
     """ONE ``read_pins`` per request, not one per row.

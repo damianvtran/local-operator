@@ -25,6 +25,7 @@ import pytest
 from local_operator.tui.sidebar_pins import (
     PINS_FILE,
     PINS_LIMIT,
+    _write_pins,
     read_pins,
     set_pin,
     toggle_pin,
@@ -270,6 +271,29 @@ def test_set_pin_honours_the_cap_and_keeps_the_new_pin(tmp_path: Path) -> None:
     assert len(pins) == PINS_LIMIT
     assert pins[0] == "f" * 12
     assert f"{0:012x}" not in pins
+
+
+def test_the_writer_itself_applies_the_cap(tmp_path: Path) -> None:
+    """The CAP, pinned on ``_write_pins`` rather than on the verbs.
+
+    The two cap tests above drive ``toggle_pin`` and ``set_pin``, so they stay
+    green if the writer stops capping while both verbs keep their own trim — the
+    shape this test exists to make impossible. It is also the test a NEW verb
+    needs: the writer is the entry point the module's comment recommends, and an
+    over-long list handed to it must come out at ``PINS_LIMIT`` whatever the
+    caller believed it had trimmed.
+
+    The file is read RAW rather than through ``read_pins``: that read prunes
+    against ``sessions/``, so a capped list of ids with no directories would
+    come back empty and the assertion would be about the prune instead of the
+    cap.
+    """
+    entries = [f"{index:012x}" for index in range(PINS_LIMIT + 5)]
+
+    _write_pins(tmp_path, entries)
+
+    assert json.loads((tmp_path / PINS_FILE).read_text()) == entries[:PINS_LIMIT]
+    assert len(entries) == PINS_LIMIT + 5, "the caller's own list must not be trimmed in place"
 
 
 def test_set_pin_unpins_from_anywhere_in_the_list(tmp_path: Path) -> None:

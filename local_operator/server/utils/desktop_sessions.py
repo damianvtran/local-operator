@@ -2474,9 +2474,19 @@ class DesktopSessions:
         a small file replace, and a receipt would buy at-most-once for a call
         that is already idempotent by construction.
 
-        Returns the answer the route publishes, with the STORE's verdict rather
-        than the caller's request echoed back — today they always agree, and the
-        store is the one authority that can say so.
+        Returns the answer the route publishes, whose ``pinned`` is the state the
+        store settled on. Today that is always the requested state — with ONE
+        exception worth naming, because the response reads as a durability claim
+        and is not one: on a config root this process cannot write,
+        ``_write_pins`` swallows its ``OSError`` by the never-raise contract the
+        store inherits from ``toggle_pin``, so this echoes the request over a file
+        that did not change and the client renders a pin the store does not hold
+        until its next catalogue read settles the row. Deliberately not fixed
+        here: escaping the failure would break that pinned contract, and a
+        read-back would reintroduce the race between the two writers that the
+        store documents as accepted. A backend whose config root is read-only
+        cannot serve this feature at all, and "the state the store settled on"
+        is not a claim that every ``os.replace`` succeeded.
         """
 
         def apply() -> dict[str, Any]:
