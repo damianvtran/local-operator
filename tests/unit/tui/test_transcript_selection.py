@@ -75,7 +75,13 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.markdown_theme import install_markdown_theme
 from local_operator.tui.widgets import _copy_markdown
-from local_operator.tui.widgets.assistant import RAIL_COLS, AssistantBlock, flatten
+from local_operator.tui.widgets.assistant import (
+    QUOTE_BAR,
+    RAIL,
+    RAIL_COLS,
+    AssistantBlock,
+    flatten,
+)
 from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ROW_INDENT, ToolCard
@@ -1219,10 +1225,10 @@ async def test_a_sub_line_take_across_a_wrapped_quote_never_copies_the_bar() -> 
         await pilot.pause()
 
         rows = _rendered_rows(block)
-        # The quote's OWN bars, which are the second glyph on the row now that
-        # the block paints a rail as the first. Counting rows that merely start
-        # with the glyph would count every row in the message.
-        bars = [i for i, row in enumerate(rows) if row.count("▌") >= 2]
+        # The quote's own bar. It is the first painted glyph on the row: a
+        # quote row reserves the block's gutter cells without painting a bead
+        # into them, so the bar is what opens the text.
+        bars = [i for i, row in enumerate(rows) if QUOTE_BAR in row]
         assert len(bars) >= 2, f"the quote must actually wrap, or this proves nothing: {rows!r}"
 
         selection = Selection.from_offsets(
@@ -1569,9 +1575,14 @@ async def test_frame_is_unchanged_by_the_flatten() -> None:
         assert [strip.text[RAIL_COLS:].rstrip() for strip in flat._render_cache.lines] == [
             strip.text.rstrip() for strip in raw._render_cache.lines
         ]
-        # ...and the gutter really is on every row, or the strip above is
-        # quietly removing two cells of prose instead.
-        assert all(strip.text.startswith("▌") for strip in flat._render_cache.lines)
+        # ...and the gutter really is reserved on every row, or the strip above
+        # is quietly removing two cells of prose instead. Reserved, not
+        # necessarily painted: a blockquote row keeps the same two cells blank
+        # so the quote's own bar is not doubled by a rail bead beside it.
+        assert all(
+            strip.text.startswith(RAIL) or strip.text.startswith(" " * RAIL_COLS)
+            for strip in flat._render_cache.lines
+        )
 
 
 @pytest.mark.asyncio
@@ -4149,9 +4160,10 @@ async def test_a_quote_opening_with_a_bar_keeps_the_bar_it_wrote() -> None:
             index, _, _ = _find(rows, "literal bar")
             # The frame really does paint two bars, or this proves nothing:
             # the quote's own bar and the model's literal one. The block's rail
-            # is a third glyph on the row and is not one of them, so it is
-            # discounted explicitly rather than by raising the number.
-            assert rows[index].count("▌") - 1 == 2, f"width {width}: {rows[index]!r}"
+            # is NOT among them and never has been on a quote row -- such a row
+            # reserves the gutter and leaves it blank, precisely so the two
+            # glyphs a reader sees here are the construct's own.
+            assert rows[index].count("▌") == 2, f"width {width}: {rows[index]!r}"
 
             selection = Selection.from_offsets(
                 Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)
@@ -4184,11 +4196,9 @@ async def test_a_nested_quote_opening_with_a_bar_strips_only_painted_bars() -> N
         rows = _rendered_rows(block)
         index, _, _ = _find(rows, "literal bar")
         # Three bars of the QUOTE's own — two levels of furniture plus the
-        # model's literal one. The block's rail is discounted: it is chrome on
-        # every row, not part of the construct this test is about.
-        assert (
-            rows[index].count("▌") - 1 == 3
-        ), f"the fixture must paint three bars: {rows[index]!r}"
+        # model's literal one. The block's rail is not one of them: a quote row
+        # reserves its gutter cells and paints no bead into them.
+        assert rows[index].count("▌") == 3, f"the fixture must paint three bars: {rows[index]!r}"
 
         selection = Selection.from_offsets(
             Offset(x=0, y=index), Offset(x=len(rows[index].rstrip()), y=index)

@@ -116,10 +116,22 @@ async def test_the_two_mappings_disagree_only_on_blank_rows() -> None:
     railed = _copy_markdown.align(block._full_text, rows)
 
     moved = [index for index, (a, b) in enumerate(zip(correct, railed)) if a != b]
-    assert moved, "the rail no longer confuses the aligner; D5 is unpinned"
-    assert all(not bare[index].strip() for index in moved), (
-        f"rows {moved} moved under the railed mapping and not all are blank; "
-        "a clipboard pin on a content row is now possible and should be added"
+    assert moved, "the rail no longer confuses the aligner; the de-rail is unpinned"
+    # The BLANK rows must be among the casualties, because they are what the
+    # clipboard pins in this file key on. They were once the ONLY casualties —
+    # true while the rail was ``U+258C`` and the aligner read it as a quote bar,
+    # which is exactly why an assertion on a content row could sleep through a
+    # revert. With the narrower ``U+258E`` the aligner cannot place the railed
+    # rows at all and most of them degrade to ``None``, so the hazard is wider
+    # now, not narrower. Asserted as "blanks move", not "only blanks move": the
+    # second form was a property of the old glyph and would fail here for a
+    # reason that is not a regression.
+    blanks = [index for index, row in enumerate(bare) if not row.strip()]
+    assert blanks, bare
+    assert set(blanks) <= set(moved), (
+        f"blank rows {blanks} no longer move under the railed mapping (moved: "
+        f"{moved}); the clipboard pins in this file may have stopped "
+        "discriminating and must be re-derived before they are trusted"
     )
 
 

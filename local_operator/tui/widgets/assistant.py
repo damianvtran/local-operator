@@ -61,12 +61,31 @@ _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 #: :meth:`AssistantBlock.on_resize`).
 FALLBACK_WIDTH = 80
 
-#: The assistant rail: the same glyph and the same two cells ``UserBlock``
-#: spends on its prompt rule, in a DIFFERENT ink. The transcript's complaint
-#: was that a user message has a line down its side and the model's answer has
-#: nothing, so the answer gets the same delineation; the colour is what keeps
-#: the two told apart at a glance.
-RAIL = "\u258c"
+#: The assistant rail: the same two cells ``UserBlock`` spends on its prompt
+#: rule, in a DIFFERENT ink and a NARROWER glyph. The transcript's complaint was
+#: that a user message has a line down its side and the model's answer has
+#: nothing, so the answer gets the same delineation.
+#:
+#: ``U+258E`` (quarter block), not the rule's ``U+258C`` (half block), and the
+#: difference is not decorative. Colour alone did not carry the distinction:
+#: ``label`` and ``signal`` are ISOLUMINANT in the shipped ramps — measured
+#: 1.08:1 contrast against each other on dark and 1.00:1 on light — so in
+#: greyscale, and under every CVD simulation (never above 1.24:1), a one-line
+#: user message and a one-line assistant reply were the same glyph in the same
+#: column at the same weight, which is the exact confusion this rail exists to
+#: remove. Weight is a SECOND, non-colour channel: it survives greyscale, it
+#: survives colour blindness, and it costs nothing in the long-block case that
+#: colour already handled.
+#:
+#: Changed here rather than on ``UserBlock``: the prompt rule is shipped and
+#: restyling it is not this slice's to do. Note the glyph is ALSO not the
+#: blockquote bar — a secondary benefit, not a substitute for
+#: :func:`_quote_owns_row`, which is what actually resolves that collision.
+RAIL = "\u258e"
+#: The glyph RICH paints for a blockquote bar — not ours, and named here only
+#: so :func:`_quote_owns_row` can recognise it. It is also ``UserBlock.RULE``;
+#: that shared identity is precisely the collision the rail had to step around.
+QUOTE_BAR = "\u258c"
 #: Exactly :data:`SPINE_INDENT`, imported rather than re-spelled as ``2``. The
 #: prompt rule and this rail must be the same width BY CONSTRUCTION — the field
 #: has one text origin, and two gutters that agree by coincidence drift the
@@ -90,8 +109,26 @@ RAIL_TOKEN = "label"
 MIN_BODY = 8
 
 
+def _quote_owns_row(row: str) -> bool:
+    """Does Rich's own blockquote bar already open this rendered row?
+
+    A blockquote is painted as ``U+258C`` in the ``label`` token — the SAME
+    token the rail uses. Beading the rail onto such a row put two identical
+    glyphs, identically filled and identically coloured, one space apart, which
+    reads as a double-paint glitch rather than as nesting: nesting is legible
+    only when something differs, and here nothing did.
+
+    Keyed on the row's first painted cell, which is where Rich puts the bar and
+    where it puts nothing else — a quote's indent is inside the bar, not before
+    it. A fenced line whose own content opens with the glyph is safe: Rich
+    indents code by two, so the literal never lands in column 0 (verified
+    against ``\u258c literal bar`` inside a fence).
+    """
+    return row.startswith(QUOTE_BAR)
+
+
 def rail_rows(text: Text) -> Text:
-    """``text`` with the rail prepended to EVERY row, as one styled ``Text``.
+    """``text`` with the rail prepended to every row the quote does not own.
 
     Mirrors :meth:`UserBlock._build`'s geometry: the gutter runs down wrapped
     continuations and the blank rows between paragraphs alike, because a marker
@@ -100,6 +137,15 @@ def rail_rows(text: Text) -> Text:
     rows breaks the rail into one segment per paragraph, which is the same
     "three separate things" failure wearing the new treatment.
 
+    **A blockquote row is the one exception, and it keeps the column intact
+    rather than breaking it.** Such a row already carries its own bar in the
+    same ink, so the rail's cells are reserved but left BLANK: the row still
+    starts its text in the shared column, the rail is continuous above and
+    below, and the eye reads one unbroken column with the quote nested inside
+    it. Paying the two cells without painting them is what keeps every other
+    invariant — the fold width, the de-rail slicing, every selection
+    coordinate — identical for quote rows and prose rows alike.
+
     The colour is resolved HERE, at paint time, and never cached on the
     instance: :meth:`AssistantBlock.retheme` re-enters ``_apply_rows``, so a
     theme change re-inks the rail for free — a ``Style`` held on the block is
@@ -107,11 +153,17 @@ def rail_rows(text: Text) -> Text:
     """
     glyph_style = Style(color=theme_mod.semantic_color(RAIL_TOKEN))
     gutter = RAIL + " " * max(RAIL_COLS - cell_len(RAIL), 0)
+    # Same WIDTH, no ink: the lane is uniform whether or not a row paints a
+    # bead, so nothing downstream has to know which kind of row it is holding.
+    blank_gutter = " " * RAIL_COLS
     railed = Text(end="", no_wrap=True, overflow="ellipsis")
     for index, row in enumerate(text.split("\n")):
         if index:
             railed.append("\n")
-        railed.append(gutter, style=glyph_style)
+        if _quote_owns_row(row.plain):
+            railed.append(blank_gutter)
+        else:
+            railed.append(gutter, style=glyph_style)
         railed.append_text(row)
     return railed
 
