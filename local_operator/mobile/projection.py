@@ -1755,11 +1755,35 @@ class ProjectionFold:
             self._activity_started_at = self._activity_anchor(phase, epoch, edge=edge)
         self._activity_phase = phase
         p.activity = label
-        p.activity_started_s = (
-            None
-            if self._activity_started_at is None
-            else round(time.monotonic() - self._activity_started_at, 1)
-        )
+        self.refresh_activity_age()
+
+    def refresh_activity_age(self) -> None:
+        """Re-date the published band age from THIS fold's phase instant.
+
+        ``activity_started_s`` is otherwise a number written when the phase last
+        moved, and the long phases are exactly the ones with no band event in
+        them: prose streams deltas that do not re-enter the label's arm, and a
+        running call has no arm at all. A frame built mid-phase therefore
+        carried the age as of the last edge, and a viewer that attached on it
+        painted that stale number — at a known zero, ``0s`` counting from its
+        own mount, which is the operator's reported defect rendered as a
+        fabricated zero on the one surface this change is about (review round 3,
+        MAJOR 1).
+
+        Called at every frame build rather than on a timer: the readers are the
+        runtime's own push (``RuntimeServer._projection_payload``) and the seed a
+        handle hands a viewer, which are the two moments the number becomes an
+        answer to "how long has this been going". The client needs no change — a
+        fresher number simply re-seeds it.
+
+        ``None`` is left alone, in both directions: an unknown instant stays
+        unknown rather than becoming a zero, which is the whole point of the
+        nullable field (``types.SessionProjection.activity_started_s``).
+        """
+        if self._activity_started_at is None:
+            self.projection.activity_started_s = None
+            return
+        self.projection.activity_started_s = round(time.monotonic() - self._activity_started_at, 1)
 
     def _activity_anchor(self, phase: str, epoch: float | None, *, edge: bool) -> float | None:
         """The instant to date ``phase`` from, or ``None`` when there is none.
@@ -1901,10 +1925,24 @@ class ProjectionFold:
             # that reaches this fold late — the fold was built at attach, the
             # stream was relayed, the event was redelivered — dates the row and
             # the band from the call rather than from the phone's arrival.
+            #
+            # With NO epoch the start event is the phase's edge only if this
+            # fold watched the phase begin. A producer that states no epoch (an
+            # older runtime) plus a call already in flight at attach would
+            # otherwise publish the fold's own arrival as a KNOWN zero, and the
+            # band would count `0s` up from the phone's mount while the call's
+            # own row withholds its duration in the same frame — design round
+            # 3's D7, the D4 class inverted. The `running` phase is not an
+            # adoptable one (the batch's phase edge is its FIRST call's start,
+            # D9), so an unwatched start with no epoch publishes no clock at all.
             self._set_activity(
                 event.intent or f"running {event.tool_name}",
                 phase=ACTIVITY_PHASE_RUNNING,
                 epoch=event.started_at_epoch,
+                edge=(
+                    self._activity_phase not in ("", ACTIVITY_PHASE_RUNNING)
+                    or self._attach_phase not in ("", ACTIVITY_PHASE_RUNNING)
+                ),
             )
         elif isinstance(event, ToolExecutionEndEvent):
             # Back to waiting on the model: restart the clock for the gap.

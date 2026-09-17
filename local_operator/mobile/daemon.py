@@ -1152,8 +1152,18 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     """
     from local_operator.harness.rows import completion_notice
     from local_operator.mobile.projection import cap_projection_frame
-    from local_operator.mobile.types import TranscriptEntry
+    from local_operator.mobile.types import TranscriptEntry, refresh_activity_age
 
+    # RE-DATE BEFORE SERIALIZING. The runtime re-dates its own frames, but this
+    # copy is only as fresh as the frame it arrived on: during a long phase —
+    # prose, a running call — no band event fires, so the runtime sends nothing
+    # new and the age it named has been running down on this process's clock
+    # ever since. Serving the stored number is what made a phone attaching
+    # mid-phase paint `0s` counting from its own mount (review round 3, MAJOR
+    # 1); the reference stamped at ingest says how long ago the reading was
+    # taken, which is all the arithmetic needs. A projection with no reference
+    # (a durable rebuild) is left as it is.
+    refresh_activity_age(projection)
     data, degraded = cap_projection_frame(projection)
     attention = projection.attention
     data["attention"] = attention

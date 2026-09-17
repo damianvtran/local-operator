@@ -103,14 +103,36 @@ def build() -> dict[str, object]:
     }
 
 
-def main() -> None:
-    """Write the fixture, one case per line so a diff names the form that moved."""
+def render() -> str:
+    """The fixture's exact bytes — one case per line, so a diff names what moved."""
     data = build()
     cases = data["cases"]
     assert isinstance(cases, list)
-    lines = json.dumps(data["_"], ensure_ascii=False)
+    title = json.dumps(data["_"], ensure_ascii=False)
     body = ",\n".join(f"  [{json.dumps(age)}, {json.dumps(text)}]" for age, text in cases)
-    FIXTURE.write_text(f'{{\n "_": {lines},\n "cases": [\n{body}\n ]\n}}\n')
+    return f'{{\n "_": {title},\n "cases": [\n{body}\n ]\n}}\n'
+
+
+def main() -> None:
+    """Write the fixture, or (``--check``) prove the committed one came from here.
+
+    ``--check`` is the PROVENANCE half of the pin. Both suites assert the
+    fixture's content against their own formatter, which catches drift in a
+    formatter but not in the file: a hand edit that rewrote the cases while
+    keeping the list longer than the suites' ``>40`` bound would shrink coverage
+    silently (review round 3, NIT 1). ``tests/unit/mobile/test_tui_bridge.py``
+    makes the same comparison, so CI runs it on every PR; this flag is the human
+    path for the same question.
+    """
+    cases = build()["cases"]
+    assert isinstance(cases, list)
+    if "--check" in sys.argv[1:]:
+        if FIXTURE.read_text() == render():
+            print(f"{FIXTURE} is current ({len(cases)} cases)")
+            return
+        print(f"{FIXTURE} is STALE — regenerate it from this script", file=sys.stderr)
+        raise SystemExit(1)
+    FIXTURE.write_text(render())
     print(f"wrote {FIXTURE} ({len(cases)} cases)")
 
 

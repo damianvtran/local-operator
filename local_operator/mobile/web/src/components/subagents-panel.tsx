@@ -85,7 +85,13 @@ export function AgentRow({
 				) : null}
 			</span>
 			<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-				{agent.elapsed_s > 0 ? formatElapsed(agent.elapsed_s) : ""}
+				{/* `null` is "this roster has no age for the child" and contributes
+				 * nothing, exactly as a zero- or sub-second age does in this compact
+				 * list; the drill-in is where an age that IS known is shown from the
+				 * first frame, including a known `0s`. */}
+				{agent.elapsed_s !== null && agent.elapsed_s > 0
+					? formatElapsed(agent.elapsed_s)
+					: ""}
 			</span>
 		</button>
 	);

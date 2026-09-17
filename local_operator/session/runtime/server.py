@@ -4241,6 +4241,17 @@ class RuntimeServer:
         from local_operator.mobile.projection import cap_projection_frame
 
         sink = self._projection_sink
+        if sink is not None:
+            # RE-DATE BEFORE SERIALIZING. The band's age is a reading taken when
+            # the phase last moved, and this frame is the moment it becomes an
+            # answer to "how long has this been going" — for whoever is attached
+            # now, including a phone that just attached mid-phase. Probed rather
+            # than required: the sink protocol is deliberately narrow (a test
+            # stub supplies only ``projection``/``set_pending``), and a stub
+            # that cannot re-date simply publishes the number it holds.
+            refresh = getattr(sink, "refresh_activity_age", None)
+            if callable(refresh):
+                refresh()
         projection = sink.projection if sink is not None else self._handle.session_projection_seed
         data, degraded = cap_projection_frame(projection)
         if degraded and not self._frame_cap_warned:

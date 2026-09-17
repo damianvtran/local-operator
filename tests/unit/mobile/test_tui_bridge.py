@@ -14,7 +14,14 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import TextContent, ToolExecutionEndEvent, ToolResult
+from local_operator.harness.types import (
+    AgentStartEvent,
+    Message,
+    MessageUpdateEvent,
+    TextContent,
+    ToolExecutionEndEvent,
+    ToolResult,
+)
 from local_operator.mobile.tui_handle import (
     TuiSessionHandle,
     _DetailChangedDuringHydration,
@@ -381,3 +388,72 @@ def test_the_phone_formatter_fixture_still_matches_the_tuis_formatter() -> None:
     assert len(cases) > 40, "the fixture must keep covering every branch and crossing"
     for seconds, expected in cases:
         assert format_duration(float(seconds)) == expected, seconds
+
+
+@pytest.mark.asyncio
+async def test_a_second_viewer_is_served_the_phases_true_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 3, MAJOR 1 — through the production attach path.
+
+    The seed a viewer gets IS the object the runtime serializes, and it carries
+    the age as of the phase's last edge. A second viewer — a reconnect, a second
+    phone, "resume that session" — attaching to a live fold mid-phase therefore
+    seeded on that stale number: at a known zero, `0s` counting from the new
+    viewer's own mount, which is the operator-reported defect rendered as a
+    fabricated zero on the surface this PR exists for. The fold re-dates on the
+    way out of the seed, so both viewers get an answer that is true when they
+    read it: the first keeps counting from the phase's edge, and the second is
+    served the phase's real age.
+
+    Driven with the fold's own clock, and with the deltas the reviewer measured
+    this window with: prose streams them continuously, and none re-enters the
+    label's arm, so the stored snapshot does not move on its own.
+    """
+    import local_operator.mobile.projection as projection_module
+    from tests.unit.mobile.test_projection import _StubClock
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    session = FakeSession()
+    session.streaming = True
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    handle.subscribe(lambda: None)
+
+    # The fold watches this turn begin, so the prose edge is one it witnessed —
+    # its own true zero, not a number counted from the attach.
+    session.emit(AgentStartEvent(generation=1))
+    session.emit(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert handle.session_projection_seed.activity == "responding"
+    assert handle.session_projection_seed.activity_started_s == 0.0, "the viewer's own edge"
+
+    clock.advance(45)
+    session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
+    assert handle.session_projection_seed.activity_started_s == pytest.approx(
+        45.0, abs=0.2
+    ), "a viewer attaching 45s into the phase must be served the phase's age, not zero"
+
+
+def test_the_formatter_fixture_is_what_its_generator_produces() -> None:
+    """Review round 3, NIT 1: the fixture is pinned to its GENERATOR, not just
+    to its content.
+
+    Both suites assert the fixture's content against their own formatter, which
+    catches a formatter drifting but says nothing about the FILE: a hand edit
+    that rewrote the cases while keeping the list longer than the suites' ``>40``
+    bound would shrink coverage with every test still green. ``render()`` is the
+    generator's own bytes, so comparing against it is the provenance half — and
+    it is here rather than only behind the script's ``--check`` flag because CI
+    runs this suite.
+    """
+    from scripts.generate_clock_format_parity import FIXTURE, render
+
+    assert FORMATTER_PARITY == FIXTURE, "the generator writes the file this suite reads"
+    assert FORMATTER_PARITY.read_text() == render()

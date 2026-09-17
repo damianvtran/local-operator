@@ -286,6 +286,20 @@ class TuiSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection THIS handle hands a viewer at attach.
+
+        Re-dating on the way out is deliberate: the band's ``activity_started_s``
+        is written when the phase last moved, and a viewer that attaches to a
+        long phase — mid-prose, inside a running call — is exactly the case with
+        no event in between. Serving the stored number here is what made a
+        second phone paint ``0s`` counting from its own mount for a phase that
+        was minutes old (review round 3, MAJOR 1); this accessor is the moment
+        the age becomes an answer, so it is where the fold recomputes it. The
+        object is the fold's own, so the runtime's own serialization sees the
+        same fresh value either way (``RuntimeServer._projection_payload``
+        refreshes through the sink as well).
+        """
+        self._fold.refresh_activity_age()
         return self._projection
 
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
