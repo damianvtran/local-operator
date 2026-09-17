@@ -22,6 +22,7 @@ That is stated plainly rather than implied away.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import struct
@@ -36,6 +37,8 @@ from local_operator import clipboard as clipboard_module
 from local_operator.clipboard import (
     CLIPBOARD_TIMEOUT_S,
     MAX_CLIPBOARD_TEXT_BYTES,
+    SCRATCH_NO_SPACE,
+    SCRATCH_UNAVAILABLE,
     ClipboardImage,
     clipboard_reads_are_local,
     read_clipboard,
@@ -1151,3 +1154,258 @@ def test_clipboard_text_is_bounded_by_the_paste_budget_not_the_image_ceiling(
     _install(monkeypatch, {"xclip": lambda argv, kwargs: at_limit})
     contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
     assert len(contents.text) == MAX_CLIPBOARD_TEXT_BYTES, "the budget itself must fit"
+
+
+# -- a scratch directory that cannot be allocated -----------------------------
+# The operator's incident, 2026-09-17, and the reason this section exists: the
+# boot volume filled (99 %, 443 GB used) and the host logged 56 `Errno 28`s in
+# six minutes before `ctrl+v` on a screenshot killed the session. `tempfile`
+# could not create its probe file in ANY candidate — `TMPDIR`, `/tmp`,
+# `/var/tmp`, `/usr/tmp`, the home directory — and reported that as
+# `FileNotFoundError: [Errno 2] No usable temporary directory found in [...]`,
+# naming directories that all existed. That exception left `read_clipboard`,
+# which the module documents as never raising, straight into Textual's message
+# handler, which exits the app on any exception raised from one.
+#
+# The classification is tested as a pure function, the probe against REAL
+# kernel refusals, and the two backends through the dispatch, because the
+# failure only reached the user through the last of those.
+
+
+def _scratchless(monkeypatch, directory: Path) -> None:
+    """Make `tempfile` unable to allocate a scratch directory, for real.
+
+    Both halves are needed and neither is a stub. `_candidate_tempdir_list` is
+    the list the incident exhausted — the same lever ``scratchless_tui.py``
+    uses to rebuild it deterministically — and clearing the CACHED
+    `tempfile.tempdir` is what makes `gettempdir()` consult that list again
+    inside a process that has already created temp files. `tempfile`'s own
+    probe (create, write, unlink) is what then fails, so the exception is
+    tempfile's own `FileNotFoundError` and not a raised stand-in.
+    """
+    monkeypatch.setattr(
+        clipboard_module.tempfile, "_candidate_tempdir_list", lambda: [str(directory)]
+    )
+    monkeypatch.setattr(clipboard_module.tempfile, "tempdir", None)
+
+
+def _only_these_bases(monkeypatch, base: Path) -> None:
+    """Point the probe at one base, so its answer is about that base."""
+
+    monkeypatch.setenv("TMPDIR", str(base))
+    monkeypatch.delenv("TEMP", raising=False)
+    monkeypatch.delenv("TMP", raising=False)
+
+
+@pytest.mark.parametrize(
+    ("errno_value", "expected"),
+    [
+        (errno.ENOSPC, SCRATCH_NO_SPACE),
+        (errno.EDQUOT, SCRATCH_NO_SPACE),
+        (errno.ENOENT, SCRATCH_UNAVAILABLE),
+        (errno.EACCES, SCRATCH_UNAVAILABLE),
+        (errno.EMFILE, SCRATCH_UNAVAILABLE),
+        (None, SCRATCH_UNAVAILABLE),
+    ],
+)
+def test_the_scratch_refusal_is_classified_by_the_move_it_implies(
+    errno_value: int | None, expected: str
+) -> None:
+    """Only two errnos mean "there was no room", and they are the same problem
+    for the user: ENOSPC is a full volume and EDQUOT is a full quota on a
+    volume with space, and the move that helps is the same one.
+
+    Everything else — a missing or read-only base, a full file table, and the
+    ``None`` the probe gives when a base accepted a file — is reported as
+    ``unavailable``, because this module cannot name it and inventing a cause
+    is the wrong-diagnosis class the reason field exists to remove.
+    """
+    assert clipboard_module._classify_scratch_failure(errno_value) == expected
+
+
+def test_the_probe_recovers_a_cause_tempfile_has_already_discarded(tmp_path, monkeypatch) -> None:
+    """`_get_default_tempdir` collapses every refusal into
+    `FileNotFoundError(ENOENT, ...)`, so the errno that actually reaches a
+    caller is always ENOENT whatever the OS said — measured on the operator's
+    host, where the message named five directories that all existed.
+
+    The errno therefore has to be recovered from a real create against the
+    platform's own bases, which is what this drives: a directory that is gone
+    answers ENOENT.
+    """
+    _only_these_bases(monkeypatch, tmp_path / "gone")
+    assert clipboard_module._probe_scratch_errno() == errno.ENOENT
+    assert (
+        clipboard_module._classify_scratch_failure(clipboard_module._probe_scratch_errno())
+        == SCRATCH_UNAVAILABLE
+    )
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="a read-only directory does not stop root",
+)
+def test_the_probe_answers_from_a_real_kernel_refusal(tmp_path, monkeypatch) -> None:
+    """EACCES from a real ``chmod``, not from a patched raise: this is the same
+    mechanism ``scratchless_tui.py`` uses to reproduce the incident, where the
+    FAILURE is the operator's and only the errno differs."""
+    readonly = tmp_path / "ro"
+    readonly.mkdir()
+    readonly.chmod(0o500)
+    _only_these_bases(monkeypatch, readonly)
+    try:
+        assert clipboard_module._probe_scratch_errno() == errno.EACCES
+    finally:
+        # Restore the mode before tmp_path's own teardown has to remove it.
+        readonly.chmod(0o700)
+
+
+def test_a_base_that_accepts_a_file_is_never_reported_as_out_of_space(
+    tmp_path, monkeypatch
+) -> None:
+    """The probe succeeding is an answer too, and it is the one that forbids
+    "no space": the filesystem demonstrably had room, so the allocation failed
+    for something else and the notice must not send the user to free space."""
+    _only_these_bases(monkeypatch, tmp_path)
+    assert clipboard_module._probe_scratch_errno() is None
+    assert clipboard_module._classify_scratch_failure(None) == SCRATCH_UNAVAILABLE
+
+
+def test_an_unallocatable_scratch_directory_returns_a_reason_instead_of_raising(
+    tmp_path, monkeypatch
+) -> None:
+    """The never-raise contract, at the one call that used to break it. The
+    allocation failure here is `tempfile`'s own, against a base that does not
+    exist."""
+    _scratchless(monkeypatch, tmp_path / "gone")
+    tmp, reason = clipboard_module._open_scratch_dir()
+    assert tmp is None, "a failed allocation must not hand back a directory"
+    assert reason == SCRATCH_UNAVAILABLE
+
+
+def test_a_full_scratch_volume_is_reported_as_no_space(tmp_path, monkeypatch) -> None:
+    """The operator's case, and the one substitution in this file.
+
+    ENOSPC cannot be produced here without filling a real volume, so the
+    probe's ANSWER is substituted while everything around it stays real: the
+    allocation fails for real, the classification runs for real, and the reason
+    the composer words its notice from is the real one. Stated rather than
+    implied — the end-to-end proof that a genuinely full disk produces this
+    errno is the mounted-full-volume run in the PR, not this test.
+    """
+    _scratchless(monkeypatch, tmp_path / "gone")
+    monkeypatch.setattr(clipboard_module, "_probe_scratch_errno", lambda: errno.ENOSPC)
+    tmp, reason = clipboard_module._open_scratch_dir()
+    assert tmp is None
+    assert reason == SCRATCH_NO_SPACE
+
+
+def test_macos_reports_an_unallocatable_scratch_directory_as_an_unread_clipboard(
+    tmp_path, monkeypatch, which_all
+) -> None:
+    """The reported crash, at the layer that crashed.
+
+    The clipboard on this host holds a screenshot; what is missing is the room
+    to stage it. Before this, `tempfile`'s `FileNotFoundError` came out of
+    `_read_macos`, out of `read_clipboard`, and out of the keystroke handler,
+    and Textual exited the app. Now the same failure is a result that says the
+    clipboard was not read.
+    """
+    _scratchless(monkeypatch, tmp_path / "gone")
+    fake = _install(monkeypatch, {"osascript": lambda argv, kwargs: b"image"})
+
+    contents = read_clipboard(BIG, platform="darwin", env={})
+
+    assert contents.read_failed == SCRATCH_UNAVAILABLE
+    assert contents.image is None and contents.text == "", "a failed read yields nothing"
+    assert contents.timed_out is False, "a read that never ran cannot also have timed out"
+    assert fake.calls == [], "the pasteboard cannot be read if it cannot be staged"
+
+
+def test_the_scratch_failure_reaches_the_result_off_macos_too(monkeypatch, which_all) -> None:
+    """Both scratch sites are in scope, because a Windows paste is the same
+    keystroke: the module's doctrine is that the platforms are peers, and a
+    guard added only where the report came from is the single-environment
+    assumption this module exists to remove.
+
+    The Windows backends return an image or a string, neither of which can say
+    "the clipboard was not read", so the reason rides out on the same
+    out-parameter shape `oversized` uses.
+    """
+    monkeypatch.setattr(clipboard_module, "_open_scratch_dir", lambda: (None, SCRATCH_NO_SPACE))
+    fake = _install(monkeypatch, {"pwsh": PNG})
+
+    contents = read_clipboard(BIG, platform="win32", env={})
+
+    assert contents.read_failed == SCRATCH_NO_SPACE
+    assert contents.image is None and contents.text == ""
+    assert fake.calls == [], (
+        "nothing may spawn once staging is impossible, and the text read must not "
+        "run after the image read has already reported the same failure"
+    )
+
+
+def test_the_windows_text_backend_hands_the_reason_to_its_caller(monkeypatch, which_all) -> None:
+    """Directly, because `_read_windows_text` can only return a string and the
+    out-parameter is the whole mechanism that carries the reason past it."""
+    monkeypatch.setattr(clipboard_module, "_open_scratch_dir", lambda: (None, SCRATCH_UNAVAILABLE))
+    failed: list[str] = []
+    text = clipboard_module._read_windows_text(
+        BIG, clipboard_module._Deadline(CLIPBOARD_TIMEOUT_S), None, failed
+    )
+    assert text == ""
+    assert failed == [SCRATCH_UNAVAILABLE]
+
+
+def test_an_exception_escaping_a_backend_is_reported_rather_than_raised(
+    monkeypatch, which_all, caplog
+) -> None:
+    """Rule 1 is enforced by construction now, not by auditing every backend
+    each time one is added.
+
+    A backend is the most likely thing to grow a raise — the incident was a
+    scratch allocation rather than a backend, which is precisely why auditing
+    did not catch it — so the guard is asserted with an exception that is not
+    an OSError, to prove it is not a band-aid for the one failure that got
+    reported. The traceback still reaches the log: the keystroke stays a
+    keystroke, and the detail a maintainer needs is not thrown away with it.
+    """
+
+    def exploding(argv, kwargs):
+        raise RuntimeError("a backend that forgot the contract")
+
+    with caplog.at_level("ERROR", logger="local_operator.clipboard"):
+        _install(monkeypatch, {"xclip": exploding})
+        contents = read_clipboard(BIG, platform="linux", env={"DISPLAY": ":0"})
+
+    assert contents.read_failed == SCRATCH_UNAVAILABLE
+    assert contents.image is None and contents.text == ""
+    assert "Clipboard read failed" in caplog.text
+    assert "a backend that forgot the contract" in caplog.text, (
+        "the traceback has to reach the log even though the caller is told only "
+        "that the read did not happen"
+    )
+
+
+def test_a_read_that_happened_is_never_reported_as_one_that_did_not(monkeypatch, which_all) -> None:
+    """The other side of the flag, on every platform: a healthy read — image,
+    text, or a genuinely empty clipboard — leaves it unset, so no notice can
+    tell a user their paste was never read when it was."""
+    for platform, env, binary in (
+        ("darwin", {}, "osascript"),
+        ("linux", {"DISPLAY": ":0"}, "xclip"),
+        ("win32", {}, "pwsh"),
+    ):
+
+        def osascript(argv, kwargs):
+            Path(argv[2]).write_bytes(PNG)
+            return b"image"
+
+        answer = osascript if binary == "osascript" else (lambda argv, kwargs: PNG)
+
+        _install(monkeypatch, {binary: answer})
+        assert read_clipboard(BIG, platform=platform, env=env).read_failed == ""
+
+        _install(monkeypatch, {binary: lambda argv, kwargs: b""})
+        empty = read_clipboard(BIG, platform=platform, env=env)
+        assert empty.read_failed == "", "an empty clipboard was READ, and it was empty"
