@@ -7773,6 +7773,18 @@ class Editor(TextArea):
             return True
         if query.strip().lower() == name.strip().lower():
             return True
+        # A FLAG row is named with its dashes (`--clear`, `--stop`) while the same
+        # action has a BARE spelling these commands have always honoured and
+        # still do (`clear`, `stop`). Spelled either way the user named the
+        # action, so both count as "typed in full" — they are the same word, and
+        # the bare one is what a user most often types. Without this the flag ROW
+        # would have turned `/goal clear` + Enter, one keystroke before the row
+        # existed, into a completion needing a second Enter, i.e. the gate would
+        # have cost the documented bare forms a keystroke instead of only gating
+        # the IMPLICIT one (round 1: the designer's D1 fix, and the two
+        # pre-existing tests its first cut broke).
+        if query.strip().lower().lstrip("-") == name.strip().lower().lstrip("-"):
+            return True
         return not self._argument_is_destructive() and len(self._picker.suggestions()) <= 1
 
     def _argument_is_destructive(self) -> bool:
