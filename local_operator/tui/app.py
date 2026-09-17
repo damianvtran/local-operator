@@ -16715,6 +16715,16 @@ class OperatorApp(App[None]):
         has no move to name, which is the whole reason it is the one variant
         that does not take the failure duration.
 
+        **A named move has to work for EVERY cause the variant covers**, which
+        is why ``read-failed`` names the path route and not a retry (review
+        round 1, NIT-5 / QA Q2). That variant is the union of a transient
+        escape and a permanent refusal — QA staged a ``chmod 500`` scratch base
+        that refuses on every attempt — and a retry names an action the second
+        half rules out. Pasting a file path bypasses the clipboard read
+        entirely, so it survives both halves and survives a full volume; it is
+        also the move ``remote`` and ``unattachable`` already spell the same
+        way, so the family teaches one route rather than three.
+
         Capitalised, noun-first: this is a state notice, the family
         ``No provider configured`` belongs to, not a gesture receipt like
         ``copied 12 characters`` (design round 1, D4).
@@ -16754,7 +16764,7 @@ class OperatorApp(App[None]):
             # `read-failed` below (2026-09-17).
             text = "Clipboard not read — no temp space left. Free up space."
         elif message.reason == "read-failed":
-            # 37 cells. Says what happened and the one move that helps, and
+            # 46 cells. Says what happened and the one move that helps, and
             # deliberately does NOT guess why: the cause this branch covers is
             # the union of "a probe could not name it" and "an exception
             # escaped a backend", which is a set this app cannot enumerate. Not
@@ -16762,7 +16772,17 @@ class OperatorApp(App[None]):
             # exists: this user's clipboard was never read, and telling them it
             # was empty sends them to re-copy something that may be perfectly
             # fine.
-            text = "Clipboard not read. Try ctrl+v again."
+            #
+            # The move is the PATH route, not a retry (review round 1, NIT-5 /
+            # QA Q2). "Try ctrl+v again" was right for the transient half of
+            # this value (an escaped `EMFILE`) and provably wrong for the
+            # permanent half: QA staged a `chmod 500` scratch base, where every
+            # attempt is refused, so the notice named an action that could not
+            # work. The path route bypasses the clipboard READ altogether, so
+            # it survives both halves - and "Paste a file path" is already the
+            # family's own vocabulary (`remote` and `unattachable` both name
+            # it), so this is not a new move to teach.
+            text = "Clipboard not read. Paste a file path instead."
         elif message.reason == "unattachable":
             # No "paste its file path" here any more: the path route runs the
             # same bounding tail, so a refusal caused by the IMAGE cannot be

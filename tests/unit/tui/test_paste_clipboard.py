@@ -1708,19 +1708,48 @@ async def test_every_paste_notice_fits_the_toast_on_one_line() -> None:
     from local_operator.tui.widgets.toast import Toast
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    reasons = ["nothing", "too_large", "timeout", "remote", "unattachable", "unreadable"]
+    #: Every value `EditorPasteEmpty` can carry, including the two this PR
+    #: added. The family is enumerated here rather than sampled, because the
+    #: property being pinned is about the family: a notice that is not in this
+    #: list is a notice nothing checks.
+    reasons = [
+        "nothing",
+        "too_large",
+        "timeout",
+        "remote",
+        "unattachable",
+        "unreadable",
+        "read-no-space",
+        "read-failed",
+    ]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         toast = app.query_one(Toast)
         budget = toast.content_cells
         for reason in reasons:
+            # DISMISS BETWEEN ITERATIONS, and assert the card took the slot.
+            # Without the dismissal this loop proves nothing after its first
+            # pass: `show` is called with `yield_to_actionable=True`, every
+            # paste notice is actionable (`TOAST_FAILURE_MS`), and
+            # `toast.py` DEFERS an actionable card while another is up — so
+            # iterations 2..n re-read iteration 1's message and the loop would
+            # agree with itself while measuring one of eight strings. The
+            # generation counter is the check that catches a future edit
+            # reintroducing that: it moves only on a show that TOOK the slot.
+            toast.dismiss_toast()
+            generation = toast.generation
             app.on_editor_paste_empty(EditorPasteEmpty(reason=reason))
             await pilot.pause()
+            assert toast.generation == generation + 1, (
+                f"the {reason!r} notice never reached the card: the slot deferred "
+                f"it, so this iteration measured the previous reason's message"
+            )
             assert cell_len(toast.message) <= budget, (
                 f"{reason!r} notice is {cell_len(toast.message)} cells against a "
                 f"{budget}-cell box: it wraps and clips the logo behind it"
             )
+        toast.dismiss_toast()
         assert cell_len(CLIPBOARD_READING_NOTICE) <= budget
 
 

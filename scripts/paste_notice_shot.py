@@ -78,7 +78,7 @@ VARIANTS: dict[str, ClipboardContents] = {
 #: of the pair is which sentence the user gets.
 EXPECTED: dict[str, str] = {
     "read-no-space": "Clipboard not read — no temp space left. Free up space.",
-    "read-failed": "Clipboard not read. Try ctrl+v again.",
+    "read-failed": "Clipboard not read. Paste a file path instead.",
 }
 
 
