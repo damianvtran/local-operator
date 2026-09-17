@@ -3827,7 +3827,19 @@ class ServingSessionHandle(SessionHandle):
         if command == "compact":
             return self._compact_slash(session, SlashResult)
         if command == "loop":
+            from local_operator.slash_commands import unknown_flag_refusal
+
             driver = self._loop_driver()
+            # Strip ONCE, here, mirroring `_goal_slash`: `Command.args` is a plain
+            # `str` on the wire with no strip validator, so a trailing space
+            # arrives verbatim — and every comparison below is a whole-string
+            # match. Unstripped, `/loop --stop ` silently no-opped with `loop_busy`
+            # while the loop kept running, and `/loop --clear ` on an idle driver
+            # STARTED an unbounded goal-mode loop toward the literal goal
+            # `--clear` (round 1, reviewer MAJOR-2). The TUI strips the same
+            # argument before its handler, so leaving this unstripped was also a
+            # host disagreement about what one word means.
+            args = args.strip()
             if args.lower() in LOOP_STOP_ARGS:
                 await driver.cancel()
             elif args.lower() in LOOP_CLEAR_ARGS:
@@ -3853,8 +3865,17 @@ class ServingSessionHandle(SessionHandle):
                     return SlashResult(
                         kind="error", text="A loop is already running", data={"code": "loop_busy"}
                     )
+                # A bare `--token` that names no flag: without this the fall-through
+                # starts a paid goal-mode loop toward the literal flag text
+                # (`/loop --stopx`), which is the same defect the TUI refuses on
+                # (round 1, UX U6 / reviewer NIT-5). `loop_invalid` is the mapped
+                # client-error code, so the refusal reaches the caller as a 422
+                # rather than a 200 that only a rendered receipt explains.
+                refusal = unknown_flag_refusal("loop", args)
+                if refusal is not None:
+                    return SlashResult(kind="error", text=refusal, data={"code": "loop_invalid"})
                 try:
-                    driver.start(args.strip(), str(getattr(session, "goal", "")))
+                    driver.start(args, str(getattr(session, "goal", "")))
                 except ValueError as error:
                     return SlashResult(kind="error", text=str(error), data={"code": "loop_invalid"})
             return SlashResult(kind="block", data={"type": "loop", **driver.state})
@@ -3875,7 +3896,12 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        from local_operator.session.goal import GOAL_CLEAR_ARGS, MAX_GOAL_CHARS
+        from local_operator.session.goal import (
+            GOAL_CLEAR_ARGS,
+            MAX_GOAL_CHARS,
+            cleared_goal_receipt,
+        )
+        from local_operator.slash_commands import unknown_flag_refusal
 
         arg = arg.strip()
         if not hasattr(session, "set_goal"):
@@ -3888,9 +3914,19 @@ class ServingSessionHandle(SessionHandle):
         # never be stored as the goal body: nothing below runs for it, and no
         # turn is started (`goal_set` is what the viewer submits).
         if arg.lower() in GOAL_CLEAR_ARGS:
+            # Name what went: the receipt is rendered by a viewer that may have no
+            # other way to see the goal (design D4/U3), so the echo is built by
+            # the same shared helper every other host uses.
+            receipt = cleared_goal_receipt(session.goal)
             session.set_goal("")
             self._notify()
-            return SlashResult(kind="notice", text="goal cleared", style="info")
+            return SlashResult(kind="notice", text=receipt, style="info")
+        refusal = unknown_flag_refusal("goal", arg)
+        if refusal is not None:
+            # One refusal string for every host: a runtime that stored `--stop` as
+            # the goal while the TUI refused it is the host-disagreement class the
+            # shared vocabularies in this module exist to remove (UX U6).
+            return SlashResult(kind="notice", text=refusal, style="warning")
         stored = session.set_goal(arg)
         self._notify()
 

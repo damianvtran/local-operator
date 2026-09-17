@@ -38,6 +38,39 @@ MAX_GOAL_CHARS = 2000
 #: loss in the one command whose argument the MODEL is told.
 GOAL_CLEAR_ARGS = frozenset({"clear", "none", "reset", "--clear"})
 
+#: How much of a cleared goal the receipt echoes.
+#:
+#: ``MAX_GOAL_CHARS`` is a spec-sized bound no single receipt should carry: the
+#: echo exists so a mistaken clear is visible and can be retyped by eye, and a
+#: goal longer than a terminal row defeats exactly that. 96 is the same bound the
+#: ``goal restored`` notice already clips to, so the two lines the app prints
+#: about the same value read alike. Characters rather than cells because this
+#: module is the shared, non-UI half of the app — the surfaces that paint the
+#: string own its cell clipping.
+CLEARED_GOAL_ECHO_CHARS = 96
+
+
+def cleared_goal_receipt(cleared: str) -> str:
+    """The ``/goal --clear`` receipt: name what went, or say there was nothing.
+
+    A standing goal is deliberately invisible in the UI — the band does not carry
+    it, and the only echo is the one-time ``goal restored`` notice on adopt — and
+    there is no undo. So this string is the user's whole chance to see what a
+    mistaken clear took away and type it back, which is why it names the goal
+    rather than reporting the event (design D4 / UX U3, round 1).
+
+    Flattened to ONE line: a receipt is a single terminal row, and a goal is
+    free text a user may have pasted newlines into.
+    """
+    text = " ".join((cleared or "").split())
+    if not text:
+        # Nothing was set, so there is nothing to name — and "goal cleared: "
+        # with an empty tail reads as a rendering bug rather than an empty goal.
+        return "goal cleared"
+    if len(text) > CLEARED_GOAL_ECHO_CHARS:
+        text = text[:CLEARED_GOAL_ECHO_CHARS].rstrip() + "…"
+    return f"goal cleared: {text}"
+
 
 @dataclass
 class GoalState:

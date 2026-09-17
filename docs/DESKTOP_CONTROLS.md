@@ -285,17 +285,35 @@ driver runs it answers `a loop is running — /loop --stop to stop it first` (co
 `loop_running`) and changes nothing, and when nothing runs it REPLACES the published
 state with `{"status": "idle", "completed": 0}` and checkpoints it, which is what a
 desktop surface dismisses and what keeps a restart from restoring the cleared run.
+That refusal is a `409` carrying the sentence, like `loop_busy` — the client never has
+to read a receipt to tell it from a success, which is what `POST …/commands` answers
+for it (round 1 review, MINOR-4: the code rode a 200 error receipt before).
 `/loop status` reads state. The canonical frontend snapshot carries
 loop status/count/reason. A viewer detach does not stop/restart it; runtime teardown
 cancels it, and a replaced runtime labels a retained active checkpoint interrupted
 rather than automatically spending more tokens.
 
 `/goal --clear` unsets the standing goal (the bare words `clear|none|reset` still
-work). It is stored nowhere and starts no turn: the receipt is the whole effect, and
-the argument is matched as a WHOLE, so `/goal --clear the flaky job` remains an
-ordinary objective. The terminal's argument picker offers `--clear` on an empty `/goal `
+work). It is stored nowhere and starts no turn: the receipt is the whole effect — and
+it NAMES the goal it removed, because a standing goal is invisible in the UI and
+there is no undo — and the argument is matched as a WHOLE, so `/goal --clear the
+flaky job` remains an ordinary objective. A bare `--token` that names no flag of the
+command is refused rather than stored (`/goal --stop` used to become the standing
+objective), which is the one deliberate behaviour change: a goal whose text is a
+single `--word` is no longer accepted.
+
+The terminal's argument picker offers `--clear` on an empty `/goal `
 argument while a goal is set, and `--stop` on an empty `/loop ` argument while that
-terminal is running a loop.
+terminal is running a loop. Both rows are `alert` rows, so one Enter FILLS the buffer
+and a second runs it; the row is pre-selected, so without that gate the keystroke that
+reads the standing goal would clear it.
+
+In the terminal, `--clear` means what this host can mean by it: a loop RUNNING here is
+the only loop state this host has (nothing is published), so `--clear` ends it with
+the receipt `loop cleared — stopping after the current turn`, and with nothing running
+it answers `nothing to clear in THIS terminal — no loop is running here`. The
+owner-path refusal above is about the PUBLISHED state a detached runtime holds, which
+this surface does not have.
 
 ## Provider and reporting endpoints
 

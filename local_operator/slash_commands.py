@@ -508,7 +508,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # guessing the bare word `clear`. "show" gave up its cell to it — a bare
         # `/goal` still reports the goal, while an unstated flag was reachable
         # from nowhere.
-        "Set the goal and start work; /goal --clear unsets it",
+        #
+        # "clears it", not a synonym: the picker row offers "Clear the standing
+        # goal" and the receipt reads "goal cleared", so the third phrasing of
+        # the same act was the odd one out beside a flag literally spelled
+        # `--clear` (round 1, D3). Same 52 cells, so nothing re-sizes.
+        "Set the goal and start work; /goal --clear clears it",
         echo=True,
         consumes_prompt=True,
         # The trailing text is the objective, this command's own argument.
@@ -534,19 +539,29 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # command, and the prompt the turn later announces).
     SlashCommand(
         "loop",
-        # Advertises all THREE forms so each is discoverable from the palette
-        # without reading the source: free text is a goal a judge decides is met,
-        # a number is a bounded iteration count, and the stop flag is the escape
-        # hatch — which used to appear only in a launch notice or an
-        # already-running refusal, i.e. after the user needed it (UX round 1, U6).
+        # Advertises the forms the command actually has on every host: free text
+        # is a goal a judge decides is met, a number is a bounded iteration
+        # count, and the stop flag is the escape hatch — which used to appear
+        # only in a launch notice or an already-running refusal, i.e. after the
+        # user needed it (UX round 1, U6).
         #
-        # 62 cells, SHORTER than the 73-cell form it replaces, which was one of
-        # the two rows that wrapped in `/help` at 100 columns. That is why the
-        # two flags share one clause: the distinction between them (stop cancels
-        # a running loop, clear dismisses a finished one) belongs to the picker
-        # row that offers each and to `docs/DESKTOP_CONTROLS.md`, not to a
-        # description already at the wrap boundary.
-        "Loop toward a goal: /loop <goal>, /loop <n>, --stop or --clear",
+        # 53 cells, sized against the `/help` description budget at 80 columns —
+        # `W - 26` (4-cell block indent + 20-cell name column), so 54 there, the
+        # common narrow terminal. The 62-cell form this replaces was measured at
+        # the WRONG width: rendered from the base commit at 100 columns it painted
+        # one 95-cell line and did not wrap, so the comment claiming it was "one
+        # of the two rows that wrapped in `/help` at 100 columns" was wrong about
+        # its own evidence (round 1, QA Q2). What it actually did was wrap at 90
+        # columns and below, i.e. long before the 80-column band this is read at;
+        # the replacement is a single line at 80 (re-measured through
+        # `RichBlock.render_line`, see the PR's evidence).
+        #
+        # `--clear` is deliberately NOT in this clause. It is a word the TUI
+        # cannot honour as a dismissal of published state (it publishes none) and
+        # the runtime refuses while a loop runs, so naming it here would teach a
+        # form in the one place it works least; the picker row that offers each
+        # flag, and `docs/DESKTOP_CONTROLS.md`, carry that distinction.
+        "Loop toward a goal: /loop <goal>, <n>; --stop cancels",
         consumes_prompt=True,
         # The trailing text is the loop instruction or count, this command's own
         # argument.
@@ -958,6 +973,60 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
     ):
         return "Use the MCP setup form for configuration and secret references"
     return None
+
+
+#: The forms the unknown-flag refusal names, per command — the flag spelled
+#: beside words the user can actually type, so the sentence teaches the vocabulary
+#: rather than only complaining about what it received.
+_FLAG_FORMS: dict[str, str] = {
+    "goal": "/goal <text> sets a goal, /goal --clear unsets it",
+    "loop": "/loop <goal> loops toward a goal, /loop <n> runs n turns, /loop --stop cancels",
+}
+
+
+def unknown_flag_refusal(command: str, arguments: str) -> str | None:
+    """The refusal for a BARE ``--token`` that names no flag of ``command``.
+
+    Two flag vocabularies are now taught side by side — ``--clear`` unsets the
+    goal, ``--stop`` ends the loop — so reaching for the wrong one is the
+    expected mistake rather than an exotic one. Under the whole-argument flag
+    rule (`session/goal.py::GOAL_CLEAR_ARGS`, `session/goal_loop.py::LOOP_CLEAR_ARGS`)
+    that mistake was not refused at all: it became the VALUE. ``/goal --stop``
+    stored ``--stop`` as the standing objective and submitted a turn carrying it,
+    and ``/loop --stop now`` started a paid goal-mode loop toward that literal
+    text (round 1: UX U6, reviewer NIT-5).
+
+    Deliberately NARROW, and the narrowness is the contract: only a whole-argument
+    token is treated as a flag ATTEMPT. ``/goal --clear the flaky job`` keeps its
+    tail and stays an objective, which is the same whole-argument rule the flags
+    themselves are matched by — one rule, so `--clear`'s meaning cannot depend on
+    which side of an arbitrary word count it falls.
+
+    Returns ``None`` for every command that declares no flags, so a host may call
+    this unconditionally on its argument path.
+    """
+    # Imported here rather than at module scope: this module is the registry every
+    # host imports, and the vocabularies live in the session layer it should not
+    # pull in at import time.
+    from local_operator.session.goal import GOAL_CLEAR_ARGS
+    from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
+
+    known: frozenset[str] | None = {
+        "goal": GOAL_CLEAR_ARGS,
+        # `status` is a WORD the runtime loop branch answers with its state
+        # block, not a flag — accepted here so the refusal does not name the
+        # forms and then contradict itself on the one word it already honours.
+        "loop": LOOP_STOP_ARGS | LOOP_CLEAR_ARGS | {"status"},
+    }.get(command)
+    if known is None:
+        return None
+    token = arguments.strip()
+    if not token.startswith("--") or token.lower() in known:
+        return None
+    if any(char.isspace() for char in token):
+        # Not a bare token: this is free text that happens to open with dashes.
+        return None
+    return f"unknown flag {token} — {_FLAG_FORMS[command]}"
 
 
 def whole_draft_command(text: str) -> tuple[SlashCommand, str] | None:

@@ -24,12 +24,21 @@ call the test made.
 from __future__ import annotations
 
 import pytest
+from rich.cells import cell_len
 
-from local_operator.session.goal import GOAL_CLEAR_ARGS
+from local_operator.session.goal import (
+    CLEARED_GOAL_ECHO_CHARS,
+    GOAL_CLEAR_ARGS,
+    cleared_goal_receipt,
+)
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.command_picker import PickerMode, skill_token
+from local_operator.tui.widgets.command_picker import (
+    CommandPicker,
+    PickerMode,
+    skill_token,
+)
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 
@@ -56,13 +65,24 @@ def _notice_texts(app: OperatorApp) -> list[str]:
     ]
 
 
+async def _settle(pilot, app: OperatorApp) -> None:
+    """Let the worker a submit started finish, as the reported path does.
+
+    The clear/submit path runs as a worker, so the receipt is not painted by the
+    time Enter returns.
+    """
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    await pilot.pause()
+
+
 async def _submit(pilot, app: OperatorApp, text: str) -> None:
     """Type a line into the real editor and press Enter — the reported path.
 
     The picker is dismissed first where it is showing: Enter on an open list
     COMPLETES the highlighted row and runs THAT, so a test aiming at the typed
     form would otherwise be testing the picker. That row path is covered on its
-    own by ``test_accepting_the_goal_row_submits_the_flag``; this helper drives
+    own by ``test_accepting_the_goal_row_fills_before_it_runs``; this helper drives
     the other one, the words the user typed with the list dismissed.
     """
     editor = app.query_one(Editor)
@@ -124,7 +144,9 @@ async def test_the_goal_flag_clears_the_goal_and_runs_no_turn() -> None:
         await _submit(pilot, app, "/goal --clear")
         assert session.goal == ""
         assert session.prompts == []
-        assert "goal cleared" in _notice_texts(app)
+        # The receipt NAMES the goal it took away: it is the only place the
+        # removed text is still visible (design D4 / UX U3).
+        assert "goal cleared: land the OAuth refresh fix" in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -191,7 +213,10 @@ async def test_the_routed_goal_handler_clears_without_submitting(arg: str) -> No
         await _boot(pilot, app)
         result = await app.run_slash_authoritative("goal", arg)
         assert result["kind"] == "notice"
-        assert result["text"] == "goal cleared"
+        # The receipt NAMES what went (design D4 / UX U3): a standing goal is
+        # invisible in the UI and there is no undo, so this line is the user's
+        # only chance to see and retype what a mistaken clear took away.
+        assert result["text"] == "goal cleared: land the OAuth refresh fix"
         assert session.goal == ""
         assert session.prompts == []
 
@@ -241,8 +266,14 @@ async def test_the_loop_stop_forms_still_refuse_when_nothing_runs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_clear_while_running_refuses_and_names_the_flag() -> None:
-    """`--clear` never stops work it did not start, and says which word does."""
+async def test_loop_clear_while_running_clears_this_terminals_loop() -> None:
+    """In the TUI `--clear` means the only thing this host can mean by it.
+
+    This surface publishes no loop state, so a running loop IS the state a
+    clear would remove — refusing and naming `/loop --stop` taught a flag that
+    does nothing here (round 1: UX U4, reviewer NIT-6). The receipt says what
+    happened rather than borrowing the stop sentence.
+    """
     session = FakeSession()
     session.set_goal("land the OAuth refresh fix")
     app = OperatorApp(lambda: _factory(session))
@@ -250,25 +281,25 @@ async def test_loop_clear_while_running_refuses_and_names_the_flag() -> None:
         await _boot(pilot, app)
         app._loop_running = True
         await _submit(pilot, app, "/loop --clear")
-        assert app._loop_cancelled is False
+        assert app._loop_cancelled is True
         notices = _notice_texts(app)
-        assert any("/loop --stop" in text for text in notices), notices
+        assert any("loop cleared" in text for text in notices), notices
 
 
 @pytest.mark.asyncio
-async def test_loop_clear_when_idle_uses_the_existing_sentence() -> None:
+async def test_loop_clear_when_idle_answers_a_clear_request() -> None:
     """In the TUI there is no published loop state to clear.
 
-    The app-local loop is published nowhere, so `--clear` answers with the
-    sentence `--stop` already produces rather than inventing a second story
-    about a surface no viewer has.
+    The app-local loop is published nowhere, so the honest answer is about
+    CLEARING — the `--stop` sentence names running, which is a different
+    question and read as though `--clear` were a typo (NIT-6).
     """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/loop --clear")
-        assert "no loop is running in THIS terminal" in _notice_texts(app)
+        assert "nothing to clear in THIS terminal — no loop is running here" in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -283,15 +314,114 @@ async def test_the_routed_loop_handler_answers_the_flags(arg: str) -> None:
         idle = await app.run_slash_authoritative("loop", arg)
         assert idle["kind"] == "notice"
         assert "no loop is running" in idle["text"]
+        # The idle SENTENCE differs by what the host can see (QA Q5: a
+        # pre-existing divergence this change does not normalise), so a clear
+        # asks about clearing here too.
+        assert ("nothing to clear" in idle["text"]) is (arg == "--clear")
 
         app._loop_running = True
         running = await app.run_slash_authoritative("loop", arg)
         assert running["kind"] == "notice"
-        if arg == "--stop":
-            assert running["text"] == "loop will stop after the current turn"
-        else:
-            assert "/loop --stop" in running["text"]
-        assert app._loop_cancelled is (arg == "--stop")
+        assert running["text"] == (
+            "loop cleared — stopping after the current turn"
+            if arg == "--clear"
+            else "loop will stop after the current turn"
+        )
+        assert app._loop_cancelled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arg", ["--stop ", "--stop\t", "cancel "])
+async def test_a_trailing_space_does_not_turn_a_flag_into_a_loop_start(arg: str) -> None:
+    """`Command.args` is a plain `str` on the wire: the space arrives verbatim.
+
+    `serving.py`'s loop branch matched the flag UNSTRIPPED, so `/loop --stop `
+    silently no-opped with `loop_busy` while the loop kept running and
+    `/loop --clear ` on an idle driver started a paid goal-mode loop toward the
+    literal goal `--clear` (round 1, reviewer MAJOR-2). Both TUI handlers strip
+    the same argument, so the hosts disagreed about one word.
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._loop_running = True
+        running = await app.run_slash_authoritative("loop", arg)
+        assert running["kind"] == "notice"
+        assert "already running" not in running["text"], running["text"]
+        assert app._loop_cancelled is True
+        # And the bare word is not stored as a goal either.
+        assert session.goal == "land the OAuth refresh fix"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "arg", "supported"),
+    [
+        ("goal", "--stop", "/goal --clear"),
+        ("goal", "--cli", "/goal <text> sets a goal"),
+        ("loop", "--clearx", "/loop <n> runs n turns"),
+        ("loop", "--stopx", "/loop --stop cancels"),
+    ],
+)
+async def test_a_bare_unknown_flag_is_refused_for_both_commands(
+    command: str, arg: str, supported: str
+) -> None:
+    """Two flag vocabularies are taught, so mixing them is the expected mistake.
+
+    Under the whole-argument flag rule the mismatch became the VALUE —
+    `/goal --stop` stored `--stop` as the standing objective and submitted a
+    turn carrying it (round 1: UX U6, reviewer NIT-5).
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        result = await app.run_slash_authoritative(command, arg)
+        assert result["kind"] == "notice"
+        assert result.get("style") == "warning"
+        assert f"unknown flag {arg}" in result["text"]
+        assert supported in result["text"]
+        assert session.goal == "land the OAuth refresh fix"
+        assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_flag_typed_locally_is_refused_not_stored() -> None:
+    """The local handlers refuse it too, and start no turn."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/goal --stop")
+        notices = _notice_texts(app)
+        assert any("unknown flag --stop" in text for text in notices), notices
+        assert session.goal == "land the OAuth refresh fix"
+        assert session.prompts == []
+        await _submit(pilot, app, "/loop --clearx")
+        notices = _notice_texts(app)
+        assert any("unknown flag --clearx" in text for text in notices), notices
+        assert app._loop_running is False
+
+
+@pytest.mark.asyncio
+async def test_a_whole_argument_flag_with_a_tail_still_becomes_a_goal() -> None:
+    """The refusal is narrow BY CONTRACT: only a bare token is a flag attempt.
+
+    `/goal --clear the flaky job` must stay an objective — eating the tail of a
+    real goal would be silent data loss in the one command whose argument the
+    MODEL is told.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        result = await app.run_slash_authoritative("goal", "--clear the flaky job")
+        assert result["text"] == "goal set"
+        assert session.goal == "--clear the flaky job"
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +495,16 @@ async def test_an_idle_loop_offers_nothing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_accepting_the_goal_row_submits_the_flag() -> None:
-    """The row is the whole point: Enter on it runs `/goal --clear`."""
+async def test_accepting_the_goal_row_fills_before_it_runs() -> None:
+    """Two Enters, because one Enter used to destroy what the keystroke READS.
+
+    The row is pre-selected and is the only match, so without `alert` the
+    editor's `_picker_choice_is_unambiguous` RUNS it — and `/goal ` + Enter, the
+    keystroke that reports the standing goal and the one `/goal`'s own
+    description advertises, cleared it instead (round 1: design D1, UX U1,
+    reviewer MAJOR-1). This is the app's established shape for a row that
+    removes something: first Enter fills, second Enter runs.
+    """
     session = FakeSession()
     session.set_goal("land the OAuth refresh fix")
     app = OperatorApp(lambda: _factory(session))
@@ -374,12 +512,98 @@ async def test_accepting_the_goal_row_submits_the_flag() -> None:
         await _boot(pilot, app)
         editor = await _draft(app, pilot, "/goal ")
         assert _row_names(editor) == ["--clear"]
+        assert editor._argument_is_destructive()
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
+        # The FIRST Enter only fills: the goal is untouched and nothing ran.
+        assert editor.text == "/goal --clear"
+        assert session.goal == "land the OAuth refresh fix"
+        assert "goal cleared" not in " ".join(_notice_texts(app))
+        # The second one accepts the completed row.
+        await pilot.press("enter")
+        await _settle(pilot, app)
         assert session.goal == ""
         assert session.prompts == []
-        assert "goal cleared" in _notice_texts(app)
+        assert any(text.startswith("goal cleared") for text in _notice_texts(app))
+
+
+@pytest.mark.asyncio
+async def test_accepting_the_loop_row_fills_before_it_runs() -> None:
+    """The same gate on `/loop `: one Enter must not stop a running loop.
+
+    On the base tree the identical keys hit the "a loop is already running"
+    REFUSAL, so an unguarded row turned a report into a cancel (UX U2).
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._loop_running = True
+        editor = await _draft(app, pilot, "/loop ")
+        assert _row_names(editor) == ["--stop"]
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert editor.text == "/loop --stop"
+        assert app._loop_cancelled is False
+        await pilot.press("enter")
+        await _settle(pilot, app)
+        assert app._loop_cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_move_onto_the_row_still_runs_it_in_one_press() -> None:
+    """The gate costs the IMPLICIT path only.
+
+    An explicit down-arrow onto the row is the editor's own definition of
+    unambiguous, so a user who deliberately reaches for the flag keeps the single
+    keystroke.
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ")
+        assert _row_names(editor) == ["--clear"]
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("enter")
+        await _settle(pilot, app)
+        assert session.goal == ""
+        assert editor.text == ""
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_goal_row_fills_instead_of_clearing() -> None:
+    """The MOUSE path takes the same gate, not a second one.
+
+    A click used to run a non-destructive row outright (`_apply_command` →
+    `_run_argument`), so one click on `--clear` cleared — the reviewer's note on
+    MAJOR-1, and the reason the fix is `alert=True` rather than a keyboard-only
+    guard. A click names one exact row, which the editor already treats as an
+    explicit choice; `alert` is what makes a DESTRUCTIVE row still stop to be
+    confirmed, exactly as it does on `/logout`.
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ")
+        assert _row_names(editor) == ["--clear"]
+        # Row 0 is at the picker's first content row: the one-row offer has no
+        # notice row above it, so `content_region` == `region` here.
+        await pilot.click(CommandPicker, offset=(4, 0))
+        for _ in range(60):
+            await pilot.pause()
+            if editor.text != "/goal ":
+                break
+        assert editor.text == "/goal --clear"
+        assert session.goal == "land the OAuth refresh fix"
+        assert not [text for text in _notice_texts(app) if text.startswith("goal cleared")]
 
 
 # ---------------------------------------------------------------------------
@@ -449,11 +673,19 @@ async def test_the_picker_row_does_not_start_a_turn_when_the_draft_is_typed_over
 
 
 def test_the_palette_descriptions_name_the_flag_forms() -> None:
-    """Discoverability is the requirement, so the palette must carry the flag."""
+    """Discoverability is the requirement, so the palette must carry the flag.
+
+    ``--clear`` is deliberately absent from the `/loop` row: the TUI cannot
+    dismiss a published loop state it does not have, and the runtime refuses it
+    while a loop runs, so the 53-cell form sizes against the `/help` budget at 80
+    columns instead and names only the flag that acts on every host.
+    """
     goal = slash_command_for("/goal")
     loop = slash_command_for("/loop")
     assert goal is not None and "--clear" in goal.description
-    assert loop is not None and "--stop" in loop.description and "--clear" in loop.description
+    assert loop is not None and "--stop" in loop.description
+    # The 80-column `/help` description budget is `W - 26`, i.e. 54 cells.
+    assert cell_len(loop.description) <= 54
 
 
 def test_the_clear_vocabularies_hold_the_flag_and_the_legacy_words() -> None:
@@ -465,6 +697,23 @@ def test_the_clear_vocabularies_hold_the_flag_and_the_legacy_words() -> None:
     # The two loop sets are disjoint on purpose: collapsing them would make
     # `--clear` cancel live work by accident.
     assert not (LOOP_STOP_ARGS & LOOP_CLEAR_ARGS)
+
+
+def test_the_clear_receipt_names_what_it_removed() -> None:
+    """The receipt is the only place a cleared goal is still readable.
+
+    A standing goal is invisible in the UI and there is no undo, so the echo is
+    the user's whole chance to retype what a mistaken clear took away (design
+    D4 / UX U3). One line, because a receipt is a single terminal row.
+    """
+    assert cleared_goal_receipt("land the OAuth refresh fix") == (
+        "goal cleared: land the OAuth refresh fix"
+    )
+    assert cleared_goal_receipt("") == "goal cleared"
+    multi = cleared_goal_receipt("first line\n\nsecond line")
+    assert multi == "goal cleared: first line second line"
+    long = cleared_goal_receipt("x" * 400)
+    assert long == "goal cleared: " + "x" * CLEARED_GOAL_ECHO_CHARS + "…"
 
 
 def test_the_name_slot_flag_is_only_on_the_roster_commands() -> None:

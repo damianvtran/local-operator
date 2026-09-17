@@ -151,6 +151,7 @@ from local_operator.slash_commands import (
     SLASH_COMMANDS,
     primary_slash_name,
     slash_command_for,
+    unknown_flag_refusal,
 )
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
@@ -32153,7 +32154,11 @@ class OperatorApp(App[None]):
         FLAG: it is matched as the WHOLE argument before the set path, so it can
         never be stored as the literal goal ``--clear`` and never starts a turn.
         """
-        from local_operator.session.goal import GOAL_CLEAR_ARGS
+        from local_operator.session.goal import (
+            GOAL_CLEAR_ARGS,
+            MAX_GOAL_CHARS,
+            cleared_goal_receipt,
+        )
 
         session = self._session
         if session is None or not hasattr(session, "set_goal"):
@@ -32168,15 +32173,31 @@ class OperatorApp(App[None]):
             notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
             return
         if request.lower() in GOAL_CLEAR_ARGS:
+            # Name what went. A standing goal is deliberately invisible in the UI
+            # — the band does not carry it and the only echo is the one-time
+            # `goal restored` notice on adopt — and there is no undo, so this
+            # receipt is the user's whole chance to see what a mistaken clear
+            # took away and retype it (round 1: design D4, UX U3).
+            receipt = cleared_goal_receipt(session.goal)
             session.set_goal("")
-            notice("goal cleared")
+            notice(receipt)
+            return
+        # A bare `--token` that names no flag of THIS command. The app now teaches
+        # two flag vocabularies (`--clear` for the goal, `--stop` for the loop),
+        # so mixing them is the expected mistake — and the whole-argument flag
+        # rule meant the mismatch was STORED as the standing objective and
+        # submitted as a turn: `/goal --stop` set the goal to `--stop` (round 1,
+        # UX U6). Deliberately narrow: only a whole-argument token is a flag
+        # ATTEMPT, so `/goal --clear the flaky job` keeps its tail and stays an
+        # objective.
+        refusal = unknown_flag_refusal("goal", request)
+        if refusal is not None:
+            notice(refusal, "warning")
             return
         stored = session.set_goal(request)
         # Only the standing objective is capped. The ordinary user message
         # retains the full request, and the normal submit path owns its ONE
         # transcript row, busy steering, compaction hold and attachment order.
-        from local_operator.session.goal import MAX_GOAL_CHARS
-
         if len(stored) == MAX_GOAL_CHARS and len(request) > MAX_GOAL_CHARS:
             notice(
                 f"goal set: shortened to the {MAX_GOAL_CHARS}-character cap. "
@@ -32195,25 +32216,26 @@ class OperatorApp(App[None]):
         the transcript rather than a hidden background process.
 
         ``--clear`` is the owner-path dismissal of a FINISHED loop's published
-        state (see ``serving._route_shared_slash``). There is no such state
-        here: this terminal's loop lives in ``_loop_running`` and is published
-        nowhere, so `--clear` answers with the same sentence the idle `--stop`
-        does rather than inventing a second story about a surface no viewer has.
+        state (``ServingSessionHandle._slash_result``, reached over the
+        authoritative seam by ``run_slash_authoritative``). THIS terminal
+        publishes no such state — its loop lives in ``_loop_running`` and is
+        written nowhere — so here `--clear` means the only thing it CAN mean:
+        end this terminal's loop, exactly as `--stop` does. It used to refuse
+        while a loop ran (citing `--stop`) and answer the idle `--stop`
+        sentence otherwise, which made the flag `/help` advertised read as a
+        no-op or a typo in the one host that offers no other meaning for it
+        (round 1: UX U4, reviewer NIT-6).
         """
         session = self._session
         if arg.lower() in LOOP_STOP_ARGS or arg.lower() in LOOP_CLEAR_ARGS:
+            clearing = arg.lower() in LOOP_CLEAR_ARGS
             if self._loop_running:
-                if arg.lower() in LOOP_CLEAR_ARGS:
-                    # Never a silent cancel: `--clear` while a loop runs would
-                    # otherwise stop real work under a word that promises only
-                    # to tidy a snapshot away.
-                    notice(
-                        "a loop is running in THIS terminal — /loop --stop to stop it",
-                        "warning",
-                    )
-                    return
                 self._loop_cancelled = True
-                notice("loop will stop after the current turn")
+                notice(
+                    "loop cleared — stopping after the current turn"
+                    if clearing
+                    else "loop will stop after the current turn"
+                )
             else:
                 # Say only what THIS terminal knows, and nothing more.
                 #
@@ -32240,7 +32262,25 @@ class OperatorApp(App[None]):
                 # The tint is the plain notice, not `warning`: the request is
                 # legitimate, the answer is an explanation, and nothing here
                 # says the user did anything wrong.
-                notice("no loop is running in THIS terminal")
+                #
+                # `--clear` gets its own WORDING, not its own behaviour: the
+                # same true fact answers a different question, and replying to
+                # "clear the finished loop" with a sentence about RUNNING named
+                # the wrong thing entirely (NIT-6).
+                notice(
+                    "nothing to clear in THIS terminal — no loop is running here"
+                    if clearing
+                    else "no loop is running in THIS terminal"
+                )
+            return
+        # A bare `--token` that names no flag of this command: `/loop --stopx`
+        # would otherwise become a GOAL and start a paid goal-mode loop toward
+        # the literal text (round 1, reviewer NIT-5). Narrow on purpose — only a
+        # whole-argument token is a flag attempt, so `/loop --stop abc` stays the
+        # documented "any other non-empty text is a GOAL" case.
+        refusal = unknown_flag_refusal("loop", arg)
+        if refusal is not None:
+            notice(refusal, "warning")
             return
         if session is None:
             # A rejected command changed nothing, so the conversation has not
@@ -34438,8 +34478,24 @@ class OperatorApp(App[None]):
             # with nothing to clear, and a palette that taught it anyway would be
             # advertising a dead end. Empty rows with no notice close the list,
             # so the ungated case shows the user nothing at all.
+            #
+            # `alert=True` is the app's own gate for "accepting this row removes
+            # something" (`/logout`, `/mcp remove`, `/stop`'s targets), and it is
+            # load-bearing HERE rather than decorative: the row is pre-selected
+            # and is the only match, so without it the editor's
+            # `_picker_choice_is_unambiguous` RUNS it on one Enter — which turned
+            # `/goal ` + Enter, the keystroke that used to report the standing
+            # goal, into a clear (round 1: design D1, UX U1, reviewer MAJOR-1).
+            # With the flag set the first Enter FILLS the buffer with
+            # `/goal --clear` and the second runs it; an explicit down-arrow onto
+            # the row keeps its one press, because the editor already treats a
+            # deliberate move as unambiguous.
+            # The tint it normally paints never lands here: the row is always
+            # `selected`, and `command_picker._argument_row` skips the danger
+            # colour on the selected row by design — so this changes the gate and
+            # not one pixel.
             picker.set_choices(
-                [ArgumentChoice("--clear", "Clear the standing goal")]
+                [ArgumentChoice("--clear", "Clear the standing goal", alert=True)]
                 if getattr(self._session, "goal", "")
                 else []
             )
@@ -34452,8 +34508,14 @@ class OperatorApp(App[None]):
             # `--clear` would name something no surface can show. While a loop is
             # running `--stop` is the flag that does something, and it is the word
             # the launch and busy notices name.
+            # `alert=True` for the goal row's reason: one Enter on a
+            # pre-selected single match would otherwise stop a running loop,
+            # where the same keystroke on the base tree only refused with
+            # "a loop is already running" (round 1, UX U2).
             picker.set_choices(
-                [ArgumentChoice("--stop", "Stop the running loop")] if self._loop_running else []
+                [ArgumentChoice("--stop", "Stop the running loop", alert=True)]
+                if self._loop_running
+                else []
             )
             picker.set_notice("")
             return
@@ -36824,7 +36886,11 @@ class OperatorApp(App[None]):
         )
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
-        from local_operator.session.goal import GOAL_CLEAR_ARGS, MAX_GOAL_CHARS
+        from local_operator.session.goal import (
+            GOAL_CLEAR_ARGS,
+            MAX_GOAL_CHARS,
+            cleared_goal_receipt,
+        )
 
         arg = arg.strip()
         session = self._session
@@ -36835,8 +36901,19 @@ class OperatorApp(App[None]):
             text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
             return SlashResult(kind="notice", text=text, style="info")
         if arg.lower() in GOAL_CLEAR_ARGS:
+            # The receipt names what went, on this host too: a follower's
+            # `/goal --clear` is rendered by ITS terminal, so a receipt that named
+            # nothing would be the same silent loss one hop out (design D4/U3).
+            receipt = cleared_goal_receipt(session.goal)
             session.set_goal("")
-            return SlashResult(kind="notice", text="goal cleared", style="info")
+            return SlashResult(kind="notice", text=receipt, style="info")
+        refusal = unknown_flag_refusal("goal", arg)
+        if refusal is not None:
+            # Same refusal, same words as the local handler: this is the bytes a
+            # follower paints, so a host that stored `--stop` as the goal while
+            # one that refused it is the host-disagreement class the shared
+            # vocabularies in `session/goal.py` exist to remove (UX U6).
+            return SlashResult(kind="notice", text=refusal, style="warning")
         stored = session.set_goal(arg)
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
@@ -37454,21 +37531,37 @@ class OperatorApp(App[None]):
         notices.
         """
         session = self._session
+        # Strip ONCE, as `_goal_slash_result` does: the flags below are matched as
+        # the WHOLE argument, and a routed control frame carries the CLIENT's
+        # string verbatim — so `/loop --stop ` with a trailing space used to fall
+        # through to the count parser and report a bad count while the loop kept
+        # running (round 1, reviewer MAJOR-2; the same fix in `serving.py`).
+        arg = arg.strip()
         if arg.lower() in LOOP_STOP_ARGS or arg.lower() in LOOP_CLEAR_ARGS:
+            clearing = arg.lower() in LOOP_CLEAR_ARGS
             if self._loop_running:
-                if arg.lower() in LOOP_CLEAR_ARGS:
-                    # Same refusal as the local handler: `--clear` never stops
-                    # work it did not start, and it names the word that does.
-                    return SlashResult(
-                        kind="notice",
-                        text="a loop is running in THIS terminal — /loop --stop to stop it",
-                        style="warning",
-                    )
+                # `--clear` here means what it means in the local handler: this
+                # host IS the loop's own terminal whenever it is the one running
+                # it, so there is no published snapshot to distinguish a clear
+                # from a stop — and no reason to teach a flag that only refuses.
                 self._loop_cancelled = True
                 return SlashResult(
-                    kind="notice", text="loop will stop after the current turn", style="info"
+                    kind="notice",
+                    text=(
+                        "loop cleared — stopping after the current turn"
+                        if clearing
+                        else "loop will stop after the current turn"
+                    ),
+                    style="info",
                 )
-            return SlashResult(kind="notice", text="no loop is running", style="info")
+            return SlashResult(
+                kind="notice",
+                text="nothing to clear — no loop is running" if clearing else "no loop is running",
+                style="info",
+            )
+        refusal = unknown_flag_refusal("loop", arg)
+        if refusal is not None:
+            return SlashResult(kind="notice", text=refusal, style="warning")
         if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         if self._loop_running:

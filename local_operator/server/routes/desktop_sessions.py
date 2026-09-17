@@ -1670,6 +1670,13 @@ async def command(session_id: str, body: Command, request: Request):
             if outcome.kind == "error" and outcome.data.get("code") in {
                 "loop_invalid",
                 "loop_busy",
+                # The third loop refusal: `/loop --clear` while the driver RUNS.
+                # It rode a 200 error receipt before, so a client that reads the
+                # status could not tell the refusal from a success — on the very
+                # surface the flag exists for (round 1, reviewer MINOR-4). It
+                # takes the 409 arm with its siblings' `outcome.text`, the
+                # sentence that names `/loop --stop`.
+                "loop_running",
             }:
                 raise HTTPException(
                     422 if outcome.data["code"] == "loop_invalid" else 409, outcome.text

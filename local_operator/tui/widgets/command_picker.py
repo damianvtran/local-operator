@@ -125,7 +125,10 @@ _PRIMARY_COLUMN_GAP = 2
 #: characters and an ellipsis.
 _MIN_DESCRIPTION_CELLS = 10
 
-#: At or below this width the row collapses to the command name only.
+#: At or below this width a COMMAND row collapses to the command name only.
+#:
+#: Scoped to `_command_row`: an ARGUMENT row's description is the consequence of
+#: the choice, so it degrades by ellipsis instead (see `_argument_row` and UX U5).
 DESCRIPTION_COLLAPSE_WIDTH = 40
 
 #: Right-edge breathing room, so no row ever paints into the last cell.
@@ -2088,7 +2091,20 @@ class CommandPicker(Static):
         body = span - row_reserved
 
         description = choice.description.strip()
-        if description and width > DESCRIPTION_COLLAPSE_WIDTH:
+        # NO `DESCRIPTION_COLLAPSE_WIDTH` gate here, deliberately, and this is the
+        # one place the argument row departs from the command row's collapse
+        # rule. A command row's description is a hint about a word the user
+        # already typed; an argument row's description is the CONSEQUENCE of the
+        # choice about to be accepted — on the flag offers this picker raises for
+        # `/goal` and `/loop` it is the only text that says what the flag means
+        # before Enter commits to it. Under the shared 40-column gate the row
+        # painted `❯  --clear` with the label gone at 38 columns while a peer row
+        # kept its right-aligned detail, so the narrow terminal was back to
+        # guessing the flag (round 1, UX U5). The description now degrades by
+        # ELLIPSIS whenever `_MIN_DESCRIPTION_CELLS` of it fit, and only a row too
+        # narrow for even that — the same floor every other path uses — falls back
+        # to the name alone.
+        if description:
             column = max(1, min(self._primary_column(), body))
             clipped = truncate_cells(name, max(1, column - _PRIMARY_COLUMN_GAP))
             row.append(clipped, style=name_style)

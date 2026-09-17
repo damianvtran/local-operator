@@ -135,6 +135,22 @@ async def main() -> None:
         await pilot.pause()
         await _seed(app, pilot)
         editor = app.query_one(Editor)
+        # WAIT FOR ADOPTION before touching the state the gate reads. The
+        # `--clear` row is gated on `self._session.goal`, which is still empty
+        # until the app has adopted its session, so assigning the buffer on a
+        # fixed pause budget emitted a frame with NO row on some runs — the
+        # documented reproduction was non-deterministic in exactly the case it
+        # exists to show (round 1, QA Q1: three runs gave
+        # `[True, True, False]`, and an earlier batch wrote a row-less
+        # `goal-set` frame at 6716 B against the committed 7464 B). Waited on
+        # the STATE, not on a longer clock.
+        for _ in range(200):
+            adopted = app._session is not None and getattr(app._session, "goal", None) is not None
+            if adopted:
+                break
+            await pilot.pause()
+        else:  # pragma: no cover — a boot that never adopts is not this test's subject
+            raise RuntimeError("the app never adopted its session")
         # The app's own loop flag: the same attribute `_cmd_loop` reads, so the
         # frame is captured in the state the gate is written against.
         app._loop_running = bool(state["loop"])
