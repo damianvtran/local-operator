@@ -842,20 +842,182 @@ def test_metadata_orphan_reports_secret_absent(store: AuthStore, secret_base: Pa
     assert record["length"] == len(FAKE_TICKET)
 
 
-def test_secret_orphan_is_invisible_to_this_feature(store: AuthStore, secret_base: Path) -> None:
-    """The reverse orphan, and why `store_ticket` writes the secret FIRST.
+def _make_secret_orphan(base: Path) -> None:
+    """The state `store_ticket` leaves when it is interrupted between its writes.
 
-    A crash between the two writes leaves this state: a value nothing points
-    at. It is inert -- unreadable by the feature, overwritten by the next
-    `set` -- which is why it is the failure this ordering prefers.
+    The VALUE is written first and the row second (see `store_ticket`), so a
+    crash, a kill, or an `auth.db` restored from an older backup leaves the
+    value with nothing pointing at it. Built through the real secret store
+    rather than by faking a reader, because the property under test is that
+    `rm` reaches a value that is genuinely on disk.
     """
     from local_operator.secrets import access
 
-    secret_store = access.open_store(secret_base, create=True)
+    secret_store = access.open_store(base, create=True)
     secret_store.initialize()
     secret_store.set(QWENCLOUD_TICKET_SECRET_NAME, FAKE_TICKET.encode())
 
+
+def test_secret_orphan_is_not_reported_by_the_metadata_reader(
+    store: AuthStore, secret_base: Path
+) -> None:
+    """`read_ticket_record` reads the ROW, and a secret orphan has none.
+
+    This replaces `test_secret_orphan_is_invisible_to_this_feature`, which
+    asserted the same None but sold it as the state being INERT. It is not
+    inert: the value is a live full-account console session, and `rm` now
+    reaches it (see the two tests below). What survives is the narrower,
+    still-true fact -- this function reports metadata, and there is no
+    metadata here, so `status` keeps saying "nothing stored" rather than
+    rendering "(0 characters, age unknown)" over a credential whose length and
+    age genuinely are not knowable without retrieving the value.
+
+    The recovery path is therefore `rm`, which revokes it, and `lop secret
+    list`, which names it -- not `status`.
+    """
+    _make_secret_orphan(secret_base)
+
     assert read_ticket_record(store, base=secret_base) is None
+
+
+def test_rm_revokes_a_secret_orphan_rather_than_reporting_nothing_stored(
+    store: AuthStore, secret_base: Path
+) -> None:
+    """MAJOR-3: the revoke command that lied about a full-account credential.
+
+    With no metadata row, `delete_ticket` used to return False before the
+    secret delete ever ran, so `rm` printed "No QwenCloud console ticket
+    stored." with exit 0 while the console session sat in the encrypted store.
+
+    Fails AGAINST restoring the `record is None` early return above the secret
+    delete -- i.e. the shipped code at 855b435e. Both halves are required: the
+    return value is what the CLI turns into its message, and the `describe`
+    probe is what proves the value is actually gone rather than merely
+    reported gone. Nothing else in this file produces both observables for a
+    row-less store.
+    """
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound
+
+    _make_secret_orphan(secret_base)
+    # Precondition: the value really is on disk, so a later absence means the
+    # delete removed it rather than it never having been there.
+    assert access.open_store(secret_base).describe(QWENCLOUD_TICKET_SECRET_NAME) is not None
+    assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True) == []
+
+    assert delete_ticket(store, base=secret_base) is True, "a removed value must report True"
+
+    with pytest.raises(SecretNotFound):
+        access.open_store(secret_base).describe(QWENCLOUD_TICKET_SECRET_NAME)
+
+
+def test_rm_on_a_secret_orphan_says_removed_through_the_real_cli(
+    store: AuthStore,
+    secret_base: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The user-visible half of MAJOR-3, driven through the CLI verb itself.
+
+    `delete_ticket` returning True is not the defect the user met; the
+    "No QwenCloud console ticket stored." receipt is. Asserted through
+    `_qwencloud_ticket_action` because that is where the boolean becomes the
+    message, and a fix that changed only the boolean would leave the lie in
+    place.
+
+    The EXIT CODE is deliberately not the pin. Both the true receipt and the
+    false one exit 0, so asserting the code alone passes against the shipped
+    defect -- measured, not assumed: with the early return restored this test
+    was green on `== 0` and only the stdout assertions turned it red. Pinning
+    the two receipts against each other is what discriminates.
+
+    Fails AGAINST the same restored early return: the CLI then takes its
+    `if not removed` branch and prints the false receipt.
+    """
+    from local_operator.providers import qwencloud_console as _qc
+
+    _make_secret_orphan(secret_base)
+    # The CLI calls `delete_ticket(store)` with no `base`, so bind this test's
+    # throwaway base onto the seam it resolves at call time.
+    real_delete = _qc.delete_ticket
+    monkeypatch.setattr(
+        _qc, "delete_ticket", lambda store, **kw: real_delete(store, base=secret_base)
+    )
+    monkeypatch.setattr(
+        "local_operator.providers.auth_cli._invalidate_cached_usage", lambda *a, **k: None
+    )
+
+    assert _qwencloud_ticket_action("rm", store) == 0
+    out = capsys.readouterr().out
+    assert "Removed the stored QwenCloud console ticket." in out
+    assert "No QwenCloud console ticket stored." not in out, "rm lied about a live credential"
+
+
+def test_rm_on_a_locked_store_does_not_claim_the_orphan_is_gone(
+    store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hardened property, preserved across the new path.
+
+    A secret orphan in a LOCKED store cannot be removed and cannot be
+    confirmed, so the new row-less branch must raise `TicketStoreLocked` --
+    which the CLI turns into "MAY STILL BE STORED" and exit 1 -- rather than
+    returning False and reporting "nothing stored", which is the same lie in a
+    second costume.
+
+    Fails AGAINST swallowing `BrokerDenied`/`BrokerLocked` in
+    `_delete_secret_value` and returning False, the obvious wrong way to make
+    the row-less path "not crash".
+    """
+    _make_secret_orphan(secret_base)
+    _lock_the_secret_store(monkeypatch, secret_base)
+
+    with pytest.raises(TicketStoreLocked) as excinfo:
+        delete_ticket(store, base=secret_base)
+
+    message = str(excinfo.value)
+    assert "MAY STILL BE STORED" in message
+    assert "lop secret unlock" in message
+    assert FAKE_TICKET not in message
+
+
+def test_rm_reports_nothing_stored_only_when_both_stores_are_empty(
+    store: AuthStore, secret_base: Path
+) -> None:
+    """False must now mean BOTH halves were empty, not just the row.
+
+    The fourth combination, and the one that keeps the fix from degenerating
+    into "always return True": with no row and no secret, `rm` must still be a
+    clear no-op so the honest "No QwenCloud console ticket stored." receipt
+    survives.
+
+    BOTH empty shapes are driven, because they take DIFFERENT branches and a
+    test covering only the first is non-discriminating for the second --
+    measured, not assumed. With no secret store at all, `_delete_secret_value`
+    returns at the `store_path(base).exists()` guard and never reaches the
+    `SecretNotFound` handler. A host that has run `lop secret set` for anything
+    else HAS a store, so it reaches that handler, and a handler reporting True
+    there would make `rm` announce a removal on a machine that never stored a
+    ticket. That is the ordinary case for any user of the secret store, not a
+    contrivance.
+
+    Fails AGAINST making the row-less branch `return True` unconditionally (the
+    cheapest wrong fix for MAJOR-3), and AGAINST `SecretNotFound` reporting a
+    removal it did not perform.
+    """
+    from local_operator.secrets import access
+
+    # Shape 1: no secret store on this host at all.
+    assert not (secret_base / "secrets").exists()
+    assert delete_ticket(store, base=secret_base) is False
+
+    # Shape 2: a real store that holds OTHER secrets but no ticket.
+    other = access.open_store(secret_base, create=True)
+    other.initialize()
+    other.set("UNRELATED_SECRET", b"not-a-ticket")
+
+    assert delete_ticket(store, base=secret_base) is False
+    # And the bystander is untouched: `rm` deletes its own name, not the store.
+    assert other.describe("UNRELATED_SECRET") is not None
 
 
 def test_no_store_means_no_daemon(

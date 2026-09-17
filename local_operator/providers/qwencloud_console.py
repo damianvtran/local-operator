@@ -447,21 +447,32 @@ def read_ticket_record(store: Any, *, base: Path | None = None) -> dict[str, Any
     return None
 
 
-def _delete_secret_value(base: Path | None) -> None:
-    """Remove the ticket VALUE from the encrypted store, confirming it is gone."""
+def _delete_secret_value(base: Path | None) -> bool:
+    """Remove the ticket VALUE from the encrypted store, confirming it is gone.
+
+    Returns True when a value was actually removed and False when there was
+    none to remove. The RETURN VALUE is what lets :func:`delete_ticket` tell a
+    SECRET ORPHAN -- a value with no row pointing at it -- apart from an empty
+    store, and those two are the difference between "Removed the stored
+    QwenCloud console ticket." and "No QwenCloud console ticket stored." over a
+    full-account credential that is still on disk.
+
+    "It did not raise" is still not evidence: removal is CONFIRMED by
+    re-reading below, and only that path returns True.
+    """
     from local_operator.secrets import access
     from local_operator.secrets.client import BrokerDenied, BrokerLocked
     from local_operator.secrets.errors import SecretNotFound, SecretStoreError
     from local_operator.secrets.keys import store_path
 
     if not store_path(base).exists():
-        return
+        return False
     try:
         access.open_store(base).delete(QWENCLOUD_TICKET_SECRET_NAME)
     except SecretNotFound:
         # A metadata orphan: nothing to remove on this side. NOT an error --
         # the row still has to go, and refusing here would strand it.
-        pass
+        return False
     except (BrokerDenied, BrokerLocked) as exc:
         raise TicketStoreLocked(
             "the secret store is hardened and locked, so the ticket's value "
@@ -478,7 +489,7 @@ def _delete_secret_value(base: Path | None) -> None:
     try:
         access.open_store(base).describe(QWENCLOUD_TICKET_SECRET_NAME)
     except SecretNotFound:
-        return
+        return True
     raise TicketStoreError(
         "the ticket's encrypted value is still present after deleting it; "
         "it may still be stored in the secret store"
@@ -506,11 +517,28 @@ def delete_ticket(store: Any, *, base: Path | None = None) -> bool:
     re-read through its own reader. For a revocation command on a full-account
     credential, the difference between those two is the entire value of the
     command.
+
+    **The VALUE is attempted whether or not a row exists**, which is why the
+    secret delete is not behind the ``record is None`` return. A SECRET ORPHAN
+    -- value present, row absent -- is a state :func:`store_ticket` can
+    actually leave behind, because it writes the secret first and the row
+    second and prefers that ordering on purpose; restoring an older ``auth.db``
+    from a backup produces it too. Returning False before touching the secret
+    made ``rm`` print "No QwenCloud console ticket stored." with exit 0 while a
+    full-account console session sat in the encrypted store -- a revoke command
+    that lies, the exact failure :class:`TicketStoreUnreadable` exists to
+    prevent, reintroduced through the other half of the split.
+
+    So the result is the OR of the two halves: True when either store gave
+    something up, False only when both were genuinely empty.
     """
     record = read_ticket_record(store, base=base)
+    # Not short-circuited on `record is None`: see the docstring. The value has
+    # to be reachable without a row, or the orphan is unrevocable through this
+    # command -- and this command is the whole mitigation.
+    secret_removed = _delete_secret_value(base)
     if record is None:
-        return False
-    _delete_secret_value(base)
+        return secret_removed
     try:
         store.delete_credential(record["credential_id"])
     except sqlite3.ProgrammingError:
