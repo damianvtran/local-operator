@@ -33181,8 +33181,8 @@ class OperatorApp(App[None]):
             return
         # The read is a day-range GROUP BY over the maintained ``session_daily``
         # rollup — tens of ms of CPU — whenever its fail-closed gate can prove
-        # the window, and the raw ledger's three full scans when it cannot (1.8 s
-        # all-time to 6.2 s for the panel's 30-day window on the operator's 343 MB
+        # the window, and the raw ledger's three full scans when it cannot (2.6 s
+        # all-time to 4.9 s for the panel's 30-day window on the operator's 343 MB
         # ledger, more on a loaded host — `bench/analytics-rollup-*.json`; this
         # comment used to call the query "milliseconds" back when the ledger was
         # bounded, and that stopped being true). Either
