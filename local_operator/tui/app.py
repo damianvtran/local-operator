@@ -120,6 +120,12 @@ from local_operator.model.effort import (
     resolve_effort_in,
 )
 from local_operator.providers.catalogue import picker_rows
+
+# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
+# it is reached through a lazy seam: this module already imports the session
+# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
+# objection that applies to a Textual WIDGET does not apply to the app.
+from local_operator.references import expand_references, scan_directory
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -258,6 +264,7 @@ from local_operator.tui.widgets.editor import (
     EditorPasteEmpty,
     EditorQuit,
     EditorSubmitted,
+    FileQueryOpened,
     InlineCommandRequested,
     InterruptRequested,
     Marked,
@@ -15332,6 +15339,23 @@ class OperatorApp(App[None]):
         never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
+        # `@path` REFERENCES are deliberately NOT expanded here, and the absence
+        # is the decision — not an omission somebody forgot.
+        #
+        # This method is synchronous and so is every path into it (`_cmd_team`,
+        # `_cmd_agent`, `_cmd_goal`, `_render_authoritative_slash`), while
+        # `expand_references` is a coroutine. Expansion happens instead in
+        # `Session.prompt`, which awaits it before taking the turn lock, so every
+        # request that leaves here IS expanded by the time the model sees it —
+        # including the programmatic call sites, which have no composer and so
+        # no operator waiting to read a notice.
+        #
+        # REJECTED: dispatching it as a detached task (`run_worker` /
+        # `create_task`) to bridge sync to async here. That sends the turn before
+        # the expansion resolves — the bare token reaches the model and the
+        # expansion lands after — and it puts a human approval gate in a task
+        # nothing awaits. If this ever needs TUI-side notices, the fix is making
+        # this method async as its own refactor, not a task launched from here.
         sent = self._expand_invocation(request, attachments)
         # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
         # argument as its row (the body belongs in the payload, never the
@@ -18587,6 +18611,18 @@ class OperatorApp(App[None]):
             # UNRECOVERABLE rather than merely absent (review round 2,
             # BLOCKER-1). The aside is also the surface a user is most likely to
             # paste a log into, since it exists for "what is this?".
+            # `@path` REFERENCES are expanded here too, and this exit is the one
+            # most likely to be missed because it does not go through
+            # `_expand_invocation` and so does not look like the others. Without
+            # it `/btw what does @foo.py do?` reaches the aside model with a bare
+            # token — the same shape of hole as the paste bug above, in the same
+            # branch, for the same reason: this path returns before the splice at
+            # the foot of the method.
+            #
+            # `@path` REFERENCES are expanded in `_aside_worker`, not here. This
+            # is only ONE of three routes into the card (`_cmd_aside` at the
+            # `/btw` command and the inline-command path are the others), and
+            # expanding per-route is how two of them would quietly miss it.
             self._ask_aside(expand_pastes(text, message.attachments))
             return
         if message.shell:
@@ -18714,6 +18750,37 @@ class OperatorApp(App[None]):
         # `typed=` carries the chip line on for NAMING only — the expanded
         # payload is what the row shows and what the model gets, but titling a
         # conversation after a pasted stack trace is not what the user asked.
+        # `@path` REFERENCES ARE DELIBERATELY NOT EXPANDED HERE. `Session.prompt`
+        # expands them, before it takes `_turn_lock` and with the approval gate
+        # passed (`session.py:5159`), which is what makes the deny-list and the
+        # outside-workspace escalation reachable at all.
+        #
+        # Expanding here instead — the design's §2.7 "preferred" mitigation —
+        # cannot carry that gate, and the reason is this method's own contract
+        # documented above: the pump awaits each handler to completion, and the
+        # approval card is MOUNTED and ANSWERED through that same pump. Awaiting
+        # an approval here therefore blocks the loop that would draw it. Probed
+        # on a real app: with the gate marshalled through `call_later` no card
+        # ever mounted and Enter never returned; mounting it inline instead got
+        # a card that a keypress could not reach. A frozen composer is worse
+        # than the slow turn R3 was written about.
+        #
+        # So exit 1 is exactly what it was before this feature, and the session
+        # is the single expansion site for it, exits 3 and 4 (ruling D). The
+        # ASIDE is the one exception and must be, because `_ask_aside` never
+        # reaches `Session.prompt` — it expands in `_aside_worker`, which is a
+        # `run_worker` and so is off the pump (an await there is legal), under a
+        # DECLINING gate — the interactive one is not answerable from inside the
+        # aside either, for the cancellation chain `_expand_references`
+        # documents: `request_tool_approval` → `_close_aside` → cancels the
+        # `aside` worker group, which is where `_aside_worker` awaits.
+        #
+        # The cost is that exit 1 paints no reference notice (an unresolved
+        # `@nope.py` is sent verbatim and silently). Exits 3 and 4 already
+        # behave that way, so this is consistent rather than newly broken. The
+        # fix, if it is ever wanted, is moving this expansion into a worker —
+        # which disturbs the submit ORDERING this docstring calls load-bearing
+        # and so deserves its own change, not a line in this one.
         sent = self._expand_invocation(text, message.attachments)
         # An INVOCATION keeps the typed line as its row; everything else shows
         # the expanded text (design §2.5).
@@ -34393,7 +34460,23 @@ class OperatorApp(App[None]):
         for previous in prior_turns or []:
             if previous.forkable:
                 turns.extend((Message.user(previous.question), Message.assistant(previous.answer)))
-        turns.append(Message.user(ASIDE_PROMPT.format(question=question)))
+        # `@path` REFERENCES expand HERE, and this is the only place they can.
+        # The aside is a separate model call that never reaches
+        # `Session.prompt`, so the session-layer expansion every other exit
+        # relies on does not run for it — without this, `/btw what does
+        # @auth.py do?` asks the model about a token it cannot resolve.
+        #
+        # In the WORKER rather than at the three `_ask_aside` call sites
+        # (`on_editor_submitted`, `_cmd_aside`, the inline-command path) because
+        # this is where they converge and where an await is already legal. Per
+        # route, two of the three would have missed it — and `/btw` typed fresh
+        # goes through `_cmd_aside`, which is the commonest way in.
+        #
+        # The card still shows the TYPED question: only the text handed to the
+        # model is expanded, so the display/sent split holds on this surface
+        # exactly as it does in the transcript.
+        asked = await self._expand_references(question)
+        turns.append(Message.user(ASIDE_PROMPT.format(question=asked)))
         source.active_workers += 1
         try:
             try:
@@ -34605,6 +34688,45 @@ class OperatorApp(App[None]):
                 for skill in sorted(skills.values(), key=lambda item: item.name.lower())
             ]
         )
+
+    def on_file_query_opened(self, message: FileQueryOpened) -> None:
+        """The buffer just entered an ``@`` token — offer that directory's entries.
+
+        The ``@`` twin of :meth:`on_skill_query_opened`, answering on the message
+        for the same reason: every route into the list arrives at one place with
+        one set of rows.
+
+        The message carries the DIRECTORY, not the whole query, because the
+        editor re-posts whenever that directory changes rather than once per
+        token — a file vocabulary is not fixed for the session the way the skill
+        vocabulary is. Resolution is against :meth:`_session_cwd`, the same cwd
+        an ``@path`` is expanded against at submit, so the list can never offer
+        a row the expander would then fail to find.
+
+        SYNCHRONOUS, and deliberately so (design D6). ``scan_directory`` does one
+        ``os.scandir`` of one directory, measured at 0.04–0.07 ms against the
+        0.29 ms fingerprint probe this same keystroke path already accepts.
+        Do NOT move it to ``run_worker``, ``asyncio.to_thread`` or a debounce:
+        this codebase has no cancellation for a stale list beyond
+        ``_dismissed_query`` and ``_apply`` re-matching the current query, so a
+        worker would mean BUILDING cancellation to make a 0.04 ms call
+        affordable. The staleness it would introduce is a real bug; the latency
+        it would save is not measurable.
+
+        An empty directory sets a notice rather than leaving a bare list, exactly
+        as an empty skill vocabulary does: "this directory has nothing to offer"
+        is a real answer, and the row says so instead of showing an empty box.
+        """
+        message.stop()
+        picker = self._editor().picker
+        choices = scan_directory(message.directory, self._session_cwd())
+        if not choices:
+            picker.set_choices([])
+            where = message.directory or "this directory"
+            picker.set_notice(f"nothing to reference in {where}")
+            return
+        picker.set_notice("")
+        picker.set_choices(choices)
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         """The buffer just entered ``/<command> …`` — fill that command's list.
@@ -36716,6 +36838,69 @@ class OperatorApp(App[None]):
             if self._skills_by_name is None:
                 self._skills_by_name = {}
         return self._skills_by_name
+
+    async def _expand_references(self, text: str) -> str:
+        """Expand every ``@path`` in ``text``, painting one notice per problem.
+
+        THE ASIDE'S expansion, and only the aside's. Every other exit is
+        expanded by :meth:`Session.prompt`; this one cannot be, because
+        ``complete_aside`` is a separate model call that never reaches it. See
+        ``on_editor_submitted`` for why the main submit path does NOT call this.
+
+        Never raises, by the resolver's contract: every failure degrades to the
+        original text plus a notice. That is the same bargain
+        :meth:`_expand_invocation` strikes for an unreadable skill body, and for
+        the same reason — swallowing the user's request is the worse half of the
+        trade, so an unresolved token is SAID and the raw text still goes.
+
+        Notices go through the app's ordinary :meth:`_notice` rather than any
+        new mechanism, so a reference problem reads like every other thing the
+        app has to tell the user.
+
+        THE GATE PASSED HERE DECLINES, and the interactive one MUST NOT be used
+        in its place — doing so cancels this very worker. The chain, because it
+        is three hops and invisible from this line:
+
+        1. :meth:`request_tool_approval` calls :meth:`_close_aside`
+           (``app.py:20181``), deliberately: its card floats over the transcript,
+           so a question raised behind an open aside would be drawn underneath
+           it while still taking focus.
+        2. :meth:`_close_aside` cancels the ``aside`` worker group
+           (``app.py:34024``) — it retires the in-flight request, not just the
+           surface.
+        3. :meth:`_aside_worker` RUNS in that group (``app.py:34124``).
+
+        So awaiting the interactive gate from here is self-cancelling. Probed on
+        a real app with ``/btw what is in @.env ?``: ``_close_aside CALLED`` →
+        ``EXPAND WAS CANCELLED mid-await`` → ``card never mounted`` →
+        ``asides=0``. The user's question is discarded in silence, which reads
+        as a flake rather than as a denial. A reader who cannot see this chain
+        will "fix" the decline by passing the real gate and reintroduce it.
+
+        This is NOT a second approval convention: same parameter, same shape,
+        same routing, and the decline degrades through the module's existing
+        path — verbatim token plus a notice, exactly as an unresolvable one
+        does. What differs is the POLICY for a surface with no interactive
+        approval channel available to it, expressed as the value passed.
+
+        The cost is bounded and it is the right half to lose. An ordinary
+        in-workspace file never consults the gate at all, so the common
+        ``/btw what does @auth.py do?`` expands exactly as before; only a
+        deny-listed or outside-workspace path is refused, and it is refused with
+        a notice rather than a hang. The real fix is resolving the approval
+        BEFORE the panel opens, which needs `_ask_aside` to stop being
+        synchronous — one of its three callers is a message handler, so that is
+        the pump question again and its own change.
+        """
+
+        async def _decline(tool_name: str, description: str) -> bool:
+            """Refuse without asking — see the chain above for why."""
+            return False
+
+        result = await expand_references(text, self._session_cwd(), request_approval=_decline)
+        for notice in result.notices:
+            self._notice(notice, "warning")
+        return result.sent
 
     def _expand_invocation(
         self, text: str, attachments: Mapping[int, Marked] | None = None

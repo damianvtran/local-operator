@@ -389,6 +389,13 @@ class SessionProtocol(Protocol):
 
         ``images`` are attachments pasted into the prompt; they ride the same
         message as the text so the model reads them as one turn.
+
+        ``@path`` references in ``text`` expand BEFORE the turn is built, so
+        every surface reaching this method gets them without per-surface work.
+        A token that does not resolve to an existing path is not a reference:
+        it is prose, and it is left verbatim. There is no provenance keyword to
+        pass and the signature does not widen — the resolver's strictness, not
+        a flag, is what makes expanding any text safe.
         """
         ...
 

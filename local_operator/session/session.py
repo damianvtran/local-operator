@@ -169,6 +169,7 @@ from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
 )
+from local_operator.references import expand_references
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -5123,9 +5124,23 @@ class Session:
         on-demand compaction holds, which the rejection names. ``_is_streaming``
         is then re-checked under the lock to close the race where streaming was
         set between the lock probe and the acquire.
+
+        ``@path`` expansion sits BETWEEN those two points, and that placement
+        is part of the contract rather than an implementation detail: a
+        rejected prompt must not have read a referenced file or raised an
+        approval card on its way to the raise.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
+        # THE PROBE COMES FIRST, ahead of anything that can touch the disk or a
+        # human. Expansion reads every referenced file and can raise a live
+        # approval card, so with the probe below it a caller that arrives
+        # mid-turn (`serving`, `attached`, `mobile/tui_handle`, `goal_loop`,
+        # `subagent`) had the operator's files read — and a card for a
+        # referenced `.env` ANSWERED — for a prompt this method then rejects.
+        # `locked()` does not await, so nothing here can deadlock, and the
+        # verdict is the one the probe always produced: what moves is only the
+        # work that used to happen before it.
         if self._turn_lock.locked():
             # An on-demand compaction holds the same lock a turn does, and for
             # the same reason — it is rewriting the history a request would be
@@ -5136,6 +5151,49 @@ class Session:
                 if self._compacting
                 else "session is already streaming; use steer() to inject mid-turn"
             )
+        # `@path` expansion, and it runs HERE — after the probe, before the
+        # lock, not inside it. An approval can park on a human indefinitely, and
+        # in the TUI the app awaiting this prompt is the same one that would
+        # draw the approval card; awaiting a person while holding `_turn_lock`
+        # also blocks the compaction that shares it, which is a deadlock-shaped
+        # risk rather than a slow turn. Expanding before `acquire()` costs
+        # nothing and removes the shape entirely.
+        #
+        # This one call is what gives EVERY composer surface the feature: CLI,
+        # headless, server, scheduler, mobile, subagents and the TUI's own
+        # submit exits all funnel through `prompt`. The TUI does NOT expand
+        # earlier — that pass was removed, because awaiting an approval card
+        # inside a Textual message handler deadlocks the composer (the pump
+        # awaits the handler to completion, and the card is mounted AND
+        # answered through that same pump; `on_editor_submitted` records the
+        # probe). So this is the first and only expansion of a composer draft,
+        # and the transcript row stays the typed line because the row is built
+        # from it, not because a second pass declined to touch it.
+        #
+        # THREE entry paths predate the feature and bypass `prompt`, so an
+        # `@path` in them stays inert prose: `steer` (queues the message
+        # directly — and `_submit_prompt` routes a draft typed while a turn
+        # runs there, so the TUI's own submit exit is on both lists), a wake
+        # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
+        # which adopts the TYPED question — `_aside_worker` expands only the
+        # text it hands the model, and the panel keeps the typed one).
+        #
+        # IDEMPOTENCE is still a hard requirement with a single expansion site,
+        # because this pass runs on text it did not type: a subagent launch
+        # forwards the manager's own prompt into `child.prompt`, and a manager
+        # that quoted an already-expanded block out of its context would have
+        # it doubled here.
+        expansion = await expand_references(
+            text,
+            self._cwd,
+            request_approval=None if self._yolo else self._request_approval,
+        )
+        # Notices are discarded deliberately: `prompt` has no channel back to a
+        # UI, and no surface pre-expands a composer draft, so an unresolved
+        # token on a submit exit is sent verbatim and silently — the accepted
+        # cost `on_editor_submitted` records. The aside is the one path that
+        # paints its notices, from its own call in `_aside_worker`.
+        text = expansion.sent
         await self._turn_lock.acquire()
         try:
             # Close the narrow completion-after-final-flush race: a shell
