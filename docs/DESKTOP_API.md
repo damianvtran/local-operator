@@ -620,7 +620,16 @@ parked, and the reply is never withheld for the running turn's duration.
 
 Every route in the endpoint table marked **read envelope** answers from the
 durable transcript even when the session's runtime is alive but not answering,
-and answers within `READ_ATTACH_BUDGET_S` (2.0 s) when it is.
+and answers within `READ_ATTACH_BUDGET_S` (2.0 s) when it is. The read-envelope
+routes are exactly those whose answer exists without an owner, and the list is
+closed: `GET .../{id}` (snapshot), `GET .../{id}/history`, `GET .../{id}/events`,
+`POST .../{id}/watch` (the presence beat), and the five session-scoped GETs whose
+rows come from the checkpoint, the local registries or the config store —
+`GET .../{id}/mcp`, `GET .../{id}/variables`, `GET /v1/desktop/skills`,
+`GET .../{id}/failovers` and `GET .../{id}/command-entities`. Everything else
+that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
+`/move` — keeps the control envelope, because none of those can be served
+without the owner that admitted them.
 
 A read makes ONE bounded attempt to attach to an existing runtime and then
 serves the cold facade. It never answers `503` for a session that exists on
@@ -653,7 +662,10 @@ does not send the field at all.
   `cold: false`) that the renderer already handles for a canonical epoch change.
   An authenticated dial is RETAINED for that purpose, bounded by a hard landing
   deadline (30 s): an attach socket is a residency term of the runtime's own exit
-  predicate, so a viewer that has given up must hand the slot back.
+  predicate **for a VISIBLE panel** — `runtime.server.attach_clients` counts a
+  desktop client only while its lease is live and `visible` or `can_notify` — so
+  a viewer that has given up must hand the slot back, and a background read that
+  asserted `visible=false` was never pinning the process to begin with.
 
 Both fields are ADDITIVE and DEFAULTED (`cold_reason` null, `attaching` false),
 so a renderer that predates them reads exactly what it read before. They ride the
@@ -661,9 +673,10 @@ snapshot, `frontend.replace` and `frontend.update` frames, computed together so
 no frame can state one and contradict another.
 
 The CONTROL routes keep their refusal, because a request that was not admitted
-must be able to say so: `503` with `{"code": "runtime_unreachable", "message":
-...}` for a session-scoped unreachability, distinct from a `503` that is the
-server not answering at all. Clients key on the `code`; the sentence rides along
+must be able to say so: `503` with `{"detail": {"code": "runtime_unreachable",
+"message": …}}` — the same envelope the move refusal uses (`{"detail": {"code":
+"move_outcome_unknown", …}}`) — for a session-scoped unreachability, distinct
+from a `503` that is the server not answering at all. Clients key on the `code`; the sentence rides along
 for the ones that do not.
 
 ### Admission and retry semantics
