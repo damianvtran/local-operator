@@ -458,6 +458,69 @@ async def test_a_timeout_names_the_call_and_the_budget_it_exceeded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_funded_call_reports_the_budget_it_exceeded_not_the_callers_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declaring request's message has to name ITS deadline, not the constant.
+
+    ``funded_timeout`` makes the caller's budget a FLOOR: for ``execute`` (an
+    ``ActionBatch`` of waits) and ``cleanup`` (a selected ``CleanupPlan``) the
+    deadline is the declaration plus the headroom, and the caller's constant is
+    the smaller of the two. So a detail built from that constant names a budget
+    the call never ran under -- and the test that pins the message cannot see it
+    on any other request, because a request declaring nothing is funded to the
+    byte and the two numbers coincide. The close-shaped case is pinned by
+    ``test_a_timeout_names_the_call_and_the_budget_it_exceeded``; this is the
+    funded one.
+
+    The headroom is monkeypatched, the shape
+    ``test_the_derived_budget_is_a_deadline_and_not_a_licence`` uses, because
+    at its default 30 s a funded call cannot be made to time out inside a test.
+    0.05 s of declared waiting funds to 0.5 s here against a 0.01 s caller's
+    budget, so the two candidates are 50x apart and the elapsed floor is a wide
+    margin rather than a race.
+    """
+
+    monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 0.45)
+    declared_s, headroom_s, configured_s = 0.05, 0.45, 0.01
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    params = _declaring_execute(int(declared_s * 1000))
+    peer = asyncio.create_task(_silent_peer(requests_read))
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            await client.call("execute", params, timeout=configured_s)
+        elapsed = time.monotonic() - started
+        message = str(excinfo.value)
+    finally:
+        peer.cancel()
+        await asyncio.gather(peer, return_exceptions=True)
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+    funded_s = declared_s + headroom_s
+    assert f"execute exceeded its {funded_s:g}s budget" in message
+    # The caller's constant is the only other number in scope, and naming it was
+    # the defect: a message carrying both would still tell the reader the wrong
+    # budget, so its absence is asserted rather than its position.
+    assert f"its {configured_s:g}s budget" not in message
+    # The SAME number governed the wait: the call outlived the caller's budget
+    # by 50x. A detail wired to the funded value while the wait_for stayed on
+    # the constant satisfies every message assertion above and fails here.
+    assert elapsed >= funded_s
+    # Cancel for this request, one second of grace, poison, correlation ids:
+    # unchanged by which number the sentence names.
+    assert "(request 1; operation_id exec-declared)" in message
+    assert terminated.is_set()
+
+
+@pytest.mark.asyncio
 async def test_the_raised_timeout_stays_a_TimeoutError() -> None:
     """Type is part of the contract: message is the defect, type is not.
 
