@@ -71,6 +71,10 @@ class DrainHost:
 
     begin_drain = ServingSessionHandle.begin_drain
     begin_retire = ServingSessionHandle.begin_retire
+    # The EXIT rung that writes what the two latches recorded, bound here for
+    # the same reason they are: the note's placement is the behaviour under
+    # test, and a stub that re-implemented it would pin nothing.
+    _note_retirement_cut_off = ServingSessionHandle._note_retirement_cut_off
     # Bound like any other method: ``_retiring_refusal`` reads the handle's own
     # latched cause to choose its sentence, so the stub has to hand it ``self``
     # (design round 4, D10).
@@ -84,6 +88,8 @@ class DrainHost:
         self._session = session
         self._busy = busy
         self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._retiring_owes_cut_off = True
         self._draining = False
         self._exit_committed = False
         self._disposing = False
@@ -353,19 +359,73 @@ def test_an_unnamed_refusal_is_resolved_from_the_phrase_the_frame_published() ->
 
 
 def test_begin_retire_still_records_the_cut_off_it_owes(tmp_path: Path) -> None:
-    """The contrast that keeps the taxonomy honest: the EXIT rung notes it."""
+    """The contrast that keeps the taxonomy honest: the EXIT rung writes it.
+
+    THE ORDER IS THE FIX (2026-09-17). ``begin_retire`` RECORDS the cause and
+    its detail on the handle; the disposal rung is what writes them to the
+    session, in the same step that aborts a turn. Arming the session at the
+    latch let one note brand whichever run end came next: a turn that went on to
+    complete normally, and — for the build rungs — a retirement that waited
+    hours for its work and then reported the build pair it had latched with.
+    Both halves are pinned, because a fix that moved the write and dropped it
+    would be worse than the bug: the latch must leave the session untouched, and
+    the disposal must still deliver exactly what the latch recorded.
+    """
     host, session = _host(tmp_path, busy=False)
     assert host.begin_retire("runtime-retired", " (a → b)") is True
     assert host._exit_committed is True
+    assert host._retiring_detail == " (a → b)"
+    assert session.notes == [], "a latch must not brand a run it is still waiting for"
+
+    host._note_retirement_cut_off()
     assert session.notes == [("runtime-retired", " (a → b)")]
 
 
+def test_an_idle_exit_owes_the_session_no_cut_off_at_all(tmp_path: Path) -> None:
+    """``owes_cut_off=False``: a rung that proved nothing was in flight.
+
+    The quiet idle-exit rung latches so its refusals and its log line are honest
+    (nothing is admitted after it), but it may not record a cut-off: its grace
+    loop only falls through with the whole residency predicate holding. Arming
+    one anyway is what the operator hit — a backend update that caught nothing
+    published a durable ``error`` row for a run that had already ended, six
+    times on this host (2026-09-17).
+    """
+    host, session = _host(tmp_path, busy=False)
+    assert host.begin_retire("idle-exit", owes_cut_off=False) is True
+    assert host._retiring_cause == "idle-exit", "the refusal and the log still need it"
+    host._note_retirement_cut_off()
+    assert session.notes == []
+
+
+def test_a_disposal_with_no_latch_still_names_the_shutdown(tmp_path: Path) -> None:
+    """The disposal rung's own fallback, which the move must not have eaten.
+
+    A fatal-on-arrival SIGTERM and a host that disposes in place never latch a
+    retirement, and both can catch a live turn: the disposal is the only rung
+    that can say so, and it says ``runtime-shutdown``.
+    """
+    host, session = _host(tmp_path, busy=False)
+    host._note_retirement_cut_off()
+    assert session.notes == [("runtime-shutdown", "")]
+
+
 def test_a_disposing_handle_refuses_the_latch(tmp_path: Path) -> None:
-    """A second exit must not race the disposal that is already running."""
+    """A second exit must not race the disposal that is already running.
+
+    Both latches, because the guard was asymmetric until 2026-09-17: a disposal
+    owns the ordering from ``_disposing`` on, and the rung that takes the exit
+    IN THIS STEP must not commit to a second one. Hardening rather than the fix
+    for the cut-off rows (the incident's ordering has the arming well before any
+    disposal), but an asymmetry with ``begin_drain`` immediately next door is an
+    invitation to write the next rung through it.
+    """
     host, _ = _host(tmp_path)
     host._disposing = True
     assert host.begin_drain("runtime-retired") is False
     assert host._draining is False
+    assert host.begin_retire("runtime-retired") is False
+    assert host._exit_committed is False
 
 
 # -- admissions during the drain ------------------------------------------------

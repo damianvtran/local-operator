@@ -34,7 +34,12 @@ import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
-from local_operator.session.runtime.process import _BuildWatch, _reaper, _should_refresh
+from local_operator.session.runtime.process import (
+    _build_pair,
+    _BuildWatch,
+    _reaper,
+    _should_refresh,
+)
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD
 from local_operator.update import BuildStamp
 
@@ -91,6 +96,8 @@ class FakeHandle:
         self.drain_cause = ""
         self.drain_detail = ""
         self.retired = False
+        self.retire_cause = ""
+        self.retire_detail = ""
 
     def is_busy(self) -> bool:
         return self._busy
@@ -111,10 +118,12 @@ class FakeHandle:
         self.drain_detail = detail
         return True
 
-    def begin_retire(self, cause: str, detail: str = "") -> bool:
+    def begin_retire(self, cause: str, detail: str = "", *, owes_cut_off: bool = True) -> bool:
         if self.may_refresh():
             return False
         self.retired = True
+        self.retire_cause = cause
+        self.retire_detail = detail
         return True
 
     def _deny_pending_gates(self) -> None:
@@ -189,6 +198,51 @@ async def test_a_busy_runtime_drains_once_the_bound_trips(disk, monkeypatch) -> 
     await _run_until(stop)
     assert stop.is_set() and handle.disposed and handle.retired
     assert reg.closed
+    await task
+
+
+@pytest.mark.asyncio
+async def test_the_exit_names_the_pair_on_disk_NOW_not_the_one_the_latch_saw(
+    disk, monkeypatch
+) -> None:
+    """A reason may only assert a transition the install still has.
+
+    THE STALE-PAIR BUG, measured on the reporting host (2026-09-17): five
+    latches at 01:58 named ``declined 3x (0.56.2 → 0.56.6)``, those runtimes
+    went on working, and the incident one of them replayed at 09:56 still named
+    that pair — while 0.56.9 was what a next engage would have run. The reason
+    is durable and user-visible (the sidebar, the phone, the next turn's card),
+    so a pair two generations old is a false report rather than a stale log.
+
+    The REASONS half must survive the wait — this runtime really did decline
+    three settled builds, and that is still why it is leaving — so both halves
+    are pinned here on one exit.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    disk["build"] = NEW  # the install moved once, under a busy runtime
+    reg = FakeRegistrant(boot=OLD)
+    handle = FakeHandle(busy=True)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+
+    assert await _wait_for(lambda: handle.drained), "the drain latch never engaged"
+    assert _build_pair(OLD, NEW) in handle.drain_detail, handle.drain_detail
+    assert not handle.retired, "the exit rung is not reached while busy"
+
+    # …and the install moves AGAIN while this runtime is still finishing its
+    # turn, which is the hours-long gap the operator's host spent on 0.56.2.
+    newest = BuildStamp(version="0.56.9", source_ref="b1e2f3a4c")
+    disk["build"] = newest
+    handle._busy = False
+    await _run_until(stop)
+    assert stop.is_set() and handle.retired
+    assert handle.retire_cause == "runtime-retired"
+    assert _build_pair(OLD, newest) in handle.retire_detail, handle.retire_detail
+    assert _build_pair(OLD, NEW) not in handle.retire_detail, "the latch's pair was replayed"
+    assert "declined" in handle.retire_detail, "the latch's reasons still hold"
     await task
 
 

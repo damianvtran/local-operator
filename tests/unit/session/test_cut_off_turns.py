@@ -93,6 +93,26 @@ def test_classify_cut_off_rewrites_an_involuntary_abort(tmp_path: Path) -> None:
     assert classed.cut_off == render_cut_off_reason("runtime-shutdown")
 
 
+def test_classify_cut_off_leaves_a_normally_completed_run_alone(tmp_path: Path) -> None:
+    """An armed cause cannot brand a run that says it COMPLETED.
+
+    THE GUARD THE INCIDENT NEEDED (2026-09-17). The cut-off vocabulary is armed
+    for a TURN, and the latches that commit a runtime to leaving run while the
+    session may still be working — for the build rungs, hours before the exit.
+    Any end event arriving in that window was rewritten to an error, so a turn
+    that finished normally was reported as cut off. An involuntary end always
+    says so (``aborted=True``, both from the loop's abort and from the teardown's
+    synthesised event), which is what makes this guard exact rather than
+    approximate.
+    """
+    session = _make_session(tmp_path / "sess")
+    session.note_cut_off("runtime-retired", " (1.0@a → 1.1@b)")
+    event = AgentEndEvent(messages=[], aborted=False)
+    assert session._classify_cut_off(event) is event
+    assert event.error is None
+    assert event.cut_off_cause == ""
+
+
 def test_classify_cut_off_does_not_overwrite_a_provider_error(tmp_path: Path) -> None:
     """A real provider diagnosis outranks "the runtime went away"."""
     session = _make_session(tmp_path / "sess")
@@ -123,6 +143,45 @@ def test_note_cut_off_keeps_the_first_and_most_specific_cause(tmp_path: Path) ->
     session.note_cut_off("runtime-shutdown")
     assert session._cut_off_cause == "runtime-retired"
     assert session._cut_off_detail == " (1.0@a → 1.1@b)"
+
+
+@pytest.mark.asyncio
+async def test_a_cause_armed_mid_run_cannot_brand_the_run_that_completes(tmp_path: Path) -> None:
+    """THE OPERATOR'S ROW (2026-09-17), at the seam that produced it.
+
+    A retirement latch fires on a session that is still WORKING — that is its
+    design, commit to leaving and then let the work finish — and it used to arm
+    the cut-off cause at that instant. The cause is consumed by whichever end
+    event comes next, so a run that then finished NORMALLY was published as
+    ``kind=error`` with a cut-off sentence: the desktop drew "Stopped with an
+    error" and the following turn was handed a ``[session incident] cut-off: …``
+    card for a turn that had completed. Six such rows are in this host's
+    ``attention.db``, and the card is in session ``8c13a003dc6d``'s transcript.
+
+    The note here is replayed exactly as the latch wrote it (``note_cut_off``
+    with the detail the reaper composes), and the run then ends the way a
+    completed one does: ``aborted=False``, no error, with its assistant message
+    in the transcript. Nothing about that end claims to have been cut.
+    """
+    from local_operator.harness.types import Message, TextContent
+
+    session = _make_session(tmp_path / "sess")
+    answer = Message(role="assistant", content=[TextContent(text="all done")])
+    await session._transcript.append_message(answer)
+    session._attention_run_token = str(uuid.uuid4())
+    session._attention_run_settled = False
+    # …the retirement latches WHILE this run is in flight.
+    session.note_cut_off("runtime-retired", " (0.56.2 → 0.56.6)")
+    # …and the turn then ends normally.
+    session._attention_outcome = session._classify_cut_off(
+        AgentEndEvent(messages=[answer], aborted=False)
+    )
+    await session._publish_attention_outcome()
+
+    state = AttentionStore().state(conversation_identity(session._transcript.directory))
+    assert state["kind"] == "complete", state
+    assert state["cause"] == "", state
+    assert "cut off" not in str(state.get("reason") or "")
 
 
 # -- the durable outcome -----------------------------------------------------
@@ -353,6 +412,10 @@ class _LatchHost:
     # 4, D10), so the binding here must pass ``self``. `test_serving_drain.py`'s
     # ``DrainHost`` binds it the same way.
     _retiring_refusal = _H._retiring_refusal
+    # The EXIT rung that writes what ``begin_retire`` recorded (2026-09-17): the
+    # note is written at the disposal, so this is the half that must be pinned
+    # alongside the latch.
+    _note_retirement_cut_off = _H._note_retirement_cut_off
 
     #: Typed ``Any`` on purpose: the real attribute holds a ``Session``, and the
     #: tests below substitute a recorder that only implements ``note_cut_off``.
@@ -360,6 +423,8 @@ class _LatchHost:
 
     def __init__(self, *, reason: str = "") -> None:
         self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._retiring_owes_cut_off = True
         self.reason = reason
         self.notes: list[tuple[str, str]] = []
 
@@ -376,11 +441,23 @@ class _NoteSession:
 
 
 def test_begin_retire_commits_when_idle_and_names_the_cause() -> None:
+    """The latch records; the DISPOSAL writes (2026-09-17, PR #1241).
+
+    Both halves matter. The latch is still what names the retirement for the
+    refusal and the log, and it still commits in one synchronous step. What
+    moved is the note: armed here it belonged to a TURN the runtime was merely
+    waiting for, so it branded whichever run end came next — including a turn
+    that went on to complete, which is how a backend update put a cut-off error
+    under a turn that had finished.
+    """
     host = _LatchHost()
     session = _NoteSession()
     host._session = session
     assert host.begin_retire("runtime-retired", " (1.0@a → 1.1@b)") is True
     assert host._retiring_cause == "runtime-retired"
+    assert host._retiring_detail == " (1.0@a → 1.1@b)"
+    assert session.notes == [], "the latch must not arm a turn it is still waiting for"
+    host._note_retirement_cut_off()
     assert session.notes == [("runtime-retired", " (1.0@a → 1.1@b)")]
     # The refusal is a TYPED admission category now, and its sentence
     # deliberately does NOT name the internal cause token any more — the token

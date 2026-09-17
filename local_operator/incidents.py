@@ -417,6 +417,30 @@ def is_deliberate_cause(cause: str) -> bool:
     return cause in DELIBERATE_CUT_OFF_CAUSES
 
 
+def _render_cut_off_detail(detail: str) -> str:
+    """The parenthetical a cut-off sentence carries, brackets included.
+
+    NORMALISED rather than concatenated, because the callers do not agree on
+    the separator. Two of them (``attention._record_detail``,
+    ``update._install_mid_update_reason``) hand over a string that already
+    opens with a space and a bracket, while ``process._drain_detail`` composes
+    a phrase and its pair (``declined 3x (0.56.2 → 0.56.6)``) with neither.
+    Appending the raw detail made every retirement read ``…would run a newer
+    builddeclined 3x (0.56.2 → 0.56.6)`` in the live row, in the durable
+    reason AND in the next turn's incident card (measured on this host,
+    2026-09-17). The separator belongs to the one function that knows the
+    sentence precedes it, so a fourth caller cannot reintroduce the run-together
+    text; a detail that is ALREADY a parenthetical keeps its single pair of
+    brackets rather than gaining a second.
+    """
+    text = (detail or "").strip()
+    if not text:
+        return ""
+    if text.startswith("(") and text.endswith(")"):
+        return f" {text}"
+    return f" ({text})"
+
+
 def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     """One operator-facing sentence naming why a turn was cut off.
 
@@ -425,10 +449,12 @@ def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     is deliberately a sentence and not a paragraph: ``detail`` carries an
     optional parenthetical (a build pair, a pid, a started-at) rather than
     more prose, because the sidebar tooltip has one line and truncates the
-    rest rather than wrapping it.
+    rest rather than wrapping it. The caller supplies the text of that
+    parenthetical and nothing else — the brackets and the separating space are
+    added here (see :func:`_render_cut_off_detail`).
     """
     sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
-    return f"{sentence}{detail}"
+    return f"{sentence}{_render_cut_off_detail(detail)}"
 
 
 #: How one rung of the stop ladder reads inside a deliberate stop's detail.
