@@ -2826,10 +2826,26 @@ class Editor(TextArea):
         # submit-only branch would send the draft from states where Enter does
         # something else — measured, an LF with the `/credential` picker open
         # submitted the bare command word, and one during a live masked capture
-        # submitted the mask and dropped the capture. One rewrite is what makes
-        # the byte indistinguishable from Enter, which is the whole point.
+        # submitted the mask and dropped the capture.
+        #
+        # The EVENT is rewritten as well as the local name, and that is not
+        # belt-and-braces: `_on_key` is not the only reader of the byte's
+        # spelling. The live-prompt router is handed this very event and
+        # re-reads its own `event.key == "enter"` (`route_key_to_live_prompt`,
+        # `app.py`), so a local-only rewrite still left the router reading
+        # `ctrl+j`: with an answer key held it fell through to
+        # `editor.insert(held.character)` and this method then submitted the
+        # restored character as a CHAT PROMPT, while the question stayed up
+        # unanswered — measured as `prompts == ["y"]` with the approval card
+        # still mounted. That is a REGRESSION against the pre-fix behaviour,
+        # where the inert byte left the hold timer to commit the answer, and it
+        # is deterministic for integration delivery rather than a race: both
+        # bytes of one `"y\n"` write land inside the hold window by
+        # construction. One rewrite of the event is what makes the byte
+        # indistinguishable from Enter, which is the whole point.
         if key == "ctrl+j":
             key = "enter"
+            event.key = "enter"
         # A CSI-modifier vertical chord IS its plain arrow, and is rewritten to
         # one here so that every handler below — both pickers, history, the
         # caret — sees the key it already gates on. This is the whole fix for
