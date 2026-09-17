@@ -1681,6 +1681,13 @@ class ServingSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection this handle hands a viewer at attach — re-dated.
+
+        Same reason as the TUI handle's: ``activity_started_s`` is only written
+        when the phase moves, so a viewer attaching mid-phase would otherwise
+        seed on the age it had at the last edge (review round 3, MAJOR 1).
+        """
+        self._fold.refresh_activity_age()
         return self._projection
 
     # -- v4 full-TUI capability --------------------------------------------------
