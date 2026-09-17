@@ -20,6 +20,27 @@ to the aligner, and the rail makes no row ``.strip()``-blank any more. Either
 failure is SILENT: the reader lights one thing and pastes another. The tests
 under "copy / selection" are the ones that matter, and each is written to go red
 against a plausible half-implementation rather than to describe the finished one.
+
+**The mutation matrix, measured — and why SINGLE-SITE mutants are not enough.**
+A developer who did not believe the rail needed handling would not delete one
+expression; they would write the whole method without it. Scored as
+``test_assistant_rail.py`` / ``test_copy_blank_row.py``:
+
+===========================================  =========  ==========
+mutant                                       this file  blank_row
+===========================================  =========  ==========
+A  ``bare = rows`` (one line)                2 red      18 red
+B  A + the three ``RAIL_COLS`` compensations 2 red      18 red
+C  ``content`` filters ``rows[i].strip()``   green      8 red
+D  ``copy_gutter`` returns 0                 1 red      green
+===========================================  =========  ==========
+
+B is the honest revert and it is the one that caught this file out: the
+alignment pin originally asserted on a BULLET row, went red under A, and passed
+under B. On ``MIXED_CONSTRUCTS`` the two mappings differ on rows 1 and 4 only —
+both blank — so no assertion on a content row can ever fail. C is why the
+adopted file exists: it moves 76 of 368 measured blank-row takes on the
+clipboard while every geometry test here stays green.
 """
 
 from __future__ import annotations
@@ -460,10 +481,23 @@ async def test_the_alignment_is_unchanged_by_the_rail() -> None:
     ``[0, 1, 2, 3, 4, 5]`` — rows collapse onto the wrong source lines and a
     copy pastes the wrong text with no visible symptom.
 
-    Asserted against the mapping over the PRE-RAIL rows, which is the thing that
-    must not change, rather than against a literal: the rendered shape may
-    legitimately move with the markdown theme, and a hard-coded list would then
-    fail for a reason that is not this bug.
+    **Asserted on the BLANK separator rows, and that is the whole point.** The
+    two mappings above differ on rows 1 and 4 only — both blank. Every row
+    carrying a glyph maps to the same source line either way, so a clipboard
+    assertion driven from a content row cannot fail when the strip is reverted.
+    An earlier version of this test took a bullet row and passed against a
+    coherent revert of all four de-rail sites; only a single-site mutant caught
+    it, which is exactly the false clearance single-site mutation testing gives.
+
+    Under the railed mapping a blank row is attributed to the PRECEDING source
+    line, so a take of it inherits that line's text: row 1 pastes
+    ``Here is prose.`` — a row with no glyphs on it producing a sentence — and
+    row 4 pastes ``- beta item``. Fifteen characters of gesture, and it is the
+    only clipboard-level evidence the aligner ever saw the rail.
+
+    ``tests/unit/tui/test_copy_blank_row.py`` holds the parametrised form of
+    this across widths; this stays here because the file that claims to pin the
+    alignment must be the file that actually does.
     """
     block, rows = await _block(MIXED_CONSTRUCTS)
     bare = [row[RAIL_COLS:] for row in rows]
@@ -480,22 +514,19 @@ async def test_the_alignment_is_unchanged_by_the_rail() -> None:
     assert correct == list(range(len(bare))), correct
 
     # Asserted against what PRODUCTION puts on the clipboard, not against a
-    # mapping this test computed for itself. Recomputing both mappings here and
-    # comparing them pins nothing: it passes against any implementation,
-    # including one that aligns the railed rows — the exact bug — because
-    # neither number ever came from the block. Row 2 is the discriminator: under
-    # the railed mapping it collapses onto source line 0, so a per-row take of
-    # the first bullet pastes the PARAGRAPH instead.
-    first_bullet = next(index for index, row in enumerate(bare) if "alpha" in row)
-    selection = Selection(
-        Offset(0, first_bullet), Offset(len(rows[first_bullet].rstrip()), first_bullet)
-    )
-    got = block.get_selection(selection)
-    assert got is not None
-    assert got[0].strip() == "- alpha item", (
-        f"the block aligned its rows with the rail on: row {first_bullet} pasted "
-        f"{got[0]!r} instead of its own source line"
-    )
+    # mapping this test computed for itself: recomputing both mappings here and
+    # comparing them passes against any implementation, including one that
+    # aligns the railed rows, because neither number ever came from the block.
+    blanks = [index for index, row in enumerate(bare) if not row.strip()]
+    assert blanks, bare
+    for blank in blanks:
+        got = block.get_selection(Selection(Offset(0, blank), Offset(len(rows[blank]), blank)))
+        pasted = "" if got is None else got[0].strip()
+        assert pasted == "", (
+            f"row {blank} has no glyphs on it but pasted {pasted!r}: the block "
+            "aligned its rows with the rail on, so a blank separator was "
+            "attributed to the preceding source line"
+        )
 
 
 @pytest.mark.asyncio
@@ -618,6 +649,36 @@ async def test_a_blank_separator_row_is_still_blank_to_the_copy_path() -> None:
     # The markdown path, not the glyph path: blank rows treated as content would
     # push this take down the rendered-glyph branch and paste bullets as `•`.
     assert "- alpha item" in copied and "•" not in copied, copied
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["", "   \n  \n", "\n\n"])
+async def test_an_empty_message_copies_as_nothing_not_as_a_rail(text: str) -> None:
+    """The one path where ``copy_gutter`` is the ONLY thing stripping the rail.
+
+    A message with no printable content short-circuits to
+    ``TranscriptBlock.get_selection`` (the ``not self._full_text.strip()``
+    guard), which never reaches this block's own bare-column accounting and
+    clamps past :meth:`copy_gutter` instead. The block still PAINTS a row — the
+    rail goes on every row, including the only row an empty message has — so
+    without the override that row copies as ``▌``: a reader drags over what
+    looks like empty space and pastes a glyph that is nowhere in the document.
+
+    Reviewer finding: ``copy_gutter`` returning ``RAIL_COLS`` had no test that
+    failed without it, because every other take goes through ``get_selection``'s
+    own de-rail and never consults it.
+    """
+    block, rows = await _block(text)
+    assert rows == [RAIL] or rows == [RAIL + " "], rows
+
+    got = block.get_selection(Selection(Offset(0, 0), Offset(len(rows[0]), 0)))
+
+    pasted = "" if got is None else got[0]
+    assert pasted.strip() == "", (
+        f"an empty message pasted {pasted!r}: the rail reached the clipboard "
+        "through the empty-text fallback, which clamps past `copy_gutter` "
+        "rather than through this block's own stripping"
+    )
 
 
 @pytest.mark.asyncio
