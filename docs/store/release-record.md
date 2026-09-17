@@ -52,7 +52,7 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
-## v0.1.17 — submitted 2026-09-15, pending review as of 2026-09-15
+## v0.1.17 — submitted 2026-09-15, published between 2026-09-17T00:33Z and 06:33Z
 
 | Field | Value |
 | --- | --- |
@@ -65,10 +65,10 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 | Artifact size | 13 files, no source maps (`validated Chrome Web Store package v0.1.17`) |
 | Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
 | Submission route | **Automated** — `chrome-web-store.yml`, [run 35036966759](https://github.com/damianvtran/local-operator/actions/runs/35036966759), dispatched by `damianvtran` at 2026-09-15T23:43:57Z with `ref=main` `version=0.1.17` |
-| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.17` once the store reports the revision `STAGED` |
-| Store state | `PENDING_REVIEW` at 100% — the store reports `submittedItemRevisionStatus` `state=PENDING_REVIEW`, `crxVersion=0.1.17`, `deployPercentage=100` |
-| State last checked | 2026-09-15T23:47:46Z (the run's own timestamp) — promote run [35037244157](https://github.com/damianvtran/local-operator/actions/runs/35037244157), created 23:47:46Z, ended 23:50:05Z having refused at gate 1 and printed the store's own fields |
-| Approval timestamp | *pending — append when the review completes* |
+| Promotion route | **None — no `chrome-web-store-promote.yml` run published this version.** Every promote dispatch on record for 0.1.17 failed, and the last successful promote anywhere is still 0.1.10's, so the version went live with no successful promote behind it; see the third-occurrence note below, which is the reason this row does not read "automated" |
+| Store state | `PUBLISHED` at 100% — the store reports `publishedItemRevisionStatus` `state=PUBLISHED`, `crxVersion=0.1.17`, `deployPercentage=100`, and `submittedItemRevisionStatus` now `<absent>` |
+| State last checked | 2026-09-17T06:33:08Z (the line's own timestamp) — promote run [35190293922](https://github.com/damianvtran/local-operator/actions/runs/35190293922), created 06:32:41Z, refused at gate 1 and printed the store's own fields |
+| Approval timestamp | ***Not directly observable — no run in our history records it.*** The version went live inside the window **2026-09-17T00:33Z–06:33Z**; the approval instant itself appears in no run we hold, so it is recorded as a bound rather than a timestamp. The outcome is verified independently on the public listing: the URL above reads **"Version 0.1.17"**, **"Updated September 16, 2026"** (checked 2026-09-17) |
 | Previously published | v0.1.15, `PUBLISHED` at 100% (state confirmed by the probe above; the *publication date* is not evidenced by any run — see the promotion-route note) |
 
 **One number, one tree — but read this before citing a SHA for 0.1.17.** The rule
@@ -98,18 +98,55 @@ the next bump happens — the vendored copy is not optional, because the generat
 header carries an input hash over `protocol.py`, and editing only the extension
 target leaves that hash stale.
 
-**Promotion route, second occurrence of the same gap.** As with v0.1.12, the
-publication of v0.1.15 has **no successful `chrome-web-store-promote.yml` run**
-behind it — the last successful promote anywhere remains 0.1.10's (run 34610983340,
-2026-09-11), and every promote dispatch since has failed. Google's publish
-reference says `STAGED_PUBLISH` stages on approval and is then published *by the
-developer* (against `DEFAULT_PUBLISH`, which publishes on approval), so an approved
-staged revision does not go live by itself: the publication was an explicit
-developer action taken from the dashboard or an out-of-band API call, by an
-operator or session this checkout holds no record of. Our documented sequence
-("wait for `STAGED`, then promote") is not implicated, but it is also not what
-happened, twice — worth resolving in the runbook rather than re-deriving per
-release.
+**Promotion route, third occurrence of the same gap.** As with v0.1.12 and then
+v0.1.15, a version has gone live **with no successful `chrome-web-store-promote.yml`
+run behind it**. For v0.1.15 that was the second occurrence: the last successful
+promote anywhere remains 0.1.10's (run 34610983340, 2026-09-11), and every promote
+dispatch since has failed. For v0.1.17 it is the third: eight promote dispatches
+landed between 2026-09-15T23:47:46Z (minutes after the submission) and
+2026-09-17T06:32:41Z, and every one of them failed — the last of them, run
+[35190293922](https://github.com/damianvtran/local-operator/actions/runs/35190293922),
+being the very probe whose output shows the version already `PUBLISHED`. Google's
+publish reference says `STAGED_PUBLISH` stages on approval and is then published *by
+the developer* (against `DEFAULT_PUBLISH`, which publishes on approval), so an
+approved staged revision does not go live by itself: the publication was an explicit
+developer action taken from the dashboard or an out-of-band API call, by an operator
+or session this checkout holds no record of. Our documented sequence ("wait for
+`STAGED`, then promote") is not implicated, but it is also not what happened, three
+times — worth resolving in the runbook rather than re-deriving per release.
+
+**Why this note exists at all: the record is the audit artifact, and it must not
+read as though our promote workflow published this.** It did not. The `Promotion
+route` row above therefore reads *none*, and the live state recorded above rests on
+two things our own tooling did not produce — the store's own fields, and the public
+listing. Anything else would be claiming a release from a merged PR or a workflow's
+success, which is exactly what the recording rule forbids.
+
+**The publication window, and why the listing's date reads a day earlier.** Two
+probes on 2026-09-17, with 0.1.17 still in review, both printed the same store
+fields — run [35164942781](https://github.com/damianvtran/local-operator/actions/runs/35164942781)
+(00:03Z, the run's own timestamp) and run [35167032053](https://github.com/damianvtran/local-operator/actions/runs/35167032053)
+(00:33Z):
+
+```text
+submitted state=PENDING_REVIEW distributionChannels=[crxVersion=0.1.17 deployPercentage=100]; published state=PUBLISHED distributionChannels=[crxVersion=0.1.15 deployPercentage=100]
+```
+
+and the 06:33Z probe (run [35190293922](https://github.com/damianvtran/local-operator/actions/runs/35190293922),
+the one recorded in `State last checked`) printed:
+
+```text
+submitted <absent>; published state=PUBLISHED distributionChannels=[crxVersion=0.1.17 deployPercentage=100]
+```
+
+So 0.1.17 went live **between 2026-09-17T00:33Z and 2026-09-17T06:33Z**, and the
+approval instant itself appears in no run we hold — it is recorded as a bound, not
+invented as a timestamp. The listing's own `Updated` string says **September 16,
+2026**, which is not a contradiction as far as we can tell: that whole window falls
+on September 16 in US Pacific time (00:33–06:33Z = 17:33–23:33 PDT), so the store's
+date and our UTC bound agree once the store's day boundary is allowed for. That
+reading is an inference from the two sources, not a field the store exposes, and it
+is written here so a later reader does not read the pairing as an error.
 
 ## v0.1.15 — on `main`, NOT submitted (as of 2026-09-14)
 
