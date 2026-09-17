@@ -13,7 +13,7 @@ the TOP.
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        docs/evidence/slash-goal-loop-clear/shot_slash_help_row.py OUT.svg COLSxROWS
+        scripts/shot_slash_help_row.py OUT.svg COLSxROWS
 
 The painted rows are printed to stderr: one 75-cell line for `/loop` at 80
 columns AFTER, and `... --stop or` + `  --clear` (the orphan) BEFORE. The row is
@@ -36,7 +36,9 @@ for _key in [key for key in os.environ if key.startswith(("CMUX_", "LOP_"))]:
     # product import.
     os.environ.pop(_key)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+# This script lives in ``scripts/``, one level under the repo root — the same
+# depth the sibling shot scripts assume. Retarget this if it ever moves again.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 

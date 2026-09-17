@@ -3,7 +3,7 @@
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        docs/evidence/slash-goal-loop-clear/shot_slash_flag_picker.py OUT.svg [COLSxROWS] [CASE]
+        scripts/shot_slash_flag_picker.py OUT.svg [COLSxROWS] [CASE]
 
 ``CASE`` selects the live state the suggestion is gated on, because the row's
 whole contract is that it appears only when the state it would change exists:
@@ -48,7 +48,9 @@ from pathlib import Path
 for _key in tuple(os.environ):
     if _key.startswith("CMUX_"):
         os.environ.pop(_key)
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+# This script lives in ``scripts/``, one level under the repo root — the same
+# depth the sibling shot scripts assume. Retarget this if it ever moves again.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
