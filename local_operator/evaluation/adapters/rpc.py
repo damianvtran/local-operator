@@ -344,9 +344,14 @@ class IncrementalWriter:
             view = view[written:]
 
 
-#: The magnitude at which ``:g`` leaves fixed notation, named so the renderer
-#: below has a band rather than an anecdote. ``:g`` emits six significant
-#: digits, so 999_999 s renders ``999999`` and 1_000_000 s renders ``1e+06``.
+#: The magnitude at which ``:g`` leaves fixed notation -- documentation and
+#: test input ONLY. No production line reads it and none may: ``:g`` rounds to
+#: six significant digits BEFORE it decides, so 999_999.5 s renders ``1e+06``
+#: while sitting under this value, and a guard comparing against the constant
+#: would leave that value in exponent form. ``_rendered_budget`` reads the
+#: RENDERED text instead, and this constant only states the band in prose and
+#: lets ``test_the_longest_legal_budget_renders_in_plain_units`` pin where
+#: ``:g`` crosses over (999_999 -> ``1e+06``).
 _EXPONENT_FORM_AT_S = 1_000_000.0
 
 
@@ -354,11 +359,12 @@ def _rendered_budget(timeout: float) -> str:
     """Render a budget in seconds in the units an operator reads: never exponent.
 
     WHY ``:g`` IS NOT ENOUGH HERE. This number is the only place the sentence
-    says how long the deadline was, and ``:g`` drops into exponent form from
-    ``_EXPONENT_FORM_AT_S``, which is reachable rather than theoretical now
-    that the budget can be the FUNDED value: nine maximal cleanup actions
-    declare 1_036_800 s and fund to ``1.03683e+06s`` in the one line an
-    operator reads. The protocol's own ceiling is worse -- ``CleanupPlan``
+    says how long the deadline was, and ``:g`` drops into exponent form at the
+    magnitude ``_EXPONENT_FORM_AT_S`` names -- from there and for a stretch
+    below it -- which is reachable rather than theoretical now that the budget
+    can be the FUNDED value: nine maximal cleanup actions declare 1_036_800 s
+    and fund to ``1.03683e+06s`` in the one line an operator reads. The
+    protocol's own ceiling is worse -- ``CleanupPlan``
     admits ``MAX_DECLARATIONS`` (256) actions of ``MAX_CLEANUP_TIMEOUT_MS`` x
     ``MAX_CLEANUP_ATTEMPTS`` (115_200 s) each, so the largest legal call funds
     to 29_491_230 s and would print ``2.949123e+07s``. ``execute`` cannot reach
@@ -373,7 +379,12 @@ def _rendered_budget(timeout: float) -> str:
     ``:g`` rounds to six significant digits before it decides, so 999_999.9 s
     renders an exponent too -- and only a value that already renders one is
     re-rendered, which makes the byte-identity a property of the check instead
-    of a promise about it.
+    of a promise about it. ``_EXPONENT_FORM_AT_S`` is deliberately NOT
+    consulted here: it describes the band, it is not a boundary this function
+    may compare against, and the sub-band values its own comment names are
+    asserted by ``test_the_longest_legal_budget_renders_in_plain_units`` so
+    that a guard which does compare against it fails loudly rather than
+    silently.
 
     Fixed point rather than ``repr`` (``1000000.0``) or a rounded integer cast:
     the trailing zeros of the six decimals are stripped, so 29_491_230.0 s

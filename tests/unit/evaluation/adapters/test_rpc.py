@@ -929,6 +929,11 @@ def test_the_longest_legal_budget_renders_in_plain_units() -> None:
     campaign's readouts quote and what the other tests in this file assert
     (0.05s/0.25s for ``close``, 180s/0.5s/31.5s for ``execute`` and
     ``cleanup``), so a fix that re-rendered them would churn approved evidence.
+    The crossing is also asserted FROM BELOW, at values that already render an
+    exponent while sitting under it, because that is the whole reason the guard
+    reads the rendered text: a magnitude comparison against
+    ``_EXPONENT_FORM_AT_S`` leaves those in exponent form and passes every
+    other assertion here.
     """
 
     from local_operator.evaluation.adapters.rpc import (
@@ -947,6 +952,25 @@ def test_the_longest_legal_budget_renders_in_plain_units() -> None:
     # fixed point one second below it, exponent form at it.
     assert f"{_EXPONENT_FORM_AT_S - 1.0:g}" == "999999"
     assert f"{_EXPONENT_FORM_AT_S:g}" == "1e+06"
+
+    # The crossing seen from BELOW, which is the case the guard's rendered-text
+    # comment exists for and the one a magnitude comparison slips through.
+    # ``:g`` rounds to six significant digits before it decides, so these render
+    # an exponent while sitting under ``_EXPONENT_FORM_AT_S``: a guard written
+    # as ``if timeout < _EXPONENT_FORM_AT_S`` -- the edit
+    # ``_rendered_budget``'s comment forbids -- returns the exponent form for
+    # every one of them and still passes the two magnitudes above and the band
+    # below. Both halves are asserted, so the failure names which half moved.
+    for value, expected in (
+        (999_999.5, "999999.5"),
+        (999_999.9, "999999.9"),
+        (999_999.99, "999999.99"),
+        (999_999.999, "999999.999"),
+        (999_999.999999, "999999.999999"),
+    ):
+        assert f"{value:g}" == "1e+06"
+        assert value < _EXPONENT_FORM_AT_S
+        assert _rendered_budget(value) == expected
 
     # One maximal cleanup action -- an hour, 32 attempts -- from the protocol's
     # own bounds rather than a number chosen here.
