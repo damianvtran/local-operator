@@ -1049,12 +1049,20 @@ def test_build_instruction_set_document_omits_absent_optionals() -> None:
     [
         ({"name": ""}, "name", "must not be empty"),
         ({"name": "a" * 129}, "name", "must be at most 128 characters"),
-        ({"name": "Two Words"}, "name", "must not contain whitespace"),
+        # Whitespace that is also a control character is still refused, with the
+        # hub's text; an ordinary space is not (see the deferral test below).
+        ({"name": "two\twords"}, "name", "must not contain whitespace"),
+        ({"name": "two\nwords"}, "name", "must not contain whitespace"),
         ({"name": "a/b"}, "name", 'must not contain "/", "\\" or ":"'),
         ({"name": "-leading"}, "name", 'must not begin or end with "-" or "."'),
         ({"name": "trailing."}, "name", 'must not begin or end with "-" or "."'),
         ({"name": "no\u202espam"}, "name", "must not contain Unicode bidirectional override"),
         ({"name": "bell\x07"}, "name", "must not contain control characters"),
+        (
+            {"name": "zero\u200bwidth"},
+            "name",
+            "must not contain invisible Unicode formatting characters",
+        ),
         ({"description": "  "}, "description", "must not be empty"),
         ({"description": "d" * 2001}, "description", "must be at most 2000 characters"),
         ({"instructions": " "}, "instructions", "must not be empty"),
@@ -1094,6 +1102,41 @@ def test_build_instruction_set_document_refuses_a_broken_field(
     assert str(exc_info.value) == (
         f"The agent document is not valid: {field} {exc_info.value.rule}."
     )
+
+
+def test_a_name_with_ordinary_spaces_is_sent_as_the_author_wrote_it() -> None:
+    """Whitespace is the hub's decision, not this client's.
+
+    agent-server refuses whitespace in a published name today and is relaxing
+    exactly that (`dev-name-spaces`), because the live marketplace is already
+    spelled with ordinary spaces. A client cannot mirror a rule that is moving:
+    refusing an ordinary space here would refuse a name the hub is about to
+    accept, so the spelling is sent as written and the hub normalises it — today
+    it answers 422 with `details.field = "name"`, and this route carries that
+    through unchanged.
+    """
+    document = build_instruction_set_document(
+        name="Product Manager",
+        description="Coordinates the roadmap.",
+        instructions="You manage the product.",
+        kind="role",
+        version="1.0.0",
+    )
+
+    assert document["name"] == "Product Manager"
+
+
+def test_a_name_is_trimmed_but_its_inner_spelling_is_kept() -> None:
+    """The ends are the bound's business; the spelling in between is the hub's."""
+    document = build_instruction_set_document(
+        name="  Product  Manager  ",
+        description="Coordinates the roadmap.",
+        instructions="You manage the product.",
+        kind="role",
+        version="1.0.0",
+    )
+
+    assert document["name"] == "Product  Manager"
 
 
 def test_build_instruction_set_document_counts_characters_not_bytes() -> None:

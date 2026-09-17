@@ -8,6 +8,7 @@ import requests
 from pydantic import BaseModel, SecretStr
 
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
+from local_operator.agents import MAX_AGENT_NAME_CHARS
 from local_operator.clients._http import (
     NO_RESPONSE_BODY,
     APIError,
@@ -1333,10 +1334,12 @@ INSTRUCTION_SET_DOCUMENT_TYPE = "radient.agent-instruction-set"
 #: partially parsing a newer document.
 INSTRUCTION_SET_DOCUMENT_VERSION = 1
 
-#: Caps, mirroring agent-server's validator. `MAX_INSTRUCTIONS_CHARS` is reused
-#: rather than restated: the local profile cap and the hub's document cap are the
-#: same bound, and a second number here is how they would drift apart.
-INSTRUCTION_SET_NAME_MAX_CHARS = 128
+#: Caps, mirroring agent-server's validator. Two of them are REUSED rather than
+#: restated, because a second number is how the two sides drift apart:
+#: `MAX_INSTRUCTIONS_CHARS` (the local profile cap and the hub's document cap are
+#: the same bound) and `MAX_AGENT_NAME_CHARS` (the hub's `models.AgentNameMaxChars`,
+#: which the local registry refuses to exceed when it invents a name of its own —
+#: see `_collision_free_name`).
 INSTRUCTION_SET_DESCRIPTION_MAX_CHARS = 2000
 INSTRUCTION_SET_WHEN_TO_USE_MAX_CHARS = 2000
 INSTRUCTION_SET_TOOLS_MAX_ITEMS = 64
@@ -1402,6 +1405,16 @@ INSTRUCTION_SET_FIELDS = (
 )
 
 
+#: Whitespace that is ALSO a control character: Go's `unicode.IsSpace ∩
+#: unicode.IsControl`, which is the tab, the vertical tab, the form feed, the
+#: line and carriage returns and NEL. Spelled out rather than written as
+#: `character.isspace()`, because Python's `str.isspace()` additionally calls
+#: U+001C..U+001F whitespace while Go reports those as control characters — and a
+#: client that disagrees with the hub about WHICH rule a name broke is exactly
+#: what this mirror exists to prevent.
+_CONTROL_WHITESPACE = frozenset("\t\n\v\f\r\x85")
+
+
 class InstructionSetError(ValueError):
     """A document refused before it was sent, in the hub's own vocabulary.
 
@@ -1426,21 +1439,52 @@ class InstructionSetError(ValueError):
 def _name_rule(name: str) -> Optional[str]:
     """The rule a published name breaks, or ``None`` when it is acceptable.
 
-    Mirrors ``models.ValidateAgentName`` in agent-server, rule text included. A
-    name that is a path separator, a whitespace run or a bidi override is refused
-    because a name is also a file name on the machine that pulls it, and because
-    on a public marketplace a name whose rendered form differs from its bytes is a
-    spoofing surface.
+    Mirrors ``models.ValidateAgentName`` in agent-server: the same characters, the
+    same order and the same rule text, because ``details.rule`` is what the
+    desktop app's inline error quotes — a document refused here and one refused by
+    the hub must read identically.
+
+    THE ONE RULE THIS DELIBERATELY DOES NOT MIRROR IS THE WHITESPACE BAN.
+    agent-server refuses any whitespace in a published name today, and is in the
+    middle of relaxing exactly that (`dev-name-spaces`, `0a44f50`): the live
+    marketplace is already spelled with ordinary spaces — 21 public rows, 13 of
+    them in case-insensitive duplicate groups (Twitter, Product Manager, Codey,
+    gitbot, Job automation for auto apply) — so the rule is being changed to
+    "collapse every run of Unicode whitespace to one U+0020 and trim the ends".
+    A client cannot mirror a rule that is moving: refusing an ordinary space here
+    would refuse a name the hub is about to accept (a client bound stricter than
+    the server is a bug report), and refusing it only after the change would mean
+    the same release behaves differently against two hub versions. So whitespace
+    is sent AS THE AUTHOR WROTE IT and the hub decides — today it answers 422
+    ``invalid_instruction_set`` with ``details.field = "name"`` and the rule, which
+    this route carries through unchanged, and after the relaxation it normalises
+    and stores the name.
+
+    Whitespace that is ALSO a control character (the tab, the vertical tab, the
+    form feed, the line controls and NEL) stays refused, with the hub's own text
+    for it: no legitimate name contains one, and the published-validator order
+    reports those as whitespace rather than as control characters, so dropping the
+    check would put a different ``details.rule`` on the same input than the hub's.
+
+    Names are also file names on the machine that pulls them, and on a public
+    marketplace a name whose rendered form differs from its bytes is a spoofing
+    surface — that is what the bidi/control/format rules below are for, and why
+    they are checked in the hub's order (bidi first, so its own rule text wins).
     """
 
     trimmed = name.strip()
     if not trimmed:
         return "must not be empty"
-    if len(trimmed) > INSTRUCTION_SET_NAME_MAX_CHARS:
-        return f"must be at most {INSTRUCTION_SET_NAME_MAX_CHARS} characters"
+    if len(trimmed) > MAX_AGENT_NAME_CHARS:
+        return f"must be at most {MAX_AGENT_NAME_CHARS} characters"
     if any(character in trimmed for character in ("/", "\\", ":")):
         return 'must not contain "/", "\\" or ":"'
-    if any(character.isspace() for character in trimmed):
+    if any(
+        "\u202a" <= character <= "\u202e" or "\u2066" <= character <= "\u2069"
+        for character in trimmed
+    ):
+        return "must not contain Unicode bidirectional override characters"
+    if any(character in _CONTROL_WHITESPACE for character in trimmed):
         return "must not contain whitespace"
     # `unicodedata.category == "Cc"` is Go's `unicode.IsControl` (the Cc table),
     # not `str.isprintable`: isprintable is False for every format character too,
@@ -1448,11 +1492,13 @@ def _name_rule(name: str) -> Optional[str]:
     # violation and send its author looking for something that is not there.
     if any(unicodedata.category(character) == "Cc" for character in trimmed):
         return "must not contain control characters"
-    if any(
-        "\u202a" <= character <= "\u202e" or "\u2066" <= character <= "\u2069"
-        for character in trimmed
-    ):
-        return "must not contain Unicode bidirectional override characters"
+    # Format characters (Cf) render as nothing, so `reviewer` + U+200B and
+    # `reviewer` draw identically while being two different keys: the shadowing an
+    # exact local name lookup cannot see. The hub refuses them under this text
+    # rather than folding them away, because folding would silently rewrite the
+    # author's name.
+    if any(unicodedata.category(character) == "Cf" for character in trimmed):
+        return "must not contain invisible Unicode formatting characters"
     if trimmed[0] in "-." or trimmed[-1] in "-.":
         return 'must not begin or end with "-" or "."'
     return None
@@ -1503,7 +1549,9 @@ def build_instruction_set_document(
     different field than the server would is a bug report waiting to be filed.
 
     Args:
-        name: The agent's published name (1..128 characters, after trim).
+        name: The agent's published name (1..128 characters, after trim). The
+            spelling is sent as the author wrote it: whitespace is the hub's to
+            normalise (see :func:`_name_rule`).
         description: What the agent does (1..2000 characters).
         instructions: The instruction body (1..8000 characters). This is the
             publication; it is also the only field the hub's reviewer treats as
