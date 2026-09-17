@@ -176,7 +176,27 @@ Structural tests, each driven in the direction that FAILS before being trusted
 | `test_a_bridge_awaiting_its_first_acquire_is_not_evicted` | the handout dropped from `_evictable` → the handed-out bridge is evicted |
 | `test_a_failed_open_leaves_no_reservation_behind` | the handout never released → the reservation leaks |
 
-Gate results for the branch (`bf67bf699` + 6 commits):
+Gate results for the remediation head `529c290f6` — the commit the round-1 review's
+five findings and QA's two are answered in. It is the same tree the six commands
+below were run against, `git status` clean at capture:
+
+```
+.venv/bin/python -m flake8 .                              → rc=0 (clean)
+uvx --from black==26.1.0 black --check .                  → 1450 files unchanged
+uvx isort==5.13.2 --check .                               → rc=0
+.venv/bin/python -m pyright --pythonpath .venv/bin/python . → 0 errors, 0 warnings
+.venv/bin/python -m pytest tests/unit -q                  → 22834 passed, 22 skipped in 23:59
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
+                                                          → 168 passed, 7 skipped in 17:34
+```
+
+The full unit suite is **green here**, which is the stronger half of the flake
+claim below: the five failures the first head saw did not recur on a head that
+contains the same code plus a comment reflow and one new test.
+
+Gate results for the first head (`bf67bf699` + 6 commits, the head the round-1
+review read) — kept because the analysis of its five failures is the flake
+evidence, and because "green now" is only meaningful beside "was it green then":
 
 ```
 .venv/bin/python -m flake8 .                              → rc=0 (clean)
@@ -187,6 +207,10 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e 
                                                           → 168 passed, 7 skipped in 18:55
 .venv/bin/python -m pytest tests/unit -q                  → 22828 passed, 22 skipped, 5 failed
 ```
+
+The counts of those two unit runs differ by the six tests this round added or
+re-pinned; the head SHA is the identity here, not the count — QA's finding on the
+drifted figure is why the paragraph names a commit.
 
 **The five unit failures are pre-existing load flakes, and that is a measurement
 rather than an assertion.** Two full-suite runs on this branch failed DIFFERENT
