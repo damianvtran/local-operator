@@ -242,6 +242,14 @@ def _darwin_footprint_bytes(pid: int) -> int | None:
         return None
 
 
+#: The largest pid any supported platform can allocate, used to keep
+#: ``os.kill`` from raising instead of answering (see :func:`_pid_exists`). Linux
+#: allows a raised ``pid_max`` up to ``2**22`` by default and ``2**31 - 1`` at the
+#: kernel's ceiling, macOS tops out at 99,998; this is Linux's ceiling, so the
+#: bound rejects only what cannot be a pid on either platform.
+_PID_MAX = 2**31 - 1
+
+
 def _pid_exists(pid: int) -> bool:
     """Whether ``pid`` names a process at all — what the fallback's cost turns on.
 
@@ -254,10 +262,16 @@ def _pid_exists(pid: int) -> bool:
 
     Called only for pids the direct reader could not answer, where the two
     answers lead to opposite costs: the dump for one that exists, nothing for
-    one that does not. A pid of zero or less cannot exist and never reaches a
-    real process, so the guard is cheap insurance rather than a case.
+    one that does not.
+
+    Bounded above as well as below, and that is load-bearing rather than
+    defensive: ``os.kill`` raises ``OverflowError`` — not an ``OSError`` — for a
+    pid outside C ``int``, and that exception would escape this module's
+    no-raise contract into the caller. No real pid reaches it (macOS ``PID_MAX``
+    is 99,998 and Linux defaults to 4,194,304, both far under the bound), so the
+    guard exists so that the shape of the check matches what it claims to cover.
     """
-    if pid <= 0:
+    if pid <= 0 or pid > _PID_MAX:
         return False
     try:
         os.kill(pid, 0)
@@ -347,14 +361,18 @@ def session_resource_usage(
         # top` is setuid root and can read those), and a host where no direct
         # reader exists at all (libproc did not load), where every pid needs it.
         # A pid that is GONE is excluded on purpose: no reader can answer it, so
-        # its only effect would be to spend the dump's entire sampling interval
-        # — 5 s to 17 s measured here, against 43.3 ms for the whole read without
-        # it — to return nothing. This is not an exotic case: `collect_sessions`
+        # its only effect would be to spend the dump's sampling interval — one
+        # whole-system dump, whose ceiling is the runner's own 5 s timeout — to
+        # return nothing. This is not an exotic case: `collect_sessions`
         # hands this function every record `registry.scan` classified `live`, and
         # the module's own contract names "a pid vanishing between scan and
-        # measure" as normal, so one session dying in that window used to put the
-        # 5 s timeout back on the whole listing (measured: 5,185.2 ms for twelve
-        # live pids plus one reaped).
+        # measure" as normal. Measured on twelve live pids plus one reaped pid,
+        # through the module's own runner: 1,259.6-1,403.9 ms with this gate
+        # removed (one dump, 1,334.3 ms median) against 50.6-140.2 ms with it
+        # (69.2 ms median), and the dump is unbounded above — a session dying
+        # while the box is loaded enough puts its 5 s timeout on the read, which
+        # is what the pre-gate measurement of 5,185.2 ms for one live pid plus
+        # one reaped was.
         probe = footprint_probe or _darwin_footprint_bytes
         waiters: list[int] = []
         for pid in pids:
@@ -371,10 +389,15 @@ def session_resource_usage(
             # value <= 0 falls through deliberately, and is neither a reading nor
             # a reason to spend the dump. `ri_phys_footprint` is 0 for a zombie
             # (measured), and 0 is never what a live process costs: reporting it
-            # would print "0 MB" for a process whose memory could not be read,
-            # where the unknown sentinel belongs — and a pid that rusage answers
-            # with 0 for is exactly the gone case above, so the dump cannot help
-            # it either.
+            # as the footprint would put "0 MB" in `lop sessions`'s FOOTPRINT
+            # column and `0` where the wire payload's `footprint_bytes` must be
+            # the unknown sentinel (``null``). The TUI's memory cell is a
+            # different rule — it renders ``format_bytes(footprint_bytes or
+            # rss_bytes)``, and a zombie's RSS is 0 too, so that surface shows
+            # "0 MB" on this and every earlier release alike. What the guard
+            # fixes is the layer that owns the sentinel. A pid that rusage answers
+            # with 0 for is also exactly the gone case above, so the dump cannot
+            # help it either.
 
         if waiters:
             # `top -l1 -stats pid,mem` for the whole system in one shot; filter

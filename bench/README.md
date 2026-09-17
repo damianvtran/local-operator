@@ -308,11 +308,19 @@ What the rows say, in order:
   no reader can answer it, so the dump would spend its whole sampling interval
   and return nothing, and that is the module's documented normal case (a session
   dying between the registry scan and the read). Measured through the module's
-  own runner: twelve live pids plus one reaped pid cost **13.9 ms**, where the
-  wider trigger cost 5,185.2 ms. A pid the kernel answers with a footprint of
-  zero (a zombie) is likewise left unknown rather than reported as `0 MB`, and
-  spends no dump either. The reference row above is what the dump costs when a
-  pid really does need it.
+  own runner on **twelve live pids plus one reaped pid**: **50.6 / 69.2 /
+  140.2 ms** with the gate, against **1,259.6 / 1,334.3 / 1,403.9 ms** with it
+  removed — one whole-system dump per read, whose ceiling is the runner's own 5 s
+  timeout, which is the coarse part of the range (the same command returned in
+  8 ms on an idle box and past the timeout under load). A pid the kernel answers
+  with a footprint of zero (a zombie) is likewise left unknown: `0` is what the
+  payload would carry where `info/model.py` requires the sentinel (`null`), and
+  what `lop sessions` would print in its FOOTPRINT column where `—` is the
+  unknown. The TUI's memory cell is a third rule —
+  `format_bytes(footprint_bytes or rss_bytes)`, and a zombie's RSS is 0 too —
+  and renders `0 MB` on this and every earlier release, so that surface is left
+  as it was. The zombie spends no dump either. The reference row above is what
+  the dump costs when a pid really does need it.
 - **`collect_snapshot`'s first call in a cold process is unchanged**, and that is
   the honest reading rather than a regression: a bare interpreter pays the whole
   `/info` import graph plus the agent/config metadata scans (~1.4-2.1 s on this
