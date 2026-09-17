@@ -288,14 +288,69 @@ async def test_a_name_that_matches_nothing_is_unreachable_and_not_an_error(tmp_p
 async def test_narrowing_is_one_way_for_the_life_of_the_session(tmp_path):
     """A bounded reach cannot be lifted mid-run by whoever can call the setter.
     Documented rather than incidental: a host that needs a different set starts a
-    session with it."""
+    session with it.
+
+    Asserted against the REACH the declaration still produces, never against the
+    declaration's own bookkeeping and not against the materialized view on its
+    own: the defect this pins was a setter that quietly accepted the wider set
+    (and a ``refresh_tools`` that then re-derived the inventory from it), so an
+    assertion on ``tool_inventory`` taken straight after the setter observed
+    "the filter ran" while the widening attempt was never exercised. Here the
+    widening is attempted, the session is then handed the FULL candidate set —
+    the same route a lazily discovered MCP tool takes — and both the reach and
+    the provider's schema list must still exclude it. Remove the guard in
+    ``set_tool_inventory`` and this test fails on the raise, on ``bash`` coming
+    back, and on what the provider is sent.
+    """
+    all_tools = [echo_tool([], name=name) for name in ("read", "bash", "write")]
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
-    session = make_session(
-        tmp_path, stream, tools=[echo_tool([], name="read"), echo_tool([], name="bash")]
-    )
+    session = make_session(tmp_path, stream, tools=all_tools)
     session.set_tool_inventory(["read"])
+
+    with pytest.raises(ValueError):
+        session.set_tool_inventory(["read", "bash"])
+
+    # The inventory write that follows: ``bash`` must not come back through it.
+    session.refresh_tools(all_tools)
+    assert session.tool_inventory == ("read",)
+    await session.prompt("go")
+    assert surfaced_tools(stream) == ["read"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declaration_in_force_is_not_lifted_by_none(tmp_path):
+    """``names=None`` is the value an ABSENT declaration has, not the statement
+    "unrestricted". Read as a reset it restored the session's full builtin reach
+    — ``write`` and ``bash`` included — which is the same bound lifted by the
+    same setter, so the invariant above must cover it too (the docstring already
+    claimed it does)."""
+    all_tools = [echo_tool([], name=name) for name in ("read", "write")]
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, tools=all_tools)
+    session.set_tool_inventory(["read"])
+
+    session.set_tool_inventory(None)
+
+    session.refresh_tools(all_tools)
+    assert session.tool_inventory == ("read",)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_later_declaration_may_still_tighten(tmp_path):
+    """The mirror of the invariant, and the reason it is a SUBSET check rather
+    than "one declaration per session": a host may narrow further mid-run, and a
+    guard that refused every second call would break that while satisfying the
+    test above."""
+    all_tools = [echo_tool([], name=name) for name in ("read", "bash")]
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, tools=all_tools)
     session.set_tool_inventory(["read", "bash"])
 
+    session.set_tool_inventory(["read"])
+
+    session.refresh_tools(all_tools)
     assert session.tool_inventory == ("read",)
     await session.dispose()
 
@@ -458,12 +513,17 @@ async def test_only_never_arriving_names_are_reported_unresolved(tmp_path):
         ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
         tools=[echo_tool([], name="read")],
     )
-    session.set_tool_inventory(["read", "reed"])
-    assert session.unresolved_declared_tools() == ("reed",)
-
-    # A declared MCP tool that the manager CAN supply is not unresolved.
-    attach_manager(session, FakeMcpManager([echo_tool([], name="mcp__vendor_screen")]))
     session.set_tool_inventory(["read", "reed", "mcp__vendor_screen"])
+    assert session.unresolved_declared_tools() == ("mcp__vendor_screen", "reed")
+
+    # A declared MCP tool that the manager CAN supply is not unresolved. Granted
+    # by the settle path — ``session_factory`` calls this again once discovery
+    # settles, which is the route a lazily arriving server takes in production —
+    # rather than by re-declaring a wider set: a declaration is one-way, so the
+    # second ``set_tool_inventory`` this test used to make is no longer a
+    # supported way to say this (see the invariant test above).
+    attach_manager(session, FakeMcpManager([echo_tool([], name="mcp__vendor_screen")]))
+    session.materialize_declared_tools()
     assert session.unresolved_declared_tools() == ("reed",)
     await session.dispose()
 

@@ -6029,9 +6029,40 @@ class Session:
         * narrowing is ONE-WAY for the life of the session. Widening is refused
           rather than honoured because the alternative is a live session whose
           bounded reach can be lifted mid-run by whoever can call this method;
-          a host that needs a different set starts a session with it.
+          a host that needs a different set starts a session with it. Refused
+          means ENFORCED by this method rather than stated in this docstring: a
+          call naming anything outside the set already in force raises
+          ``ValueError`` and changes nothing, and ``names=None`` — the value an
+          absent declaration has — does not lift one in force.
         """
-        self._declared_tools = None if names is None else frozenset(names)
+        incoming = None if names is None else frozenset(names)
+        in_force = self._declared_tools
+        if in_force is not None:
+            # THE one-way invariant, where a caller can actually break it. The
+            # bound is a security control, so the two refusals below are what
+            # stops whoever can reach this method (a host, a front end, a future
+            # writer) from re-admitting a tool the run was declared not to have:
+            # a superset would be re-admitted by the very next ``refresh_tools``
+            # (it re-derives the inventory from the declaration), and ``None``
+            # would restore the full builtin reach. Raising on a widening call
+            # rather than intersecting: a silent intersection leaves the caller
+            # believing its superset applied, which is the same "the declared
+            # guarantee does not hold" shape this whole mechanism exists to
+            # remove — and only the caller knows whether it meant to widen.
+            if incoming is None:
+                logger.warning(
+                    "set_tool_inventory(None) ignored: this session's declaration (%s) is "
+                    "one-way for its lifetime",
+                    ", ".join(sorted(in_force)),
+                )
+                return
+            widened = sorted(incoming - in_force)
+            if widened:
+                raise ValueError(
+                    "a tool declaration is one-way for the life of a session: refusing to "
+                    f"widen {sorted(in_force)} with {widened}"
+                )
+        self._declared_tools = incoming
         self._declared_tools_unattended = bool(unattended)
         # Re-published through ``refresh_tools`` so the narrowing reaches the
         # model-facing view (``self._context.tools``) by the same route every
