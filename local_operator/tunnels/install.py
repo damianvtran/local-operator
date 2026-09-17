@@ -29,6 +29,18 @@ def _run(args: list[str], *, checked: bool = True) -> None:
         raise ValueError("Tunnel service action failed; check your user service manager.")
 
 
+def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+    """This daemon's ``launchctl``, threaded into :func:`launchd.reload_job`.
+
+    ``_run`` above stays for systemd, whose failures carry their own message.
+    This one answers with launchd's stderr intact, because the reload reports
+    launchd's own reason to the operator rather than a generic sentence.
+    """
+    return subprocess.run(  # noqa: S603 — fixed argv, no shell
+        ["launchctl", *args], capture_output=True, text=True, timeout=20
+    )
+
+
 def render_plist(config_base: Path | None = None) -> dict[str, object]:
     """The whole supervised-unit plan, for the store ``config_base`` names.
 
@@ -98,21 +110,15 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(base))
         if outcome.kind != "repaired":
             return outcome
-        domain = f"gui/{os.getuid()}"
-        # bootout + bootstrap, NOT kickstart -k: a kickstart restarts the job
-        # from launchd's in-memory definition, so it would keep running the old
-        # argv after this rewrite. Measured; see :mod:`local_operator.launchd`.
-        _run(["launchctl", "bootout", f"{domain}/{LABEL}"], checked=False)
-        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["launchctl", "bootstrap", domain, str(path)], capture_output=True, timeout=20
-        )
-        if result.returncode:
+        # bootout + bootstrap through the shared helper, NOT kickstart -k: a
+        # kickstart restarts the job from launchd's in-memory definition, so it
+        # would keep running the old argv after this rewrite. Measured; see
+        # :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
             # Names the recovery, because the job is DOWN at this point: see
             # `launchd.reload_failure`.
-            detail = result.stderr.decode(errors="replace").strip()[:200]
-            return launchd.reload_failure(
-                name, path, "lop tunnel install", detail or str(result.returncode)
-            )
+            return reloaded.as_refresh_failure(name=name, path=path, recovery="lop tunnel install")
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
@@ -127,8 +133,20 @@ def install() -> None:
         value = render_plist()
         path.write_bytes(plistlib.dumps(value))
         path.chmod(0o600)
-        _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], checked=False)
-        _run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)])
+        # Reload through the shared helper, and REPORT what launchd said. This
+        # used to issue bootout+bootstrap and raise a generic "check your user
+        # service manager" that discarded launchd's stderr while the CLI went on
+        # to print "Tunnel service started." — a false success over a daemon
+        # that had just been booted out and never loaded back. See
+        # :mod:`local_operator.launchd` for the measurement.
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
+            # The same sentence the upgrade path prints, because the state is
+            # the same one it describes: the plist is written and the job is
+            # not loaded. `lop tunnel install` is the working recovery.
+            raise ValueError(
+                launchd.reload_failure("tunnel", path, "lop tunnel install", reloaded.detail).detail
+            )
     else:
         # Systemd quoting is its own grammar, not shell escaping. Percent is
         # doubled because unit specifiers expand even inside quoted strings.
@@ -160,12 +178,22 @@ def action(name: str) -> None:
             "Tunnel service not installed. Run lop tunnel install or lop tunnel serve."
         )
     if sys.platform == "darwin":
-        domain = f"gui/{os.getuid()}"
         if name == "stop":
-            _run(["launchctl", "bootout", domain + "/" + LABEL], checked=False)
+            # A bare bootout, deliberately: stopping is not a reload, and there
+            # is nothing to bootstrap afterwards.
+            _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], checked=False)
         else:
-            _run(["launchctl", "bootstrap", domain, str(path)], checked=False)
-            _run(["launchctl", "kickstart", "-k", domain + "/" + LABEL])
+            # start/restart both mean "load the plist that is on disk now", so
+            # both go through the shared reload: the old shape bootstrapped with
+            # its failure ignored and then kickstarted, which reported success
+            # for a job that was never registered.
+            reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+            if not reloaded.ok:
+                raise ValueError(
+                    launchd.reload_failure(
+                        "tunnel", path, "lop tunnel install", reloaded.detail
+                    ).detail
+                )
     else:
         _run(["systemctl", "--user", name, path.name])
 
