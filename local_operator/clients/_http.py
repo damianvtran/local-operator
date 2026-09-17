@@ -10,8 +10,9 @@ Two shapes exist on purpose:
 
 * :func:`response_body` is the legacy shape — prose for a human, with the body
   interpolated into it. Call sites that predate machine-readable error codes
-  keep using it, and their text is unchanged apart from the falsy bug it used to
-  carry (see below).
+  keep using it; their text changed only by the falsy bug it used to carry being
+  fixed, and by :func:`redact_secrets`, which takes the caller's own credential
+  out of a body an upstream may have reflected it into.
 * :class:`APIError` is the structured one — the upstream's own ``error`` prose
   plus its stable ``code`` and ``details`` as attributes. A caller that has to
   CHOOSE A NEXT STEP from a refusal (the desktop app has to distinguish a taken
