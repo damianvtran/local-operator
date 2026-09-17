@@ -112,6 +112,10 @@ def test_list_models_api_error(openrouter_client: OpenRouterClient) -> None:
     """
     mock_requests_get = MagicMock()
     mock_requests_get.return_value.status_code = 400
+    # `content` is bytes on a real Response, and the error path now decodes AND
+    # scrubs it, so a Mock here is not a stand-in for anything: it is a double of
+    # the wrong type.
+    mock_requests_get.return_value.content = b'{"error": "bad request"}'
     mock_requests_get.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(
         "Bad Request", response=mock_requests_get.return_value
     )

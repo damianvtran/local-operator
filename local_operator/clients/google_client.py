@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Literal, Optional, Union, overload
 import requests
 from pydantic import BaseModel
 
+from local_operator.clients._http import scrub_secrets
+
 logger = logging.getLogger(__name__)
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/"
@@ -354,12 +356,17 @@ class GoogleClient:
                 logger.error(f"Google API request failed: {e}", exc_info=True)
                 raise GoogleAPIError(f"Google API request failed: {e}") from e
             status_code = error_response.status_code
-            error_message = f"Google API request failed: {error_response.text}"
+            # Every body-derived string in these messages goes through the shared
+            # scrubber: Google echoes the request it received into its errors, and
+            # an OAuth refresh sends the client secret in the same request.
+            error_message = f"Google API request failed: {scrub_secrets(error_response.text)}"
             try:
                 error_details = error_response.json()
                 if "error" in error_details and "message" in error_details["error"]:
                     err_msg = error_details["error"]["message"]
-                    error_message = f"Google API Error: {err_msg} (Status: {status_code})"
+                    error_message = (
+                        f"Google API Error: {scrub_secrets(err_msg)} (Status: {status_code})"
+                    )
             except json.JSONDecodeError:
                 pass  # Stick with the text if JSON decoding fails
             logger.error(error_message, exc_info=True)
@@ -884,7 +891,8 @@ class GoogleClient:
                     f"Drive multipart upload (simulated) request failed: {e}"
                 ) from e
             raise GoogleAPIError(
-                f"Drive multipart upload (simulated) failed: {error_response.text}",
+                f"Drive multipart upload (simulated) failed: "
+                f"{scrub_secrets(error_response.text)}",
                 error_response.status_code,
             ) from e
         except requests.exceptions.RequestException as e:
@@ -999,15 +1007,20 @@ def refresh_google_access_token(
             logger.error(f"Google token refresh request failed: {e}", exc_info=True)
             raise GoogleAPIError(f"Google token refresh request failed: {e}") from e
         status_code = error_response.status_code
-        error_message = f"Google token refresh failed: {error_response.text}"
+        error_message = f"Google token refresh failed: {scrub_secrets(error_response.text)}"
         try:
             error_details = error_response.json()
             if "error_description" in error_details:  # Google often uses error_description here
                 err_desc = error_details["error_description"]
-                error_message = f"Google Token Refresh Error: {err_desc} (Status: {status_code})"
+                error_message = (
+                    f"Google Token Refresh Error: {scrub_secrets(err_desc)} "
+                    f"(Status: {status_code})"
+                )
             elif "error" in error_details and isinstance(error_details["error"], str):
                 err = error_details["error"]
-                error_message = f"Google Token Refresh Error: {err} (Status: {status_code})"
+                error_message = (
+                    f"Google Token Refresh Error: {scrub_secrets(err)} (Status: {status_code})"
+                )
 
         except json.JSONDecodeError:
             pass

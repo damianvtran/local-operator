@@ -4,6 +4,7 @@ Agent management endpoints for the Local Operator API.
 This module contains the FastAPI route handlers for agent-related endpoints.
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -11,11 +12,12 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path as FilePath
-from typing import Dict
+from typing import Any, Dict, Optional
 
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     Depends,
     File,
     HTTPException,
@@ -25,10 +27,21 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    is_specialist,
+    profile_from_agent,
+)
 from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
-from local_operator.clients.radient import RadientClient
+from local_operator.clients._http import APIError, scrub_details
+from local_operator.clients.radient import (
+    InstructionSetError,
+    RadientClient,
+    build_instruction_set_document,
+    validate_document_overrides,
+)
 from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig, get_env_config
 from local_operator.providers.auth_store import AuthStore
@@ -608,6 +621,613 @@ async def download_agent_from_radient(
     except Exception as e:
         logger.exception("Error downloading agent from Radient")
         raise HTTPException(status_code=400, detail=f"Error downloading agent from Radient: {e}")
+
+
+# --- Instruction-set publication ---------------------------------------------
+#
+# These routes carry the DOCUMENT, not the id, and they are the reason the zip
+# upload path above can stay untouched: a published agent is an instruction set
+# (contract §1), and an archive is how an agent published under the old standard
+# is still updated and pulled. Every failure here answers with a STRUCTURE --
+# ``{code, message, details}`` -- because a duplicate name, a reserved built-in
+# name, a moderation refusal and an oversized document are indistinguishable
+# behind one prose sentence, and each needs a different next step from the user.
+
+#: The hub's refusal codes mapped onto the HTTP status the desktop app's error
+#: surface switches on (contract §2.4, §6.2). The hub's own status travels through
+#: unchanged; these are the fallback when a code arrives without one, and they are
+#: the mapping the tests pin per code.
+#:
+#: ``name_claim_in_flight`` is the ninth code and the newest (agent-server #31): no
+#: row holds the name, but a concurrent write holds it transiently. It is a 409
+#: like ``name_taken`` and it needs a different next step — the caller RETRIES,
+#: where a taken name is answered by choosing another — which is why the hub gives
+#: it a code of its own and carries ``details.retryable``. It is listed here so the
+#: status is right even if a hub ever sends it without one; the payload itself is
+#: passed through untouched, which is what tells the renderer what to do.
+PUBLICATION_STATUS_BY_CODE: Dict[str, int] = {
+    "invalid_instruction_set": 422,
+    "moderation_rejected": 422,
+    "payload_too_large": 413,
+    "name_taken": 409,
+    "name_claim_in_flight": 409,
+    "name_reserved_builtin": 409,
+    "not_owner": 403,
+    "agent_not_found": 404,
+    "moderation_unavailable": 503,
+}
+
+#: The three codes this proxy adds to the hub's vocabulary. They exist because the
+#: proxy can fail in ways the hub never sees and never describes: it can fail to
+#: REACH the hub (``hub_unavailable``), it can fail on this machine before the
+#: hub is asked anything (``local_failure``), and the hub can REFUSE THIS
+#: MACHINE'S CREDENTIAL (``hub_unauthorized``) -- which the hub answers with a
+#: status rather than with a code of its own, so the vocabulary has to name it.
+#: Reporting any of them as a hub code would misdescribe which side failed.
+HUB_UNAVAILABLE_CODE = "hub_unavailable"
+LOCAL_FAILURE_CODE = "local_failure"
+#: A refusal of this machine's Radient credential, on a route that authenticates
+#: with it. Deliberately NOT a member of :data:`PUBLICATION_STATUS_BY_CODE`: that
+#: table is the HUB's vocabulary, and this code is the proxy's own. The status is
+#: always the hub's here (a code we do not know still arrives on a real response),
+#: so nothing needs a fallback for it.
+#:
+#: WHY IT IS NOT ``hub_unavailable``: the two need opposite next steps. This one
+#: means "the hub answered, your key was refused" -- re-authenticate, and retrying
+#: cannot help. ``hub_unavailable`` means "we could not reach it, or it did not
+#: answer in its own vocabulary" -- retry. A renderer told the first when the
+#: second is true (or the reverse, which is what shipped) sends the user to do the
+#: one thing that cannot work. The hub's prose travels in ``message`` unchanged
+#: either way, so a client that ignores ``code`` loses nothing by the change.
+HUB_UNAUTHORIZED_CODE = "hub_unauthorized"
+
+#: Local registry tags that ENCODE a profile field rather than tag the agent.
+#: ``role`` marks the row as a delegation role, and ``tools:``/``effort:``/
+#: ``delegate:`` carry fields the document publishes in their own right (the keys
+#: ``profile_from_agent`` decodes). Publishing them as tags as well would put this
+#: machine's registry encoding on the hub.
+PROFILE_ENCODING_TAG_KEYS = frozenset({"role", "tools", "effort", "delegate"})
+
+
+class AgentPublicationRequest(BaseModel):
+    """The request body of a publish or republish (contract §6.4).
+
+    ``document`` is deliberately open rather than a pydantic model: the closed
+    field set of a version-1 document is enforced by
+    :func:`validate_document_overrides`, so an undefined key is refused with
+    ``invalid_instruction_set`` naming the field -- exactly as the hub refuses it.
+    A pydantic model would instead drop the key, which is how a publisher comes to
+    believe it published something it did not.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The fields the caller is overriding. Anything omitted is read from the
+    #: local agent row, which is where the instruction body actually lives.
+    document: Dict[str, Any] = Field(default_factory=dict)
+    #: The hub listing to update. Required to republish: the local registry keeps
+    #: no link to the listing an agent was published as, so a republish that did
+    #: not name one would have to guess which row to overwrite.
+    hub_agent_id: Optional[str] = Field(default=None, max_length=128)
+
+
+def _publication_detail(
+    code: str, message: str, details: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """The structured ``detail`` of a publication failure.
+
+    ``code`` is the key the renderer switches on and the only stable part;
+    ``message`` is the sentence a human reads (the hub composes its own, so it is
+    used unchanged); ``details`` carries the machine-readable rest -- which field
+    was wrong, which built-in reserved the name, which moderation categories were
+    cited -- and holds no prose, so a client that renders only ``message`` still
+    reads correctly.
+
+    THIS IS THE BOUNDARY, so the masker runs HERE rather than at each arm that
+    builds a detail. What a caller receives is this body and nothing else, and
+    ``message``/``details`` both carry upstream text -- a hub is free to reflect
+    the request it refused into either, and ``details.rule``/``details.field`` are
+    values this app RENDERS. Masking here rather than at the call sites means the
+    property holds for the arm that forwards the hub's ``details``, for the arm
+    that substitutes a code, and for the LOCAL validation arm, and it does not rest
+    on how the :class:`APIError` was built: the client masks the value it raises
+    (``_http.api_error_from_response``, which is what knows the machine's own key
+    and can remove it exactly), while this masks the body it answers with, for the
+    case where the exception came from somewhere else.
+    """
+
+    return {
+        "code": code,
+        "message": scrub_details(message),
+        "details": scrub_details(dict(details or {})),
+    }
+
+
+def _publication_http_error(exc: APIError) -> HTTPException:
+    """Map a hub refusal onto the local response.
+
+    A code the vocabulary defines keeps its meaning and its status; a REFUSAL OF
+    THIS MACHINE'S CREDENTIAL (401, or a 403 no known code accounts for) is
+    reported as :data:`HUB_UNAUTHORIZED_CODE` so the caller re-authenticates;
+    anything else is the hub failing to describe a failure, which is reported as
+    :data:`HUB_UNAVAILABLE_CODE` with a 502 rather than as a rejection of the
+    document the user sent. The upstream BODY never travels: a response shape we do
+    not recognise is the case where the body may be a proxy's HTML page, and that
+    belongs in neither the response nor the log.
+    """
+
+    if exc.code in PUBLICATION_STATUS_BY_CODE:
+        return HTTPException(
+            status_code=exc.status_code or PUBLICATION_STATUS_BY_CODE[exc.code],
+            detail=_publication_detail(exc.code, str(exc), exc.details),
+        )
+    # The auth arm, and the order matters: a KNOWN code wins above, so the hub's
+    # ``not_owner`` keeps its own meaning on the 403 it arrives with. What is left
+    # is a status that says the hub answered and refused the CALLER -- 401 always,
+    # and a 403 nothing in the vocabulary explains. The hub's own status travels
+    # through, so an expired key reads as 401 rather than as a 502 about reach.
+    #
+    # The hub's ``details`` are NOT passed through here, unlike the known-code arm:
+    # an unrecognised refusal's details are the one part of that body we have no
+    # shape for, and an auth refusal has never needed more than its code and
+    # sentence. The hub's own CODE is a different thing and IS carried, under
+    # ``hub_code``: ``hub_unauthorized`` says which side refused and what to do
+    # about it, and it is also the one thing that loses the distinction the hub did
+    # make -- a 401 for an EXPIRED key and a 401 for a REVOKED one both answer with
+    # this code, so a renderer that switches on ``code`` alone cannot tell the two
+    # apart. Publishing the hub's code as the OUTWARD ``code`` is the change that
+    # was rightly rejected (a closed set in the renderer, and an invented member it
+    # has no treatment for -- the same objection that keeps the 429 on the retry
+    # arm). Inside ``details`` it is ADDITIVE: the outward code, and every renderer
+    # that keys on it, is untouched. local-operator-ui#285 reads ``details`` by
+    # NAME (``field``, ``rule``, ``existing_agent_id``, ``categories``, ...) and
+    # never enumerates it, so an unfamiliar key is carried and unread; and its
+    # ``publicationErrorFromBody`` does not yet list ``hub_unauthorized`` in
+    # ``PUBLICATION_ERROR_CODES``, so it takes its prose fallback for this whole
+    # arm today -- i.e. this addition cannot change what an existing renderer
+    # paints, in either direction. It is also absent when the hub sent no code, so
+    # the live hub's prose-only 401 answers exactly as it did before.
+    if exc.status_code in (401, 403):
+        logger.warning(
+            "Radient Agent Hub refused this machine's credential: HTTP %s", exc.status_code
+        )
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=_publication_detail(
+                HUB_UNAUTHORIZED_CODE,
+                str(exc),
+                {"hub_code": exc.code} if exc.code else None,
+            ),
+        )
+    logger.warning(
+        "Radient Agent Hub returned an unrecognised publication failure: HTTP %s",
+        exc.status_code,
+    )
+    return HTTPException(
+        status_code=502,
+        detail=_publication_detail(HUB_UNAVAILABLE_CODE, str(exc)),
+    )
+
+
+def _invalid_document_error(exc: InstructionSetError) -> HTTPException:
+    """Refuse a document this machine can already see is invalid.
+
+    The rule text is the hub's own, so the user reads the same sentence whichever
+    side refused it and the renderer needs one branch for both.
+    """
+
+    return HTTPException(
+        status_code=422,
+        detail=_publication_detail("invalid_instruction_set", str(exc), exc.details),
+    )
+
+
+def _instruction_set_fields(
+    agent_registry: AgentRegistry, agent: AgentData, overrides: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The document fields a local registry row publishes, before overrides.
+
+    WHY THIS MACHINE BUILDS THE DOCUMENT AND NOT THE DESKTOP APP: the instruction
+    body lives here -- in the agent's ``system_prompt.md`` -- so an app-assembled
+    document would be a second, drifting copy of the local-to-hub mapping. The
+    renderer supplies through ``document`` only what it actually edits, and
+    everything else comes from the row the user is looking at.
+    """
+
+    profile = profile_from_agent(agent_registry, agent)
+    # The profile's instructions are the delegation PREAMBLE: capped, because they
+    # ride in front of every turn of a child. A publication must not be truncated,
+    # because a body silently cut short is a document the author never wrote,
+    # published under their name. So the body is read unbounded here and the
+    # document's own cap refuses it with the rule the hub would use.
+    instructions = agent_registry.get_agent_system_prompt(agent.id) or ""
+
+    fields: Dict[str, Any] = {
+        "name": agent.name,
+        "description": str(agent.description or ""),
+        "instructions": instructions,
+        # Locally, role and specialist are a registry tag and a category; the hub
+        # has one explicit `kind`. A row that is neither is published as a role: a
+        # published agent IS a role to whoever pulls it, and refusing it would
+        # leave the user unable to publish an agent for a reason the dialog cannot
+        # explain or offer a fix for.
+        "kind": "specialist" if is_specialist(agent) else "role",
+        # The AUTHOR's content version. Deliberately not the row's `version`, which
+        # records the local-operator release that wrote agent.yml: reusing it would
+        # publish an application version as the author's own.
+        "version": "1.0.0",
+        "tags": [
+            str(tag)
+            for tag in (agent.tags or [])
+            if str(tag).partition(":")[0].strip().lower() not in PROFILE_ENCODING_TAG_KEYS
+            and not str(tag).startswith(SEED_ORIGIN_PREFIX)
+        ],
+    }
+    # `when_to_use` and `categories` are NOT derived. Locally a role stores its
+    # routing text AS the description (``profile_from_agent``), so sending both
+    # would publish one sentence twice; and the local category vocabulary is not
+    # the hub's -- `specialist` is a local kind marker, not one of the hub's
+    # categories -- so translating between them silently is the one thing neither
+    # side is allowed to do. The caller supplies them when it means them.
+    if profile.tools is not None:
+        fields["tools"] = list(profile.tools)
+    if profile.effort:
+        fields["effort"] = profile.effort
+    fields["delegate"] = profile.may_delegate
+
+    fields.update(overrides)
+    return fields
+
+
+@router.post(
+    "/v1/agents/{agent_id}/publish",
+    response_model=CRUDResponse,
+    summary="Publish an agent's instruction set to the Radient Agent Hub",
+    description=(
+        "Publish the agent with the given ID to the Radient Agent Hub as a version-1 "
+        "instruction-set document. Requires RADIENT_API_KEY. Failures answer with a "
+        "structured detail carrying the hub's own error code."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Agent published to Radient",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "Agent published to Radient successfully",
+                            "result": {
+                                "agent_id": "8f1c...",
+                                "name": "adverse-media-screener",
+                                "version": "1.0.0",
+                                "document_version": 1,
+                                "moderation": {"verdict": "allow"},
+                            },
+                        }
+                    }
+                },
+            },
+            "409": {
+                "description": "The name is already published, or is reserved by a built-in",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "detail": {
+                                "code": "name_taken",
+                                "message": 'The name "Coder" is already published on the hub.',
+                                "details": {
+                                    "existing_agent_id": "8f1c...",
+                                    "owned_by_caller": False,
+                                },
+                            }
+                        }
+                    }
+                },
+            },
+            "422": {
+                "description": "The document is invalid, or the review refused it",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "detail": {
+                                "code": "invalid_instruction_set",
+                                "message": "The agent document is not valid: kind must be "
+                                '"role" or "specialist".',
+                                "details": {
+                                    "field": "kind",
+                                    "rule": 'must be "role" or "specialist"',
+                                },
+                            }
+                        }
+                    }
+                },
+            },
+            "503": {
+                "description": "Publication review is temporarily unavailable",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "detail": {
+                                "code": "moderation_unavailable",
+                                "message": "Publication review is temporarily unavailable. "
+                                "Try again shortly.",
+                                "details": {"attempts": 2},
+                            }
+                        }
+                    }
+                },
+            },
+        }
+    },
+)
+async def publish_agent_to_radient(
+    agent_id: str = Path(
+        ..., description="ID of the local agent to publish", examples=["agent123"]
+    ),
+    publication: AgentPublicationRequest = Body(default_factory=AgentPublicationRequest),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
+    credential_manager: CredentialManager = Depends(get_credential_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """
+    Publish the agent with the given ID to the Radient Agent Hub.
+
+    The document is built from the local row (see :func:`_instruction_set_fields`)
+    with any caller-supplied overrides applied, then posted to the hub's publish
+    endpoint. Nothing else about the row travels: no conversation, no execution
+    history, no learnings, no schedules, no plan, no pickled context, no working
+    directory, no model, no hosting, no security prompt.
+    """
+    try:
+        # Get config and credentials
+        from local_operator.providers.radient_credentials import (
+            resolve_radient_credential,
+        )
+
+        api_key = await resolve_radient_credential(
+            credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+        )
+        if not api_key:
+            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+
+        try:
+            agent = agent_registry.get_agent(agent_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+
+        try:
+            overrides = validate_document_overrides(publication.document)
+            document = build_instruction_set_document(
+                **_instruction_set_fields(agent_registry, agent, overrides)
+            )
+        except InstructionSetError as exc:
+            raise _invalid_document_error(exc)
+
+        radient_client = RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
+        try:
+            # On a worker thread: a publication is reviewed by a model on the hub,
+            # which takes seconds to tens of seconds, and the legacy zip upload's
+            # precedent of calling the client inline would park this server's
+            # event loop -- and therefore every other session -- for that whole
+            # time.
+            result = await asyncio.to_thread(radient_client.publish_agent_instruction_set, document)
+        except APIError as exc:
+            logger.info(
+                "Radient Agent Hub refused a publication (code=%s, HTTP %s)",
+                exc.code,
+                exc.status_code,
+            )
+            raise _publication_http_error(exc)
+
+        return CRUDResponse(
+            status=200,
+            message="Agent published to Radient successfully",
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error publishing agent to Radient")
+        # If the error is about missing API key, return a clear message
+        if "RADIENT_API_KEY" in str(e) or "credential" in str(e):
+            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+        raise HTTPException(
+            status_code=500,
+            detail=_publication_detail(
+                LOCAL_FAILURE_CODE, "This agent could not be published from this machine."
+            ),
+        )
+
+
+@router.put(
+    "/v1/agents/{agent_id}/publish",
+    response_model=CRUDResponse,
+    summary="Republish an agent's instruction set to the Radient Agent Hub",
+    description=(
+        "Update a hub listing with the agent's current instruction set. Requires "
+        "RADIENT_API_KEY and the id of the listing to update; only the account that "
+        "published it may."
+    ),
+)
+async def republish_agent_to_radient(
+    agent_id: str = Path(
+        ..., description="ID of the local agent to republish", examples=["agent123"]
+    ),
+    publication: AgentPublicationRequest = Body(default_factory=AgentPublicationRequest),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
+    env_config: EnvConfig = Depends(get_env_config),
+    credential_manager: CredentialManager = Depends(get_credential_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """
+    Update a hub listing with the local agent's current instruction set.
+
+    The listing is named by ``hub_agent_id``: the local registry holds no link to
+    the listing an agent was published as, so the caller -- which is looking at
+    the listing -- is the only side that knows it.
+    """
+    try:
+        from local_operator.providers.radient_credentials import (
+            resolve_radient_credential,
+        )
+
+        api_key = await resolve_radient_credential(
+            credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+        )
+        if not api_key:
+            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+
+        if not publication.hub_agent_id:
+            raise HTTPException(
+                status_code=422,
+                detail=_publication_detail(
+                    "invalid_instruction_set",
+                    "An update needs the id of the listing to update: "
+                    "the agent document is not valid: hub_agent_id must not be empty.",
+                    {"field": "hub_agent_id", "rule": "must not be empty"},
+                ),
+            )
+
+        try:
+            agent = agent_registry.get_agent(agent_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+
+        try:
+            overrides = validate_document_overrides(publication.document)
+            document = build_instruction_set_document(
+                **_instruction_set_fields(agent_registry, agent, overrides)
+            )
+        except InstructionSetError as exc:
+            raise _invalid_document_error(exc)
+
+        radient_client = RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
+        try:
+            result = await asyncio.to_thread(
+                radient_client.republish_agent_instruction_set,
+                publication.hub_agent_id,
+                document,
+            )
+        except APIError as exc:
+            logger.info(
+                "Radient Agent Hub refused a republish (code=%s, HTTP %s)",
+                exc.code,
+                exc.status_code,
+            )
+            raise _publication_http_error(exc)
+
+        return CRUDResponse(
+            status=200,
+            message="Agent republished to Radient successfully",
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error republishing agent to Radient")
+        if "RADIENT_API_KEY" in str(e) or "credential" in str(e):
+            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+        raise HTTPException(
+            status_code=500,
+            detail=_publication_detail(
+                LOCAL_FAILURE_CODE, "This agent could not be republished from this machine."
+            ),
+        )
+
+
+@router.get(
+    "/v1/agent-name-availability",
+    response_model=CRUDResponse,
+    summary="Check whether an agent name is publishable",
+    description=(
+        "Ask the Radient Agent Hub whether a name can be published. Public, and "
+        "advisory: a name reported available can still be taken by a concurrent "
+        "publication."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Name availability checked",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "status": 200,
+                            "message": "Name availability checked",
+                            "result": {
+                                "name": "adverse-media-screener",
+                                "name_key": "adverse media screener",
+                                "available": False,
+                                "code": "name_reserved_builtin",
+                                "details": {"builtin_name": "reviewer"},
+                            },
+                        }
+                    }
+                },
+            },
+            "422": {
+                "description": "The name is not a valid agent name",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "detail": {
+                                "code": "invalid_instruction_set",
+                                "message": "The agent document is not valid: name must not "
+                                "contain whitespace.",
+                                "details": {
+                                    "field": "name",
+                                    "rule": "must not contain whitespace",
+                                },
+                            }
+                        }
+                    }
+                },
+            },
+        }
+    },
+)
+async def check_agent_name_availability(
+    name: str = Query(
+        ..., description="The agent name to check", examples=["adverse-media-screener"]
+    ),
+    env_config: EnvConfig = Depends(get_env_config),
+):
+    """
+    Ask the hub whether a name is publishable.
+
+    Public on the hub, so no credential is resolved: a courtesy check that needed
+    a signed-in account would be unavailable in exactly the state where a user is
+    deciding whether to sign in.
+    """
+    try:
+        # API key not required for this endpoint
+        radient_client = RadientClient(api_key=None, base_url=env_config.radient_api_base_url)
+        try:
+            result = await asyncio.to_thread(radient_client.check_agent_name_availability, name)
+        except APIError as exc:
+            logger.info(
+                "Radient Agent Hub refused a name availability check (code=%s, HTTP %s)",
+                exc.code,
+                exc.status_code,
+            )
+            raise _publication_http_error(exc)
+
+        return CRUDResponse(
+            status=200,
+            message="Name availability checked",
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error checking agent name availability on Radient")
+        raise HTTPException(
+            status_code=500,
+            detail=_publication_detail(
+                LOCAL_FAILURE_CODE, "The agent name could not be checked from this machine."
+            ),
+        )
 
 
 @router.delete(
