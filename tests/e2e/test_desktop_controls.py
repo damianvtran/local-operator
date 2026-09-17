@@ -278,19 +278,6 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             loop_id = request_id()
             started = await command("loop", "2", loop_id)
             assert started["data"]["status"] == "running"
-            # The refusal at the surface it exists for, as a STATUS: `/loop
-            # --clear` while the driver runs used to answer 200 with `kind:
-            # error`, so a client reading the status could not tell it from a
-            # success (round 1, reviewer MINOR-4). A raw POST rather than
-            # `command(...)`, which asserts 200. The loop must keep running,
-            # and neither refusal may consume a provider turn.
-            clearing = await client.post(
-                target + "/commands",
-                json={"request_id": request_id(), "command": "loop", "args": "--clear"},
-            )
-            assert clearing.status_code == 409, clearing.text
-            assert "/loop --stop" in clearing.json()["detail"]
-            assert handle._goal_loop.running, "the refusal cancelled live work"
             await until(lambda: handle._goal_loop.state["status"] == "completed")
             await command("loop", "2", loop_id)
             assert len(stream.requests) == 4
@@ -404,6 +391,22 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             stream.block = True
             await command("loop", "3")
             await asyncio.wait_for(stream.started.wait(), 15)
+            # The refusal at the surface it exists for, as a STATUS: `/loop
+            # --clear` while the driver runs used to answer 200 with `kind:
+            # error`, so a client reading the status could not tell it from a
+            # success (round 1, reviewer MINOR-4). A raw POST rather than
+            # `command(...)`, which asserts 200. It sits HERE, inside the blocked
+            # turn, because the refusal needs a loop that is genuinely mid-flight:
+            # the scripted stream answers a 2-iteration loop faster than a POST can
+            # follow it, which is how this cell first passed locally and failed in
+            # CI on an idle driver (it dismissed the state instead of refusing).
+            clearing = await client.post(
+                target + "/commands",
+                json={"request_id": request_id(), "command": "loop", "args": "--clear"},
+            )
+            assert clearing.status_code == 409, clearing.text
+            assert "/loop --stop" in clearing.json()["detail"]
+            assert handle._goal_loop.running, "the refusal cancelled live work"
             cancelled = await command("loop", "cancel")
             assert cancelled["data"]["status"] == "cancelled"
             await until(lambda: not session.is_streaming and not handle._prompt_queue)

@@ -495,6 +495,42 @@ async def test_an_idle_loop_offers_nothing() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "bare"),
+    [("goal", "clear"), ("loop", "stop")],
+)
+async def test_the_bare_word_still_acts_on_one_enter(command: str, bare: str) -> None:
+    """The row is `alert`, and the BARE word is still spelled-in-full.
+
+    The row is named with its dashes (`--clear`, `--stop`) while the same action
+    has a bare spelling both commands have always honoured and this PR keeps
+    (`clear`/`none`/`reset`, `stop`/`cancel`/`abort`) — the words the pre-existing
+    `test_app_pilot` pins type. So `Editor._picker_choice_is_unambiguous` counts
+    either spelling as "typed in full": the first cut of the `alert` gate treated
+    only `--clear` as spelled, which turned `/goal clear` + Enter (one keystroke
+    before the row existed) into a completion needing a second one.
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._loop_running = command == "loop"
+        expected_row = "--clear" if command == "goal" else "--stop"
+        editor = await _draft(app, pilot, f"/{command} {bare}")
+        assert _row_names(editor) == [expected_row], editor.picker.render_rows(100)
+        await pilot.press("enter")
+        await _settle(pilot, app)
+        if command == "goal":
+            assert session.goal == ""
+            assert session.prompts == []
+        else:
+            assert app._loop_cancelled is True
+        # The row was RUN, not completed into the buffer: one keystroke, as before.
+        assert editor.text == ""
+
+
+@pytest.mark.asyncio
 async def test_accepting_the_goal_row_fills_before_it_runs() -> None:
     """Two Enters, because one Enter used to destroy what the keystroke READS.
 
