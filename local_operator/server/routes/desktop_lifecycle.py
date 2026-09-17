@@ -204,7 +204,13 @@ def asides(request: Request) -> dict[str, Aside]:
 
 @router.get("/v1/desktop/sessions/{session_id}/mcp", response_model=CRUDResponse[Result])
 async def mcp_status(session_id: str, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: the cold branch below is a COMPLETE answer (the on-disk config set for
+    # the session's cwd), so this GET must not be refused because a live owner is
+    # slow — that is the reported asymmetry surviving on the MCP row, where the
+    # same session answered 200 with no owner at all and 503 with a silent one.
+    # The live branch is untouched: a bound owner still answers from its own
+    # runtime.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
             from local_operator.mcp.config import (
@@ -299,11 +305,30 @@ async def variables(session_id: str, request: Request):
     agent-directory UUIDs and answered 404 for every canonical session id, which
     is why this surface exists. This one reads the answer off the session's own
     runtime — the only place the namespace exists — and a cold session is read
-    WITHOUT engaging one.
+    WITHOUT engaging one. It is therefore a READ in the route sense too: the
+    durable answer exists whether or not an owner is answering, so a silent owner
+    must not turn this GET into a 503. The three MUTATIONS beside it stay on the
+    control envelope: none can be served without an owner, and a refusal one of
+    them did make has to say so.
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         if bridge.remote.is_cold:
+            # THE COLD PAYLOAD DEPENDS ON WHY IT IS COLD, because ``variables: []``
+            # means "observed and empty, never unknown" (see ``read_variables``
+            # above). ``no-runtime`` is the genuine absent case and keeps that
+            # reading: no pid holds the lease, so there is no namespace to read
+            # and the panel's "no code memory yet" is true. A ``owner-silent`` or
+            # ``owner-leaving`` facade is the opposite claim — a runtime holds the
+            # lease and simply did not answer — and answering the observed/empty
+            # payload there renders "Nothing stored yet" over a namespace nobody
+            # read, which is the same false "no runtime" statement this read mode
+            # exists to remove (review round 2, MINOR-2). ``busy`` is the retryable
+            # state the panel already renders for a namespace it could not read;
+            # it carries no ``variables`` key precisely so nothing can render it
+            # as empty.
+            if bridge.remote.cold_reason in ("owner-silent", "owner-leaving"):
+                return reply({"data": {"state": "busy"}})
             return reply({"data": dict(_COLD_VARIABLES)})
         answer = await bridge.remote.variables_op("list")
         return reply({"data": read_variables(answer)})
