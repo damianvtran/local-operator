@@ -19,16 +19,46 @@ Every test installs a ``post_message`` spy on the editor AND reads
 ``session.prompts``, so each claim is about the real app path and not about the
 widget in isolation. ``session.prompts`` counts user prompts only; the system
 prompt is ignored.
+
+The composer is not the only reader of the byte. ``Editor._on_key`` normalises
+the name it gates on, but it also hands the EVENT to the app's live-prompt
+router (``OperatorApp.route_key_to_live_prompt``), which compares ``event.key``
+itself — so a rewrite of the local name alone left an LF spelled ``ctrl+j``
+there. With an answer key held that fell through to
+``editor.insert(held.character)``, and this method then submitted the restored
+character as a CHAT PROMPT while the question stayed up unanswered: measured as
+``prompts == ["y"]`` with the approval card still mounted, against CR's
+answered prompt. That is a regression on the pre-fix behaviour, where the inert
+byte left the hold timer to commit the answer, and it is deterministic for
+integration delivery — both bytes of one ``"y\\n"`` write land inside the hold
+window by construction, not by timing luck. So the byte is normalised on the
+EVENT as well, and the router is pinned here beside the composer.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 from textual import events
 
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.editor import EditorSubmitted
+from local_operator.tui.widgets.approval import ApprovalPrompt
+from local_operator.tui.widgets.editor import Editor, EditorSubmitted
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+# The hold fixture is IMPORTED rather than rebuilt, for the reason
+# `test_paste_collapse` imports `skill_root`: a second definition of the
+# stretch is how two files come to disagree about how long "held" is. It is
+# activated with `usefixtures` rather than taken as a parameter, because a
+# parameter of the same name shadows this import (F811) and none of these tests
+# reads what it returns — they read the app's own `_held_answer_key`.
+from tests.unit.tui.test_steering_approval import (  # noqa: F401
+    SteerableSession,
+    _booted_gate,
+    _focus_composer,
+    unraceable_answer_hold,
+)
 from tests.unit.tui.test_word_caret import _boot, _feed
 
 
@@ -207,3 +237,139 @@ async def test_a_bracketed_paste_with_a_newline_does_not_submit() -> None:
 
         assert editor.text == "alphabeta\ngamma\n"
         assert submitted == []
+
+
+async def _answered_from_bytes(deliver) -> dict:  # type: ignore[no-untyped-def]
+    """Run a live approval with the composer focused, then deliver BYTES.
+
+    ``deliver(pilot, app, editor)`` is the only difference between the cases:
+    the answer key pressed and then a terminator, or the whole write at once.
+    Both go through the same ``_feed`` seam as the composer tests, so what is
+    measured is what the terminal writes. The hold is stretched by
+    ``unraceable_answer_hold``, which makes "the deadline never fired first"
+    true by construction rather than by timing luck.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        ask = await _booted_gate(pilot, session)
+        pending = asyncio.ensure_future(ask("bash", "run: rm -rf ./build"))
+        for _ in range(100):
+            if app.query(ApprovalPrompt):
+                break
+            await pilot.pause(0.02)
+        await pilot.pause()
+        await _focus_composer(pilot, app)
+        editor = app.query_one(Editor)
+        submitted = _spy_submissions(editor)
+
+        await deliver(pilot, app, editor)
+        for _ in range(4):
+            await pilot.pause()
+
+        try:
+            resolved = await asyncio.wait_for(asyncio.shield(pending), 2)
+        except asyncio.TimeoutError:
+            resolved = None
+        pending.cancel()
+        return {
+            "resolved": resolved,
+            "submitted": submitted,
+            "prompts": list(session.prompts),
+            "card_still_up": bool(app.query(ApprovalPrompt)),
+            "editor_text": editor.text,
+        }
+
+
+async def _held_answer_after_byte(byte: str) -> dict:
+    """Hold the `y` answer key, then deliver ``byte`` from the driver."""
+
+    async def deliver(pilot, app, editor) -> None:  # type: ignore[no-untyped-def]
+        await pilot.press("y")
+        await pilot.pause()
+        assert app._held_answer_key is not None, "precondition: the answer key is held"
+        await _feed(app, byte)
+
+    return await _answered_from_bytes(deliver)
+
+
+async def _single_write_after(text: str) -> dict:
+    """Deliver the answer key AND its terminator in ONE write.
+
+    This is the shape an integration produces: sidekick.nvim, tmux and every
+    editor plugin hand the terminal a whole line in one write, so both bytes
+    land inside the hold window by construction. There is no composition step
+    in which a human's inter-key interval could intervene.
+    """
+
+    async def deliver(pilot, app, editor) -> None:  # type: ignore[no-untyped-def]
+        await _feed(app, text)
+
+    return await _answered_from_bytes(deliver)
+
+
+@pytest.mark.usefixtures("unraceable_answer_hold")
+@pytest.mark.asyncio
+async def test_an_lf_byte_takes_a_held_answer_key_like_enter() -> None:
+    """The byte must be Enter at the ROUTER too, not only in the composer.
+
+    Rewriting the composer's local name left the event itself spelled `ctrl+j`,
+    and the router reads the event: the held `y` was restored into the buffer
+    and then submitted as a chat prompt while the question sat there waiting.
+    That regressed the pre-fix behaviour, so the byte is normalised on the
+    event as well.
+    """
+    obs = await _held_answer_after_byte("\n")
+
+    assert obs["resolved"] is True, f"the LF never answered the question: {obs}"
+    assert obs["submitted"] == [], f"the held character became a prompt: {obs}"
+    assert obs["prompts"] == [], f"the answer went to the agent: {obs}"
+    assert obs["card_still_up"] is False, f"the card never resolved: {obs}"
+    assert obs["editor_text"] == "", f"the answer key was left in the buffer: {obs}"
+
+
+@pytest.mark.usefixtures("unraceable_answer_hold")
+@pytest.mark.asyncio
+async def test_an_lf_that_ends_one_write_answers_like_cr() -> None:
+    """The integration form: `y` and the terminator in the SAME write.
+
+    The pressed-key test above has a gap between the two events that a write
+    does not: here the answer key is armed by the byte stream itself, so the
+    hold is committed by the very next event in the same parse pass. This is
+    the delivery every editor integration actually makes.
+    """
+    obs = await _single_write_after("y\n")
+
+    assert obs["resolved"] is True, f"the LF never answered the question: {obs}"
+    assert obs["submitted"] == [], f"the answer became a prompt: {obs}"
+    assert obs["prompts"] == [], f"the answer went to the agent: {obs}"
+    assert obs["card_still_up"] is False, f"the card never resolved: {obs}"
+
+
+@pytest.mark.usefixtures("unraceable_answer_hold")
+@pytest.mark.asyncio
+async def test_a_cr_single_write_answers_the_question() -> None:
+    """The single-write control, so the LF claim above has a referent."""
+    obs = await _single_write_after("y\r")
+
+    assert obs["resolved"] is True, f"CR never answered the question: {obs}"
+    assert obs["submitted"] == [], f"a stray prompt: {obs}"
+    assert obs["prompts"] == [], f"the answer went to the agent: {obs}"
+    assert obs["card_still_up"] is False, f"the card never resolved: {obs}"
+
+
+@pytest.mark.usefixtures("unraceable_answer_hold")
+@pytest.mark.asyncio
+async def test_a_cr_byte_takes_a_held_answer_key() -> None:
+    """The control, and the LF case's independent source of truth.
+
+    Identical to the LF test but for the byte, so a difference between the two
+    is the defect and a failure here means the LF claim has no referent.
+    """
+    obs = await _held_answer_after_byte("\r")
+
+    assert obs["resolved"] is True, f"CR never answered the question: {obs}"
+    assert obs["submitted"] == [], obs
+    assert obs["prompts"] == [], obs
+    assert obs["card_still_up"] is False, obs
+    assert obs["editor_text"] == "", obs
