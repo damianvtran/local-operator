@@ -2832,17 +2832,20 @@ class Editor(TextArea):
         # belt-and-braces: `_on_key` is not the only reader of the byte's
         # spelling. The live-prompt router is handed this very event and
         # re-reads its own `event.key == "enter"` (`route_key_to_live_prompt`,
-        # `app.py`), so a local-only rewrite still left the router reading
-        # `ctrl+j`: with an answer key held it fell through to
-        # `editor.insert(held.character)` and this method then submitted the
-        # restored character as a CHAT PROMPT, while the question stayed up
+        # `app.py`), so a local-only rewrite still left it reading `ctrl+j`,
+        # which is not that branch: the router cancelled the held answer key,
+        # restored its character into the composer, and this method then
+        # submitted that character as a CHAT PROMPT while the question stayed up
         # unanswered — measured as `prompts == ["y"]` with the approval card
-        # still mounted. That is a REGRESSION against the pre-fix behaviour,
-        # where the inert byte left the hold timer to commit the answer, and it
-        # is deterministic for integration delivery rather than a race: both
-        # bytes of one `"y\n"` write land inside the hold window by
-        # construction. One rewrite of the event is what makes the byte
-        # indistinguishable from Enter, which is the whole point.
+        # still mounted. The end state matched the pre-fix path, which did the
+        # same thing for the same reason once the held key reached the router as
+        # the next keystroke; what it diverged from is CR, which answers the
+        # question and submits nothing. It is deterministic rather than a race,
+        # because both events of one `"y\n"` write arrive in the same parse
+        # pass, so the terminator is always the key that cancels the hold.
+        # Rewriting the event, and not only the local name, is what closes that
+        # divergence and makes the byte indistinguishable from Enter, which is
+        # the whole point.
         if key == "ctrl+j":
             key = "enter"
             event.key = "enter"
