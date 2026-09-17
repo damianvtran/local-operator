@@ -1851,16 +1851,21 @@ async def pin(session_id: str, body: Pin, request: Request):
     landing inside one window do not merely arbitrate over the conversation they
     share — the later ``os.replace`` is what the file holds, and anything the
     earlier writer added in that same window is gone. That can be a pin to a
-    DIFFERENT conversation, which is the case this route is what makes reachable:
-    before it there was one writer surface (the TUI), and now a TUI and an app
-    write the same file at once. A cross-process lock for a small index has no
-    precedent in this codebase, the store's own docstring records why, and the
-    only consequence a user can observe is that two presses within one animation
-    resolve to the second — which is the correct reading of their own two
-    actions. Stated rather than left to the store's comment because the client
-    reconciles its row on this answer: until the next catalogue read agrees, a
-    pin the app just made is not yet durable, and it never is on a config root
-    the backend cannot write.
+    DIFFERENT conversation.
+
+    THAT LOSS IS NOT SOMETHING THIS ROUTE INTRODUCES. The store's own docstring
+    already concedes it between two ``lop`` processes — the TUI was the only
+    writer, not the only possible one — and what this route changes is how often
+    the window is hit: a press here beside a press in the terminal is routine in
+    a way two terminal processes colliding never was, so a few-microsecond race
+    stops being a curiosity. A cross-process lock for a small index has no precedent in this
+    codebase, the store's own docstring records why no read-back is wanted
+    either, and the only consequence a user can observe is that two presses
+    within one animation resolve to the second — the correct reading of their own
+    two actions. Stated rather than left to the store's comment because the
+    client reconciles its row on this answer: until the next catalogue read
+    agrees, a pin the app just made is not yet durable, and it never is on a
+    config root the backend cannot write.
 
     ID SHAPE AND IS-DIR ONLY. Deliberately NOT the ``is_user_session`` check its
     neighbour ``/seen`` applies: the sidebar pins delegated runs, and a route

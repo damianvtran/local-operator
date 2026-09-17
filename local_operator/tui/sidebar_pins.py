@@ -27,17 +27,18 @@ same instant means the second write is what the file holds; no precedent in this
 codebase takes a cross-process lock for a small index, and the same-directory
 ``os.replace`` means a reader never sees a torn file — only an older one.
 
-THE GRANULARITY IS THE WHOLE INDEX, NOT ONE ID, and the difference is what the
-desktop route makes reachable: every write is a read-modify-write of the entire
-list, so two writers landing inside one window do not merely arbitrate over the
-id they share — the later ``os.replace`` discards every entry the earlier one
-added, and a pin to a DIFFERENT conversation can be the one lost. The window is
-one ``read_pins`` plus one ``os.replace`` (microseconds), and it is inherent to
-an index kept in one file rather than to anything the route does; a per-id write
-would need a real store. Stated here because the desktop plane is what makes two
-WRITER SURFACES — a TUI and an app — reach the same file at once, so a caller
-that has just been answered 200 is not entitled to treat the pin as durable
-until the next read agrees.
+THE GRANULARITY IS THE WHOLE INDEX, NOT ONE ID, and that property is NOT new
+here: the multi-process case above already loses a DIFFERENT-id pin, because
+every write is a read-modify-write of the entire list — two writers landing
+inside one window do not merely arbitrate over the id they share, and the later
+``os.replace`` discards every entry the earlier one added. What the desktop route
+changes is the FREQUENCY, not the existence, of the overlap: it adds a second
+frontend writing this same file, so a few-microsecond window that previously
+needed two ``lop`` processes to collide becomes routine — a press in the app
+beside a press in the terminal. The window itself is one ``read_pins`` plus one
+``os.replace``, inherent to an index kept in one file; per-id durability would
+need a real store. Stated here because a caller that has just been answered 200
+is not entitled to treat the pin as durable until the next read agrees.
 """
 
 from __future__ import annotations
