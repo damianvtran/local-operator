@@ -46,6 +46,7 @@ import uvicorn
 from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
+from local_operator.session.creation import CREATED_AT_NAME
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     delivery_dir,
@@ -663,3 +664,94 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
             reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reader
+
+
+@pytest.mark.asyncio
+async def test_a_completion_inside_active_reorders_the_list_and_is_announced(
+    desktop_server, workspace: Path
+):
+    """THE REPORTED SYMPTOM, end to end: a session that is ALREADY Active finishes.
+
+    ``CatalogEntry.active`` is section membership; the order the sidebar renders is
+    ``CatalogEntry.rank``. A working row (tier 4) that finishes becomes an unread
+    completion (tier 1) with ``active`` True -> True, so the feed's section
+    comparison published nothing at all — measured on the real backend as ZERO
+    catalogue frames in 15 s, and still zero across ~100 ticks with the probes
+    accelerated 20x, while the backend's own list read had already moved the row —
+    and the client kept the last list's order until some OTHER row's section move
+    refetched it (5-10 s on this machine, which is what the operator reported).
+
+    Everything here is the production stack over loopback HTTP: the real app, the
+    real SSE stream, the real discovery-record write, a real completion in the
+    attention store. The claim is two-sided, and the second half is what makes the
+    first worth anything: the frame arrives on the doorbell's own clock, AND the
+    list read it triggers leads with the completed row.
+    """
+    root, client = desktop_server
+    elder = await _create(client, workspace, "55555555-5555-4555-8555-555555555501")
+    completer = await _create(client, workspace, "55555555-5555-4555-8555-555555555502")
+
+    # PIN THE BIRTHS. The ORDER KEY's third term is the session's canonical birth,
+    # read from ``created_at.json`` by ``session_created_at``, and two POSTs land
+    # inside the same second — without this the ordering assertion would be about
+    # the id tiebreak rather than about the resort under test.
+    for session_id, at in ((elder, 1_700_000_000.0), (completer, 1_700_000_600.0)):
+        (root / "sessions" / session_id / CREATED_AT_NAME).write_text(
+            json.dumps(at), encoding="utf-8"
+        )
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        await _next_frame(lines, lambda f: f["type"] == "open")
+
+        # The machine state the operator described: an older unread completion
+        # (tier 1, Active) and a session WORKING (tier 4, Active), so both are in
+        # "Active chats" with the working one second.
+        await asyncio.to_thread(_publish, root, elder)
+        await asyncio.to_thread(_publish_record, root, completer, busy=True)
+        # The working edge is DRAINED before the completion is driven: otherwise
+        # the completion would be that row's FIRST edge, which invalidates for a
+        # different reason and would leave this test proving nothing.
+        await _next_frame(
+            lines,
+            lambda f: f["type"] == "session_status"
+            and f["session_id"] == completer
+            and f["payload"]["code"] == "busy",
+        )
+        # The working edge is ALSO a section move — the row is cold until a runtime
+        # reports it — so it publishes an invalidation of its own. Drained here, so
+        # the frame asserted below cannot be this one.
+        working_edge = await _next_frame(lines, lambda f: f["type"] == "catalogue")
+        assert working_edge["payload"]["revision"] >= 1
+
+        before = (await client.get("/v1/desktop/sessions", params={"limit": 50})).json()["result"]
+        before_ids = [row["id"] for row in before["sessions"]]
+        assert before_ids.index(elder) < before_ids.index(completer), before_ids
+        assert all(row["active"] for row in before["sessions"]), before["sessions"]
+
+        # IT FINISHES: the record goes quiet and the completion lands. The section
+        # stays "Active chats"; only the row's position inside it changes.
+        await asyncio.to_thread(_publish_record, root, completer)
+        await asyncio.to_thread(_publish, root, completer, "complete")
+        # The 2 s is a hang backstop, not the assertion: the frame itself is what
+        # is waited on, and the doorbell's clock is 100 ms.
+        frames = await _frames_until(lines, lambda f: f["type"] == "catalogue", timeout=2.0)
+        catalogues = [frame for frame in frames if frame["type"] == "catalogue"]
+        assert len(catalogues) == 1, frames
+        kinds = [frame["type"] for frame in frames]
+        # AFTER the status frame, so the client paints the checkmark and then
+        # re-reads a list that already agrees with it.
+        assert kinds.index("catalogue") > kinds.index("session_status"), kinds
+
+    # ...and the read that frame triggers is the one that leads with the completed
+    # row. Both rows are still Active: this is the resort, not a section move.
+    listed = await client.get("/v1/desktop/sessions", params={"limit": 50})
+    assert listed.status_code == 200, listed.text
+    after = listed.json()["result"]["sessions"]
+    assert after[0]["id"] == completer, after
+    assert (after[0]["active"], after[1]["active"]) == (True, True), after
+    assert (after[0]["status"]["code"], after[0]["status"]["label"]) == (
+        "complete",
+        "Unseen completion",
+    ), after[0]
