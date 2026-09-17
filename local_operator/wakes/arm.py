@@ -386,25 +386,25 @@ async def _mutate_locked(
             # session's persist that had already read the transcript after our
             # append, which is what its entry carries. Re-applying the mutation
             # here is what appended the row a SECOND time inside one request; the
-            # change is already in effect, so the base IS the answer.
+            # change is already in effect, so the base IS the answer — including
+            # its due instant, which the owner may have re-timed.
             logger.info(
                 "wake write for %s was overtaken by a base that already carries it", session_id
             )
-            return existing, wake_id, due
+            landed = next((row for row in existing if row.id == wake_id), None)
+            return existing, wake_id, (landed.next_due_at if landed is not None else due)
         before = existing
         wake_id, rows, due = mutate(existing, now)
         try:
             await _refuse_if_owned(config_dir, session_id)
-        except WakeWriteError:
+        except WakeWriteError as refusal:
             # A refusal on the SECOND attempt comes from a request that has
             # already appended — attempt 0's snapshot is on disk, whatever the
             # guard's reason is now. Roll our own write back before refusing, so
             # that every refusal this module raises really does leave nothing
             # durable behind (which is what lets the journal release its claim
             # and let a retry run — see ``WakeWriteError.wrote``).
-            if written is not None:
-                await _roll_back(session_dir, before=written[0], after=written[1])
-            raise
+            raise await _refusal_after_undoing(refusal, session_dir, written)
         entry = await _append(session_dir, rows)
         written = (existing, rows)
         try:
@@ -420,12 +420,11 @@ async def _mutate_locked(
             # can appear and still be detected is now "before this check" rather
             # than "before the append".
             await _refuse_if_owned(config_dir, session_id)
-        except WakeWriteError:
+        except WakeWriteError as refusal:
             # The append is undone, so the refusal leaves no lasting state for the
             # owner to delete — and the retry that follows routes through the
             # owner's own command instead of re-writing behind it.
-            await _roll_back(session_dir, before=existing, after=rows)
-            raise
+            raise await _refusal_after_undoing(refusal, session_dir, written)
         if await asyncio.to_thread(_latest_entry_id, session_dir) == entry:
             break
         # STILL REACHED, but no longer by a peer using this module: the lock
@@ -491,6 +490,31 @@ def _absorbed(
         if row.id in latest_by_id:
             return False
     return True
+
+
+async def _refusal_after_undoing(
+    refusal: WakeWriteError,
+    session_dir: Path,
+    written: tuple[list[WakeSchedule], list[WakeSchedule]] | None,
+) -> WakeWriteError:
+    """The refusal to raise once this request's own append has been undone.
+
+    ``written`` is None when nothing was appended (the attempt-0 case), and the
+    refusal is returned untouched. Otherwise the rollback is what lets the refusal
+    be RELEASED by the journal — a retry re-runs and can succeed, which is what
+    these sentences promise — so if the rollback itself cannot be done, the refusal
+    has to say so instead: ``wrote=True`` makes the journal record it, and a
+    caller who is told to reconcile is better served than one told to retry a
+    write that may still be standing.
+    """
+    if written is None:
+        return refusal
+    try:
+        await _roll_back(session_dir, before=written[0], after=written[1])
+    except Exception:  # noqa: BLE001 - any failure here leaves our bytes unproven
+        logger.exception("could not undo the wake write for %s", session_dir.name)
+        return WakeWriteError(str(refusal), status=refusal.status, code=refusal.code, wrote=True)
+    return refusal
 
 
 async def _roll_back(
