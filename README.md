@@ -317,7 +317,7 @@ login-capable provider; the ids and plan requirements:
 | Kimi | `lop login kimi` | Kimi (Moonshot) |
 | Grok | `lop login xai-oauth` (`xai` = API key) | Grok OAuth |
 | Z.AI / GLM | `lop login zai-oauth` (`zai` = API key) | GLM Coding Plan |
-| Qwen | `lop login alibaba-token-plan-oauth` | QwenCloud Token Plan |
+| Qwen | `lop login alibaba-token-plan-oauth` | QwenCloud Token Plan (a personal plan also needs the [console ticket](./local_operator/guides/qwencloud/GUIDE.md) for `/usage`) |
 
 OpenAI, Anthropic, Z.AI, and Qwen logins are keyed by account identity, so a
 second login adds to the pool; Kimi holds one account (xAI identity is
@@ -351,7 +351,9 @@ per account and a hop would re-pay to rebuild it.
 - **Everything is visible in-app.** `/usage` shows each provider's quota
   windows and account spend; `/accounts` lists every stored credential;
   `/session` reports the current session's cost, cache, and request
-  diagnostics.
+  diagnostics. One exception: QwenCloud's personal Token Plan window needs a
+  [console ticket](./local_operator/guides/qwencloud/GUIDE.md) stored alongside
+  the login.
 
 <p align="center">
   <img src="./static/tui-usage.png" alt="The /usage panel showing per-provider quota windows and account spend" width="720">
@@ -823,7 +825,11 @@ lop credential update TAVILY_API_KEY
 lop credential delete TAVILY_API_KEY
 ```
 
-OAuth tokens from `lop login` are stored separately and refresh themselves.
+OAuth tokens from `lop login` are stored separately, in
+`~/.local-operator/auth.db`, and refresh themselves. The one credential there
+that does not is the QwenCloud console ticket: a browser session cookie you
+capture and store by hand, expiring roughly weekly, which the
+[QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers.
 
 ## 🌟 Radient: automatic model selection and agent sharing
 

@@ -33,10 +33,17 @@ endpoints on different hosts rather than two ways of authenticating one.
 Providers deliberately absent, because the credential they need is one
 local-operator does not hold: ``google`` (the Gemini quota endpoint is part of
 the Gemini CLI's Cloud Code OAuth; local-operator's Google provider is an AI
-Studio API key, which that endpoint rejects) and ``alibaba`` (a browser console
-session cookie, not the DashScope key). Both would need a new login flow before
-a fetcher could reach anything, and advertising a provider whose table can only
-ever be empty is worse than being incomplete.
+Studio API key, which that endpoint rejects). It would need a new login flow
+before a fetcher could reach anything, and advertising a provider whose table
+can only ever be empty is worse than being incomplete.
+
+``alibaba-token-plan`` has TWO routes for one provider, which is a different
+case from Kimi's two credential kinds. The BSS gateway answers with the OAuth
+management token for accounts the official CLI can see; a personal Token Plan
+subscription is invisible there (empty seat summary, zero instances) and is
+read from the console gateway with a browser session cookie, stored in its own
+``qwencloud-console`` namespace. The console route runs first and falls
+through to BSS on None, so a teams account keeps its monthly window.
 
 **Vendors report utilization, not spend.** Every subscription endpoint here
 quotes a PERCENTAGE — ``utilization`` (Anthropic), ``used_percent``
@@ -71,7 +78,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from local_operator.providers.registry import get_provider_definition
+from local_operator.providers.registry import (
+    credential_provider_id,
+    get_provider_definition,
+)
 
 #: Human labels for the unit a usage amount is measured in. The renderer reads
 #: this rather than interpolating the raw key, so an amount prints ``519.86 USD``
@@ -150,6 +160,21 @@ QWENCLOUD_TOKEN_PLAN_COMMODITIES = {
     "addon": "sfm_tokenplanteamsaddon_dp_intl",
 }
 
+#: The QwenCloud *console* data gateway. A different host, product and
+#: authentication from the BSS gateway above: BSS takes a Bearer management
+#: token, this one takes a browser console session cookie and nothing else.
+#: Verified by bisection against a live account (2026-09-11): the single
+#: cookie ``login_qwencloud_ticket`` is sufficient, and ``sec_token`` is
+#: echoed but never validated (a wrong value and an empty one both returned
+#: live data). The Bearer management token CANNOT reach this host — it
+#: answers ``BailianGateway.Login.NotLogined``.
+QWENCLOUD_CONSOLE_URL = "https://cs-data.qwencloud.com/data/api.json"
+QWENCLOUD_CONSOLE_PRODUCT = "sfm_bailian"
+QWENCLOUD_CONSOLE_ACTION = "IntlBroadScopeAspnGateway"
+QWENCLOUD_CONSOLE_API = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage"
+QWENCLOUD_CONSOLE_ORIGIN = "https://home.qwencloud.com"
+QWENCLOUD_CONSOLE_REFERER = "https://home.qwencloud.com/analytics/token-plan/individual"
+
 #: The fetcher a provider id routes to. Naming the kinds keeps the dispatch
 #: table and the if-chain in :func:`fetch_usage` in lockstep.
 FetcherKind = Literal[
@@ -161,6 +186,7 @@ FetcherKind = Literal[
     "deepseek-balance",
     "xai-oauth",
     "qwencloud-token-plan",
+    "qwencloud-console-usage",
     "zai-quota",
     "radient-balance",
 ]
@@ -2122,6 +2148,129 @@ async def fetch_qwencloud_token_plan(client: httpx.AsyncClient, token: str) -> U
     return UsageReport(provider="alibaba-token-plan", limits=limits) if limits else None
 
 
+async def fetch_qwencloud_console_usage(
+    client: httpx.AsyncClient, ticket: str
+) -> UsageReport | None:
+    """Personal Token Plan usage via the browser console gateway.
+
+    The BSS route above answers for accounts whose plan is visible to the
+    official CLI. A personal Token Plan subscription is not: for a live
+    account ``QuerySubscriptionGray`` returns ``{"IsGray": true}`` while
+    ``GetSeatSubscriptionSummary`` returns an empty ``Data`` and every
+    ``DescribeFrInstances`` commodity returns ``TotalCount: 0``. The console
+    endpoint the web UI itself calls is the only route that reports the
+    7-day window for such an account.
+
+    The credential is a full-account console session cookie, so this fetcher
+    is deliberately the narrowest thing that works: one request, one cookie,
+    and a parse that fails closed.
+    """
+    # NOTE: for the account shape this fetcher serves -- IsGray true, an empty
+    # seat summary, TotalCount 0 on every commodity -- `fetch_qwencloud_token_plan`
+    # returns None rather than a window-less report: `_qwencloud_credits_limit`
+    # bails on `total == 0`, so `limits` stays empty and the fetcher's
+    # `... if limits else None` answers None. That is WHY this route runs first:
+    # `fetch_usage` returns on the first route it can attempt and has no
+    # fall-through between the OAuth and API-key pair, so BSS first would end the
+    # fetch at None and never reach here. A window-less BSS report is reachable
+    # only on the narrower shape that also holds add-on Credit Packs
+    # (`packs > 0`), and there running first is what keeps the 7-day window on
+    # the panel -- at the cost of the packs row `fetch_usage` documents as a
+    # KNOWN LIMITATION. Out of scope here.
+    params = {
+        "Api": QWENCLOUD_CONSOLE_API,
+        "Data": {
+            "cornerstoneParam": {
+                "domain": "home.qwencloud.com",
+                "consoleSite": "QWENCLOUD",
+                "console": "ONE_CONSOLE",
+                "xsp_lang": "en-US",
+                "protocol": "V2",
+                "productCode": "p_efm",
+            }
+        },
+        "V": "1.0",
+    }
+    try:
+        response = await client.post(
+            QWENCLOUD_CONSOLE_URL,
+            data={
+                "product": QWENCLOUD_CONSOLE_PRODUCT,
+                "action": QWENCLOUD_CONSOLE_ACTION,
+                "region": QWENCLOUD_REGION,
+                # Echoed back by the gateway and never validated; an empty
+                # string is accepted. Sending a plausible-looking fake would
+                # only obscure that this field carries no authentication.
+                "sec_token": "",
+                "params": json.dumps(params),
+            },
+            headers={
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": QWENCLOUD_CONSOLE_ORIGIN,
+                "referer": QWENCLOUD_CONSOLE_REFERER,
+                # A header rather than ``cookies=``, which httpx deprecates
+                # per-request (0.28 warns, 1.x drops it) precisely because
+                # persistence is ambiguous. The client is caller-owned and
+                # shared across providers (module docstring above), so the
+                # cookie must NOT reach its jar: a full-account console
+                # session cookie would then ride along on every other
+                # provider's request on that pool.
+                "cookie": f"login_qwencloud_ticket={ticket}",
+            },
+        )
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    # FOUR envelopes, and the failure mode is the reason each one is checked
+    # rather than walked with .get() chains: a dead ticket answers HTTP 200
+    # with `code: "200"` and `data.success: false` carrying
+    # `errorCode: "BailianGateway.Login.NotLogined"`. A "200 means success"
+    # read parses that as data and reports a fabricated window. Both
+    # `success` flags must be True and the number must be present.
+    outer = payload.get("data")
+    if not isinstance(outer, dict) or outer.get("success") is not True:
+        return None
+    data_v2 = outer.get("DataV2")
+    if not isinstance(data_v2, dict):
+        return None
+    inner = data_v2.get("data")
+    if not isinstance(inner, dict) or inner.get("success") is not True:
+        return None
+    usage = inner.get("data")
+    if not isinstance(usage, dict):
+        return None
+
+    fraction = _num(usage.get("per1WeekPercentage"))
+    if fraction is None:
+        return None
+    # A vendor FRACTION (0.2405 == 24.05% used), not a 0-100 percentage.
+    percent = max(0.0, min(100.0, fraction * 100.0))
+    reset = _num(usage.get("per1WeekResetTime"))
+    limit = UsageLimit(
+        id="credits-7d",
+        label="7 Day Credits",
+        amount=UsageAmount(
+            used=percent,
+            limit=100.0,
+            remaining=100.0 - percent,
+            used_fraction=percent / 100.0,
+            unit="percent",
+        ),
+        window="7d",
+        resets_at_ms=int(reset) if reset and reset > 0 else None,
+        shared=True,
+    )
+    return UsageReport(provider="alibaba-token-plan", limits=[limit])
+
+
 async def fetch_usage(
     client: httpx.AsyncClient,
     provider: str,
@@ -2129,6 +2278,7 @@ async def fetch_usage(
     access_token: str | None = None,
     account_id: str | None = None,
     oauth_creds: dict[str, Any] | None = None,
+    extra_creds: dict[str, Any] | None = None,
 ) -> UsageReport | None:
     """Dispatch a provider id to whichever fetcher its credentials can reach.
 
@@ -2140,12 +2290,53 @@ async def fetch_usage(
     ``oauth_creds`` is the raw stored OAuth row for split-token providers whose
     wire bearer is not the token the quota endpoint wants.
 
+    ``extra_creds`` is a credential from a namespace OUTSIDE the provider
+    registry (the QwenCloud console session cookie), kept separate from
+    ``oauth_creds`` because that one is documented as the raw stored OAuth
+    row and is already read for its ``access`` field.
+
     Returns None when the provider has no endpoint, or has one but not for the
     credential kind on hand. Never raises.
     """
     routes = _FETCHERS.get(provider)
     if routes is None:
         return None
+    # Console route FIRST, and gated on the TICKET's presence rather than on
+    # the absence of an access token: the two credentials coexist on this
+    # account (a dead OAuth row and a live console cookie), so keying off
+    # "no access_token" would never fire. Falling through on None is what
+    # keeps a teams account working — the personal endpoint is absent or
+    # zero there, and BSS still reports the monthly window below.
+    #
+    # The PROVIDER gate is not redundant with the ticket check. Without it any
+    # caller passing ``extra_creds`` generically would spend a full-account
+    # console session cookie on every unrelated provider's fetch AND get back a
+    # report labelled ``alibaba-token-plan`` for, say, ``openrouter`` — the
+    # caller then files QwenCloud's 7-day window into another provider's slot.
+    # Compared on the STORAGE id so the ``alibaba-token-plan-oauth`` login
+    # flavour, which ``_FETCHERS`` deliberately carries as its own key, still
+    # reports.
+    if (
+        credential_provider_id(provider) == "alibaba-token-plan"
+        and extra_creds
+        and extra_creds.get("ticket")
+    ):
+        report = await _run_fetcher(
+            client, "qwencloud-console-usage", "", account_id, creds=extra_creds
+        )
+        if report is not None:
+            # KNOWN LIMITATION, and the tradeoff is deliberate. Returning here
+            # rather than merging both routes' limits is what makes exactly one
+            # ``credits-7d`` row possible: both routes build that id, and
+            # concatenating them would render the same window twice. The cost is
+            # that a HYBRID account -- a personal Token Plan that also holds BSS
+            # Credit Packs -- loses its ``credits-packs`` row, because the BSS
+            # path that reports packs never runs. Unusual, since packs are the
+            # teams addon commodity (``sfm_tokenplanteamsaddon_dp_intl``), and
+            # not the live account this was verified against (BSS returns
+            # ``TotalCount: 0`` for it). If a packs row ever goes missing for an
+            # account whose 7-day window reports fine, this is why.
+            return report
     oauth_kind, api_kind = routes
     if access_token and oauth_kind is not None:
         return await _run_fetcher(client, oauth_kind, access_token, account_id, creds=oauth_creds)
@@ -2181,6 +2372,13 @@ async def _run_fetcher(
         return await fetch_zai_quota(client, secret)
     if kind == "xai-oauth":
         return await fetch_xai_oauth(client, secret)
+    if kind == "qwencloud-console-usage":
+        # Neither credential kind in the `_FETCHERS` pair: a console session
+        # cookie stored in its own namespace. ``secret`` is unused.
+        ticket = (creds or {}).get("ticket")
+        if not ticket:
+            return None
+        return await fetch_qwencloud_console_usage(client, ticket)
     if kind == "qwencloud-token-plan":
         # Split-token provider: the wire bearer is the sk-sp key, but quota
         # needs the management token from the raw row. ``secret`` is the

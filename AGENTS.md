@@ -2210,6 +2210,129 @@ user.** §9 of the design is explicit and the guide repeats it: it defeats the
 running as the operator that is willing to run `lop` can still read every
 secret. A comment or a docstring that promises more than that is wrong.
 
+## The QwenCloud console ticket (`lop qwencloud-ticket`)
+
+Full agent-facing guidance — advising a USER who wants the personal Token Plan
+window in `/usage`, including capturing the cookie — is `guide://qwencloud`
+(packaged at `local_operator/guides/qwencloud/GUIDE.md`). This section is what
+someone CHANGING this code needs to know, and it is the half that does not
+ship: `AGENTS.md` is absent from `pyproject.toml`'s `package-data`, which is
+why the guide carries the user-facing workflow rather than this file.
+
+**What it is.** `login_qwencloud_ticket`, the QwenCloud console's browser
+session cookie. Not a scoped API key — it is a FULL-ACCOUNT console session,
+the broadest credential in `auth.db`.
+
+**Why it exists at all.** The personal Token Plan window is invisible to the
+BSS gateway the official CLI calls: for a live account that gateway answers
+`IsGray: true` with an empty seat summary and zero instances on every
+commodity. The console gateway the web UI itself calls does report the window,
+and it authenticates on exactly one thing — this cookie. No login flow can mint
+it, because a browser session cookie cannot be refreshed headlessly.
+
+**Storing it.** Stdin only, never argv — a command line is readable by any
+process running as you and lands in shell history:
+
+```sh
+printf %s '<TICKET>' | lop qwencloud-ticket set
+lop qwencloud-ticket status   # presence, length and age; never the value
+lop qwencloud-ticket rm
+```
+
+There is deliberately no `get` verb. The one consumer is inside the process.
+
+**The row is namespaced, not registered.** It is stored under provider id
+`qwencloud-console`, which is deliberately absent from `PROVIDER_REGISTRY` —
+the same trick `mcp-oauth` uses. A row under `alibaba-token-plan` would satisfy
+`ProviderController.has_any_credential` (it matches the provider column with no
+type or field filter) and local-operator would conclude it can run CHAT traffic
+on a read-only console cookie. The value is stored under `data["ticket"]` and
+never `data["key"]`, because the API-key cascade reads `key` and would hand a
+full-account browser cookie to DashScope as an inference bearer.
+
+**The symptom when it expires.** `/usage` simply stops showing the 7 Day
+Credits window for alibaba-token-plan — no error, no "sign-in expired" note,
+because this is not an OAuth row and cannot set `credential_invalid`. An
+expired ticket also returns HTTP **200**, carrying
+`data.errorCode == "BailianGateway.Login.NotLogined"`. The fix is one line:
+capture a fresh cookie and re-run `set`.
+
+**The ticket AUGMENTS a Token Plan credential — it does not replace one.**
+This is the precondition that actually gates the feature, and it is invisible
+unless you know to look. `/usage` only fetches a provider `can_report_usage`
+accepts, which requires `is_usable` — and the ticket deliberately cannot
+satisfy that, because a row that did would be the exact blast radius the
+separate namespace exists to prevent. So with a valid ticket and NO
+`alibaba-token-plan` credential row, `/usage` renders nothing at all: no
+window, no error, no block.
+
+The way you get there is ordinary: `lop logout alibaba-token-plan` removes the
+credential row while leaving the ticket in place. `lop qwencloud-ticket status`
+warns when no such row exists, and that warning is the only signal — do not
+change `is_usable`, `has_any_credential` or `can_report_usage` to "fix" it.
+
+**Cache lag.** The stored ticket is deliberately not part of the usage cache
+fingerprint — hashing a full-account session cookie into a cache key is the
+worse trade. The consequence is that a ticket swap changes NOTHING the cache
+key observes (measured: byte-identical keys across two different tickets), so
+`set` and `rm` call `_invalidate_cached_usage` explicitly, exactly as `lop
+login` and `lop logout` do for the credentials they change. Without that call a
+latched `usage unavailable` row was served for up to ~12.5 minutes
+(`USAGE_UNAVAILABLE_RETRY_MS` 10 min, ±25% jitter) after the user had already
+pasted a working cookie. Press `r` in the panel to force a refresh regardless.
+
+**The value is validated at the door.** `set` rejects a ticket containing an
+embedded newline, any other control character, or a non-latin-1 character, and
+bounds the length at 4096 (the live cookie is 172 chars). This is not
+fastidiousness: the value's only use is interpolation into a `cookie:` header,
+httpx rejects such values LOCALLY, and the console fetcher swallows that as
+`httpx.HTTPError` — so the panel showed its generic empty-result row ("no
+usage — no quota endpoint, or no credential for one"), naming a missing
+credential, with nothing linking it back to the paste. Copying the cookie out of
+devtools is the documented workflow and the cookie expires roughly weekly, so a
+multi-line paste is a recurring certainty rather than a corner case.
+
+**The update hazard.** `lop /update` or `uv tool upgrade` reinstalls from PyPI
+and silently reverts a locally built console fetcher while leaving the row in
+place: nothing reads it, and the credential still looks healthy.
+`lop qwencloud-ticket status` reports that state explicitly.
+
+**Revocation must be provable, not assumed — and `rm` is not a full revoke.**
+`rm` re-reads the store to confirm the row is gone from the API's view, and
+exits **non-zero** saying the ticket may still be stored if it cannot prove
+otherwise — a locked or corrupt store is an ordinary outcome with
+`busy_timeout` at 5s on a busy machine. "Cannot read the store" and "nothing is
+stored" are deliberately different answers (`TicketStoreUnreadable`):
+collapsing them made `rm` report success with exit 0 while the plaintext
+full-account cookie was still on disk, telling the user it had worked. `status`
+reports UNKNOWN for the same reason, and both read with
+`include_disabled=True` so a soft-deleted row cannot hide a cookie that is
+still present.
+
+Be precise about what that confirmation is worth, because it is easy to
+overclaim. Two things `rm` does NOT guarantee, both verified:
+
+- **The plaintext can outlive the row.** After a successful `rm`, `strings
+  auth.db` still returns the deleted row including the ticket; a `VACUUM`
+  clears it. That is ordinary SQLite freelist behaviour from
+  `delete_credential`, not specific to this credential — but it means `rm` is
+  not a secure erase.
+- **The session stays valid server-side.** Deleting the local row ends local
+  use and nothing more. The cookie remains a live browser session until it is
+  signed out in the QwenCloud console.
+
+So `rm` is not a substitute for revoking the session in the console, and it
+says so on the SUCCESS path rather than only when it fails — success is the
+moment a user worried about exposure stops looking.
+
+**Residual risk, stated plainly.** `~/.local-operator/auth.db` is plaintext
+SQLite with no OS keychain, protected only by its 0600 mode, and this cookie is
+broader than every other row in it. `set` refuses to write when the store's
+directory is wider than 0700, and `status` flags a ticket older than about a
+week. Note that `AuthStore._connect` re-chmods the db file to 0600 on every
+open, so the file-mode branch of that check is a backstop for a store opened
+some other way, not something the CLI path can normally hit.
+
 ## Usage analytics (`local_operator/analytics/`)
 
 Every provider call across every session contributes to one shared, on-disk
