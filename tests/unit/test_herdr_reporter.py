@@ -22,7 +22,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Iterator, Sequence, cast
 
 import pytest
 
@@ -400,6 +400,17 @@ def _no_ancestry(pid: int) -> int | None:
     return None
 
 
+def _foreign_ancestry(pid: int) -> int | None:
+    """The chain the real interloper has: one hop, then a readable pid 1.
+
+    A walk that reaches pid 1 has FINISHED and found no pane shell on the way,
+    which is the negative evidence a FOREIGN verdict is allowed to rest on. A
+    walk that merely answers nothing is UNKNOWN — see
+    ``test_an_unfinished_ancestry_walk_is_unknown_not_foreign``.
+    """
+    return 1
+
+
 def _foreign_payload() -> str:
     """A payload for a pane whose shell, group and foreground processes are
     all someone else's."""
@@ -408,6 +419,19 @@ def _foreign_payload() -> str:
         foreground_pgid=FOREIGN_SHELL_PID - 1,
         foreground_pids=(FOREIGN_SHELL_PID,),
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_ownership_cache() -> Iterator[None]:
+    """The verdict memo is per process, and a test is not a process.
+
+    ``start_reporter`` memoizes its verdict per pane id, so without this every
+    test after the first would be answered by the first one's verdict for
+    ``w1:p1``. Cleared on both sides so a test cannot leak into the next.
+    """
+    reporter_mod._OWNERSHIP_CACHE.clear()
+    yield
+    reporter_mod._OWNERSHIP_CACHE.clear()
 
 
 def test_start_reporter_is_none_for_a_pane_this_process_is_not_in(
@@ -427,11 +451,28 @@ def test_start_reporter_is_none_for_a_pane_this_process_is_not_in(
         env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
         invoker=recorder,
         pane_probe=probe,
-        parent_of=_no_ancestry,
+        parent_of=_foreign_ancestry,
     )
     assert reporter is None
     assert probe.asked == [("w1:p1", "/usr/local/bin/herdr")]
     assert recorder.calls == []
+
+
+def test_a_second_adopt_for_the_same_pane_does_not_probe_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The FOREIGN path is re-entered on every session swap, and must not re-ask.
+
+    ``_start_herdr_reporter`` returns early only when a reporter EXISTS, so a
+    pane we correctly refuse is asked about again at the next adopt — which is
+    why the verdict is memoized per process.
+    """
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    env = {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}
+    probe = Probe(_foreign_payload())
+    for _ in range(3):
+        assert start_reporter("sess-9", env=env, invoker=Recorder(), pane_probe=probe) is None
+    assert len(probe.asked) == 1
 
 
 def test_start_reporter_reports_when_we_are_the_pane_shell(
@@ -560,20 +601,118 @@ def test_the_pane_verdict_is_unknown_until_the_payload_names_a_process() -> None
             payload, pid=ours, pgid=os.getpgid(0), parent_of=_no_ancestry
         )
         assert verdict is None, payload
-    # And it goes three-valued the moment the payload names one process.
+    # And it goes three-valued the moment the payload names one process —
+    # provided the comparison that field makes possible actually happens.
     assert (
         reporter_mod._pane_ownership(
             _process_info_payload(shell_pid=FOREIGN_SHELL_PID),
             pid=ours,
             pgid=os.getpgid(0),
-            parent_of=_no_ancestry,
+            parent_of=_foreign_ancestry,
         )
         is False
     )
 
 
-def test_the_ancestry_walk_is_bounded_and_cycle_safe() -> None:
-    """A wrong or looping ``parent_of`` must not spin, and must not match."""
+def test_an_unfinished_ancestry_walk_is_unknown_not_foreign() -> None:
+    """A ``ps`` that cannot answer must not turn the ancestry arm negative.
+
+    This is the reviewer's counter-example: with ``parent_of`` answering
+    nothing (a missing or erroring ``ps``), the walk used to report "not an
+    ancestor" and the verdict FOREIGN — silencing exactly the
+    backgrounded-in-the-pane lop the arm exists for.
+    """
+    payload = _process_info_payload(shell_pid=FOREIGN_SHELL_PID)
+    assert (
+        reporter_mod._pane_ownership(
+            payload, pid=os.getpid(), pgid=os.getpgid(0), parent_of=_no_ancestry
+        )
+        is None
+    )
+    # A walk that FINISHES at pid 1 is negative evidence, and still FOREIGN.
+    assert (
+        reporter_mod._pane_ownership(
+            payload, pid=os.getpid(), pgid=os.getpgid(0), parent_of=_foreign_ancestry
+        )
+        is False
+    )
+
+
+def test_a_group_only_payload_is_unknown_when_our_group_is_unreadable() -> None:
+    """FOREIGN needs a comparison that could have matched — both sides."""
+    payload = '{"result": {"process_info": {"foreground_process_group_id": 42}}}'
+    ours = os.getpid()
+    assert reporter_mod._pane_ownership(payload, pid=ours, pgid=0, parent_of=_no_ancestry) is None
+    # With a readable group of our own it is a real comparison, so it votes.
+    assert reporter_mod._pane_ownership(payload, pid=ours, pgid=42, parent_of=_no_ancestry) is True
+    assert reporter_mod._pane_ownership(payload, pid=ours, pgid=43, parent_of=_no_ancestry) is False
+
+
+def test_an_unreadable_process_group_cannot_produce_an_owned_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``os.getpgid`` failing reads as 0, and 0 matches nothing. Never OWNED."""
+
+    def boom(pid: int) -> int:
+        raise OSError("no such process group")
+
+    monkeypatch.setattr(reporter_mod.os, "getpgid", boom)
+    assert reporter_mod._process_group(0) == 0
+    payload = _process_info_payload(
+        shell_pid=FOREIGN_SHELL_PID,
+        foreground_pgid=FOREIGN_SHELL_PID,
+        foreground_pids=(FOREIGN_SHELL_PID,),
+    )
+    # The payload's group is the pane's group, and this process is provably not
+    # in it: with our own group unreadable the arm is skipped, so the verdict
+    # comes from the pid comparison rather than from a guessed match.
+    assert (
+        reporter_mod._pane_ownership(
+            payload,
+            pgid=reporter_mod._process_group(0),
+            pid=os.getpid(),
+            parent_of=_foreign_ancestry,
+        )
+        is False
+    )
+    # Control: a readable matching group is OWNED, so the guard is what moved it.
+    assert (
+        reporter_mod._pane_ownership(
+            payload, pgid=FOREIGN_SHELL_PID, pid=os.getpid(), parent_of=_foreign_ancestry
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not a list",
+        7,
+        None,
+        {},
+        {"pid": 7},
+        [],
+        [7, "x", None, True],
+        [{"pid": None}],
+        [{"pid": "7"}],
+        [{"pid": True}],
+        [{"argv": ["zsh"]}],
+        [{"pid": -3}],
+    ],
+)
+def test_malformed_foreground_processes_yield_no_pids(value: object) -> None:
+    """Every shape herdr does not send is read as "named nobody", never as a pid."""
+    assert reporter_mod._foreground_pids(value) == frozenset()
+
+
+def test_readable_foreground_pids_survive_unreadable_neighbours() -> None:
+    entries = [{"pid": 7}, {"pid": "8"}, "x", None, {"pid": True}]
+    assert reporter_mod._foreground_pids(entries) == frozenset({7})
+
+
+def test_the_ancestry_walk_gives_up_when_the_hop_bound_is_spent() -> None:
+    """Endless chain: no verdict of its own, and it stops at the hop bound."""
     payload = _process_info_payload(shell_pid=FOREIGN_SHELL_PID)
     hops: list[int] = []
 
@@ -583,23 +722,42 @@ def test_the_ancestry_walk_is_bounded_and_cycle_safe() -> None:
 
     assert (
         reporter_mod._pane_ownership(payload, pid=500, pgid=os.getpgid(0), parent_of=endless)
-        is False
+        is None
     )
     assert len(hops) == reporter_mod._ANCESTRY_MAX_HOPS
-    # A cycle ends the walk rather than following it forever.
+
+
+def test_the_ancestry_walk_gives_up_when_its_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overall budget bounds the walk, not just the per-hop timeout."""
+    monkeypatch.setattr(reporter_mod, "ANCESTRY_BUDGET_S", 0.01)
+    hops: list[int] = []
+
+    def slow(pid: int) -> int | None:
+        hops.append(pid)
+        time.sleep(0.02)
+        return pid + 1
+
+    assert reporter_mod._reaches_ancestor(500, FOREIGN_SHELL_PID, slow) is None
+    assert len(hops) == 1
+
+
+def test_the_ancestry_walk_is_cycle_and_self_parent_safe() -> None:
+    """A tree that loops proves its own chain is not ours — a real answer."""
+    payload = _process_info_payload(shell_pid=FOREIGN_SHELL_PID)
+    ours = os.getpid()
+    our_group = os.getpgid(0)
     cycle = {500: 501, 501: 500}
     assert (
-        reporter_mod._pane_ownership(payload, pid=500, pgid=os.getpgid(0), parent_of=cycle.get)
-        is False
+        reporter_mod._pane_ownership(payload, pid=500, pgid=our_group, parent_of=cycle.get) is False
     )
     # A process is not its own ancestor.
     assert (
-        reporter_mod._pane_ownership(
-            payload, pid=500, pgid=os.getpgid(0), parent_of=lambda pid: pid
-        )
+        reporter_mod._pane_ownership(payload, pid=500, pgid=our_group, parent_of=lambda pid: pid)
         is False
     )
-    # Neither is pid 1, and a walk that reaches it stops.
+    # And the walk stops the moment it reaches pid 1 rather than beyond it.
     stopped: list[int] = []
 
     def up_to_one(pid: int) -> int | None:
@@ -607,10 +765,125 @@ def test_the_ancestry_walk_is_bounded_and_cycle_safe() -> None:
         return 1
 
     assert (
-        reporter_mod._pane_ownership(payload, pid=500, pgid=os.getpgid(0), parent_of=up_to_one)
+        reporter_mod._pane_ownership(payload, pid=ours, pgid=our_group, parent_of=up_to_one)
         is False
     )
     assert len(stopped) == 1
+
+
+def test_a_payload_for_a_different_pane_is_unknown() -> None:
+    """Herdr echoes the pane id; a payload about another pane answers nothing
+    about ours, and must not silence it."""
+    other = json.dumps(
+        {
+            "result": {
+                "process_info": {
+                    "pane_id": "w9:p9",
+                    "shell_pid": FOREIGN_SHELL_PID,
+                    "foreground_processes": [{"pid": FOREIGN_SHELL_PID}],
+                }
+            }
+        }
+    )
+    ours = os.getpid()
+    our_group = os.getpgid(0)
+    assert (
+        reporter_mod._pane_ownership(
+            other, pane_id="w1:p1", pid=ours, pgid=our_group, parent_of=_foreign_ancestry
+        )
+        is None
+    )
+    # The same payload for the pane that WAS asked about keeps its verdict.
+    mine = other.replace("w9:p9", "w1:p1")
+    assert (
+        reporter_mod._pane_ownership(
+            mine, pane_id="w1:p1", pid=ours, pgid=our_group, parent_of=_foreign_ancestry
+        )
+        is False
+    )
+
+
+def test_a_probe_that_raises_is_unknown_and_still_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A check that could not run is "could not tell", never silence."""
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+
+    def boom(pane_id: str, binary: str) -> str | None:
+        raise RuntimeError("probe exploded")
+
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=boom,
+    )
+    assert reporter is not None
+
+
+def test_a_parent_lookup_that_raises_is_unknown_and_still_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule for the walk: a raising ``parent_of`` is not a FOREIGN."""
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+
+    def boom(pid: int) -> int | None:
+        raise RuntimeError("ps exploded")
+
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=Probe(_foreign_payload()),
+        parent_of=boom,
+    )
+    assert reporter is not None
+
+
+def test_the_default_probe_has_its_own_shorter_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung ``herdr`` costs the calling thread the probe budget, not five seconds."""
+    binary = tmp_path / "herdr"
+    binary.write_text("#!/bin/sh\nsleep 5\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(reporter_mod, "PANE_PROBE_TIMEOUT_S", 0.2)
+    started = time.monotonic()
+    assert reporter_mod._default_pane_probe("w1:p9", str(binary)) is None
+    assert time.monotonic() - started < 3
+
+
+def test_the_default_parent_lookup_survives_an_unusable_ps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing or erroring ``ps`` is UNKNOWN, and must not raise.
+
+    The module object is replaced rather than its ``run``, so the patch cannot
+    reach anything else that happens to call ``subprocess.run`` in this
+    process.
+    """
+
+    class NoSubprocess:
+        @staticmethod
+        def run(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("ps not found")
+
+    monkeypatch.setattr(reporter_mod, "subprocess", NoSubprocess())
+    assert reporter_mod._default_parent_pid(os.getpid()) is None
+
+
+def test_the_default_parent_lookup_gives_up_on_a_slow_ps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-hop timeout that ``PARENT_LOOKUP_TIMEOUT_S`` exists for."""
+    fake = tmp_path / "ps"
+    fake.write_text("#!/bin/sh\nsleep 5\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(reporter_mod, "PARENT_LOOKUP_TIMEOUT_S", 0.2)
+    started = time.monotonic()
+    assert reporter_mod._default_parent_pid(os.getpid()) is None
+    assert time.monotonic() - started < 3
 
 
 def test_the_default_probe_passes_the_pane_explicitly(
@@ -627,7 +900,7 @@ def test_the_default_probe_passes_the_pane_explicitly(
     binary.chmod(0o755)
     assert reporter_mod._default_pane_probe("w1:p9", str(binary)) == '{"result":{}}\n'
     assert log.read_text() == "pane process-info --pane w1:p9"
-    monkeypatch.setattr(reporter_mod, "CALL_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(reporter_mod, "PANE_PROBE_TIMEOUT_S", 0.5)
     # A non-zero exit and a spawn failure are both UNKNOWN, never stdout.
     assert reporter_mod._default_pane_probe("w1:p9", sys.executable) is None
     assert reporter_mod._default_pane_probe("w1:p9", str(tmp_path / "missing")) is None
