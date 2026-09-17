@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator.harness.types import TextContent, ToolExecutionEndEvent, ToolResult
 from local_operator.mobile.tui_handle import (
     TuiSessionHandle,
     _DetailChangedDuringHydration,
@@ -292,3 +294,59 @@ def test_the_started_hook_is_wired_and_reseeded_on_rebind(tmp_path) -> None:
     handle._app = _App(noted)  # type: ignore[assignment]
     handle.rebind()
     assert registrant.resets == [True, False, False]
+
+
+@pytest.mark.asyncio
+async def test_the_attach_seeds_a_live_calls_duration_from_the_owner() -> None:
+    """The WIRING, not just the fold: attaching must hand over the instants.
+
+    ``ProjectionFold.reconcile_clocks`` consuming a producer's start instant is
+    pinned in ``test_projection.py``, and that is not enough on its own: the
+    seed lives at the CALL SITE, beside ``reconcile_streaming``, so a refactor
+    that drops the call leaves every fold test green while the reported defect —
+    a phone attaching onto work in flight measuring it from the attach — comes
+    straight back.
+
+    So this drives the real handle over the real attach path and asserts the
+    reading ONLY the seed can produce: the call ends with no ``duration_s`` of
+    its own (optional on the wire), which leaves the fold measuring from the
+    instant the attach seeded. Without the seed that reading is ~0s.
+    """
+
+    class Epochs(FakeSession):
+        """A session publishing the two folded anchors, as ``Session`` does."""
+
+        epochs: dict[str, float | None] = {}
+        phase: tuple[str, float | None] = ("", None)
+
+        def live_tool_start_epochs(self) -> dict[str, float | None]:
+            return dict(self.epochs)
+
+        def activity_phase_clock(self) -> tuple[str, float | None]:
+            return self.phase
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    session = Epochs()
+    session.streaming = True
+    session.epochs = {"c1": time.time() - 180.0}
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    handle.subscribe(lambda: None)
+
+    session.emit(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="4")]),
+        )
+    )
+    row = [entry for entry in handle.session_projection_seed.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "done"
+    assert row.elapsed_s == pytest.approx(
+        180.0, abs=2.0
+    ), "a call that began before the phone attached must not be measured from the attach"
