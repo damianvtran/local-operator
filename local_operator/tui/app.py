@@ -33380,8 +33380,11 @@ class OperatorApp(App[None]):
         describing the old session — the rule ``SessionDiagnostics.capture``
         states at ``session_panel.py``. Everything blocking then runs in a
         worker, because the sessions block alone measured **879.5 ms** on this
-        host (``session_resource_usage`` shells ``top -l1`` for the whole system
-        on macOS), which is ~26 dropped frames at 30 fps.
+        host while ``session_resource_usage`` shelled ``top -l1`` for the whole
+        system on macOS (7-42 ms over the same pids in the passes recorded since
+        — the range is the machine's load, not the read — and the first call in
+        a cold process still pays that block's imports and metadata scans),
+        which is far past a frame at 30 fps.
 
         The screen is pushed BEFORE the probe starts, like ``/session`` and
         unlike ``/analytics``: it is useful from frame one (version, session id,
@@ -33451,10 +33454,10 @@ class OperatorApp(App[None]):
     def refresh_info_screen(self, screen: "InfoScreen") -> None:
         """Re-run the probes for an open ``/info`` (its ``r`` binding).
 
-        Manual only, never a timer: a ``top -l1`` fork per second is a real cost
-        on the machine being diagnosed, and this screen is a snapshot rather
-        than a monitor. The live half is re-captured too, so ``r`` after
-        launching a subagent shows it.
+        Manual only, never a timer: the read forks ``ps`` and walks the session
+        registry per invocation, which is a real cost on the machine being
+        diagnosed, and this screen is a snapshot rather than a monitor. The live
+        half is re-captured too, so ``r`` after launching a subagent shows it.
         """
         if screen.presentation_cancelled or screen not in self.screen_stack:
             return
