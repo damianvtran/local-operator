@@ -154,9 +154,11 @@ def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="NAMES",
         help=(
             "Comma-separated tools this run may reach, and the ONLY ones. Excluded "
-            "tools are unreachable, not merely unapproved. Without --control the "
-            "declared tools are approved by the declaration (nobody is there to "
-            "ask); a name this build does not have is unreachable and reported"
+            "tools are unreachable, not merely unapproved. The declaration stands as "
+            "the APPROVAL for its own members only where nobody can be asked — a "
+            "non-tty run without --control; on a terminal, and under --control, every "
+            "write/exec call is still decided by the approval gate. A name this build "
+            "does not have is unreachable and reported"
         ),
     )
     parser.add_argument(
@@ -277,7 +279,22 @@ def apply_startup(session: Any, args: Any, team: Any) -> None:
     # must still be asked about rather than waved through.
     inventory = declared_tool_inventory(session, args)
     if inventory is not None:
-        session.set_tool_inventory(inventory, unattended=not getattr(args, "control", False))
+        # "No supervisor" is NOT "no human", and conflating them silently
+        # removed a live safety prompt: a declaration stands as the APPROVAL for
+        # its own members only where there is nobody to ask, and the tree's
+        # existing test for that is a tty — ``session_factory._make_request_approval``
+        # prompts y/N on one and denies without one (CL-04), which is the
+        # contract ``docs/EXEC.md`` states. So `lop exec --tools bash,write "…"`
+        # typed at a terminal keeps the per-call prompt on THIS command, while a
+        # piped or ``--background`` run stays auto-approved (the detached worker
+        # is spawned with ``stdin=DEVNULL``, so it answers this the same way a
+        # pipe does). Deriving it from the terminal rather than from the flag
+        # also keeps this correct for any future host that runs attended without
+        # ``--control``.
+        session.set_tool_inventory(
+            inventory,
+            unattended=not getattr(args, "control", False) and not sys.stdin.isatty(),
+        )
     if getattr(args, "clear_goal", False):
         session.set_goal("")
     elif getattr(args, "goal", None) is not None:

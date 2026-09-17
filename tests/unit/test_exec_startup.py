@@ -1,6 +1,7 @@
 """Bounded startup adapters retain actual team/profile and loop semantics."""
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -310,6 +311,32 @@ def test_tools_declares_the_inventory_and_approves_it_when_unattended():
     apply_startup(session, ExecArgs(tools="read"), team=None)
     assert session.declared == [(("read",), True)]
     assert session.tool_inventory == ("read",)
+
+
+def test_a_foreground_tty_run_does_not_treat_the_declaration_as_consent(monkeypatch):
+    """Naming a tool is not consent on a terminal.
+
+    ``unattended`` used to mean "no ``--control``", which conflated "no
+    supervisor" with "no human" and silently removed a live per-call safety
+    prompt: `lop exec --tools bash,write "…"` typed at a terminal ran every
+    bash call with nothing shown, while the same command without --tools
+    prompts. The tree's existing test for "somebody can answer" is a tty
+    (``session_factory._make_request_approval`` prompts there and denies
+    without one), so the declaration may stand as the approval for its own
+    members only when there is no tty — the two tests above run with pytest's
+    non-tty stdin and keep auto-approving, which is also what a
+    ``--background`` worker sees (``exec_mode`` spawns it with
+    ``stdin=DEVNULL``).
+    """
+
+    class Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(sys, "stdin", Tty())
+    session = RecordingSession(reachable=("read", "bash"))
+    apply_startup(session, ExecArgs(tools="read"), team=None)
+    assert session.declared == [(("read",), False)]
 
 
 def test_a_supervised_run_declares_the_inventory_but_leaves_the_gate_alone():
