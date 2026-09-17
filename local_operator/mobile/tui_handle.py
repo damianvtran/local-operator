@@ -325,6 +325,13 @@ class TuiSessionHandle(SessionHandle):
         # events (start/end/turn-end) are the sole authority — see
         # ``_reconcile_streaming`` for why per-event reads are poison.
         self._reconcile_streaming()
+        # And seed the CLOCKS from the same attach, for the same reason: a phone
+        # subscribing mid-turn never witnessed the ``tool_execution_start`` (or
+        # the phase edge) either, so the fold's first event would date work that
+        # is already running from the phone's arrival — the reported band
+        # reading ``0s`` and counting up. One-shot, and probed: a session that
+        # cannot answer seeds nothing. See ``ProjectionFold.reconcile_clocks``.
+        self._fold.reconcile_clocks(session)
         self._refresh_state()
         self._warm_subagent_details()
         self._unsubscribe = unsubscribe
