@@ -1,3 +1,4 @@
+import json
 import time
 import unicodedata
 from enum import Enum
@@ -409,6 +410,37 @@ class RadientTokenRefreshAPIResponse(BaseModel):
     def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         """Convert model to dictionary, making it JSON serializable."""
         return super().model_dump(*args, **kwargs)
+
+
+def _is_an_error_envelope(response: requests.Response) -> bool:
+    """Is this successful response actually an error the upstream reported?
+
+    Radient reports a provider failure in a 200 body as often as in an error
+    status (the transcription path pins that behaviour), and this client's
+    speech call hands its bytes straight back as audio. Audio never parses as
+    JSON -- an mp3 opens with a frame sync or ``ID3``, a wav with ``RIFF``, an
+    ogg stream with ``OggS`` -- so a JSON object or array here is an error
+    envelope rather than a payload, whatever the content type claims.
+
+    Args:
+        response: A response whose status is already known to be 2xx.
+
+    Returns:
+        bool: True when the body is an error envelope, not audio.
+    """
+    if "json" in response.headers.get("Content-Type", "").lower():
+        return True
+    content = response.content
+    # Cheap first: audio opens with a frame sync, `ID3`, `RIFF` or `OggS`, so a
+    # body that does not open like JSON at all never needs decoding. Eight bytes
+    # is the window because an envelope may be preceded by whitespace.
+    if content[:8].lstrip()[:1] not in (b"{", b"["):
+        return False
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return isinstance(payload, (dict, list))
 
 
 class RadientClient:
@@ -1340,7 +1372,26 @@ class RadientClient:
         try:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
+            if _is_an_error_envelope(response):
+                # A provider failure reported in a 200 body, which is a shape
+                # Radient uses. Without this the error body -- including any
+                # credential the upstream echoed into it -- is returned as audio
+                # bytes and served to this daemon's own client, where no
+                # ``HTTPException`` handler ever sees it. Raised as an upstream
+                # failure so the route reports it as one, through the same
+                # scrubbed body every other surfaced failure goes through.
+                raise APIError(
+                    "Failed to generate speech: Radient returned an error body with a "
+                    f"{response.status_code} status",
+                    status_code=response.status_code,
+                    body=self._surfaceable_body(scrubbed_response_body(response)),
+                )
             return response.content
+        except APIError:
+            # Raised above from a 2xx body carrying an error. Re-raise it
+            # unchanged: the catch-all below would otherwise wrap it a second
+            # time and bury the status and body the route reads.
+            raise
         except requests.exceptions.RequestException as e:
             error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(

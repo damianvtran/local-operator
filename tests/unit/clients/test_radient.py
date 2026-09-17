@@ -1677,3 +1677,82 @@ def test_redact_secrets_leaves_text_alone_without_a_secret() -> None:
     """A client with no credential configured changes nothing it surfaces."""
     assert redact_secrets("plain body", [None, ""]) == "plain body"
     assert redact_secrets("plain body", ["key"]) == "plain body"
+
+
+# A provider failure reported inside a 200 body, in the shape Radient uses on
+# this path too (`test_create_transcription_error_in_a_200_body_is_an_upstream_failure`
+# pins the transcription sibling). The echoed credential is what makes it matter
+# here: the speech call returns bytes, so an envelope like this used to be served
+# to the daemon's own client as audio -- a payload path no `HTTPException`
+# handler ever sees.
+SPEECH_ERROR_IN_A_200_BODY = (
+    b'{"error":"Incorrect API key provided: radient-key-with-no-published-shape-4a91"}'
+)
+
+
+def test_create_speech_returns_the_audio_body_unchanged(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """Audio is not an envelope, and the error guard must not eat it.
+
+    Both shapes a real upstream sends are covered: a text-ish fixture (what the
+    end-to-end stub answers) and a body opening with an mp3 frame sync, which is
+    what a real encoder emits and must never be parsed as JSON.
+    """
+    with patch("requests.post", MagicMock(return_value=real_response(200, b"fixture-audio"))):
+        assert (
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+            == b"fixture-audio"
+        )
+
+    frame_sync_audio = b"\xff\xfb\x90\x00" + bytes(range(64))
+    with patch("requests.post", MagicMock(return_value=real_response(200, frame_sync_audio))):
+        assert (
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+            == frame_sync_audio
+        )
+
+
+def test_create_speech_treats_a_200_error_body_as_an_upstream_failure(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """A 2xx that is an error envelope is an upstream failure, not audio.
+
+    Radient reports provider failures in a 200 body, and this call returns its
+    bytes to the route, which streams them with an audio media type. Typed as an
+    upstream failure, the route reports it as one instead of serving the
+    envelope -- and the credential an upstream echoed into it -- as audio.
+    """
+    with patch(
+        "requests.post",
+        MagicMock(return_value=real_response(200, SPEECH_ERROR_IN_A_200_BODY)),
+    ):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+
+    exc = exc_info.value
+    assert exc.status_code == 200
+    assert exc.body == SPEECH_ERROR_IN_A_200_BODY.decode()
+    # Exactly once: a second wrap would mean the catch-all swallowed the typed
+    # error and the status and body the route reads were lost with it.
+    assert str(exc).count("Failed to generate speech") == 1
+
+
+def test_create_speech_treats_a_json_content_type_as_an_upstream_failure(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """A JSON content type is not audio whatever the body does or does not parse as.
+
+    A gateway can answer a 200 with a content type that names JSON and a body
+    that is not valid JSON; the media type alone is enough to know the bytes are
+    not the audio the caller asked for.
+    """
+    response = real_response(200, b"quota exceeded")
+    response.headers["Content-Type"] = "application/json"
+
+    with patch("requests.post", MagicMock(return_value=response)):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.body == "quota exceeded"
