@@ -15,7 +15,7 @@ removes something"; with it set the first Enter FILLS the buffer with
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        docs/evidence/slash-goal-loop-clear/shot_slash_flag_flow.py OUTDIR \
+        scripts/shot_slash_flag_flow.py OUTDIR \
         [goal-fill|goal-run|loop-fill|loop-run|narrow]
 
 Every case also prints the observed state to stderr (the numbers behind the
@@ -34,7 +34,9 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+# This script lives in ``scripts/``, one level under the repo root — the same
+# depth the sibling shot scripts assume. Retarget this if it ever moves again.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
