@@ -13,7 +13,9 @@ by the invoker), never on the clock — see AGENTS.md "Timing, flakes".
 from __future__ import annotations
 
 import itertools
+import json
 import logging
+import os
 import subprocess
 import sys
 import textwrap
@@ -309,7 +311,12 @@ def test_start_reporter_inside_herdr(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
     recorder = Recorder()
     reporter = start_reporter(
-        "sess-9", env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}, invoker=recorder
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=recorder,
+        # Detection is what this test is about; the ownership question is
+        # answered below, and a real probe here would spawn a real herdr.
+        pane_probe=lambda pane, binary: None,
     )
     assert reporter is not None
     assert reporter.pane_id == "w1:p1"
@@ -332,6 +339,305 @@ def test_the_state_translation() -> None:
     assert state_from_title("attention") == "blocked"
     # An errored turn is the user's turn again — never `unknown`.
     assert state_from_title("failed") == "idle"
+
+
+# ---------------------------------------------------------------------------
+# Pane identity
+# ---------------------------------------------------------------------------
+
+
+#: A pid no process in this suite has, so "the pane's shell" can never be
+#: confused with the test process itself.
+FOREIGN_SHELL_PID = 424242
+
+
+def _process_info_payload(
+    *,
+    shell_pid: int | None = None,
+    foreground_pgid: int | None = None,
+    foreground_pids: Sequence[int] = (),
+    include_pane_id: bool = True,
+) -> str:
+    """A ``pane process-info`` payload, shaped as herdr 0.9.0 emits it.
+
+    Measured against the installed 0.9.0, not invented: ``result.process_info``
+    carries ``shell_pid``, ``foreground_process_group_id`` and
+    ``foreground_processes[].pid``, and EVERY one of them can be absent — which
+    is the case the module has to read as unknown rather than as "not mine".
+    """
+    info: dict[str, Any] = {}
+    if include_pane_id:
+        info["pane_id"] = "w1:p1"
+    if shell_pid is not None:
+        info["shell_pid"] = shell_pid
+    if foreground_pgid is not None:
+        info["foreground_process_group_id"] = foreground_pgid
+    info["foreground_processes"] = [
+        {"pid": pid, "cmdline": "lop", "name": "python3"} for pid in foreground_pids
+    ]
+    return json.dumps(
+        {
+            "id": "cli:pane:process_info",
+            "result": {"process_info": info, "type": "pane_process_info"},
+        }
+    )
+
+
+class Probe:
+    """A pane probe that records what it was asked and answers one payload."""
+
+    def __init__(self, payload: str | None) -> None:
+        self.payload = payload
+        self.asked: list[tuple[str, str]] = []
+
+    def __call__(self, pane_id: str, binary: str) -> str | None:
+        self.asked.append((pane_id, binary))
+        return self.payload
+
+
+def _no_ancestry(pid: int) -> int | None:
+    """An ancestry walk that answers nothing, so only pid/pgid can match."""
+    return None
+
+
+def _foreign_payload() -> str:
+    """A payload for a pane whose shell, group and foreground processes are
+    all someone else's."""
+    return _process_info_payload(
+        shell_pid=FOREIGN_SHELL_PID,
+        foreground_pgid=FOREIGN_SHELL_PID - 1,
+        foreground_pids=(FOREIGN_SHELL_PID,),
+    )
+
+
+def test_start_reporter_is_none_for_a_pane_this_process_is_not_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect: an inherited marker names a pane we are nowhere near.
+
+    Nothing is reported and nothing is released — a process that never claimed
+    the row has no row to give up, and releasing someone else's would clear
+    their Agents row instead.
+    """
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    recorder = Recorder()
+    probe = Probe(_foreign_payload())
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=recorder,
+        pane_probe=probe,
+        parent_of=_no_ancestry,
+    )
+    assert reporter is None
+    assert probe.asked == [("w1:p1", "/usr/local/bin/herdr")]
+    assert recorder.calls == []
+
+
+def test_start_reporter_reports_when_we_are_the_pane_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    payload = _process_info_payload(shell_pid=os.getpid())
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=Probe(payload),
+        parent_of=_no_ancestry,
+    )
+    assert reporter is not None
+    assert reporter.pane_id == "w1:p1"
+
+
+def test_start_reporter_reports_when_our_process_group_is_the_pane_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process sharing the pane's foreground group is running in the pane."""
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    payload = _process_info_payload(
+        shell_pid=FOREIGN_SHELL_PID,
+        foreground_pgid=os.getpgid(0),
+    )
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=Probe(payload),
+        parent_of=_no_ancestry,
+    )
+    assert reporter is not None
+
+
+def test_start_reporter_reports_when_our_pid_is_a_foreground_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    payload = _process_info_payload(shell_pid=FOREIGN_SHELL_PID, foreground_pids=(os.getpid(),))
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=Probe(payload),
+        parent_of=_no_ancestry,
+    )
+    assert reporter is not None
+
+
+def test_start_reporter_reports_when_our_ancestry_reaches_the_pane_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backgrounded in the pane: neither pid nor pgid matches, the walk does."""
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    ours = os.getpid()
+    chain = {ours: ours + 1, ours + 1: FOREIGN_SHELL_PID}
+    payload = _process_info_payload(
+        shell_pid=FOREIGN_SHELL_PID,
+        foreground_pgid=FOREIGN_SHELL_PID,
+        foreground_pids=(FOREIGN_SHELL_PID,),
+    )
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=Probe(payload),
+        parent_of=chain.get,
+    )
+    assert reporter is not None
+    assert reporter.pane_id == "w1:p1"
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        ("the probe failed", None),
+        ("the payload is unparsable", "herdr: not json at all"),
+        ("the payload is a bare error object", '{"error": {"code": "pane_not_found"}}'),
+        ("process_info is missing", '{"result": {"type": "pane_process_info"}}'),
+        ("no identity field is present", _process_info_payload(include_pane_id=False)),
+    ],
+)
+def test_start_reporter_fails_open_on_every_unknown(
+    label: str, payload: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UNKNOWN reports anyway, and that is the point rather than a fallback.
+
+    Herdr being unreachable is not evidence that this process is somewhere
+    else, and the failure the module's contract forbids is SILENCING a
+    legitimate row. So every unanswerable payload still yields a reporter.
+    """
+    monkeypatch.setattr(reporter_mod.shutil, "which", lambda name: "/usr/local/bin/herdr")
+    probe = Probe(payload)
+    reporter = start_reporter(
+        "sess-9",
+        env={"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"},
+        invoker=Recorder(),
+        pane_probe=probe,
+        parent_of=_no_ancestry,
+    )
+    assert probe.asked, label  # the probe was asked, so this is not vacuous
+    assert reporter is not None, label
+
+
+def test_the_pane_verdict_is_unknown_until_the_payload_names_a_process() -> None:
+    """The pure rule, on the payloads that carry no identity at all."""
+    ours = os.getpid()
+    unknown = [
+        None,
+        "",
+        "not json",
+        "[]",
+        '{"error": {"code": "pane_not_found"}}',
+        '{"result": {}}',
+        '{"result": {"process_info": {}}}',
+        '{"result": {"process_info": {"foreground_processes": []}}}',
+        # Present but unreadable is absent, not pid 1.
+        '{"result": {"process_info": {"shell_pid": true}}}',
+        '{"result": {"process_info": {"shell_pid": "424242"}}}',
+    ]
+    for payload in unknown:
+        verdict = reporter_mod._pane_ownership(
+            payload, pid=ours, pgid=os.getpgid(0), parent_of=_no_ancestry
+        )
+        assert verdict is None, payload
+    # And it goes three-valued the moment the payload names one process.
+    assert (
+        reporter_mod._pane_ownership(
+            _process_info_payload(shell_pid=FOREIGN_SHELL_PID),
+            pid=ours,
+            pgid=os.getpgid(0),
+            parent_of=_no_ancestry,
+        )
+        is False
+    )
+
+
+def test_the_ancestry_walk_is_bounded_and_cycle_safe() -> None:
+    """A wrong or looping ``parent_of`` must not spin, and must not match."""
+    payload = _process_info_payload(shell_pid=FOREIGN_SHELL_PID)
+    hops: list[int] = []
+
+    def endless(pid: int) -> int | None:
+        hops.append(pid)
+        return pid + 1
+
+    assert (
+        reporter_mod._pane_ownership(payload, pid=500, pgid=os.getpgid(0), parent_of=endless)
+        is False
+    )
+    assert len(hops) == reporter_mod._ANCESTRY_MAX_HOPS
+    # A cycle ends the walk rather than following it forever.
+    cycle = {500: 501, 501: 500}
+    assert (
+        reporter_mod._pane_ownership(payload, pid=500, pgid=os.getpgid(0), parent_of=cycle.get)
+        is False
+    )
+    # A process is not its own ancestor.
+    assert (
+        reporter_mod._pane_ownership(
+            payload, pid=500, pgid=os.getpgid(0), parent_of=lambda pid: pid
+        )
+        is False
+    )
+    # Neither is pid 1, and a walk that reaches it stops.
+    stopped: list[int] = []
+
+    def up_to_one(pid: int) -> int | None:
+        stopped.append(pid)
+        return 1
+
+    assert (
+        reporter_mod._pane_ownership(payload, pid=500, pgid=os.getpgid(0), parent_of=up_to_one)
+        is False
+    )
+    assert len(stopped) == 1
+
+
+def test_the_default_probe_passes_the_pane_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Against a real subprocess: ``--pane`` is always passed, stdout is read.
+
+    A bare ``herdr pane process-info`` answers about the FOCUSED pane, so the
+    fake binary records its argv and the test asserts the flag is there.
+    """
+    log = tmp_path / "argv.log"
+    binary = tmp_path / "herdr"
+    binary.write_text(f'#!/bin/sh\nprintf %s "$*" > {log}\necho \'{{"result":{{}}}}\'\n')
+    binary.chmod(0o755)
+    assert reporter_mod._default_pane_probe("w1:p9", str(binary)) == '{"result":{}}\n'
+    assert log.read_text() == "pane process-info --pane w1:p9"
+    monkeypatch.setattr(reporter_mod, "CALL_TIMEOUT_S", 0.5)
+    # A non-zero exit and a spawn failure are both UNKNOWN, never stdout.
+    assert reporter_mod._default_pane_probe("w1:p9", sys.executable) is None
+    assert reporter_mod._default_pane_probe("w1:p9", str(tmp_path / "missing")) is None
+
+
+def test_the_default_parent_lookup_reads_this_process_tree() -> None:
+    """``ps`` against a process that really exists, plus the pid-1 stop."""
+    assert reporter_mod._default_parent_pid(os.getpid()) == os.getppid()
+    assert reporter_mod._default_parent_pid(1) is None
+    assert reporter_mod._default_parent_pid(999_999_999) is None
 
 
 # ---------------------------------------------------------------------------
