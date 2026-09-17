@@ -1622,11 +1622,19 @@ async def command(session_id: str, body: Command, request: Request):
     if spec is None or not spec.desktop_destination:
         raise HTTPException(422, "Unknown command")
     if spec.name == "credential" and body.args:
-        # The ONE command whose trailing text the desktop never consumes: the
-        # secret is entered in the masked form (`argument_shape` is NONE), so any
-        # text here is prose the caller sent to the wrong route. Left as its own
-        # check because the sentence is about the FORM, not about a shape the
-        # admission rule reads.
+        # The ONE command whose trailing text this route REFUSES rather than
+        # consumes, because the secret is entered in the masked form. Left as its
+        # own check because the sentence is about the FORM, not about a shape
+        # `command_argument_refusal` validates.
+        #
+        # It is NOT a row the admission rule calls prose, and that is the half
+        # this comment used to get wrong: the registry publishes
+        # `argument_shape=ANY` for it, so the messages endpoint reads a
+        # whole-draft `/credential <secret>` as the command and answers 422 too.
+        # The two 422s are one policy — the text belongs to the masked form —
+        # and the registry's `ANY` is what keeps the secret out of a paid turn
+        # for a client whose command surface is off and which therefore plans
+        # every draft as `send`.
         raise HTTPException(
             422, "Enter credentials in the masked credential form, not command text"
         )

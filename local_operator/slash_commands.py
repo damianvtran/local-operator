@@ -693,6 +693,26 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Type or paste a secret after a space; masked",
         aliases=("cred",),
         arguments=ArgumentMode.OPTIONAL,
+        # ANY, and this row is the reason the shape vocabulary needed a third
+        # entry in its exception list: the command route REFUSES hand-typed text
+        # and names the masked form instead ("Enter credentials in the masked
+        # credential form, not command text"), so the text after the word belongs
+        # to this command and must never be planned as PROSE by another path.
+        #
+        # The default `none` said the opposite — "no source at all, so text after
+        # the word is a message" — and that made the published fact false in the
+        # unsafe direction: the messages endpoint's admission rule agreed with it
+        # and admitted a whole-draft `/credential <secret>` as a MESSAGE, so a
+        # client whose composer plans that draft as prose posted a raw credential
+        # to the model. Measured on the released code: `/credential <canary>`,
+        # `/cred <canary>` and even `please /credential <canary>` all reached a
+        # transcript as a `type=message, role=user` record.
+        #
+        # ANY rather than WORD because the refusal is about the text, not its
+        # token count: a secret is arbitrary text, and a single-token shape would
+        # leave `/credential my pass phrase` admitted as a message — the same leak
+        # for the multi-token case.
+        argument_shape=ArgumentShape.ANY,
         desktop_destination="session.credential",
     ),
     # NOT an echo. `/team <name> <request>` does reach the model, but as
