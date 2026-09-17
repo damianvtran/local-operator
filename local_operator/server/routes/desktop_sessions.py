@@ -98,6 +98,32 @@ logger = logging.getLogger(__name__)
 #: the user's text was dropped with a log line as its only trace.
 _ADMISSION_ACK_BOUND_S = 2.0
 
+#: The machine code a CONTROL path answers when the session's runtime could not be
+#: reached at all — a refused dial, a socket that died, a bind that ran out of its
+#: envelope. A session-scoped fact, which the status alone cannot express: 503 is
+#: also what a server that is not answering, and a daemon that is retiring, both
+#: produce. Part of the two-repo contract in ``docs/DESKTOP_API.md``: the renderer
+#: keys on this code, and the sentence below is carried for the clients that
+#: predate it.
+RUNTIME_UNREACHABLE = "runtime_unreachable"
+
+#: The vetted sentence that accompanies :data:`RUNTIME_UNREACHABLE`.
+#:
+#: DELIBERATELY THE UNCHANGED TEXT, while the design (D8) says a read should stop
+#: talking about an "owner" at all. Two reasons, and the first is a hard
+#: constraint rather than caution: the shipped desktop app recognises this exact
+#: prefix to give its MCP row the "this conversation's session is not running"
+#: sentence, so rewording it here would change that copy on every machine whose
+#: app has not been updated yet — a UI regression produced by a backend fix. The
+#: code above is what removes the coupling; the wording goes when the renderer
+#: keys on the code (the UI half of this change). Second, every READ that used to
+#: reach this ladder now answers cold instead, so the remaining callers are
+#: control paths, where the sentence is about a request that genuinely was not
+#: served.
+RUNTIME_UNREACHABLE_MESSAGE = (
+    "Session owner is unavailable. Reconnect and reconcile before retrying."
+)
+
 #: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is
 #: the ONE-WORD answer to "did the owner take this text", which is why a false
 #: ``admitted`` is not a wording problem: it is the field a renderer branches on.
@@ -1017,13 +1043,24 @@ async def errors() -> AsyncIterator[None]:
         # raises bare ConnectionErrors carrying socket errors, internal control
         # ports and other sessions' ids. Those keep the generic sentence.
         detail = str(error).strip() if getattr(error, "actionable", False) else ""
+        # A CODE, NOT ONLY A SENTENCE (design D8). The status says "this backend
+        # could not complete the request", which the renderer cannot tell from a
+        # server-wide outage — that conflation is what painted "the Local Operator
+        # server is not running" over one conversation. ``code`` is the machine
+        # contract the renderer branches on; ``message`` keeps the same vetted
+        # sentence it has always carried, because the shipped app matches that
+        # prefix for its MCP row and the two repositories must never have to move
+        # in step for copy to keep rendering.
         raise HTTPException(
             503,
-            detail or "Session owner is unavailable. Reconnect and reconcile before retrying.",
+            {
+                "code": RUNTIME_UNREACHABLE,
+                "message": detail or RUNTIME_UNREACHABLE_MESSAGE,
+            },
         ) from None
     except (RuntimeError, asyncio.TimeoutError):
         raise HTTPException(
-            503, "Session owner is unavailable. Reconnect and reconcile before retrying."
+            503, {"code": RUNTIME_UNREACHABLE, "message": RUNTIME_UNREACHABLE_MESSAGE}
         ) from None
 
 
@@ -1324,7 +1361,12 @@ async def preview_session(body: DraftPreview, request: Request):
 
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])
 async def snapshot(session_id: str, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: an existing but silent owner must not fail a read. The durable answer
+    # is on disk in this same process, so the attempt is bounded
+    # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
+    # ``cold_reason``; the previous envelope answered 503 "Session owner is
+    # unavailable" after ~17 s for a runtime whose loop was merely busy.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.snapshot())
 
 
@@ -1335,7 +1377,8 @@ async def history(
     before_id: str | None = Query(default=None, max_length=128),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ, for the same reason as ``snapshot`` beside it.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.history(before_id=before_id, limit=limit))
 
 
@@ -1809,7 +1852,13 @@ async def notified(session_id: str, body: Notified, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])
 async def watch(session_id: str, body: Watch, request: Request):
-    async with errors(), host(request).session(session_id) as bridge:
+    # READ: this is the renderer's presence BEAT (every 15 s), not a mutation of
+    # the conversation. It must never be refused because an existing owner is
+    # slow to answer — a lost beat costs one lease interval, while a 503 here
+    # made the panel report a lost connection for a session that was running.
+    # The visible lease this beat carries still CREATES residency (through
+    # ``bridge.watch`` and its lease-warm loop); read mode bounds only the attach.
+    async with errors(), host(request).session(session_id, read=True) as bridge:
         await bridge.watch(body.subscription_id, visible=body.visible, can_notify=body.can_notify)
         return reply({"lease_seconds": 45})
 
@@ -2248,7 +2297,7 @@ async def events(
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
-    context = host(request).session(session_id)
+    context = host(request).session(session_id, read=True)
     async with errors():
         bridge: DesktopSessionBridge = await context.__aenter__()
         try:
