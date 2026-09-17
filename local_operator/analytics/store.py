@@ -2363,6 +2363,21 @@ class AnalyticsStore:
         Inspect columns on THIS connection rather than writer migration flags:
         diagnostics must also work against a read-only, older ledger. Missing
         optional fields remain unknown, not invented successes or zero timings.
+
+        SCAN ECONOMY. The report's fields come from three statements, not the ~9
+        it used to walk: one flat totals scan (which also carries the
+        missing/unknown/first/last figures, because they read the same rows), ONE
+        combined ``GROUP BY purpose, outcome, provider, model_id`` that the three
+        breakdowns are re-derived from, and the recent-rows tail. The merge is
+        safe because every measure is an additive integer: summing the finest
+        grouping's counts per (provider, model_id) or per purpose gives exactly
+        what the separate GROUP BYs returned, and the key sets are identical by
+        construction. On the operator's busiest real session (27,974 calls) that
+        is what takes the read from ~1.7 s to well under the one-second target;
+        the equivalence is pinned by
+        ``tests/unit/analytics/test_session_report_equivalence.py``, which
+        compares this against a frozen copy of the pre-change statements over the
+        same database.
         """
         conn: sqlite3.Connection | None = None
         try:
@@ -2399,52 +2414,99 @@ class AnalyticsStore:
             measures = ", ".join(sums)
             scope = " FROM calls WHERE session_id = ?"
             params = (session_id,)
-            aggregate = _aggregate_from_row(
-                conn.execute(f"SELECT {measures}" + scope, params).fetchone()
+            usage = col("usage_reported", "NULL")
+            # The three timing summaries ride this scan too. They need
+            # conditional aggregates rather than a WHERE clause so that each
+            # column is judged independently — the old statements each re-scanned
+            # the session to drop rows whose OWN column was the "no sample"
+            # ``-1`` sentinel, and a shared ``AND x >= 0`` would silently start
+            # requiring all three samples at once. An absent column (a
+            # pre-timing ledger) still reads count 0 with NULL mean/min/max
+            # rather than a fabricated 0 ms.
+            timing_columns = [
+                (name, col(name, "NULL")) for name in ("duration_ms", "ttft_ms", "preparation_ms")
+            ]
+            timing_select = ", ".join(
+                f"COUNT(CASE WHEN {expression} >= 0 THEN {expression} END), "
+                f"AVG(CASE WHEN {expression} >= 0 THEN {expression} END), "
+                f"MIN(CASE WHEN {expression} >= 0 THEN {expression} END), "
+                f"MAX(CASE WHEN {expression} >= 0 THEN {expression} END)"
+                for _, expression in timing_columns
             )
-            by_model = {
-                (str(row[0]), str(row[1])): _aggregate_from_row(row[2:])
-                for row in conn.execute(
-                    f"SELECT provider, model_id, {measures}"
-                    + scope
-                    + " GROUP BY provider, model_id",
-                    params,
+            # ONE scan for the headline figures. ``SUM(x = 0)`` counts rows where
+            # the comparison is true and ignores the NULL rows, which is what the
+            # separate statement did and why an absent column still reads 0.
+            top = conn.execute(
+                f"SELECT {measures}, SUM({usage} = 0), SUM({usage} IS NULL), "
+                f"MIN(ts_ms), MAX(ts_ms), " + timing_select + scope,
+                params,
+            ).fetchone()
+            aggregate = _aggregate_from_row(top[: len(sums)])
+            missing, unknown, first, last = top[len(sums) : len(sums) + 4]
+            timings: dict[str, TimingSummary] = {}
+            for index, (name, _) in enumerate(timing_columns):
+                offset = len(sums) + 4 + index * 4
+                timings[name] = TimingSummary(
+                    int(top[offset]),
+                    top[offset + 1],
+                    top[offset + 2],
+                    top[offset + 3],
                 )
-            }
             purpose = col("purpose", "'unknown'")
             outcome = col("outcome", "'unknown'")
+            # ONE scan for all three breakdowns. Each of the separate GROUP BYs
+            # this replaces walked the session's rows again with the same WHERE
+            # clause — measured as the single largest cost of the read — and each
+            # aggregates the SAME additive measures, so the finest grouping can
+            # produce all three by summing in Python. That is exact: every value
+            # is an integer COUNT/SUM, and the keys are rebuilt in the order the
+            # old queries returned them, so the route's serialised lists are
+            # unchanged as well as their contents.
+            grouped = conn.execute(
+                f"SELECT {purpose}, {outcome}, provider, model_id, {measures}"
+                + scope
+                + " GROUP BY 1, 2, 3, 4",
+                params,
+            ).fetchall()
+            model_sums: dict[tuple[str, str], list[int]] = {}
+            purpose_sums: dict[str, list[int]] = {}
+            groups: dict[tuple[str, str], int] = {}
+
+            def accumulate(bucket: dict[Any, list[int]], key: Any, values: list[int]) -> None:
+                """Add one fine-grained group's measures into a coarser bucket.
+
+                Integer addition is what makes the merge exact: every measure is
+                a COUNT or a SUM over the same rows, so summing the finest
+                grouping per key reproduces the coarser GROUP BY's row exactly.
+                """
+                accumulated = bucket.get(key)
+                if accumulated is None:
+                    bucket[key] = list(values)
+                else:
+                    for index, value in enumerate(values):
+                        accumulated[index] += value
+
+            for row in grouped:
+                # ``measures`` opens with COUNT(*), so the same tuple both feeds
+                # the accumulated measures and answers ``by_purpose_outcome``.
+                values = [int(value or 0) for value in row[4:]]
+                pair = (str(row[0]), str(row[1]))
+                groups[pair] = groups.get(pair, 0) + values[0]
+                accumulate(model_sums, (str(row[2]), str(row[3])), values)
+                accumulate(purpose_sums, str(row[0]), values)
+            by_model = {
+                key: _aggregate_from_row(value) for key, value in sorted(model_sums.items())
+            }
             # Consumption per purpose, on the SAME ``measures`` contract as
-            # ``by_model`` — one extra GROUP BY on a column that already exists
+            # ``by_model`` — one extra grouping on columns that already exist
             # beside the token and cost sums, so no schema change and no second
             # aggregation vocabulary. ``col`` folds an older ledger without the
             # column into a single ``unknown`` row, which is honest: we know the
             # tokens, we do not know what they were spent on.
             by_purpose = {
-                str(row[0]): _aggregate_from_row(row[1:])
-                for row in conn.execute(
-                    f"SELECT {purpose}, {measures}" + scope + " GROUP BY 1", params
-                )
+                key: _aggregate_from_row(value) for key, value in sorted(purpose_sums.items())
             }
-            groups = {
-                (str(row[0]), str(row[1])): int(row[2])
-                for row in conn.execute(
-                    f"SELECT {purpose}, {outcome}, COUNT(*)" + scope + " GROUP BY 1, 2", params
-                )
-            }
-            usage = col("usage_reported", "NULL")
-            missing, unknown, first, last = conn.execute(
-                f"SELECT SUM({usage} = 0), SUM({usage} IS NULL), MIN(ts_ms), MAX(ts_ms)" + scope,
-                params,
-            ).fetchone()
-            timings: dict[str, TimingSummary] = {}
-            for name in ("duration_ms", "ttft_ms", "preparation_ms"):
-                expression = col(name, "NULL")
-                row = conn.execute(
-                    f"SELECT COUNT({expression}), AVG({expression}), "
-                    f"MIN({expression}), MAX({expression})" + scope + f" AND {expression} >= 0",
-                    params,
-                ).fetchone()
-                timings[name] = TimingSummary(int(row[0]), row[1], row[2], row[3])
+            groups = dict(sorted(groups.items()))
             fields = [
                 col("request_id", "''"),
                 "ts_ms",

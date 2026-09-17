@@ -362,66 +362,93 @@ What the rows say, in order:
   the read is still serial.
 ## analytics-rollup-before.json / analytics-rollup-after.json
 
-The `/analytics` open: `AnalyticsStore.aggregate()` — the read
-`/v1/desktop/analytics` performs for the panel and the TUI's `/analytics` screen
-performs for its tables — before and after the maintained day-grain rollup.
-`scripts/bench_panel_latency.py` calls the store exactly as the route does on a
-**copy** of the operator's live ledger, and reports the path each arm actually
-took, so a "fast" number cannot come from the wrong code:
+Two reads, each with its own before/after: the `/analytics` aggregate
+(`AnalyticsStore.aggregate()`, the read `/v1/desktop/analytics` makes for the
+panel and the TUI makes for its tables) and the `/session` report
+(`AnalyticsStore.session_report`, the read behind
+`/v1/desktop/sessions/{id}/report`). `scripts/bench_panel_latency.py` calls the
+store exactly as those routes do, against a **copy** of the operator's live
+ledger, and records which path each arm took, so a "fast" number cannot come
+from the wrong code. It also re-checks the `/session` equivalence against the
+frozen pre-change statements and records the result in the JSON.
 
 ```sh
 PYTHONPATH=. .venv/bin/python scripts/bench_panel_latency.py \
   --ledger ~/.local-operator/analytics.db --label after --json out.json
 ```
 
-Both JSONs were produced by the same command against the *same* snapshot copy
+Both JSONs come from that one command against the *same* snapshot copy
 (`/tmp/bench-live/analytics.db`, 342.8 MB, 1,155,845 calls, 7,241 sessions,
 2026-08-22 → 2026-09-16): `before` from a worktree at `f8111eecc`, `after` from
-the change's worktree, sequentially, on a 14-core host at load **206-265** from
-sibling agent worktrees. Wall time is inflated by that load and moves 2.5x
-between runs of the same code; **CPU is the portable column** and is reported
-beside it everywhere.
+the change's worktree, sequentially, on a 14-core host at load **334-463** from
+sibling agent worktrees. Wall time is inflated by that load and moves 2-3x
+between runs of the same code; **CPU is the portable column**, the `min` of a
+sample set is the least-contended estimate of the real cost, and both are
+reported beside the wall everywhere.
+
+### `/analytics`: raw ledger → maintained day rollup
 
 | arm (1.16 M calls, 342.8 MB) | before: raw ledger | after: rollup | ratio |
 | --- | --- | --- | --- |
-| panel's 30-day window, wall p50 | 4,829 ms | **334 ms** | 14x |
-| panel's 30-day window, CPU p50 | 2,765 ms | **110 ms** | 25x |
-| TUI all-time (`aggregate()`, no bounds), wall p50 | 3,186 ms | **314 ms** | 10x |
-| TUI all-time, CPU p50 | 1,801 ms | **103 ms** | 17x |
-| last 7 days, wall p50 / CPU p50 | 5,928 / 1,380 ms | **302 / 85 ms** | 20x / 16x |
-| **first** read of a fresh copy (cold stand-in) | 4,346 ms | **457 ms** | 10x |
-| route payload (`asdict` + `json.dumps`, 3.74 MB) | 38.8 ms CPU | 54.5 ms CPU | — |
-| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.14 / 0.25 / 0.45 ms | 0.29 / 0.43 / 0.77 ms | +0.12 / +0.10 / +0.21 ms |
-| backfill sweep of an existing ledger | n/a (falls back to the ledger) | 26 days, 9,983 ms wall / 1,929 ms CPU | 212 ms/day p50 |
+| panel's 30-day window, wall p50 | 14,857 ms | **611 ms** | 24x |
+| panel's 30-day window, CPU p50 | 3,014 ms | **110 ms** | 27x |
+| TUI all-time (no bounds), wall p50 | 8,976 ms | **375 ms** | 24x |
+| TUI all-time, CPU p50 | 2,069 ms | **105 ms** | 20x |
+| last 7 days, wall p50 / CPU p50 | 7,039 / 1,446 ms | **418 / 91 ms** | 17x / 16x |
+| **first** read of a fresh copy (cold stand-in) | 6,061 ms / 2,011 ms CPU | **407 ms / 108 ms CPU** | 15x / 19x |
+| route payload (`asdict` + `json.dumps`, 3.74 MB) | 42.1 ms CPU | 59.3 ms CPU | — |
+| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.14 / 0.18 / 0.55 ms | 0.14 / 0.37 / 0.70 ms | +0.00 / +0.19 / +0.19 ms |
+| backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 26 days, 6,753 ms wall / 1,651 ms CPU (9,060 buckets) | 156 ms/day p50 |
 
-Reading the table:
+Reading it:
 
 - **The windowed read is the more expensive shape, and it is the one the panel
   asks for.** A bounded window makes SQLite use `idx_calls_ts` for random table
-  lookups where the unbounded query falls back to a sequential scan, so the
-  panel (day-aligned bounds) used to be *slower* than the TUI (no bounds) despite
-  touching the same rows. Fixing only the TUI path would not have fixed the
-  panel; both are served by the same rollup because both real callers are
-  day-aligned or unbounded, which is exactly the assumption the gate enforces.
-- **The first-touch row is the one a warm A/B cannot see.** Copying a new
-  342.8 MB file each time is the stand-in for an evicted page cache (`sudo purge`
-  is not available here), and the rollup's 1.1 MB of buckets versus the ledger's
-  ~300 MB of table and index is the durable part of the claim: at 6.4 s vs
-  457 ms this is the difference between a panel that appears broken on a cold
-  morning and one that does not.
-- **The write row is measured as an interleaved A/B inside one interpreter**, so
-  host drift lands on both arms: the control is the same `record_batch`
-  transaction with the new upsert disabled, which is precisely what the parent
-  tree runs. The cost is +0.10-0.21 ms of CPU per batch on the recorder's
-  background thread, against a sub-millisecond transaction that already pays a
-  commit — and none of it is on a session's event loop.
-- **The sweep is the upgrade path, not the steady state.** It runs once per
-  launch on the store-maintenance thread, newest-first, one bounded transaction
-  per day, and a read touching a day it has not reached is answered by the ledger
-  (i.e. the before column) rather than by a partial total. On this ledger the
-  panel's 30-day window is fast once all 26 days are derived; Today is fast
-  immediately because the writer maintains today's buckets.
-- **Nothing here is a test assertion.** The suite asserts which path ran, never a
-  duration (AGENTS.md §Timing); these files are where a duration is a
-  measurement, and the `path` field inside each arm is the evidence that the
-  number came from the code it names.
+  lookups where the unbounded query falls back to a sequential scan, so the panel
+  (day-aligned bounds) used to be *slower* than the TUI (no bounds) despite
+  touching the same rows. Both now come from the rollup, because both real
+  callers are day-aligned or unbounded — which is exactly the assumption the gate
+  enforces.
+- **The first-touch row is what a warm A/B cannot see.** A fresh copy each run is
+  the stand-in for an evicted page cache (`sudo purge` is unavailable here), and
+  the durable part of the claim is bytes touched: 1.1 MB of buckets against
+  ~300 MB of table and index. 6.1 s → 407 ms is the difference between a panel
+  that looks broken on a cold morning and one that does not.
+- **The write row is an interleaved A/B inside one interpreter**, so host drift
+  lands on both arms: the control is the same `record_batch` transaction with the
+  new upsert disabled, which is precisely what the parent tree runs. The cost is
+  +0.19 ms of CPU per batch on the recorder's background thread — none of it on a
+  session's event loop.
+- **The sweep is the upgrade path, not the steady state**: once per launch, on
+  the store-maintenance thread, newest-first, one bounded transaction per day,
+  and a read touching a day it has not reached is answered by the ledger (the
+  before column) rather than by a partial total.
+
+### `/session`: five scans of a session's rows → two
+
+The report's fields come from three statements now, not nine: one flat totals
+scan that also carries the timing summaries and the missing/unknown/span
+figures, ONE combined `GROUP BY purpose, outcome, provider, model_id` that the
+three breakdowns are re-derived from by integer addition, and the recent-rows
+tail. Measured on the three busiest real sessions:
+
+| session | calls | before wall p50 (min) | after wall p50 (min) | before CPU p50 | after CPU p50 |
+| --- | --- | --- | --- | --- | --- |
+| `835fbcafdc27` | 27,974 | 1,043 ms (465) | **788 ms (235)** | 238.4 ms | **152.4 ms** |
+| `29435655756c` | 25,445 | 352 ms (179) | **238 ms (86)** | 133.5 ms | **79.6 ms** |
+| `13669a0d7af1` | 21,927 | 308 ms (162) | **103 ms (90)** | 108.5 ms | **67.9 ms** |
+
+- **Equivalence is recorded, not asserted in prose**: the JSON carries
+  `session_report_equivalence` — `{"equal": true, "fields": 15}` for each of the
+  three sessions — produced by running the frozen pre-change statements against
+  the same copy and comparing `dataclasses.asdict` field for field. The unit
+  suite runs the same oracle on synthetic edges (two providers in one session, a
+  purpose under two outcomes, absent timing samples, an older ledger with none of
+  the optional columns) and on the operator's ledger when it is readable.
+- **The largest session is the worst case that exists on this ledger**, and it
+  now sits under the one-second target on a host at load ~400 (235 ms in the
+  least-contended sample) — with 152 ms of CPU, which is what it costs on an idle
+  machine.
+- **Nothing here is a test assertion.** The suite asserts which path ran and
+  which fields agree, never a duration (AGENTS.md §Timing); these files are where
+  a duration is a measurement.
