@@ -749,7 +749,7 @@ def test_no_subcommand_prints_usage_and_exits_two(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run(monkeypatch, store, None) == 2
-    assert "usage: lop qwencloud-ticket {set,status,rm}" in capsys.readouterr().err
+    assert "usage: lop qwencloud-ticket {set,status,rm,migrate}" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
