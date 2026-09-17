@@ -514,6 +514,14 @@ class ServingSessionHandle(SessionHandle):
         #: Deliberately never cleared: a retirement is a one-way door for the
         #: process.
         self._retiring_cause: str = ""
+        #: The parenthetical that belongs to ``_retiring_cause``, held here so
+        #: the exit can compose its own reading of it (``process._drain_detail_at_exit``
+        #: RE-READS the build pair rather than replaying the latch's). It is the
+        #: LOG's why-now and nothing else: a retirement cannot have cut a turn
+        #: (``begin_retire`` refuses while anything is in flight), so there is no
+        #: turn outcome for it to ride — see
+        #: :meth:`_note_retirement_cut_off`.
+        self._retiring_detail: str = ""
         #: Set by :meth:`begin_drain`, the latch that does NOT require an idle
         #: runtime. It says the leaving is a HANDOVER with time left in it: the
         #: runtime still has work to finish, so a message that arrives in the
@@ -984,10 +992,16 @@ class ServingSessionHandle(SessionHandle):
         # event), and suppressed when a deliberate stop was already noted for
         # this turn — the graceful ``stop`` op reaches here too, and relabelling
         # a user's own cancel as an error is the worse mistake.
-        session = getattr(self, "_session", None)
-        note = getattr(session, "note_cut_off", None)
-        if callable(note):
-            note(self._retiring_cause or "runtime-shutdown")
+        #
+        # THIS IS THE RUNG THAT WRITES IT, for every exit, and that placement is
+        # the fix (2026-09-17): the latches above run when the departure is
+        # DECIDED, which for the build rungs can be hours before the exit — and
+        # the note belongs to a TURN, so one armed at a latch could only ever
+        # brand whatever run ended next. Arming it here means it can only ever
+        # brand the turn the disposal is about to abort, and
+        # :meth:`_note_retirement_cut_off` gates even that on the session's own
+        # evidence of a live turn, so an exit that caught nothing notes nothing.
+        self._note_retirement_cut_off()
         # Revoke the broker registration along with the session: descendants of
         # a session that is going away must not stay authorized behind it
         # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
@@ -1252,10 +1266,27 @@ class ServingSessionHandle(SessionHandle):
         aborted (design §5.1). The latch makes the claim true by construction
         rather than by timing.
 
-        ``cause`` names the retirement for the refusal and the log; the session
-        is told as well, so a turn aborted while retiring is labelled with the
-        retirement rather than a generic shutdown.
+        ``cause`` names the retirement for the refusal and the log, and
+        ``detail`` is the why-now parenthetical that belongs to it — the build
+        pair the exit RE-READS, or the latch's reasons when the pair cannot be
+        asserted (``process._drain_detail_at_exit``). BOTH ARE RECORDED AND
+        LOGGED, AND NEITHER CAN BRAND A TURN: the cut-off note is written by
+        :meth:`_note_retirement_cut_off` at the disposal, and only for a turn
+        the disposal is actually aborting. Arming one here — which is what this
+        method did until 2026-09-17 — could only ever brand a run the exit did
+        not cut, because the idle gate above means no turn is in flight when
+        this succeeds (agent review round 1, MAJOR-1).
+
+        Refuses while this handle is already disposing, mirroring
+        :meth:`begin_drain`: the disposal owns the ordering from ``_disposing``
+        on, and a second rung committing to an exit would race it into
+        ``_clean_exit``. Hardening rather than a fix — the incident that
+        motivated the move (2026-09-17) has the arming, not the disposal, before
+        it — but the asymmetry with ``begin_drain`` is one rung away from being
+        read as an invitation.
         """
+        if getattr(self, "_disposing", False):
+            return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
@@ -1263,12 +1294,55 @@ class ServingSessionHandle(SessionHandle):
         if reason:
             return False
         self._retiring_cause = cause or "retiring"
+        self._retiring_detail = detail
         self._exit_committed = True
+        # The exit's own LOG line, and the only reader this detail has. It is
+        # logged HERE rather than at the departure site so every rung's reading
+        # lands in one shape: the two build rungs log the pair they composed at
+        # the exit (never the latch's), the signal rung its phrase, and the
+        # viewer-driven retirement (``server._retire``) its build label.
+        logger.info(
+            "session runtime: retiring (%s)%s",
+            self._retiring_cause,
+            f" {detail.strip()}" if detail.strip() else "",
+        )
+        return True
+
+    def _note_retirement_cut_off(self) -> None:
+        """Record the cause of the turn THIS disposal is about to cut.
+
+        Called by :meth:`dispose` before the handle hands over to the session's
+        own disposal, which is the moment the cut becomes a fact rather than a
+        forecast.
+
+        THE GATE IS THE SESSION'S OWN EVIDENCE, not this handle's latch, and
+        that is the fix (agent review round 1, MAJOR-1). Written whenever the
+        latch existed, the note branded whichever run end came next — and for
+        every rung that names a build there can only ever be a run this exit did
+        NOT cut, because ``begin_retire`` refuses while anything is in flight:
+        the note then landed on a run left unsettled by a turn that had stopped
+        somewhere else, and rendered the operator a "Stopped with an error" card
+        for an update that caught nothing. What the session can attest to is a
+        turn it is ABORTING (``Session.disposal_cuts_a_turn``), so that is what
+        is asked.
+
+        THE CAUSE STILL RIDES, because one latch that CAN reach a live turn is
+        the bounded signal drain: ``begin_drain(SIGNAL_DRAIN_CAUSE)`` does not
+        require idle, ``_drain_for`` retries the exit latch until the boundary,
+        and the disposal is what aborts the turn the bound expired under —
+        labelled ``runtime-shutdown``, the token that drain carries, so a turn
+        is classified identically whether the drain expired or never ran
+        (``process._drain_for_signal``). ``runtime-shutdown`` when nothing
+        latched at all: a fatal-on-arrival SIGTERM and a host that disposes in
+        place name no retirement, and both can catch a live turn.
+        """
         session = getattr(self, "_session", None)
+        cuts = getattr(session, "disposal_cuts_a_turn", None)
+        if not callable(cuts) or not cuts():
+            return
         note = getattr(session, "note_cut_off", None)
         if callable(note):
-            note(self._retiring_cause, detail)
-        return True
+            note(self._retiring_cause or "runtime-shutdown", self._retiring_detail)
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
         """Commit this runtime to leaving WITHOUT requiring it to be idle.
@@ -1310,9 +1384,9 @@ class ServingSessionHandle(SessionHandle):
 
         Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
         running when this latches is expected to FINISH, and arming a cut-off
-        for it would relabel a completed turn as an error — that note belongs
-        to the rung that actually takes the exit, which is still
-        :meth:`begin_retire`.
+        for it would relabel a completed turn as an error — the note belongs to
+        the DISPOSAL, and only for a turn the disposal is actually aborting
+        (:meth:`_note_retirement_cut_off`).
 
         ``cause`` is the vocabulary token the refusal and the eventual cut-off
         note carry; ``detail`` is free text for the log. Returns whether the

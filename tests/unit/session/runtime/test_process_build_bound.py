@@ -34,7 +34,12 @@ import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
-from local_operator.session.runtime.process import _BuildWatch, _reaper, _should_refresh
+from local_operator.session.runtime.process import (
+    _build_pair,
+    _BuildWatch,
+    _reaper,
+    _should_refresh,
+)
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD
 from local_operator.update import BuildStamp
 
@@ -91,6 +96,8 @@ class FakeHandle:
         self.drain_cause = ""
         self.drain_detail = ""
         self.retired = False
+        self.retire_cause = ""
+        self.retire_detail = ""
 
     def is_busy(self) -> bool:
         return self._busy
@@ -115,6 +122,8 @@ class FakeHandle:
         if self.may_refresh():
             return False
         self.retired = True
+        self.retire_cause = cause
+        self.retire_detail = detail
         return True
 
     def _deny_pending_gates(self) -> None:
@@ -193,6 +202,51 @@ async def test_a_busy_runtime_drains_once_the_bound_trips(disk, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_the_exit_names_the_pair_on_disk_NOW_not_the_one_the_latch_saw(
+    disk, monkeypatch
+) -> None:
+    """A reason may only assert a transition the install still has.
+
+    THE STALE-PAIR BUG, measured on the reporting host (2026-09-17): five
+    latches at 01:58 named ``the runtime declined to hand over 3x (0.56.2 →
+    0.56.6)``, those runtimes went on working, and the record that replayed one
+    of them at 09:56 still named that pair — while 0.56.9 was what a next engage
+    would have run. A why-now naming a build that has not been on disk for hours
+    is a false report rather than a stale log.
+
+    The REASONS half must survive the wait — this runtime really did decline
+    three settled builds, and that is still why it is leaving — so both halves
+    are pinned here on one exit.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    disk["build"] = NEW  # the install moved once, under a busy runtime
+    reg = FakeRegistrant(boot=OLD)
+    handle = FakeHandle(busy=True)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+
+    assert await _wait_for(lambda: handle.drained), "the drain latch never engaged"
+    assert _build_pair(OLD, NEW) in handle.drain_detail, handle.drain_detail
+    assert not handle.retired, "the exit rung is not reached while busy"
+
+    # …and the install moves AGAIN while this runtime is still finishing its
+    # turn, which is the hours-long gap the operator's host spent on 0.56.2.
+    newest = BuildStamp(version="0.56.9", source_ref="b1e2f3a4c")
+    disk["build"] = newest
+    handle._busy = False
+    await _run_until(stop)
+    assert stop.is_set() and handle.retired
+    assert handle.retire_cause == "runtime-retired"
+    assert _build_pair(OLD, newest) in handle.retire_detail, handle.retire_detail
+    assert _build_pair(OLD, NEW) not in handle.retire_detail, "the latch's pair was replayed"
+    assert "declined" in handle.retire_detail, "the latch's reasons still hold"
+    await task
+
+
+@pytest.mark.asyncio
 async def test_the_bound_is_not_reached_while_the_stamp_is_settling(disk, monkeypatch) -> None:
     """The unsettled window is not a decline: a marker written mid-install is
     not a build this runtime can be said to have refused."""
@@ -238,7 +292,10 @@ async def test_the_age_bound_catches_a_stamp_that_keeps_moving(disk, monkeypatch
     # The count never got past its first observation — every check saw a
     # DIFFERENT stamp, which is exactly what a per-stamp counter cannot bound —
     # and the clock tripped anyway. That is the shape the age bound exists for.
-    assert "declined 1x" in handle.drain_detail, handle.drain_detail
+    # The phrase names its SUBJECT (design round 1, D2): "declined" beside a
+    # build read as the build being refused, when the runtime is the party
+    # declining to hand over.
+    assert "the runtime declined to hand over 1x" in handle.drain_detail, handle.drain_detail
     assert counter["n"] >= 2, "the stamp really did keep moving under the counter"
     assert not stop.is_set() and not handle.disposed
     stop.set()
@@ -289,7 +346,10 @@ async def test_the_age_bound_survives_the_settle_windows_of_its_own_installs(
     assert await _wait_for(lambda: handle.drained), "the belt never tripped across settle windows"
     # The count cannot be what tripped it: every decline was a DIFFERENT stamp,
     # so it never got past one.
-    assert "declined 1x" in handle.drain_detail, handle.drain_detail
+    # The phrase names its SUBJECT (design round 1, D2): "declined" beside a
+    # build read as the build being refused, when the runtime is the party
+    # declining to hand over.
+    assert "the runtime declined to hand over 1x" in handle.drain_detail, handle.drain_detail
     assert counter["n"] >= 4, "the install really did keep moving under the counter"
     assert not stop.is_set() and not handle.disposed, "in-flight work must never be aborted"
     stop.set()
