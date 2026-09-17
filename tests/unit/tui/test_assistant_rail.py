@@ -34,8 +34,18 @@ B  A + the three ``RAIL_COLS`` compensations 3 red      8 red
 C  ``content`` filters ``rows[i].strip()``   green      8 red
 D  ``copy_gutter`` returns 0                 5 red      5 red
 E  ``RAIL`` back to ``U+258C``               3 red      green
-F  ``_quote_owns_row`` returns ``False``     2 red      green
+F  the quote-row reservation, restored       4 red      green
 ===========================================  =========  ==========
+
+Row F USED to read "``_quote_owns_row`` returns ``False``", scoring 2 red, and
+it pinned the opposite ruling: that a quote row reserves the rail's cells and
+paints nothing into them. PR #1229 reversed that (see
+``test_a_quoted_row_carries_both_the_rail_and_the_quote_bar``), the function is
+gone, and F is now the FAITHFUL REVERT of the deletion — re-add
+``_quote_owns_row`` and its ``blank_gutter`` branch in ``rail_rows`` by hand.
+Measured at 4 red in this file, and the honest revert shape rather than a
+one-line mutation, because a developer who disagreed with the reversal would
+restore the mechanism whole rather than flip one expression.
 
 B is the honest revert and it is the one that caught this file out: the
 alignment pin originally asserted on a BULLET row, went red under A, and passed
@@ -418,20 +428,32 @@ def test_the_rail_is_told_from_the_user_rule_without_colour() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_quoted_row_carries_the_quote_bar_and_no_rail_bead() -> None:
-    """The blockquote collision: one bar on a quote row, and it is the model's.
+async def test_a_quoted_row_carries_both_the_rail_and_the_quote_bar() -> None:
+    """A quote row carries TWO marks, and that is the nesting — not a collision.
 
-    Rich paints a blockquote as ``U+258C`` in the ``label`` token — the same
-    token the rail uses. Beading the rail onto such a row put two glyphs of the
-    same colour one space apart, and it read as a double-paint glitch rather
-    than as nesting, because nesting is only legible when something differs.
+    **This test asserted the opposite until PR #1229's review, and the reversal
+    is deliberate. Read this before you change it back.**
 
-    The fix reserves the gutter on a quote row and paints nothing into it. The
-    column still reads as continuous: the rail is present on the rows above and
-    below, which is what this test pins alongside its absence on the quote row
-    itself. Asserted on the rows either side rather than on the quote row alone,
-    because "no bead here" is satisfied just as well by a rail that stopped
-    working entirely.
+    Design round 1 ruled that a quote row must RESERVE the rail's two cells and
+    paint nothing into them. That ruling was correct for the tree it was made
+    in: the rail and Rich's blockquote bar were the SAME glyph, ``U+258C``, in
+    the same ``label`` token, landing one space apart. Two identical glyphs,
+    identically filled and identically inked, read as a double-paint glitch
+    rather than as nesting — nesting is legible only when something differs, and
+    there nothing did.
+
+    Design finding D2 (isoluminance) then moved the rail to ``U+258E``, a
+    quarter block, so the distinction would survive greyscale and CVD. That
+    killed the collision rationale: a quarter block at painted column 0 beside a
+    half block at painted column 2 cannot read as one glyph painted twice. What
+    the reservation left instead was a HOLE — the gutter column breaking and
+    restarting around every quote — which is what the maintainer reported on
+    PR #1229 ("the left bar should be uniform").
+
+    So the rail now runs through quote rows and the quote's bar sits beside it,
+    OUTSIDE-IN: block gutter first, then the quote's own mark. The rows above
+    and below are still asserted, but they now prove CONTINUITY rather than
+    bracketing a hole.
     """
     block, rows = await _block(
         "Intro line here.\n\n> quoted line one\n> quoted line two\n\nAfter the quote.\n",
@@ -442,11 +464,15 @@ async def test_a_quoted_row_carries_the_quote_bar_and_no_rail_bead() -> None:
 
     for index in quoted:
         row = rows[index]
-        assert RAIL not in row, f"row {index} beaded a rail beside the quote bar: {row!r}"
+        assert RAIL in row, f"row {index} lost the rail beside the quote bar: {row!r}"
         assert row.count(QUOTE_BAR) == 1, row
-        # The cells are still RESERVED, so the quote's text starts in the same
-        # column as every other row's — the gutter is unpainted, not absent.
-        assert row.startswith(" " * RAIL_COLS), row
+        # The rail opens the row, in the same column every other row opens in:
+        # the gutter is PAINTED now, not reserved blank.
+        assert row.startswith(RAIL), row
+        # Outside-in. The rail belongs to the block and the bar to the quote
+        # nested inside it, so their order is the nesting the maintainer asked
+        # for — a bar OUTSIDE the rail would be a different, wrong picture.
+        assert row.index(RAIL) < row.index(QUOTE_BAR), row
 
     # The column is unbroken around it: the rail runs above and below.
     above = max((i for i in range(min(quoted)) if rows[i].strip()), default=None)
@@ -454,6 +480,98 @@ async def test_a_quoted_row_carries_the_quote_bar_and_no_rail_bead() -> None:
     assert above is not None and below is not None, (quoted, rows)
     assert rows[above].startswith(RAIL), rows[above]
     assert rows[below].startswith(RAIL), rows[below]
+
+
+@pytest.mark.asyncio
+async def test_every_row_including_a_quote_row_carries_the_rail() -> None:
+    """The uniform rail, on the shape that has one of everything (T1-a).
+
+    The necessity test for PR #1229's deletion. ``MIXED_CONSTRUCTS`` is prose, a
+    bullet list and a blockquote separated by blank rows, so one render exercises
+    every row kind the block paints: content rows, wrapped continuations, the
+    blank separators, a list row, and the quote row that used to be the
+    exception. The claim is that NO row kind is exempt any more.
+
+    Asserted PER ROW with the offenders in the message rather than as
+    ``RAIL in text``: a membership test on the whole block passes while any
+    single row is missing its rail, which is the only failure this can actually
+    have. The faithful revert it is written against is the restoration of
+    ``_quote_owns_row`` and its ``blank_gutter`` branch (matrix row F), under
+    which the quote row fails ``startswith(RAIL)``.
+    """
+    _, rows = await _block(MIXED_CONSTRUCTS, (60, 24))
+    # The quote row must actually be present, or this proves nothing about the
+    # case it exists for.
+    assert any(QUOTE_BAR in row for row in rows), rows
+
+    bare = [row for row in rows if row.strip()]
+    assert bare, rows
+    missing = [
+        (index, row) for index, row in enumerate(rows) if row.strip() and not row.startswith(RAIL)
+    ]
+    assert not missing, f"rows without the rail: {missing!r}\nall rows: {rows!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_de_rail_slice_is_unchanged_by_a_railed_quote_row() -> None:
+    """The copy path still lands after the quote row started painting (T1-c).
+
+    This is the re-proof the deletion needs and the one that would catch a real
+    break. ``get_selection`` slices a FIXED ``RAIL_COLS`` off every row to get
+    back to bare columns, and quote rows used to have two SPACES there while now
+    they have a glyph plus a pad. Slicing a fixed two cells is blind to what is
+    in them — so ``bare`` is unmoved and the alignment, the furniture
+    measurement and the blankness predicates all read exactly what they read
+    before. That argument is sound, and it is still an argument; this pins it.
+
+    Two blockquotes so a quote row is not also the last row, which is the case
+    where an off-by-one in the walk hides.
+    """
+    source = (
+        "Here is prose.\n\n- alpha item\n- beta item\n\n> first quoted line\n\n"
+        "Between the quotes.\n\n> second quoted line\n\nAfter both.\n"
+    )
+    block, rows = await _block(source, (60, 30))
+
+    bare = [row[RAIL_COLS:] for row in rows]
+    mapping = _copy_markdown.align(block._full_text, bare)
+
+    # Every row carrying text is PLACED. A ``None`` on a content row is the
+    # aligner having lost the source line, which is what reading the rail as a
+    # quote bar would cause.
+    unplaced = [
+        (index, bare[index])
+        for index in range(len(bare))
+        if bare[index].strip() and mapping[index] is None
+    ]
+    assert not unplaced, f"content rows the aligner could not place: {unplaced!r}"
+
+    # The quote rows map to the source's own ``>`` lines rather than drifting
+    # onto a neighbour.
+    src_lines = source.split("\n")
+    quote_rows = [index for index, row in enumerate(rows) if QUOTE_BAR in row]
+    assert len(quote_rows) >= 2, rows
+    for index in quote_rows:
+        placed = mapping[index]
+        assert placed is not None, (index, bare[index])
+        assert src_lines[placed].lstrip().startswith(">"), (
+            f"quote row {index} ({bare[index]!r}) mapped to {src_lines[placed]!r}, "
+            "which is not a quote line"
+        )
+        # The bar is furniture the copy must strip, measured in BARE columns.
+        # Zero here would mean the aligner stopped seeing the quote at all.
+        assert (
+            block._furniture_width(bare, mapping, index) > 0
+        ), f"quote row {index} measured no furniture; the bar would reach the clipboard"
+
+    # ...and the real path agrees: a drag across the whole block puts markdown
+    # on the clipboard, not furniture.
+    copied = _whole_message(block, rows)
+    assert copied is not None
+    assert RAIL not in copied, copied
+    assert QUOTE_BAR not in copied, copied
+    assert "> first quoted line" in copied, copied
+    assert "> second quoted line" in copied, copied
 
 
 def test_the_rail_stays_legible_in_every_theme() -> None:
@@ -781,16 +899,26 @@ async def test_a_quoted_line_still_copies_its_own_bar() -> None:
     Guards over-stripping: an implementation that removes every bar from the row
     would pass ``test_a_copy_excludes_the_rail`` and lose the quote.
 
-    The quote's bar is ``QUOTE_BAR`` and the rail is ``RAIL`` — different glyphs
-    since the design round, and on a quote row the rail is not painted at all
-    (its cells are reserved blank), so the row carries exactly ONE bar and it is
-    the model's.
+    The quote's bar is ``QUOTE_BAR`` and the rail is ``RAIL`` — different
+    glyphs, in different columns. The row carries both: the block's rail in the
+    gutter and exactly ONE quote bar, which is the model's. Counting the bar is
+    what guards this test's real subject — an implementation that double-painted
+    the quote's own mark, or dropped it, would fail here.
+
+    (This paragraph used to assert the rail was ABSENT on a quote row. That was
+    design round 1's reservation ruling, reversed in PR #1229 — see
+    ``test_a_quoted_row_carries_both_the_rail_and_the_quote_bar`` for why. The
+    copy assertion below is what this test exists for and is unchanged by it.)
     """
     block, rows = await _block("> a quoted line\n")
     quote_rows = [row for row in rows if QUOTE_BAR in row]
     assert quote_rows, rows
-    assert all(RAIL not in row for row in quote_rows), (
-        "a quote row painted a rail bead beside the quote's own bar",
+    assert all(row.count(QUOTE_BAR) == 1 for row in quote_rows), (
+        "a quote row must carry exactly one quote bar, the model's",
+        quote_rows,
+    )
+    assert all(RAIL in row for row in quote_rows), (
+        "a quote row carries the block's rail beside the quote's own bar",
         quote_rows,
     )
     copied = _whole_message(block, rows)

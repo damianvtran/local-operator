@@ -1225,9 +1225,9 @@ async def test_a_sub_line_take_across_a_wrapped_quote_never_copies_the_bar() -> 
         await pilot.pause()
 
         rows = _rendered_rows(block)
-        # The quote's own bar. It is the first painted glyph on the row: a
-        # quote row reserves the block's gutter cells without painting a bead
-        # into them, so the bar is what opens the text.
+        # The quote's own bar, which is NOT the first painted glyph on the row:
+        # the block's rail opens every row, quote rows included (PR #1229), and
+        # the quote's bar sits beside it in the quote's own column.
         bars = [i for i, row in enumerate(rows) if QUOTE_BAR in row]
         assert len(bars) >= 2, f"the quote must actually wrap, or this proves nothing: {rows!r}"
 
@@ -1575,14 +1575,23 @@ async def test_frame_is_unchanged_by_the_flatten() -> None:
         assert [strip.text[RAIL_COLS:].rstrip() for strip in flat._render_cache.lines] == [
             strip.text.rstrip() for strip in raw._render_cache.lines
         ]
-        # ...and the gutter really is reserved on every row, or the strip above
-        # is quietly removing two cells of prose instead. Reserved, not
-        # necessarily painted: a blockquote row keeps the same two cells blank
-        # so the quote's own bar is not doubled by a rail bead beside it.
-        assert all(
-            strip.text.startswith(RAIL) or strip.text.startswith(" " * RAIL_COLS)
-            for strip in flat._render_cache.lines
-        )
+        # ...and the gutter really is PAINTED on every row, or the strip above
+        # is quietly removing two cells of prose instead. Every row, blockquote
+        # rows included: PR #1229 removed the quote-row exception, so there is
+        # no longer a row that reserves these cells without inking them.
+        #
+        # Asserted as ``startswith(RAIL)`` rather than as that OR a two-space
+        # reservation. The disjunction was load-bearing while a quote row kept
+        # its cells blank; once every row paints, the blank branch can never be
+        # the reason this passes, so the stronger form is the honest one.
+        #
+        # It does not, however, pin the QUOTE-ROW case: ``MARKDOWN`` above has
+        # no blockquote in it, so restoring the old exception leaves this test
+        # green (measured). The uniform rail through a quote row is pinned in
+        # ``test_assistant_rail.py`` —
+        # ``test_every_row_including_a_quote_row_carries_the_rail`` — which is
+        # where the fixture has one.
+        assert all(strip.text.startswith(RAIL) for strip in flat._render_cache.lines)
 
 
 @pytest.mark.asyncio
