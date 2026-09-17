@@ -375,6 +375,18 @@ def _timeout_detail(
     the type IS the bucket key, so a subclass would re-key every historical
     ``timeouterror`` comparison to buy nothing.
 
+    ``timeout`` IS THE DEADLINE THE CALL RAN UNDER, not the caller's budget:
+    ``call`` passes ``funded_timeout``'s result. The two are the same number to
+    the byte for a request that declares nothing, and they are different -- the
+    caller's constant is the smaller one -- for the two methods that declare
+    their own duration (``execute``, ``cleanup``; see
+    :mod:`local_operator.evaluation.deadlines`). Naming the constant there would
+    report a budget the call never exceeded, on exactly the calls whose timeout
+    an operator reads a readout for. The two candidate numbers and their
+    ordering by size are pinned by
+    ``test_a_funded_call_reports_the_budget_it_exceeded_not_the_callers_constant``
+    and by ``deadlines``' own tests.
+
     ORDER IS LOAD-BEARING. The readouts that consume the recorded diagnostic
     truncate it (110-160 characters), so the method and the budget come first,
     the correlation ids last. ``elapsed`` is SAMPLED rather than assumed equal
@@ -477,6 +489,15 @@ class RpcClient:
                 method=method,
                 params=params.model_dump(mode="json"),
             )
+            # The deadline this call actually runs under, resolved ONCE and
+            # used for both the wait and the detail below. Resolving it at the
+            # deadline alone (as the wait needs) and then building the detail
+            # from the caller's ``timeout`` would make the message name a budget
+            # the call never exceeded whenever ``funded_timeout`` lifts it --
+            # false for exactly the two declaring methods, and invisible to
+            # every test whose request declares nothing, where the two values
+            # are equal. See :mod:`local_operator.evaluation.deadlines`.
+            effective_budget = funded_timeout(timeout, params)
             # Started BEFORE the request is written, deliberately: ``elapsed``
             # is the caller's wall time for the whole call -- the frame going
             # out included -- not ``wait_for``'s deadline overshoot, which
@@ -490,7 +511,7 @@ class RpcClient:
                 self._write_request(request, method)
                 response = await asyncio.wait_for(
                     asyncio.to_thread(self._read_response, request_id, method),
-                    funded_timeout(timeout, params),
+                    effective_budget,
                 )
             except TimeoutError:
                 # Sampled BEFORE the cancel grace and the poison below, so the
@@ -515,7 +536,7 @@ class RpcClient:
                     # still poisons with the timeout as the cause.
                     detail = _timeout_detail(
                         method,
-                        timeout=timeout,
+                        timeout=effective_budget,
                         elapsed=elapsed,
                         request_id=request_id,
                         operation_id=operation_id,
@@ -535,7 +556,7 @@ class RpcClient:
                 raise TimeoutError(
                     _timeout_detail(
                         method,
-                        timeout=timeout,
+                        timeout=effective_budget,
                         elapsed=elapsed,
                         request_id=request_id,
                         operation_id=operation_id,
