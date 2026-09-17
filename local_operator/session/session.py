@@ -6464,9 +6464,16 @@ class Session:
         cancel as an error — the one misclassification this taxonomy calls
         worse than the bug it fixes.
 
-        A no-op on an idle session: the cause is consumed only by an
-        ``AgentEndEvent`` for the turn that was running, and it is cleared at
-        the head of the next one.
+        A no-op on an idle session, and the disposal now ENFORCES that rather
+        than assuming it: a cause is consumed by the next ``AgentEndEvent``, and
+        the event that carries it must be one ``_classify_cut_off`` can arm —
+        ``aborted``, i.e. a turn this session watched end involuntarily. A run
+        left UNSETTLED by a turn that stopped somewhere else is NOT that shape:
+        the teardown could synthesise an end for it and the note would brand
+        work this exit never cut, which is the ``error`` row the operator's own
+        ``attention.db`` is full of (2026-09-17). See
+        ``Session.disposal_cuts_a_turn`` and
+        ``ServingSessionHandle._note_retirement_cut_off``.
 
         FIRST WRITER WINS. An exit is a sequence of rungs (a retirement latch,
         then the stop rung, then the dispose), and the EARLIEST note is the
@@ -6511,19 +6518,21 @@ class Session:
         The ``cut_off``/``cut_off_cause`` fields ride along so a NEW viewer can
         name the cause precisely without re-deriving it from the vocabulary.
 
-        THE EVENT MUST SAY IT WAS ABORTED. A run that reports itself as ended
-        normally cannot have been cut off by the exit that is unwinding right
-        now, and the note is armed for a TURN rather than for a run: the latches
-        that commit a runtime to leaving run while the session may still be
-        working, so an armed cause can outlive the run it was meant for. The
-        guard is ``aborted``, which every involuntary end carries — the loop's
-        own abort and the teardown's synthesised one
-        (``Session.dispose``) both set it — and a normally-completed end keeps
-        its ``aborted=False`` and is left exactly as it was. Without it a
-        completed turn's outcome was rewritten to an error the moment any
-        retirement latch had run, which is how a backend update put a
-        "Stopped with an error" row under a turn that had finished
-        (2026-09-17; the durable error rows live in ``attention.db``).
+        THE EVENT MUST SAY IT WAS ABORTED, and the shape this guard exists for
+        is the DISPOSAL's synthesised end. The reachable ordering is
+        latch -> dispose -> orphan: ``begin_retire`` refuses while anything
+        would be lost (``may_refresh``), so a run carrying a build retirement's
+        cause is one nothing was in flight for. What a latch CAN arm is a turn
+        the disposal is about to abort (the signal drain's ``runtime-shutdown``
+        latch, or no latch at all — see
+        ``Session.disposal_cuts_a_turn``), plus ``install-mid-update`` when a
+        lazy import meets a half-replaced tree mid-turn
+        (``Session._note_import_failure``). Every one of those ends says
+        ``aborted=True``; a normally-completed end keeps its ``aborted=False``
+        and is left exactly as it was, which is the whole point — without this
+        guard an armed cause rewrote a completed turn's outcome to an error the
+        moment any retirement latch had run (2026-09-17; the durable rows are in
+        ``attention.db``).
 
         A turn that ALREADY ended with a real provider/tool error is left alone:
         that error is a more specific diagnosis than "the runtime went away",
@@ -6791,6 +6800,80 @@ class Session:
         if cut_off:
             await self._journal_cut_off_once(token, reason, cause)
         self.refresh_frontend_state()
+
+    async def _settle_run_without_an_outcome(self) -> None:
+        """Settle a run this exit ended WITHOUT publishing a verdict for it.
+
+        THE THIRD DISPOSITION, and the one the operator's report needed. A
+        disposal can meet a run that never published an outcome and that this
+        exit did NOT cut: the latch that commits a runtime to leaving
+        (``serving.ServingSessionHandle.begin_retire``) refuses while any work
+        would be lost, so a retirement exit cannot be the party that ended a
+        turn, and the disposal's own cut records a cause
+        (:meth:`disposal_cuts_a_turn`). What is left is a run that stopped
+        without an outcome being recorded — this host's shape, where a run's
+        last turn row preceded its ``error`` row by hours and the conversation
+        then continued normally.
+
+        WHY NOTHING IS PUBLISHED, rather than one of the three kinds:
+
+        * ``error`` is what the disposal used to write (``runtime-retired`` from
+          the build rungs, then ``runtime-shutdown``), and it is a claim this
+          exit cannot support. It is the operator's exact complaint — "an
+          update that catches nothing must produce no error trace" — whose
+          receipt is the durable rows in ``~/.local-operator/attention.db``.
+        * ``interrupted`` is the taxonomy's DELIBERATE verdict, whose one cause
+          is ``user-stop``: publishing it either names the user for a stop
+          nobody recorded (the quiet rung's false claim, agent review round 1
+          MAJOR-2) or coins a second meaning for the kind every surface paints
+          as "Interrupted".
+        * ``complete`` is the opposite claim again, and this run did not report
+          it. (On this host the run had in fact finished, which is exactly why
+          the exit must not choose between the three.)
+
+        SO THE SETTLEMENT ASSERTS NOTHING, and closing the run's TOKEN is the
+        point rather than tidiness. Leaving the marker open for the successor —
+        the alternative agent review round 1 offered — is not neutral here:
+        ``attention._classify_orphaned_run`` answers from the run record and
+        the turn journal, and for this shape the process has exited cleanly, so
+        there is no dead record and no open row, which drops it to its last rung
+        and publishes ``error`` with ``CUT_OFF_UNKNOWN`` — the same mystery
+        cut-off the six ``idle-exit`` rows already render from. The exit is the
+        only party that ever knew nothing was in flight, so it is the party that
+        must close the question.
+
+        The marker is the one a completed run with nothing to show already
+        writes (``eligible: False``), so no reader is taught a new shape, and a
+        LATER real outcome for the same token still supersedes it: every reader
+        takes the LAST marker of this type (``_import_transcript_outcome``,
+        ``Session.refresh_attention``).
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            conversation_identity,
+        )
+
+        token = self._attention_run_token
+        if token is None:
+            return
+        self._attention_run_settled = True
+        # Logged because the settlement is deliberately silent everywhere else:
+        # no attention row, no card, no notice. An investigation asking "what
+        # happened to that run" gets its answer here rather than nowhere.
+        logger.info(
+            "session %s: run %s left no outcome and this exit cut no turn; "
+            "settled with no verdict",
+            getattr(self, "session_id", "?"),
+            token,
+        )
+        await self._transcript.append_custom(
+            ATTENTION_CUSTOM_TYPE,
+            {
+                "conversation_id": conversation_identity(self._transcript.directory),
+                "token": token,
+                "eligible": False,
+            },
+        )
 
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
@@ -13167,6 +13250,46 @@ class Session:
         except Exception:
             logger.warning("closing the browser surface failed", exc_info=True)
 
+    def _disposal_turn(self) -> asyncio.Task[None] | None:
+        """The live turn THIS disposal is about to abort, or ``None``.
+
+        ONE DEFINITION OF "this exit cut something", shared by the note, the
+        abort that follows it, and the runtime handle that asks before it
+        notes. Three terms, and every one of them is load-bearing:
+
+        * a live ``_turn_task`` — the turn is still running, so ending it is a
+          cut rather than bookkeeping;
+        * an abort signal, because the abort below is what actually stops it
+          and the disposal cannot cut a turn it cannot abort;
+        * and the task not DONE, so a turn that finished while the caller was
+          getting here is not relabelled after the fact.
+
+        WHAT THIS IS NOT: a test of whether a RUN is unsettled. A run can be
+        left without an outcome by a turn cancelled somewhere else entirely
+        (``Session.dispose``'s synthesis comment names the socket case), and
+        that run is not work this exit ended. The two questions were conflated
+        by the note this change corrects: a disposal that cut nothing branded
+        the leftover run anyway, which is how a backend update put an error row
+        under a conversation that had gone quiet (2026-09-17).
+        """
+        turn = self._turn_task
+        if turn is None or turn.done() or self._signal is None:
+            return None
+        return turn
+
+    def disposal_cuts_a_turn(self) -> bool:
+        """Whether ``dispose`` is about to abort a LIVE turn.
+
+        The PUBLIC form of :meth:`_disposal_turn`, for
+        ``ServingSessionHandle``: the cut-off note a retirement may write is
+        only honest when this disposal is the party ending work, and the handle
+        has to ask before it notes rather than infer it from its own latch (a
+        retirement latch REFUSES while anything is in flight, so a latched
+        retirement is proof of the opposite — see
+        ``serving.ServingSessionHandle._note_retirement_cut_off``).
+        """
+        return self._disposal_turn() is not None
+
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -13188,17 +13311,17 @@ class Session:
         # cancel is never relabelled.
         #
         # A TURN MUST ACTUALLY BE RUNNING, and the evidence is the same one the
-        # abort below keys on: a live ``_turn_task``. The note used to be written
-        # unconditionally on the grounds that it is "consumed only by the running
-        # turn's end event" and therefore harmless when nothing is in flight —
-        # which is exactly what stops being true when a run is left UNSETTLED:
-        # the synthesis further down fabricates an end for it, so an unconditional
-        # note branded a run whose turn had already ended. Measured on the
-        # reporting host as durable ``error`` rows against runs whose last turn
-        # row preceded them by minutes (six with the retirement label, more with
-        # this one), each rendered as a cut-off of work that had finished
-        # (2026-09-17).
-        if self._turn_task is not None and not self._turn_task.done():
+        # abort below keys on (``disposal_cuts_a_turn``). The note used to be
+        # written unconditionally on the grounds that it is "consumed only by the
+        # running turn's end event" and therefore harmless when nothing is in
+        # flight — which is exactly what stops being true when a run is left
+        # UNSETTLED: the synthesis further down used to fabricate an end for it,
+        # so an unconditional note branded a run whose turn had already ended.
+        # Measured on the reporting host as durable ``error`` rows against runs
+        # whose last turn row preceded them by minutes (six with the retirement
+        # label, more with this one), each rendered as a cut-off of work that had
+        # finished (2026-09-17).
+        if self.disposal_cuts_a_turn():
             self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
@@ -13226,8 +13349,8 @@ class Session:
         try:
             # HC-14: abort the in-flight turn and await its completion (bounded)
             # before flushing — its persistence must land on a live transcript.
-            turn = self._turn_task
-            if turn is not None and not turn.done() and self._signal is not None:
+            turn = self._disposal_turn()
+            if turn is not None:
                 self.abort("session disposed")
                 try:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
@@ -13253,11 +13376,27 @@ class Session:
                 # through the SAME classifier and publisher, so the
                 # deliberate/error split is still decided in one place.
                 try:
-                    if self._attention_outcome is None:
-                        self._attention_outcome = self._classify_cut_off(
-                            AgentEndEvent(messages=[], aborted=True)
-                        )
-                    await self._publish_attention_outcome()
+                    # WHETHER THIS RUN'S FATE HAS ANY EVIDENCE BEHIND IT, read
+                    # before the synthesis invents the end the publisher needs.
+                    # A cause (noted by the disposal's own cut, or by a
+                    # mid-turn import failure) and a recorded deliberate stop
+                    # are the two things that make an outcome assertable; the
+                    # synthesis exists for exactly the second one, whose run
+                    # leaves no end event when it is cancelled at a tool await.
+                    # With neither, this run stopped without anyone recording
+                    # why and WITHOUT this exit cutting it — see
+                    # ``_settle_run_without_an_outcome`` for why the honest
+                    # disposition there is to publish nothing at all.
+                    if self._attention_outcome is None and not (
+                        self._cut_off_cause or self._deliberate_stop_noted
+                    ):
+                        await self._settle_run_without_an_outcome()
+                    else:
+                        if self._attention_outcome is None:
+                            self._attention_outcome = self._classify_cut_off(
+                                AgentEndEvent(messages=[], aborted=True)
+                            )
+                        await self._publish_attention_outcome()
                 except Exception:  # noqa: BLE001 — teardown must always proceed
                     logger.warning("could not publish a disposed turn's outcome", exc_info=True)
             # The browser surface is session-scoped and lives in the user's own

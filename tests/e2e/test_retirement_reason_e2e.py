@@ -3,21 +3,23 @@
 THE OPERATOR'S REPORT, verbatim: a desktop turn showed "Stopped with an error" /
 "[session incident] cut-off: the runtime retired so the next engage would run a
 newer builddeclined 3x (0.56.2 → 0.56.6)", and "it seems that the conversation
-continued smoothly after that". Three separate defects ride in that one card,
-and each has its own cell here:
+continued smoothly after that". Three separate defects rode in that one card,
+and each has a cell here:
 
 * the sentence ran the detail into the words before it (``…newer
   builddeclined``) because ``_drain_detail`` is the one caller that does not
   spell the separator its readers assume;
-* the pair named a transition the install had left hours and two generations
-  earlier — five latches at 01:58 named ``(0.56.2 → 0.56.6)`` and the incident
+* the why-now named a transition the install had left hours and two generations
+  earlier — five latches at 01:58 named ``(0.56.2 → 0.56.6)`` and the record
   replaying one of them at 09:56 did so while 0.56.9 was on disk;
-* the note itself was armed at the LATCH, so it was consumed by whichever run
-  end came next — including a run that went on to complete. Six durable
-  ``error`` rows in the reporting host's ``attention.db`` carry the retirement
-  label ``idle-exit`` for runs that had already ended, rendered as an
-  unexplained cut-off because that label is not a cause in
-  ``incidents.CUT_OFF_CAUSES``.
+* the run the card described was one the exit had NOT cut. The latches that
+  commit a runtime to leaving (``begin_retire``) refuse while anything is in
+  flight, and the disposal synthesised an end for whatever run was left
+  UNSETTLED — hours after its turn had stopped, against a conversation that then
+  continued normally. Six durable ``error`` rows in the reporting host's
+  ``attention.db`` carry such a run, rendered as an unexplained cut-off (the
+  ``idle-exit`` label is a retirement label and not a cause in
+  ``incidents.CUT_OFF_CAUSES``).
 
 These cells drive the REAL exit ordering rather than the pieces: the reaper's
 own idle rung over a real ``ServingSessionHandle`` and a real ``Session``, and
@@ -33,6 +35,7 @@ live window, #648).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -205,18 +208,32 @@ async def test_an_idle_exit_that_caught_nothing_publishes_no_error(
     assert not [
         row for row in rows if row.get("cause") == "idle-exit"
     ], "the retirement label reached the durable outcome as a cut-off cause"
+    # The run is SETTLED rather than left open for a successor, and settled
+    # with no verdict: this is the marker a complete run with nothing to show
+    # already writes, so no reader learns a new shape and no later party
+    # classifies the run (see ``Session._settle_run_without_an_outcome``).
+    assert rows and rows[-1].get("eligible") is False, rows
 
 
 @pytest.mark.asyncio
-async def test_a_retirement_that_really_cuts_a_turn_still_reports_it(
+async def test_a_retirement_cuts_nothing_and_a_live_turn_still_reports_it(
     headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The guard rail: the fix must not have silenced genuine cut-offs.
+    """Both directions of the retirement family, where they actually occur.
 
-    A run that is still in flight when the disposal takes the exit IS a cut-off,
-    and it is the case the whole taxonomy exists for. Stage the same unsettled
-    run, latch the retirement the build rung latches, and assert the row still
-    says so — with the CURRENT build pair, never the one the latch saw.
+    THE REACHABLE ORDER (agent review round 1, MINOR-1). ``begin_retire``
+    refuses while anything would be lost (``may_refresh``), so a retirement that
+    SUCCEEDED is proof no turn was in flight: the only run it can reach is one
+    that was already orphaned. This cell used to assert the opposite — it
+    latched a retirement over an orphan and required an ``error`` row carrying
+    ``runtime-retired`` — which is precisely the disposition the operator's own
+    ``attention.db`` is full of (agent review round 1, MAJOR-1; QA round 1, Q1).
+
+    Half A walks the real latch over a real orphan and asserts nothing is
+    reported at all, and that the run is SETTLED rather than left for a
+    successor (silence is only safe because the token is closed). Half B is the
+    guard rail: a turn that IS in flight when the disposal takes the exit must
+    still be recorded as a cut-off, with the cause this exit can attest to.
     """
     from local_operator.session.runtime.serving import ServingSessionHandle
     from tests.unit.session.test_session import make_session
@@ -224,29 +241,55 @@ async def test_a_retirement_that_really_cuts_a_turn_still_reports_it(
     monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.1")
     config = headless_tui_env
-    session = make_session(config, _blocking_stream())
-    handle = ServingSessionHandle(
-        session,
-        asyncio.get_running_loop(),
-        cwd=str(config),
-        install_gates=False,
-        config_dir=config,
-    )
-    await _cancel_a_run_mid_stream(session)
-    assert handle.begin_retire("runtime-retired", " (0.56.2 → 0.56.6)") is True
-    await handle.dispose()
 
-    rows = _completion_rows(config / "sess")
-    cut = [row for row in rows if row.get("kind") == "error"]
-    assert len(cut) == 1, f"a cut turn must still be recorded as one: {rows!r}"
-    assert cut[0]["cause"] == "runtime-retired"
-    # The DURABLE reason is the harness-authored cause sentence, never the live
-    # notice's longer framing, and it must read as one sentence: the detail is
-    # separated from it rather than run into the last word (the "…newer
-    # builddeclined 3x" this fix set exists for).
-    assert cut[0]["reason"] == render_cut_off_reason(
-        "runtime-retired", detail=" (0.56.2 → 0.56.6)"
-    ), cut[0]["reason"]
+    with bounded(60, "a latched retirement over an orphan, and a live turn cut"):
+        # -- half A: the latch a build drain takes, over an orphaned run ------–
+        session = make_session(config, _blocking_stream())
+        handle = ServingSessionHandle(
+            session,
+            asyncio.get_running_loop(),
+            cwd=str(config),
+            install_gates=False,
+            config_dir=config,
+        )
+        await _cancel_a_run_mid_stream(session)
+        assert handle.begin_retire("runtime-retired", " (0.56.2 → 0.56.6)") is True
+        assert session._cut_off_cause == "", "a latch may not arm a turn"
+        await handle.dispose()
+
+        rows = _completion_rows(config / "sess")
+        assert [row for row in rows if row.get("kind") == "error"] == [], rows
+        assert not [row for row in rows if row.get("cause") == "runtime-retired"], rows
+        assert rows and rows[-1].get("eligible") is False, rows
+
+        # -- half B: the same disposal over a turn that IS in flight ----------
+        live_root = config / "live"
+        live_root.mkdir(parents=True, exist_ok=True)
+        live = make_session(live_root, _blocking_stream())
+        live_handle = ServingSessionHandle(
+            live,
+            asyncio.get_running_loop(),
+            cwd=str(config),
+            install_gates=False,
+            config_dir=config,
+        )
+        task = asyncio.ensure_future(live.prompt("a turn the exit will cut"))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not live.is_streaming:
+            await asyncio.sleep(0.01)
+        assert live.is_streaming, "the turn never reached the provider stream"
+        # The latch refuses while it is live — that refusal IS half A's premise —
+        # so the cut is the disposal's, and it says so.
+        assert live_handle.begin_retire("runtime-retired", " (0.56.2 → 0.56.6)") is False
+        await live_handle.dispose()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    cut = [row for row in _completion_rows(live_root / "sess") if row.get("kind") == "error"]
+    assert len(cut) == 1, f"a cut turn must still be recorded as one: {cut!r}"
+    assert cut[0]["cause"] == "runtime-shutdown", cut[0]
+    assert cut[0]["reason"] == render_cut_off_reason("runtime-shutdown"), cut[0]["reason"]
     assert "builddeclined" not in str(cut[0]["reason"])
 
 
@@ -307,9 +350,17 @@ async def test_an_idle_update_retires_writes_no_error_row_and_re_engages_cleanly
     Boot the production runtime, run a real turn through the real viewer, flip
     the install marker the way ``lop-update`` does, and assert the two things
     the operator asked for: nothing is recorded as an error, and the next engage
-    runs the new build cleanly. The turn is deliberately one that COMPLETES —
-    that is the shape the misclassification hit, a run end arriving after a
-    latch had already armed a cause.
+    runs the new build cleanly.
+
+    WHAT THIS CELL DOES NOT DISCRIMINATE, stated rather than implied (agent
+    review round 1, MINOR-3): the turn COMPLETES, and its row is asserted before
+    the marker flips, so the end event is emitted long before any latch arms and
+    this cell would pass against the pre-fix tree too. It is kept for the
+    END-TO-END claim it does prove — a real update under a real runtime records
+    no error and re-engages on the new build — while the misclassification it was
+    originally written for is staged by
+    ``test_a_retirement_cuts_nothing_and_a_live_turn_still_reports_it`` and by
+    ``tests/unit/session/test_cut_off_turns.py``.
     """
     from tests.e2e.test_cut_off_turns_e2e import _attach, _wait_for_record
 

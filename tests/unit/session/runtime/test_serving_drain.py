@@ -45,6 +45,11 @@ class FakeSession:
         self.notes: list[tuple[str, str]] = []
         self.deliberate = 0
         self.peer_calls: list[tuple[str, str, bool]] = []
+        #: ``Session.disposal_cuts_a_turn``, which is the ONLY evidence the
+        #: cut-off note is now gated on. ``False`` is the default because a
+        #: stub that claimed a live turn without one would pin the note's
+        #: placement rather than its gate (agent review round 1, MAJOR-1).
+        self.cuts_a_turn = False
 
     # -- the two verdict writers -------------------------------------------
     def note_cut_off(self, cause: str, detail: str = "") -> None:
@@ -52,6 +57,9 @@ class FakeSession:
 
     def note_deliberate_stop(self) -> None:
         self.deliberate += 1
+
+    def disposal_cuts_a_turn(self) -> bool:
+        return self.cuts_a_turn
 
     # -- peer delivery ------------------------------------------------------
     async def receive_peer_message(
@@ -89,7 +97,6 @@ class DrainHost:
         self._busy = busy
         self._retiring_cause = ""
         self._retiring_detail = ""
-        self._retiring_owes_cut_off = True
         self._draining = False
         self._exit_committed = False
         self._disposing = False
@@ -358,18 +365,17 @@ def test_an_unnamed_refusal_is_resolved_from_the_phrase_the_frame_published() ->
     assert explicit.HEAD == RuntimeRetiring.HEAD, explicit.HEAD
 
 
-def test_begin_retire_still_records_the_cut_off_it_owes(tmp_path: Path) -> None:
-    """The contrast that keeps the taxonomy honest: the EXIT rung writes it.
+def test_begin_retire_records_the_cause_and_brands_no_turn(tmp_path: Path) -> None:
+    """The latch RECORDS; the DISPOSAL writes, and only for a turn it cuts.
 
-    THE ORDER IS THE FIX (2026-09-17). ``begin_retire`` RECORDS the cause and
-    its detail on the handle; the disposal rung is what writes them to the
-    session, in the same step that aborts a turn. Arming the session at the
-    latch let one note brand whichever run end came next: a turn that went on to
-    complete normally, and — for the build rungs — a retirement that waited
-    hours for its work and then reported the build pair it had latched with.
-    Both halves are pinned, because a fix that moved the write and dropped it
-    would be worse than the bug: the latch must leave the session untouched, and
-    the disposal must still deliver exactly what the latch recorded.
+    THE ORDER IS THE FIX (2026-09-17), and the round-1 correction is that the
+    second half has a GATE. ``begin_retire`` refuses while anything would be
+    lost, so a retirement that names a build is proof that no turn is in
+    flight: arming a note at the latch could only ever brand a run this exit did
+    not cut — the operator's "Stopped with an error" for an update that caught
+    nothing (agent review round 1, MAJOR-1). Both halves are pinned here, and
+    the gate with them: the latch leaves the session untouched, and the disposal
+    delivers what the latch recorded only when it is aborting a live turn.
     """
     host, session = _host(tmp_path, busy=False)
     assert host.begin_retire("runtime-retired", " (a → b)") is True
@@ -378,21 +384,27 @@ def test_begin_retire_still_records_the_cut_off_it_owes(tmp_path: Path) -> None:
     assert session.notes == [], "a latch must not brand a run it is still waiting for"
 
     host._note_retirement_cut_off()
+    assert session.notes == [], "a retirement proves no turn was in flight to cut"
+
+    session.cuts_a_turn = True
+    host._note_retirement_cut_off()
     assert session.notes == [("runtime-retired", " (a → b)")]
 
 
 def test_an_idle_exit_owes_the_session_no_cut_off_at_all(tmp_path: Path) -> None:
-    """``owes_cut_off=False``: a rung that proved nothing was in flight.
+    """The quiet rung: same latch, and the same rule as the build rung.
 
-    The quiet idle-exit rung latches so its refusals and its log line are honest
-    (nothing is admitted after it), but it may not record a cut-off: its grace
-    loop only falls through with the whole residency predicate holding. Arming
-    one anyway is what the operator hit — a backend update that caught nothing
-    published a durable ``error`` row for a run that had already ended, six
-    times on this host (2026-09-17).
+    The idle exit latches so its refusals and its log line are honest (nothing
+    is admitted after it), but its whole precondition is that NOTHING is in
+    flight, so there is no turn for a note to name. Arming one anyway is what
+    the operator hit — a backend update that caught nothing published a durable
+    ``error`` row for a run that had already ended, six times on this host
+    (2026-09-17). The rung no longer needs a flag to say so: the disposal's own
+    evidence decides, identically on every rung (agent review round 1,
+    MAJOR-2).
     """
     host, session = _host(tmp_path, busy=False)
-    assert host.begin_retire("idle-exit", owes_cut_off=False) is True
+    assert host.begin_retire("idle-exit") is True
     assert host._retiring_cause == "idle-exit", "the refusal and the log still need it"
     host._note_retirement_cut_off()
     assert session.notes == []
@@ -406,6 +418,7 @@ def test_a_disposal_with_no_latch_still_names_the_shutdown(tmp_path: Path) -> No
     that can say so, and it says ``runtime-shutdown``.
     """
     host, session = _host(tmp_path, busy=False)
+    session.cuts_a_turn = True
     host._note_retirement_cut_off()
     assert session.notes == [("runtime-shutdown", "")]
 
