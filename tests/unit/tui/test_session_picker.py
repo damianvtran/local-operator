@@ -44,6 +44,7 @@ from local_operator.tui.widgets.session_picker import (
     NAME_MIN_CELLS,
     OUTER_INSET_COLS,
     OUTER_INSET_ROWS,
+    PASTE_BIDI_CONTROLS,
     PASTE_QUERY_MAX_CHARS,
     PICKER_MIN_WIDTH,
     STACK_BELOW_COLS,
@@ -770,9 +771,10 @@ async def test_a_pasted_newline_never_reaches_the_one_row_filter() -> None:
     """A clipboard copy routinely carries a trailing newline; the row cannot.
 
     The filter row is ``FILTER_ROWS`` tall with ``overflow="ellipsis"``, so a
-    newline in the query paints a second line no layout budgeted for — and the
-    needle stops matching anything, because ``filter_rows`` takes ONE exact
-    substring.
+    newline in the query paints a second line no layout budgeted for. An
+    INTERIOR newline also stops the needle matching, because ``filter_rows``
+    takes ONE exact substring; a TRAILING one is rescued by that function's own
+    ``query.strip()``, which is why this test reads the painted row.
     """
     rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
     app = _PickerHost(rows)
@@ -800,7 +802,7 @@ async def test_a_multi_line_paste_collapses_to_a_needle_that_still_matches() -> 
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        app.post_message(events.Paste("parser\ncrash\r\n"))
+        app.post_message(events.Paste("parser\rcrash"))
         await pilot.pause()
         await pilot.pause()
         assert screen.filter_query == "parser crash"
@@ -821,6 +823,16 @@ async def test_a_paste_appends_to_the_filter_rather_than_replacing_it() -> None:
         await pilot.pause()
         assert screen.filter_query == "parser crash"
         assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+        # The bound is PER PASTE, not on the total query: a mutant bounding the
+        # total passes every other test in this file, because the prefix here is
+        # one character and the bound test starts from empty.
+        screen.set_query("y" * 150)
+        app.post_message(events.Paste("x" * 100))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(screen.filter_query) == 250
+        assert screen.filter_query.startswith("y" * 150)
 
 
 @pytest.mark.asyncio
@@ -894,6 +906,116 @@ async def test_a_clipboard_dump_is_bounded_rather_than_freezing_the_modal() -> N
         await pilot.pause()
         assert len(screen.filter_query) == PASTE_QUERY_MAX_CHARS
         assert screen.filter_query.startswith("word word")
+
+
+@pytest.mark.asyncio
+async def test_a_paste_keeps_the_space_it_arrived_with() -> None:
+    """``str.split()`` drops the EDGES, not just the interior runs.
+
+    A column selection routinely carries a leading space. Folding it away welds
+    the paste onto what the user already typed — ``"parser"`` + ``" crash"``
+    became ``"parsercrash"``, which matches nothing.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        for char in "parser":
+            await pilot.press(char)
+        app.post_message(events.Paste(" crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_newline_leaves_no_trailing_space() -> None:
+    """A line break is a clipboard artifact; a typed space is content.
+
+    Only ``PASTE_EDGE_SPACE`` (literal space and tab) survives at an edge, so a
+    copy that ends in a newline does not push a phantom space into the needle.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser crash\r\n"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_bidi_override_cannot_forge_the_filter_row() -> None:
+    """U+202E reverses what follows it, so the row lies about its own query.
+
+    ``strip_control_sequences`` keeps Cf format characters by design and
+    ``on_key``'s ``isprintable()`` rejects every bidi control, so paste is the
+    only route in. Read off the compositor: the accessor cannot show what the
+    terminal is handed.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("secret\u202egnp.terces"))
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+    assert screen.filter_query == "secretgnp.terces"
+    for code_point in PASTE_BIDI_CONTROLS:
+        assert chr(code_point) not in painted, repr(painted)
+    assert "\u202e" not in screen.render_footer_for_test()
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_zwj_emoji_name_still_matches_its_row() -> None:
+    """The counter-test to the bidi strip: only the OVERRIDES go.
+
+    ``sanitize_prompt_line`` escapes every Cf character, which is right for a
+    line read literally and wrong for a search needle — it turns a pasted ZWJ
+    emoji name into a needle that matches the row it was copied from 0 times.
+    """
+    rows = [
+        _row("aaa111", "asteroids game"),
+        _row("ccc333", "family \U0001f468\u200d\U0001f469\u200d\U0001f467 session"),
+    ]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("family \U0001f468\u200d\U0001f469\u200d\U0001f467 session"))
+        await pilot.pause()
+        await pilot.pause()
+        assert "\u200d" in screen.filter_query
+        assert [row.id for row in screen.visible_rows] == ["ccc333"]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_that_paints_nothing_never_reaches_the_query() -> None:
+    """A true string of zero-width characters is still an invisible query.
+
+    300 zero-width spaces bound to 200 characters paint 0 cells and admit 0
+    rows: an empty-looking filter row over an empty list, clearable only by 200
+    backspaces. Truthiness cannot tell that apart from text; ``cell_len`` can.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        for char in "parser":
+            await pilot.press(char)
+        app.post_message(events.Paste("\u200b" * 300))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
 
 
 @pytest.mark.asyncio
