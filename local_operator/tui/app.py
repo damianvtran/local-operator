@@ -33179,10 +33179,16 @@ class OperatorApp(App[None]):
             known = ", ".join(f"/{name}" for name in self._ANALYTICS_VIEWS)
             self._system_notice(f"unknown analytics view: {arg.strip()} — try {known}", "warning")
             return
-        # The query is a GROUP BY over a bounded on-disk ledger — milliseconds —
-        # but it is still disk I/O, so it runs in a worker rather than on the
-        # paint path. The screen is pushed from the worker once the data is in
-        # hand, so the overlay never appears empty and then fills.
+        # The read is a day-range GROUP BY over the maintained ``session_daily``
+        # rollup — tens of ms of CPU — whenever its fail-closed gate can prove
+        # the window, and the raw ledger's three full scans when it cannot (2.6 s
+        # all-time to 4.9 s for the panel's 30-day window on the operator's 343 MB
+        # ledger, more on a loaded host — `bench/analytics-rollup-*.json`; this
+        # comment used to call the query "milliseconds" back when the ledger was
+        # bounded, and that stopped being true). Either
+        # way it is disk I/O, so it runs in a worker rather than on the paint
+        # path. The screen is pushed from the worker once the data is in hand, so
+        # the overlay never appears empty and then fills.
         self.run_worker(
             self._open_analytics_worker(view),
             thread=False,
