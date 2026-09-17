@@ -2114,6 +2114,50 @@ serving the last cached percentage past expiry: the report TTL is 5 min
 unavailable account is re-probed on a 10 min ±25% cadence
 (`USAGE_UNAVAILABLE_RETRY_MS`). `lop qwencloud-ticket status` is the only
 diagnostic, and it reports presence, character count and age — never the value.
+It now **proves** it never retrieves the value rather than asserting it: the
+value lives in the encrypted secret store and `read_ticket_record` reads it with
+`describe`, never `get`.
+
+**Where the value lives, and the claim stated precisely.** PR 2 moved the
+ticket's VALUE into the encrypted `lop secret` store (AES-256-GCM,
+blind-indexed names) as `QWENCLOUD_CONSOLE_TICKET`, leaving `captured_at`,
+`length`, `secret_name` and `project_id` in `auth.db`. The namespace argument
+above is unchanged — only the value's location moved. This raises the cost of
+stealing the cookie; it is **not a vault**, because the default `keyfile` mode
+keeps the master key in a file beside the store and anything running as the user
+that can run `lop` can retrieve the value.
+
+The retrieval-free property is asserted as an **observable, not as an audit
+count**, and that is a deliberate correction. `access.open_store()` appends one
+`key`/`deny:key` audit row **per call** — the broker audits the key handout —
+so "a `status` call appends no audit row" is false and would fail against a
+correct implementation. What holds, and what is asserted: `status` appends **no
+`get` event** and leaves `last_used_at` **`None`**. Measured: 5 `describe` calls
+on an open handle moved the audit count by 0; 3 `get` calls moved it by 3 and
+set `last_used_at` from `None` to a float.
+
+The migration's plaintext check is scanned across `auth.db`, `auth.db-wal` and
+`auth.db-shm`, not the main file alone: `AuthStore` runs in WAL mode, so a
+freshly written value sits in the WAL and a scan of `auth.db` by itself reports
+clean against a completely broken migration. The check is asserted **True before
+and False after**, which is what proves it discriminates. Clearing those bytes
+needs `VACUUM` **and** `PRAGMA wal_checkpoint(TRUNCATE)`, and the checkpoint
+signals a blocked run through its return value's first column rather than by
+raising — so `migrate` reports when the plaintext could not be cleared instead
+of claiming a removal it did not perform.
+
+Evidence for the two-store behaviour:
+`tests/unit/providers/test_qwencloud_console.py` (61 cases, 22 added for the
+secret store — the three verbs against the two stores, the metadata/secret
+orthogonality matrix, the locked-store outcome kept distinct from "nothing
+stored", and `rm` revoking a value whose metadata row is already gone),
+`tests/unit/test_cli_new.py` (15 added CLI cases — the metadata-orphan warning,
+`status` staying retrieval-free, `rm` naming which store it could not confirm,
+and the usage footer advertising `migrate`), and
+`tests/unit/providers/test_controller.py` (29 ticket cases, 8 added — the
+missing-secret repair note, the locked note and its survival under panel
+truncation, exposed file modes and a version-skewed broker reported rather than
+swallowed, and a slow retrieval not blocking the event loop).
 
 **Two accepted trades.** Returning the console report instead of merging both
 routes is what makes exactly one `credits-7d` row possible, since both routes

@@ -2273,7 +2273,10 @@ why the guide carries the user-facing workflow rather than this file.
 
 **What it is.** `login_qwencloud_ticket`, the QwenCloud console's browser
 session cookie. Not a scoped API key — it is a FULL-ACCOUNT console session,
-the broadest credential in `auth.db`.
+the broadest credential local-operator holds. Its value lives in the encrypted
+`lop secret` store and `auth.db` holds only its metadata, which raises the cost
+of stealing it without making it safe — see "Residual risk, stated plainly"
+below.
 
 **Why it exists at all.** The personal Token Plan window is invisible to the
 BSS gateway the official CLI calls: for a live account that gateway answers
@@ -2289,18 +2292,24 @@ process running as you and lands in shell history:
 printf %s '<TICKET>' | lop qwencloud-ticket set
 lop qwencloud-ticket status   # presence, length and age; never the value
 lop qwencloud-ticket rm
+lop qwencloud-ticket migrate  # move a pre-existing plaintext ticket
 ```
 
 There is deliberately no `get` verb. The one consumer is inside the process.
+`status` is retrieval-free by construction: it reads the metadata row and calls
+`describe`, never `get`, so it neither appends a `get` audit event nor stamps
+`last_used_at`.
 
 **The row is namespaced, not registered.** It is stored under provider id
 `qwencloud-console`, which is deliberately absent from `PROVIDER_REGISTRY` —
 the same trick `mcp-oauth` uses. A row under `alibaba-token-plan` would satisfy
 `ProviderController.has_any_credential` (it matches the provider column with no
 type or field filter) and local-operator would conclude it can run CHAT traffic
-on a read-only console cookie. The value is stored under `data["ticket"]` and
-never `data["key"]`, because the API-key cascade reads `key` and would hand a
-full-account browser cookie to DashScope as an inference bearer.
+on a read-only console cookie. The metadata row carries `secret_name` and never
+`data["key"]`, because the API-key cascade reads `key` and would hand a
+full-account browser cookie to DashScope as an inference bearer. `data["ticket"]`
+is the PRE-MIGRATION spelling of the value: still read, so an un-migrated
+install keeps working, and what `migrate` removes.
 
 **The symptom when it expires.** `/usage` simply stops showing the 7 Day
 Credits window for alibaba-token-plan — no error, no "sign-in expired" note,
@@ -2364,11 +2373,28 @@ still present.
 Be precise about what that confirmation is worth, because it is easy to
 overclaim. Two things `rm` does NOT guarantee, both verified:
 
-- **The plaintext can outlive the row.** After a successful `rm`, `strings
-  auth.db` still returns the deleted row including the ticket; a `VACUUM`
-  clears it. That is ordinary SQLite freelist behaviour from
-  `delete_credential`, not specific to this credential — but it means `rm` is
-  not a secure erase.
+- **The plaintext can outlive the row, on a pre-migration store.** A ticket
+  written by a build before the secret-store move is plaintext JSON in
+  `auth.db`, and after a successful `rm` it survives in freelist pages until a
+  `VACUUM`. Ordinary SQLite behaviour from `delete_credential`, not specific to
+  this credential — but it means `rm` is not a secure erase. A ticket written
+  by this build never put its value there, so only `migrate` and pre-migration
+  installs are in scope.
+
+  **Scanning `auth.db` alone is not the check, and this is a correction to the
+  guidance this file used to give.** `AuthStore._connect` sets `PRAGMA
+  journal_mode=WAL` (`auth_store.py`), so three things are wrong with
+  `strings auth.db`: (1) a freshly written value lives in `auth.db-wal`, not
+  the main file, so the main file **scans clean while the plaintext is
+  readable** — a verification built on it passes against a completely broken
+  migration; (2) `VACUUM` alone does not fix that, because the rebuild is
+  itself written through the WAL — `PRAGMA wal_checkpoint(TRUNCATE)` after it
+  is what removes the bytes (the pair measured at 0.63 ms); and (3) the
+  checkpoint reports a blocked run **by return value, not by raising** — its
+  first column is a busy flag, so `except sqlite3.Error` alone sees success and
+  lies. Scan `auth.db`, `auth.db-wal` and `auth.db-shm` together, and prove the
+  scan discriminates with a before/after pair (True before, False after)
+  instead of trusting a lone False.
 - **The session stays valid server-side.** Deleting the local row ends local
   use and nothing more. The cookie remains a live browser session until it is
   signed out in the QwenCloud console.
@@ -2377,13 +2403,60 @@ So `rm` is not a substitute for revoking the session in the console, and it
 says so on the SUCCESS path rather than only when it fails — success is the
 moment a user worried about exposure stops looking.
 
-**Residual risk, stated plainly.** `~/.local-operator/auth.db` is plaintext
-SQLite with no OS keychain, protected only by its 0600 mode, and this cookie is
-broader than every other row in it. `set` refuses to write when the store's
-directory is wider than 0700, and `status` flags a ticket older than about a
-week. Note that `AuthStore._connect` re-chmods the db file to 0600 on every
-open, so the file-mode branch of that check is a backstop for a store opened
-some other way, not something the CLI path can normally hit.
+**Residual risk, stated plainly.** The ticket's VALUE lives in the encrypted
+`lop secret` store (AES-256-GCM, blind-indexed names) as
+`QWENCLOUD_CONSOLE_TICKET`; `~/.local-operator/auth.db` keeps only metadata —
+`captured_at`, `length`, `secret_name`, `project_id`. That raises the cost of
+stealing it and removes the readable-on-disk failure, but it is **not a vault**:
+in the default `keyfile` mode the master key is a file beside the store
+(`<config>/secrets/master.key`), and anything running as the user that is
+willing to run `lop` can retrieve the value exactly as local-operator does. This
+cookie is still broader than every other row in `auth.db`. Do not describe it to
+a user as safe, secure or protected without that qualification.
+
+**Two stores means consistency states, and all of them are REPORTED, never
+silent.** This is the operational knowledge a future agent needs:
+
+- A **metadata orphan** — row in `auth.db`, no value in the secret store —
+  makes `status` print a WARNING that the ENCRYPTED VALUE is missing and name
+  `set` as the repair, and `/usage` render `no ticket — lop qwencloud-ticket
+  set`. `read_ticket_record` defaults `secret_present` to True so a
+  pre-migration row, whose value is still in `auth.db` itself, does not trip it.
+- A **secret orphan** — value in the secret store, no row — is invisible to
+  this feature and shows up in `lop secret list`. `rm` clears the value even
+  when the metadata row is already gone, which is what keeps it from stranding
+  one.
+- A **locked hardened store** is its own outcome with its own remedy, distinct
+  from both "no ticket" and "unreadable store": `TicketStoreLocked` (a
+  `TicketStoreUnreadable` subclass), message naming `lop secret unlock`, with
+  `status` exiting non-zero on UNKNOWN and `/usage` showing `locked — lop
+  secret unlock`. `retrieve_secret`'s own wording on that path is raw broker
+  wire text ("no lop session is registered with the broker"), so our code
+  catches `BrokerDenied`/`BrokerLocked` before the generic `SecretStoreError`
+  and supplies the actionable message. Never rely on the store's message
+  reaching the user.
+
+`set` refuses to write when the METADATA store's directory is wider than 0700 —
+scoped to metadata now that the value moved, because capture time and length
+still disclose that an account has a live console session. The value store
+enforces the same rule of its own accord: `SecretStore._open` calls `check_mode`
+on every open. Both halves are covered by their own owners rather than by one
+reaching across. `status` still flags a ticket older than about a week. Note
+that `AuthStore._connect` re-chmods the db file to 0600 on every open, so the
+file-mode branch of that check is a backstop for a store opened some other way,
+not something the CLI path can normally hit.
+
+**`migrate` moves a pre-existing plaintext ticket**, value-only: write the
+secret first, confirm it with `describe`, only then rewrite the row without the
+`ticket` key, then `VACUUM` + checkpoint. That order is deliberate — a crash
+between the write and the rewrite leaves the value in BOTH stores, which is
+recoverable and which re-running repairs; the reverse order could lose the
+credential. The row is rewritten rather than deleted so `captured_at` (the
+staleness clock) and `project_id` (what makes `_identity_key_for` upsert in
+place instead of inserting a duplicate) survive. **A failed vacuum is not a
+migration failure but must be reported**: the value is encrypted either way, and
+the line claiming the plaintext is gone is conditional on the checkpoint having
+succeeded.
 
 ## Usage analytics (`local_operator/analytics/`)
 
