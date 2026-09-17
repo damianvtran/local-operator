@@ -4149,6 +4149,19 @@ def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
     assert _latest_user_query(transcript) == "fix the login redirect loop"
 
 
+async def _noop_execute(*args, **kwargs):
+    """A never-called execute, for a tool that only needs to be PRESENT.
+
+    ``async`` and RAISING on purpose, matching the ``never_execute`` helpers the
+    neighbouring tests already use: ``AgentTool.execute`` is typed
+    ``ToolExecuteFn``, which must return an awaitable ``ToolResult``. A sync
+    lambda fails the first requirement and an async one that returns ``None``
+    fails the second; a function that raises satisfies both, and is the honest
+    shape here because reaching it means the test's premise is wrong.
+    """
+    raise AssertionError("this tool is only ever present, never executed")
+
+
 def _preload_tool(name: str, server: str, raw: str):
     """One AgentTool plus the manager meta that ties it to a server origin."""
 
@@ -4180,7 +4193,7 @@ async def test_preload_tools_is_per_server_and_default_off(monkeypatch) -> None:
         description="read a file",
         parameters={"type": "object", "properties": {}},
         approval_tier="read",
-        execute=lambda *a, **k: None,
+        execute=_noop_execute,
     )
     opted_in, opted_in_meta = _preload_tool("mcp__risk_get_assessment", "risk", "get_assessment")
     neighbour, neighbour_meta = _preload_tool("mcp__notion_search", "notion", "search")
@@ -4224,7 +4237,7 @@ async def test_preload_tools_picks_up_a_server_that_missed_the_startup_gate(monk
         description="read a file",
         parameters={"type": "object", "properties": {}},
         approval_tier="read",
-        execute=lambda *a, **k: None,
+        execute=_noop_execute,
     )
     session = FakeSessionShell()
     session.tools = [builtin]
@@ -4267,7 +4280,7 @@ async def test_preload_tools_cannot_surface_a_tool_the_allowlist_excludes(monkey
         description="read a file",
         parameters={"type": "object", "properties": {}},
         approval_tier="read",
-        execute=lambda *a, **k: None,
+        execute=_noop_execute,
     )
     allowed, allowed_meta = _preload_tool("mcp__docs_search_public", "docs", "search_public")
     excluded, excluded_meta = _preload_tool("mcp__docs_search_private", "docs", "search_private")
