@@ -389,8 +389,12 @@ async def test_a_pinned_session_beyond_the_clients_page_carries_pinned_in_search
     pinned_id = full[-1]["id"]  # the last row, so a one-row page cannot hold it
     assert toggle_pin(root, pinned_id) is True
 
+    # The PAGE, not the whole answer: the answer also carries the pinned row as
+    # an extra now, which is the fix, so the premise has to name the page.
     page = _rows((await client.get("/v1/desktop/sessions", params={"limit": 1})).json())
-    assert pinned_id not in {row["id"] for row in page}, "the fixture is not the state under test"
+    assert pinned_id not in {
+        row["id"] for row in page[:1]
+    }, "the fixture is not the state under test"
 
     answer = await client.get("/v1/desktop/sessions/search", params={"q": pinned_id})
 
@@ -561,3 +565,189 @@ async def test_the_route_is_reachable_without_the_feed_or_a_running_session(pins
 
     assert response.status_code == 200, response.text
     assert pool.bridges == {}, "a pin must not acquire a bridge"
+
+
+# -- the pinned rows the PAGE does not carry -------------------------------------
+#
+# THE OPERATOR'S CASE, and it is the ordinary one rather than an edge: the store
+# holds 5,267 sessions while the client asks for a 500-row page, so a pin made in
+# the TUI on anything older than the newest 500 — most of the store — had no row
+# in the app at all. UX round 5 measured the app drawing no row, no count and no
+# trace for 11.2 s and beyond while the store held the pin.
+#
+# These tests drive the route, not the catalogue: what has to be true is that the
+# ANSWER carries the row, because the answer is what the client replaces its rows
+# with. `test_catalog_scan_cost.py` pins the catalogue half.
+
+
+async def _json(response: Any) -> dict[str, Any]:
+    """Await one response and assert it answered 200."""
+    answered = await response
+    assert answered.status_code == 200, answered.text
+    return answered.json()
+
+
+async def _all_ids(client) -> list[str]:
+    """Every id the store's own ranking yields, extras included."""
+    return [row["id"] for row in _rows(await _json(client.get("/v1/desktop/sessions")))]
+
+
+async def _page_ids(client, limit: int) -> list[str]:
+    """The ids the PAGE carries, with any extras excluded.
+
+    Taken as the first `limit` rows of the answer, which is what the route's
+    ordering guarantees: the page comes first and the extras are appended after
+    it. Every test below relies on that rather than re-deriving it, which is why
+    it is said here once.
+    """
+    rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": limit})))
+    return [row["id"] for row in rows[:limit]]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_conversation_beyond_the_page_is_carried_in_the_answer(pins_api) -> None:
+    """THE FIX. A pin outside the page is a ROW in the answer, with its name and
+    `pinned: true`, so the client's pinned section has something to draw."""
+    client, root = pins_api
+    ids = [f"aaaaaaaaaa{index:02x}" for index in range(5)]
+    for session_id in ids:
+        _session(root, session_id)
+        # A real transcript, because that is what the naming path reads: a
+        # marker-only directory is LISTED but never enters the scan whose
+        # candidate list the hydration call resolves names from, so a fixture
+        # without one cannot tell a hydrated row from a placeholder.
+        await _speak(root, session_id, f"conversation {session_id}")
+    full = await _all_ids(client)
+    page = await _page_ids(client, 2)
+    off_page = next(session_id for session_id in full if session_id not in page)
+    assert toggle_pin(root, off_page) is True
+
+    payload = (await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))["result"]
+    rows = payload["sessions"]
+
+    assert [row["id"] for row in rows[:2]] == page, "the page must not change"
+    assert [row["id"] for row in rows[2:]] == [off_page]
+    extra = rows[2]
+    assert extra["pinned"] is True
+    assert (
+        extra["name"] == f"conversation {off_page}"
+    ), "the extra was not hydrated through the naming path"
+    # The extras carry the fields a page row carries, because the client renders
+    # both in one list.
+    assert set(extra) >= {"name", "mtime", "preview", "active", "status", "binding", "degraded"}
+    # And `truncated`/`limit` still describe the PAGE.
+    assert payload["limit"] == 2
+    assert payload["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_same_conversation_is_absent_when_it_is_not_pinned(pins_api) -> None:
+    """The control, so the assertion above is about the pin rather than about the
+    ranking happening to include the row."""
+    client, root = pins_api
+    for index in range(5):
+        _session(root, f"aaaaaaaaaa{index:02x}")
+
+    page = await _page_ids(client, 2)
+    rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))
+
+    assert [row["id"] for row in rows] == page
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_extras_come_after_the_page_in_the_store_s_own_order(pins_api) -> None:
+    """No pin-recency order and no re-sort: the extras are appended in the
+    ranking's order, which is what makes the app's Pinned section and the TUI's
+    present one list in one order."""
+    client, root = pins_api
+    for index in range(6):
+        _session(root, f"aaaaaaaaaa{index:02x}")
+    full = await _all_ids(client)
+    page = await _page_ids(client, 2)
+    off_page = [session_id for session_id in full if session_id not in page]
+    assert len(off_page) >= 2
+    # Pinned newest-first on purpose, so a pin-recency sort would REVERSE these.
+    toggle_pin(root, off_page[-1])
+    toggle_pin(root, off_page[-2])
+
+    rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))
+
+    assert [row["id"] for row in rows[2:]] == [off_page[-2], off_page[-1]]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_conversation_inside_the_page_is_not_duplicated(pins_api) -> None:
+    """A pin the page already carries stays in the page, once."""
+    client, root = pins_api
+    for index in range(4):
+        _session(root, f"aaaaaaaaaa{index:02x}")
+    page = await _page_ids(client, 2)
+    toggle_pin(root, page[0])
+
+    rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))
+    ids = [row["id"] for row in rows]
+
+    assert ids == page
+    assert len(ids) == len(set(ids))
+    assert next(row for row in rows if row["id"] == page[0])["pinned"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_pinned_conversation_is_absent_rather_than_a_500(pins_api) -> None:
+    """The store prunes at read, so the extra simply does not resolve."""
+    client, root = pins_api
+    ids = [f"aaaaaaaaaa{index:02x}" for index in range(5)]
+    for session_id in ids:
+        _session(root, session_id)
+    full = await _all_ids(client)
+    page = await _page_ids(client, 2)
+    gone = next(session_id for session_id in full if session_id not in page)
+    toggle_pin(root, gone)
+
+    _remove(root / "sessions" / gone)
+
+    rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))
+    assert gone not in {row["id"] for row in rows}
+    assert read_pins(root) == [], "the read-time prune drops the dead id"
+
+
+@pytest.mark.asyncio
+async def test_the_pin_store_s_cap_bounds_the_extras(pins_api) -> None:
+    """The 50-cap, seen where it matters: the answer never claims more pins than
+    the store holds, and the extras cannot grow past it however large the store
+    is. Seeded past the cap so the trim is exercised rather than assumed."""
+    from local_operator.tui.sidebar_pins import PINS_LIMIT
+
+    client, root = pins_api
+    for index in range(PINS_LIMIT + 5):
+        _session(root, f"{index:012x}")
+    for index in range(PINS_LIMIT + 5):
+        toggle_pin(root, f"{index:012x}")
+    assert len(read_pins(root)) == PINS_LIMIT, "the fixture must exceed the cap"
+
+    rows = _rows(await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))
+    ids = [row["id"] for row in rows]
+    pinned = [row for row in rows if row["pinned"]]
+
+    assert len(pinned) <= PINS_LIMIT
+    assert len(pinned) == PINS_LIMIT, "every kept pin is either on the page or an extra"
+    assert len(ids) == len(set(ids)), "a dropped pin must not bring a duplicate row"
+
+
+@pytest.mark.asyncio
+async def test_truncated_still_speaks_about_the_page(pins_api) -> None:
+    """A full page plus extras is not a promise that nothing was withheld: with
+    a store bigger than the page, `truncated` says so, and it says nothing about
+    the extras."""
+    client, root = pins_api
+    ids = [f"aaaaaaaaaa{index:02x}" for index in range(6)]
+    for session_id in ids:
+        _session(root, session_id)
+
+    small = (await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))["result"]
+    large = (await _json(client.get("/v1/desktop/sessions", params={"limit": 50})))["result"]
+
+    assert small["truncated"] is True and small["limit"] == 2
+    assert large["truncated"] is False and large["limit"] == 50
+    assert len(large["sessions"]) == 6, "a page that fits the store carries no extras"

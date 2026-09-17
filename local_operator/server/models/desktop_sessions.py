@@ -60,9 +60,24 @@ class SessionList(BaseModel):
     ignores it behaves byte-for-byte as it does today; the field is always
     PRESENT rather than omitted when empty, so a client can tell "nothing to
     report" from "this server is too old to know".
+
+    ``sessions`` IS MORE THAN THE PAGE, deliberately. It carries the newest
+    ``limit`` conversations AND every pinned conversation the page did not
+    reach, because it is the array a client REPLACES its rows with: a pinned
+    conversation parked in a sibling field would be one the client does not hold
+    until it learns about that field, and on a store larger than the page — the
+    ordinary case — the pin would then have no row, no count and no trace
+    anywhere in the app. The additions are ordinary rows in the ranking's own
+    order (every one of them ranks below every page row), each with
+    ``pinned: true``, so a client sections them with no new field and no sort.
     """
 
     sessions: list[SessionRow]
+    #: Whether the ranking held more rows than the PAGE — the same question it
+    #: has always answered, and deliberately not "rows this answer does not
+    #: carry": the extras appended for pins are rows the client is being handed,
+    #: not history it is missing, and this flag is what a client uses to decide
+    #: whether more exists to fetch.
     truncated: bool = False
     limit: int = 100
     degraded: list[str] = Field(default_factory=list)

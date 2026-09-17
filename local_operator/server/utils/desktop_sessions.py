@@ -2336,6 +2336,39 @@ def _absent_child_page(state: str, *, before_id: str | None = None) -> dict[str,
     }
 
 
+@dataclass(frozen=True)
+class SessionPage:
+    """One page of rows, and the pinned conversations the page does not carry.
+
+    WHY A SECOND POPULATION EXISTS. Older than the page means unrendered, and
+    a pin is the one fact in a listing that the user chose rather than the
+    recency window produced: on a store bigger than the client's page — which
+    is the ordinary case, not an edge one — a pin made on an older conversation
+    would otherwise have no row anywhere in the app, with no count and no trace
+    of it. The TUI has kept such a pin resolvable since #1200
+    (``load_catalog(..., pinned_hidden_ids=...)``); this is the desktop half of
+    the same promise, and it is what makes "pin in the TUI, see it in the app"
+    true on a store of thousands rather than only on a small one.
+
+    TWO LISTS, NOT ONE, and the route concatenates them for the wire. They are
+    kept apart here because they answer different questions and only the caller
+    knows how it wants them framed: ``rows`` is the page a ``limit`` describes,
+    ``pinned_off_page`` is everything below it that the user pinned. The wire
+    answer is their concatenation, which is also RANK ORDER — every extra ranks
+    below every page row by construction — so a client that renders the two as
+    one list needs no sort and no marker field.
+
+    ``truncated`` keeps its original meaning — the ranking held more rows than
+    the page — and deliberately says nothing about the extras: a client uses it
+    to know whether more history exists, and an appended pin is a row it may
+    already be holding rather than history it has not seen.
+    """
+
+    rows: list[dict[str, Any]]
+    pinned_off_page: list[dict[str, Any]]
+    truncated: bool
+
+
 class DesktopSessions:
     """Bounded adapter cache; canonical identity lives in the session directory."""
 
@@ -2792,8 +2825,15 @@ class DesktopSessions:
 
     async def list(
         self, limit: int, status_stamps: tuple[str, dict[str, int]] | None = None
-    ) -> list[dict[str, Any]]:
-        """One page of rows, each carrying what could not be read about it.
+    ) -> SessionPage:
+        """One page of rows, plus the pinned rows the page does not carry.
+
+        ``limit`` IS THE PAGE SIZE and the truncation verdict is computed here,
+        because the two are one question: the caller used to ask for
+        ``limit + 1`` rows and slice them itself to learn whether the store held
+        more, and that trick cannot survive rows that are deliberately appended
+        BEYOND the page (see ``SessionPage.pinned_off_page``) — the count would
+        no longer mean what it is read to mean.
 
         The catalogue itself refuses rather than lying when the store cannot be
         walked (``load_catalog`` is strict), so everything below is about the
@@ -2827,15 +2867,32 @@ class DesktopSessions:
         model change.
         """
 
-        def rows() -> list[dict[str, Any]]:
-            entries = load_catalog(self.root, limit=limit)[:limit]
-            # THE PINS ARE READ ONCE PER LIST, not once per row: membership is
-            # what the projection needs, and `read_pins` already applies both the
-            # store's own read-time prune (an id whose directory is gone is not a
-            # pin) and the id-shape rule, so neither is re-implemented here. One
-            # read also means every row of one page describes the same pin set,
-            # which two reads a millisecond apart would not guarantee.
+        def rows() -> SessionPage:
+            # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
+            # so the catalogue can resolve the pins the page will not carry.
+            # `read_pins` already applies both the store's own read-time prune
+            # (an id whose directory is gone is not a pin) and the id-shape
+            # rule, so neither is re-implemented here — and one read means every
+            # row of one answer describes the same pin set, which two reads a
+            # millisecond apart would not guarantee.
             pins = set(read_pins(self.root))
+            # ``limit + 1`` is the truncation PROBE and nothing else: one row
+            # beyond the page is enough to answer "did the ranking hold more",
+            # and asking for it here rather than at the route keeps the answer
+            # from needing a second scan to interpret. Nothing in the store's
+            # scan is bounded by this number (it is limit-independent), so the
+            # extra row costs one rank position.
+            entries = load_catalog(self.root, limit=limit + 1, pinned_off_page=tuple(pins))
+            page_entries = entries[:limit]
+            # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
+            # rather than on the projected row's flag so it runs before the
+            # projection. Everything from the page bound onwards is a candidate:
+            # the probe row belongs here when it is itself pinned, because the
+            # page does not carry it either. A pinned id that resolved to no
+            # entry at all — a deleted directory, or a hidden delegated run the
+            # catalogue never builds — is simply not among them, which is the
+            # outcome `load_catalog` documents and the one a listing wants.
+            extra_entries = [entry for entry in entries[limit:] if entry.id in pins]
             attention: dict[str, dict[str, Any]] = {}
             # NOT ``contextlib.suppress``: the suppression was silent, so this
             # route answered ``degraded: []`` -- "everything about this page was
@@ -2854,13 +2911,19 @@ class DesktopSessions:
             attention_degraded = False
             try:
                 attention = AttentionStore(self.root / "attention.db").state_many(
-                    f"session/{entry.id}" for entry in entries
+                    f"session/{entry.id}" for entry in (*page_entries, *extra_entries)
                 )
             except (sqlite3.Error, OSError):
                 logger.warning("desktop listing could not read attention state", exc_info=True)
                 attention_degraded = True
-            result = []
-            for entry in entries:
+            # ONE PROJECTION for both populations, keyed by id: a pinned row off
+            # the page carries exactly the fields a page row carries -- the same
+            # attention object, the same status stamps, the same binding and
+            # preview -- because the client renders them side by side in one
+            # list and a second projector would be a second place for them to
+            # disagree.
+            projected: dict[str, dict[str, Any]] = {}
+            for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
                 stored = read_session_attachment(self.root / "sessions" / entry.id)
                 row.update(
@@ -2899,8 +2962,18 @@ class DesktopSessions:
                     if revision is not None:
                         row["status_epoch"] = epoch
                         row["status_revision"] = revision
-                result.append(row)
-            return result
+                projected[entry.id] = row
+            return SessionPage(
+                rows=[projected[entry.id] for entry in page_entries],
+                pinned_off_page=[projected[entry.id] for entry in extra_entries],
+                # MORE ROWS THAN THE PAGE, which is the original question and
+                # is still the right one: `entries` is the probe window plus
+                # whatever was appended beyond it, and the window is full
+                # exactly when the ranking held more than `limit` rows. Derived
+                # from `entries` rather than from the page alone because the
+                # probe row was ASKED for and correctly answered this.
+                truncated=len(entries) > limit,
+            )
 
         return await asyncio.to_thread(rows)
 
