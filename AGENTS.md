@@ -9,8 +9,25 @@ each round see `docs/VERIFICATION.md`.
 
 ```sh
 cd ~/local-operator
-.venv/bin/python -m pytest tests/unit -q          # ~2700 tests, ~3.5 min
+ISO=$(mktemp -d)
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
+  PATH="$PATH" TERM=xterm-256color \
+  .venv/bin/python -m pytest tests/unit -q      # ~2700 tests, ~3.5 min
 ```
+
+**Every pytest invocation in this file is isolated, and that is not decoration.**
+The suite constructs real `ConfigManager`s, so a run without a redirected `HOME`
+reads and writes the operator's live `~/.local-operator/config.yml`. It has
+already destroyed one: a run in September 2026 collapsed an operator's
+`subagents.models` tiers to `{}`, which disabled a model tier and killed the
+background jobs that depended on it. `LOCAL_OPERATOR_CONFIG_DIR` alone does NOT
+prevent this — see [Isolating a run](#isolating-a-run-local_operator_config_dir-alone-is-not-enough)
+for why, and for the `CMUX_*`/`LOP_*` variables `env -i` also strips.
+
+The `REAL CONFIG CHANGED DURING THIS TEST RUN` guard is a **post-mortem, not a
+seatbelt**: it runs in `pytest_sessionfinish`, after the write. If you see it in
+a log, the damage is done — restore the config from a backup and treat every
+number that run produced as void.
 
 **The suite caps its own parallelism.** `addopts` asks for `-n auto`, but the
 root `conftest.py` implements xdist's `pytest_xdist_auto_num_workers` hook and
@@ -102,6 +119,7 @@ its own. Any probe failure degrades to the CPU-only cap; the hook never raises.
 Override it per session, or bypass it entirely:
 
 ```sh
+# Prefix each with the `env -i HOME="$ISO" …` form from ## Environment.
 PYTEST_XDIST_AUTO_NUM_WORKERS=12 .venv/bin/python -m pytest tests/unit -q  # honoured unclamped
 .venv/bin/python -m pytest tests/unit -n 12 -q   # explicit -n bypasses the hook
 .venv/bin/python -m pytest tests/unit -n0 -q     # serialise for a debugger
@@ -149,7 +167,8 @@ TUI tests need a colour-capable terminal, so run them with the environment the
 suite expects:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python -m pytest tests/unit/tui -q
 ```
 
 **A local failure CI does not have is usually your shell, and the fix belongs
@@ -163,7 +182,8 @@ that is green on CI. Confirm the diagnosis by unsetting the variable for one
 run:
 
 ```sh
-env -u AWS_DEFAULT_PROFILE .venv/bin/python -m pytest tests/unit/evaluation -q
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  .venv/bin/python -m pytest tests/unit/evaluation -q   # -i also drops AWS_DEFAULT_PROFILE
 ```
 
 Then add the missing name to the fixture's scrub list. Do **not** leave it as a
@@ -177,7 +197,8 @@ boot, a real turn through a real tool, and `/resume` — and it is **deselected
 from the default run** (`-m "not e2e"` in `addopts`). Run it explicitly:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0 -q
 ```
 
 It exists because the whole unit suite was green while the TUI was completely
@@ -1886,7 +1907,8 @@ watch it fail:
 
 ```sh
 # put the synchronous call back on the loop, or delete the to_thread
-.venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \
+  .venv/bin/python -m pytest tests/unit/test_tui_responsiveness.py::<test> -n0
 # expect a failure with a message that names the real cause, then revert
 ```
 
