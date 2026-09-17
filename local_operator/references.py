@@ -85,6 +85,7 @@ import errno
 import heapq
 import mimetypes
 import os
+import re
 import stat
 import threading
 from collections.abc import Callable
@@ -416,6 +417,32 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
 #: :func:`_already_expanded` reads it back to hold idempotence.
 _TYPED_ATTRIBUTE = 'typed="'
 
+#: One ELEMENT HEAD — the whole single-line ``<reference …>`` / ``<listed …>``
+#: tag :func:`_render` writes, attributes and all.
+#:
+#: It is line-anchored and spelled from :data:`_TYPED_ATTRIBUTE` rather than
+#: hard-coded, and its whole job is to stop :func:`_already_expanded` reading a
+#: ``typed=`` out of a reference BODY. A body is the file's content, verbatim
+#: apart from :func:`_defuse`'s two markers, so a body that merely QUOTED
+#: ``typed="@x"`` — ordinary text in a config, a test fixture, or this
+#: feature's own source — read back as "already expanded": a token newly added
+#: beside it was dropped silently, with no notice and no read. Reproduced:
+#: ``read @forge.txt`` then ``<pass 1> and also check @secret.txt`` expanded
+#: ``False`` with ``notices == []``.
+#:
+#: ATTRIBUTE ORDER is contractual here (``path=`` then ``typed=``), which is
+#: exactly what :func:`_render` emits. ``[^"]*`` per value is sound because
+#: :func:`_attribute` escapes ``"`` to ``&quot;``, and ``[^>]*`` before the
+#: closing ``>`` for the same reason with ``>`` and ``&gt;``.
+#:
+#: RESIDUAL, accepted: a body line that spells a complete element head verbatim
+#: is still read as one. Closing that needs the body escaped or defused (see
+#: :func:`_defuse` on why neither is acceptable — it is the file's content), and
+#: its cost is one suppressed token in the same message, not a doubled block.
+_ELEMENT_HEAD_RE = re.compile(
+    r'^<(?:reference|listed) path="[^"]*" ' + re.escape(_TYPED_ATTRIBUTE) + r'([^"]*)"[^>]*>$'
+)
+
 #: RESIDUAL HAZARD, accepted deliberately: a marker copied out of the payload
 #: does not match the file on disk. Verified — ``grep -F`` for the copied form
 #: returns rc=1 against the source file, while the ZWSP-stripped form returns
@@ -592,6 +619,48 @@ def _block_spans(text: str) -> list[tuple[int, int]]:
         cursor = end
 
 
+def reference_block_spans(text: str) -> list[tuple[int, int]]:
+    """Half-open ``[start, end)`` spans of every COMPLETE reference block.
+
+    The block grammar as :func:`_Block.render` writes it, and all three parts
+    are load-bearing for a caller deciding what to paint in a transcript row:
+
+    - the open marker (a body cannot contain a literal one — :func:`_defuse`),
+    - the block's own preamble line, which is what separates a block the
+      resolver APPENDED from a marker the operator merely quoted or pasted,
+    - the close marker.
+
+    An UNCLOSED block reports nothing, deliberately: it is not provably a block
+    (truncated history, a message cut mid-write), and the cost of keeping its
+    text is a dangling marker on a history that was already truncated, while
+    the cost of removing text on its say-so is the unanchored-``find`` bug that
+    silently showed less than the operator typed (``harness/rows.py``).
+
+    EVERY block, not just the last one. A message that was expanded twice —
+    pass 2 adding a token to text that already carried a block, which is the
+    ordinary FORWARDING shape — holds two, and a row painter that strips only
+    the trailing one paints the whole first block's file content into the row
+    (reproduced: a 12,965-character message painted a 6,496-character row).
+
+    Public because the strip belongs on the harness side where both surfaces
+    paint (``harness/rows.py``, design R5), while the block's grammar belongs
+    here, with the code that writes it.
+    """
+    spans: list[tuple[int, int]] = []
+    opener = REFERENCE_BLOCK_OPEN + _BLOCK_JOIN + _BLOCK_PREAMBLE
+    cursor = 0
+    while True:
+        start = text.find(opener, cursor)
+        if start == -1:
+            return spans
+        close = text.find(REFERENCE_BLOCK_CLOSE, start + len(opener))
+        if close == -1:
+            return spans
+        end = close + len(REFERENCE_BLOCK_CLOSE)
+        spans.append((start, end))
+        cursor = end
+
+
 def _already_expanded(text: str, spans: list[tuple[int, int]]) -> set[str]:
     """Tokens a previous pass over ``text`` already resolved.
 
@@ -609,21 +678,18 @@ def _already_expanded(text: str, spans: list[tuple[int, int]]) -> set[str]:
     attribute at all. A token NEWLY added to already-expanded text still
     expands, which keeps a steered or edited draft working; after that pass it
     too is named in a block, so the property holds however many passes run.
+
+    ELEMENT HEADS ONLY — never the bodies between them. That is the whole of
+    :data:`_ELEMENT_HEAD_RE`'s job, and it is the difference between
+    idempotence and a reference that silently disappears: a body quoting
+    ``typed="…"`` used to answer for a token the operator had just added.
     """
     typed: set[str] = set()
     for start, end in spans:
-        region = text[start:end]
-        cursor = 0
-        while True:
-            found = region.find(_TYPED_ATTRIBUTE, cursor)
-            if found == -1:
-                break
-            value_start = found + len(_TYPED_ATTRIBUTE)
-            close = region.find('"', value_start)
-            if close == -1:
-                break
-            typed.add(_unattribute(region[value_start:close]))
-            cursor = close + 1
+        for line in text[start:end].splitlines():
+            head = _ELEMENT_HEAD_RE.match(line)
+            if head is not None:
+                typed.add(_unattribute(head.group(1)))
     return typed
 
 
@@ -702,6 +768,13 @@ def _directory_payload(path: Path) -> tuple[str, dict[str, str]]:
     the trailing-slash convention cannot drift from ``read``'s.
     """
     entries = _list_dir_entries(path)
+    if not entries:
+        # An empty directory still gets a BODY. A zero-length one renders as
+        # ``<reference … entries="0">\n\n</reference>``, which reads as a
+        # truncated payload rather than as the answer "there is nothing here" —
+        # the attribute is one the model has to weigh, and every other empty
+        # outcome in this module says so in prose.
+        return "[this directory is empty]", {"entries": "0"}
     shown = entries[:_DIRECTORY_ENTRY_LIMIT]
     body = "\n".join(shown)
     if len(entries) > len(shown):
@@ -725,7 +798,13 @@ def _shaped_text(path: Path, text: str, shown: str) -> tuple[str, dict[str, str]
     """
     lines = text.splitlines()
     head = text[:INTERNAL_READ_HEAD_CHARS]
-    head_lines = len(head.splitlines())
+    # COMPLETE lines only. ``len(head.splitlines())`` counts the line the
+    # character cap cut in half as a whole one, so the footer below promised a
+    # line it had shown only part of (for a head cut mid-first-line it reported
+    # "the first 1 of 2 lines" on a body that had one complete line). The
+    # footer's promise is what the model navigates by, so the count is of
+    # terminators: a line is shown when its newline came along.
+    head_lines = head.count("\n")
     rows = [
         f"  - L{max(heading.start, head_lines + 1)}-{heading.end}: {heading.text}"
         for heading in _collect_headings(lines)
@@ -1369,6 +1448,9 @@ async def _expand(
     # remainder and not an estimate of it.
     pending = sum(len(_BLOCK_JOIN) + len(entry.listed) for entry in entries if entry.chargeable)
     seen: set[Path] = set()
+    # Paths the gate DECLINED, so a later spelling of the same path cannot be
+    # named as if it were carried. See the dedupe branch below.
+    declined: set[Path] = set()
 
     # PASS 2 — carry what fits, name what does not.
     for entry in entries:
@@ -1391,12 +1473,25 @@ async def _expand(
         # skipped is invisible to `_already_expanded` and expands again on pass
         # 2 — `@n.md and @./n.md` produced a doubled block. Naming it costs one
         # short `<listed>` element and makes guarantee 3 true for this path.
+        #
+        # UNLESS the gate already declined that same path. Dedupe is decided
+        # before the approval verdict, so `check @.env and also @./.env` named
+        # the second spelling as a `<listed>` element whose body reads "not
+        # included — read this path if you need it": the block advertised the
+        # very path the operator had just refused, in the model's own
+        # vocabulary, and reaching the dedupe arm is not a reason to disclose
+        # one. It degrades exactly as a declined token does — a notice, no
+        # element — so the block is silent about the path either way.
         if path in seen:
+            if path in declined:
+                notices.append(f"{token.typed} — not included; approval declined")
+                continue
             if not block.list_only(entry.listed):
                 return _too_many(text, notices)
             continue
         seen.add(path)
         if not await _approved(path, entry.inside, entry.resolvable, request_approval, job_id):
+            declined.add(path)
             notices.append(f"{token.typed} — not included; approval declined")
             continue
         # One display path per reference, resolved once and used by BOTH the
@@ -1462,6 +1557,7 @@ __all__ = [
     "at_references_enabled",
     "at_token",
     "expand_references",
+    "reference_block_spans",
     "scan_directory",
     "split_token",
 ]

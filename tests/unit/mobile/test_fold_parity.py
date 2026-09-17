@@ -986,21 +986,49 @@ def test_a_message_that_QUOTES_the_block_marker_keeps_all_its_words() -> None:
     mid = f"explain {REFERENCE_BLOCK_OPEN} and then tell me about the resolver"
     assert user_row_text(mid) == mid
 
-    # A closer in the MIDDLE of a sentence: the text does not end with the
-    # marker, so `reference_block_stripped` returns at its `endswith` check and
-    # never reaches the no-opener branch. This is the quoted-tag case, not the
+    # A closer in the MIDDLE of a sentence: no opener precedes it, so nothing
+    # is a block and the row is untouched. This is the quoted-tag case, not the
     # half-a-block one.
     closer_only = f"what does {REFERENCE_BLOCK_CLOSE} mean?"
     assert user_row_text(closer_only) == closer_only
 
-    # A TRAILING closer with no opener is what actually reaches the
-    # `opened == -1` guard (`harness/rows.py`): the text ends with the marker,
-    # so the `endswith` check passes and the `rfind` for an opener returns -1.
-    # That is half a quoted tag, not a block — guessing a span for it would be
-    # the same defect in the other direction. The assertion above cannot
-    # observe this branch, which left the guard untested.
+    # A stray closer at the END with no opener — half a quoted tag rather than
+    # a block, because a block is also the preamble line and the open marker.
+    # Guessing a span for it would be the same defect in the other direction.
+    # The assertion above cannot observe this branch, which left it untested.
     trailing_closer = f"paste went wrong, here is a stray closer {REFERENCE_BLOCK_CLOSE}"
     assert user_row_text(trailing_closer) == trailing_closer
+
+
+def test_a_second_block_does_not_leave_the_first_ones_body_in_the_row(tmp_path: Path) -> None:
+    """The FORWARDING shape, which painted a whole file body into the row.
+
+    A message can be expanded twice: pass 1 appends a block, a token is added
+    after it, pass 2 appends a SECOND one — so the first block ends up
+    MID-MESSAGE, not trailing. Stripping only the trailing block left the whole
+    of the first in the row; measured on this fixture's shape, a 12,965
+    character message painted 6,496 characters of file body, which is the
+    failure this strip exists to prevent, reached with no attacker and no
+    unusual input.
+
+    The fixture is the REAL resolver's output, driven through ``asyncio.run``
+    because this module's tests are sync — the same rule the fixture above
+    records, and the reason a block spelled by hand here would prove nothing.
+    """
+    import asyncio
+
+    from local_operator.references import REFERENCE_BLOCK_OPEN, expand_references
+
+    (tmp_path / "a.txt").write_text("A" * 90, encoding="utf-8")
+    (tmp_path / "b.txt").write_text("B" * 90, encoding="utf-8")
+    first = asyncio.run(expand_references("first @a.txt", str(tmp_path)))
+    second = asyncio.run(expand_references(f"{first.sent} and now @b.txt", str(tmp_path)))
+
+    assert second.sent.count(REFERENCE_BLOCK_OPEN) == 2, "not the two-block shape"
+    row = user_row_text(second.sent)
+
+    assert row == "first @a.txt and now @b.txt"
+    assert "A" * 90 not in row and "B" * 90 not in row
 
 
 def test_a_real_block_is_still_stripped_when_the_prose_also_quotes_the_marker() -> None:
@@ -1008,8 +1036,8 @@ def test_a_real_block_is_still_stripped_when_the_prose_also_quotes_the_marker() 
 
     A message can legitimately do both: ask about the tag AND carry a real
     expansion. Only the appended block may go, and the operator's own sentence —
-    marker and all — must survive intact. Taking the LAST opener rather than the
-    first is what buys this.
+    marker and all — must survive intact. The quoted marker is not followed by
+    the block's preamble line, so it is not a span; the real block is.
     """
     from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
 

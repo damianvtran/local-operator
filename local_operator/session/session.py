@@ -5118,16 +5118,40 @@ class Session:
         on-demand compaction holds, which the rejection names. ``_is_streaming``
         is then re-checked under the lock to close the race where streaming was
         set between the lock probe and the acquire.
+
+        ``@path`` expansion sits BETWEEN those two points, and that placement
+        is part of the contract rather than an implementation detail: a
+        rejected prompt must not have read a referenced file or raised an
+        approval card on its way to the raise.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
-        # `@path` expansion, and it runs HERE — before the lock, not inside it.
-        # An approval can park on a human indefinitely, and in the TUI the app
-        # awaiting this prompt is the same one that would draw the approval
-        # card; awaiting a person while holding `_turn_lock` also blocks the
-        # compaction that shares it, which is a deadlock-shaped risk rather
-        # than a slow turn. Expanding before `acquire()` costs nothing and
-        # removes the shape entirely.
+        # THE PROBE COMES FIRST, ahead of anything that can touch the disk or a
+        # human. Expansion reads every referenced file and can raise a live
+        # approval card, so with the probe below it a caller that arrives
+        # mid-turn (`serving`, `attached`, `mobile/tui_handle`, `goal_loop`,
+        # `subagent`) had the operator's files read — and a card for a
+        # referenced `.env` ANSWERED — for a prompt this method then rejects.
+        # `locked()` does not await, so nothing here can deadlock, and the
+        # verdict is the one the probe always produced: what moves is only the
+        # work that used to happen before it.
+        if self._turn_lock.locked():
+            # An on-demand compaction holds the same lock a turn does, and for
+            # the same reason — it is rewriting the history a request would be
+            # built from. Saying "already streaming" for it would send the user
+            # looking for a turn that is not there.
+            raise RuntimeError(
+                "context compaction is running; the prompt can be sent once it finishes"
+                if self._compacting
+                else "session is already streaming; use steer() to inject mid-turn"
+            )
+        # `@path` expansion, and it runs HERE — after the probe, before the
+        # lock, not inside it. An approval can park on a human indefinitely, and
+        # in the TUI the app awaiting this prompt is the same one that would
+        # draw the approval card; awaiting a person while holding `_turn_lock`
+        # also blocks the compaction that shares it, which is a deadlock-shaped
+        # risk rather than a slow turn. Expanding before `acquire()` costs
+        # nothing and removes the shape entirely.
         #
         # This one call is what gives EVERY composer surface the feature: CLI,
         # headless, server, scheduler, mobile, subagents and the TUI's own
@@ -5164,16 +5188,6 @@ class Session:
         # cost `on_editor_submitted` records. The aside is the one path that
         # paints its notices, from its own call in `_aside_worker`.
         text = expansion.sent
-        if self._turn_lock.locked():
-            # An on-demand compaction holds the same lock a turn does, and for
-            # the same reason — it is rewriting the history a request would be
-            # built from. Saying "already streaming" for it would send the user
-            # looking for a turn that is not there.
-            raise RuntimeError(
-                "context compaction is running; the prompt can be sent once it finishes"
-                if self._compacting
-                else "session is already streaming; use steer() to inject mid-turn"
-            )
         await self._turn_lock.acquire()
         try:
             # Close the narrow completion-after-final-flush race: a shell
