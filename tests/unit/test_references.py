@@ -1102,6 +1102,49 @@ def test_reference_block_spans_reports_every_complete_block_and_nothing_else(tmp
     assert reference_block_spans(unclosed) == []
 
 
+def test_an_unclosed_opener_does_not_forge_a_span_across_a_later_block(tmp_path):
+    """An unclosed opener plus a later complete block must yield ONE span, the
+    later block's own — never one span spanning both.
+
+    The docstring's "an unclosed block reports nothing" held only while nothing
+    followed it. ``find(CLOSE, start)`` happily returns a LATER block's closer,
+    so an opener with no closer of its own swallowed the operator's prose
+    between the two — and ``reference_block_stripped`` deleted all of it,
+    silently, on both surfaces. That is the R4 failure (the transcript showing
+    strictly less than was typed) reappearing inside the function written to
+    prevent it (review round 2, MINOR-1).
+
+    The tell is an open marker between the two: the closer a bare ``find``
+    takes belongs to the block that marker starts. So the assertion is that the
+    operator's own sentence survives the strip AND that the later block is
+    still recognised as a span — skipping the opener must not cost the real
+    block its strip, or the fix trades one silent failure for another.
+    """
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    sent = asyncio.run(expand_references("look at @a.txt", str(tmp_path))).sent
+    # Sliced from the open marker: `.sent` is the operator's sentence PLUS the
+    # block, and the span is only ever the block.
+    block = sent[sent.index(REFERENCE_BLOCK_OPEN) :]
+    assert block.count(REFERENCE_BLOCK_OPEN) == 1, "fixture is not a complete block"
+    assert block.endswith(REFERENCE_BLOCK_CLOSE), "fixture is not a complete block"
+
+    forged = (
+        f"truncated history\n\n{REFERENCE_BLOCK_OPEN}\n\n{_BLOCK_PREAMBLE}\n\n"
+        '<reference path="x" typed="@x">\nAAA\n\n'
+        "MIDDLE PROSE THE OPERATOR TYPED\n\n"
+        f"{block}\n\ntail"
+    )
+
+    spans = reference_block_spans(forged)
+
+    assert len(spans) == 1, f"the forged span swallowed the later block: {spans}"
+    start, end = spans[0]
+    assert forged[start:end] == block, "the reported span is not the complete block"
+    assert (
+        "MIDDLE PROSE THE OPERATOR TYPED" in forged[:start]
+    ), "the operator's prose sits INSIDE the span, so the strip deletes it"
+
+
 @pytest.mark.asyncio
 async def test_a_declined_path_is_not_advertised_under_another_spelling(tmp_path):
     """A path the gate refused is not named as "read this path if you need it".
@@ -1154,7 +1197,15 @@ async def test_a_shaped_body_counts_only_the_lines_the_cap_did_not_cut(tmp_path)
     result = await expand_references("read @aligned.md @cut.md", str(tmp_path))
 
     assert "the first 1536 of 6000 lines" in result.sent
-    assert "the first 0 of 1 lines" in result.sent, "a mid-line cut claimed a line it never showed"
+    # 0 COMPLETE lines, and the footer says so — but it also names the fragment
+    # that really is in the prompt. Counting terminators alone reported `the
+    # first 0 of 1 lines` while 6,144 characters of that line were sitting in
+    # the request, which reads as "nothing here" and sends the model into a
+    # pointless re-`read` (review round 2, MINOR-3).
+    assert "the first 0 of 1 lines, plus part of line 1" in result.sent, (
+        "a mid-line cut claimed a complete line it never showed, or denied the "
+        "fragment it did show"
+    )
 
 
 @pytest.mark.asyncio

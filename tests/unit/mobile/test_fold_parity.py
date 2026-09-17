@@ -1055,3 +1055,107 @@ def test_a_real_block_is_still_stripped_when_the_prose_also_quotes_the_marker() 
 
     assert row == typed
     assert "SECRET" not in row
+
+
+def test_an_unclosed_opener_before_a_real_block_keeps_the_operators_prose(
+    tmp_path: Path,
+) -> None:
+    """The operator's own sentence must survive an UNCLOSED opener.
+
+    ``reference_block_spans`` promises an unclosed block reports nothing, and
+    while nothing followed it that held. With a real block later in the same
+    message it did not: the bare ``find(CLOSE, start)`` paired the unclosed
+    opener with the LATER block's closer, so one span covered the opener, the
+    operator's sentence, and the whole block — and the strip deleted all of it,
+    silently, on both surfaces. Reproduced before the fix: the row came back as
+    ``truncated history\n\ntail`` with the middle sentence and the block gone
+    together (review round 2, MINOR-1).
+
+    This is the R4 failure in the branch the function's own docstring claimed
+    was protected, which is why the assertion is on the PROSE and not only on
+    the span count.
+    """
+    import asyncio
+
+    from local_operator.references import (
+        _BLOCK_PREAMBLE,
+        REFERENCE_BLOCK_OPEN,
+        expand_references,
+    )
+
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    sent = asyncio.run(expand_references("look at @a.txt", str(tmp_path))).sent
+    # From the open marker: `.sent` carries the operator's sentence too, and the
+    # span is only ever the block.
+    block = sent[sent.index(REFERENCE_BLOCK_OPEN) :]
+    forged = (
+        f"truncated history\n\n{REFERENCE_BLOCK_OPEN}\n\n{_BLOCK_PREAMBLE}\n\n"
+        'unfinished <reference path="x" typed="@x">\nAAA\n\n'
+        "MIDDLE PROSE THE OPERATOR TYPED\n\n"
+        f"{block}\n\ntail"
+    )
+
+    row = user_row_text(forged)
+
+    assert "MIDDLE PROSE THE OPERATOR TYPED" in row, "the strip ate the operator's prose"
+    assert "A_BODY" not in row, "the real block was not stripped"
+    assert (
+        REFERENCE_BLOCK_OPEN in row
+    ), "the UNCLOSED opener is not a block, so its text must stay visible"
+
+
+def test_a_PASTED_complete_block_is_stripped_and_that_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """A complete block the operator pasted goes too — pinned, not denied.
+
+    The anchor is the preamble line plus the closer, so it cannot tell an
+    APPENDED block from a pasted or forwarded one: they are the same bytes. The
+    docstring used to claim only a marker the operator merely mentioned was
+    safe, which read as a promise that a complete pasted payload stays visible;
+    it does not, and the docstring now says so (review round 2, MINOR-2).
+
+    Reachable in this repo routinely — someone asks about a payload of this very
+    feature. The assertion is the DISCLOSED behaviour rather than the desirable
+    one, so the next reader gets the truth from the suite instead of from a
+    surprise.
+    """
+    import asyncio
+
+    from local_operator.references import REFERENCE_BLOCK_OPEN, expand_references
+
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    sent = asyncio.run(expand_references("look at @a.txt", str(tmp_path))).sent
+    block = sent[sent.index(REFERENCE_BLOCK_OPEN) :]
+    pasted = f"look at this payload:\n\n{block}\n\nwhat does it mean?"
+
+    row = user_row_text(pasted)
+
+    assert row == "look at this payload:\n\nwhat does it mean?"
+    assert "A_BODY" not in row
+
+
+def test_a_block_followed_by_non_whitespace_does_not_fuse_two_words(
+    tmp_path: Path,
+) -> None:
+    """The separator the strip drops belongs to the BLOCK, so it owes one back.
+
+    Each segment is right-stripped because the ``JOIN`` before a block is the
+    block's own, not the operator's prose. A caller that then appends text with
+    no space of its own got the two halves welded together —
+    ``expand("first @a.txt") + "and next"`` painted ``first @a.txtand next``
+    (review round 2, NIT-1). One space, and only where the next segment starts
+    on a non-space character, so the ordinary shapes (whose tail carries its own
+    leading newline) are joined exactly as before.
+    """
+    import asyncio
+
+    from local_operator.references import expand_references
+
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    expanded = asyncio.run(expand_references("first @a.txt", str(tmp_path))).sent
+
+    assert user_row_text(expanded + "and next") == "first @a.txt and next"
+    # The ordinary shape is untouched: the tail's own whitespace is enough, and
+    # no second separator is inserted on top of it.
+    assert user_row_text(expanded + "\n\nand next") == "first @a.txt\n\nand next"

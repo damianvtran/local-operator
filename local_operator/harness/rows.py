@@ -355,6 +355,15 @@ def reference_block_stripped(text: str) -> str:
       and reports nothing either (truncated history, a message cut mid-write —
       showing too much is recoverable, showing less than the operator typed, with
       no notice, is not).
+    - PASTED, not only appended. The anchor is the preamble line plus the
+      closer, so a COMPLETE block the operator pasted, quoted or forwarded is
+      stripped too, and that is intended rather than overlooked (review round 2,
+      MINOR-2). An appended block and a pasted one are the same bytes and there
+      is no sound way to tell them apart — which is exactly why base anchored
+      to the END of the message, and why that anchor broke the ordinary
+      forwarding shape. The accepted cost is that asking about a complete
+      payload of this feature paints less than was typed; the property bought
+      for it is that the ordinary case cannot leak a file body into the row.
     - EVERY is because a message can carry more than one. Expansion only ever
       APPENDS, so a second pass over text that already held a block leaves the
       FIRST one mid-message: pass 1's block, then prose carrying a new token,
@@ -391,7 +400,22 @@ def reference_block_stripped(text: str) -> str:
         kept.append(text[cursor:start].rstrip())
         cursor = end
     kept.append(text[cursor:].rstrip())
-    return "".join(kept)
+    # A SEPARATOR where two segments would otherwise fuse. Each segment is
+    # right-stripped, because the separator BEFORE a block belongs to the block
+    # rather than to the operator's prose, so a segment can end at a word — and
+    # a caller that appends text to an expanded message with no space of its own
+    # then painted `first @a.txtand next` (review round 2, NIT-1). A single
+    # space only when the next segment starts on a non-space character: the
+    # ordinary shapes already carry their own leading whitespace, so they are
+    # joined byte-identically to before.
+    joined = ""
+    for segment in kept:
+        if not segment:
+            continue
+        if joined and not segment[0].isspace():
+            joined += " "
+        joined += segment
+    return joined
 
 
 def user_row_text(text: str) -> str:

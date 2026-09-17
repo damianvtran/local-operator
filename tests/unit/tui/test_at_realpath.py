@@ -161,6 +161,32 @@ async def _type_and_submit(pilot: Any, app: OperatorApp, text: str) -> None:
     await pilot.press("enter")
 
 
+async def _type_keystrokes(pilot: Any, app: OperatorApp, text: str) -> None:
+    """Type ``text`` into the real composer ONE KEY AT A TIME, pressing nothing else.
+
+    Deliberately separate from :func:`_type_and_submit`, which loads the buffer
+    wholesale and ESCAPES out of an open picker first. That escape hatch is the
+    reason the feature's headline flow shipped broken: a draft ending in a
+    reference leaves the FILE list open, and an open FILE list owns Enter, so a
+    helper that dismisses the list before pressing Enter can never observe
+    whether the user's own Enter sends the message. Its own docstring admitted
+    the hazard and the 43-test composer suite still went green over it (QA
+    round 1, Q-1).
+
+    So anything asserting on what an ORDINARY keystroke does has to arrive the
+    way a user arrives: real ``pilot.press`` per character, no ``load_text``,
+    no Escape, no pre-parked caret. ``load_text`` is what the other helper uses
+    and it is right there, because those tests are about the submit path rather
+    than about the keystroke that reaches it.
+    """
+    editor = app.query_one(Editor)
+    editor.focus()
+    await pilot.pause()
+    for ch in text:
+        await pilot.press("space" if ch == " " else ch)
+    await pilot.pause()
+
+
 @pytest.mark.asyncio
 async def test_reference_reaches_the_model_expanded_and_the_row_stays_short(
     tmp_path: Path,
@@ -410,5 +436,162 @@ async def test_picker_opens_in_file_mode_and_lists_the_workspace(tmp_path: Path)
             missing = {"README.md", "auth.py", "src/"} - set(rows)
             listed = " | ".join(rows)
             assert not missing, f"workspace entries not listed: {sorted(missing)} of {listed}"
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_draft_ending_in_a_reference_SENDS_on_the_first_enter(tmp_path: Path) -> None:
+    """THE HEADLINE FLOW, typed for real: `summarise @README.md`, Enter, sent.
+
+    The regression this exists to catch shipped GREEN through a 43-test composer
+    suite, because every one of those tests reached the submit path through a
+    helper that pressed Escape first. Escape closed the very list whose Enter
+    behaviour was broken, so no test ever asked the question a user asks: I have
+    finished typing, Enter, did it go?
+
+    It did not. A FILE completion inserts no trailing space (a path may continue,
+    `@src/` being one keystroke from `@src/app.py`), so the token stayed open,
+    the list re-opened on the name it had just completed, and every Enter
+    re-completed the same row: measured on the base, `summarise @README.md` +
+    Enter x3 left the buffer byte-identical with `requests=0` (QA round 1, Q-1).
+    A draft ending in a reference could not be sent at all, by any number of
+    presses, until the user pressed Escape or typed on.
+
+    Asserted on the RECORDED REQUEST, so "the message went" is a fact about what
+    the model was handed rather than about what the app believes it sent, and on
+    the painted row, so the strip half is held to the same keystrokes.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True)
+    (workspace / "README.md").write_text(README_BODY, encoding="utf-8")
+    stream = ScriptedStream([text_turn("Summarised.")])
+    session = build_session(tmp_path / "session", stream, cwd=workspace)
+    session.set_conversation_name("at-realpath-type-enter", user_set=True)
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await drain(pilot)
+            editor = app.query_one(Editor)
+            await _type_keystrokes(pilot, app, "summarise @README.md")
+            assert editor.picker.is_open(), (
+                "fixture never reached the open file list, so this test would "
+                "pass without ever exercising the Enter routing it is about"
+            )
+
+            await pilot.press("enter")
+            settled = await _settle(pilot, lambda: bool(stream.requests))
+            await drain(pilot, cycles=20)
+
+            assert settled, (
+                "the FIRST Enter after typing a complete reference sent nothing "
+                "— the draft is unsendable and the list re-completes forever"
+            )
+            sent = _sent_to_model(stream)
+            assert "MARKER_README_913" in sent, "the file body never reached the model"
+            assert "summarise @README.md" in sent, "the typed sentence was lost"
+            assert editor.text == "", "the buffer was not cleared, so it never submitted"
+            painted = transcript_text(app)
+            assert "summarise @README.md" in painted
+            assert "MARKER_README_913" not in painted, "the body leaked into the row"
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_token_still_takes_the_second_enter_to_send(tmp_path: Path) -> None:
+    """The mid-path rule survives: the FIRST Enter completes, the second sends.
+
+    The fix for the Q-1 trap must not become the mis-send the original no-submit
+    rule existed to prevent. `@READ` is not what the row says (`README.md`), so
+    accepting it CHANGES the buffer and the keystroke stays a completion — that
+    is the `@src/`-is-one-keystroke-from-`@src/app.py` case, and submitting a
+    directory the user was still typing past has no undo once the turn is
+    dispatched.
+
+    Only a row the buffer ALREADY holds sends, which is what makes the trap's
+    escape hatch and the mid-path rule two rules rather than a contradiction.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True)
+    (workspace / "README.md").write_text(README_BODY, encoding="utf-8")
+    stream = ScriptedStream([text_turn("ok")])
+    session = build_session(tmp_path / "session", stream, cwd=workspace)
+    session.set_conversation_name("at-realpath-two-enter", user_set=True)
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await drain(pilot)
+            editor = app.query_one(Editor)
+            await _type_keystrokes(pilot, app, "summarise @READ")
+            assert editor.picker.is_open(), "fixture never opened the file list"
+
+            await pilot.press("enter")
+            await drain(pilot, cycles=20)
+            assert not stream.requests, (
+                "the first Enter SENT an unfinished token — the completion was "
+                "skipped and a directory-ish path went to the model"
+            )
+            assert (
+                editor.text == "summarise @README.md"
+            ), f"the row was not completed into the buffer: {editor.text!r}"
+
+            await pilot.press("enter")
+            settled = await _settle(pilot, lambda: bool(stream.requests))
+            assert settled, "the completed token still could not be sent"
+            assert "MARKER_README_913" in _sent_to_model(stream)
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_prose_naming_no_path_is_sent_verbatim_and_never_rewritten(tmp_path: Path) -> None:
+    """`glab mr create --assignee @me`: no list, no rewrite, verbatim on the wire.
+
+    The PR body names this exact sentence as a token that must pass through
+    untouched, and on the WIRE it always did — the resolver calls `@me` prose.
+    The COMPOSER disagreed: a subsequence matcher reached `README.md` from `me`,
+    that kept the FILE list open, and an open list owns Enter, so Enter silently
+    rewrote the operator's sentence into `--assignee @README.md` and sent
+    nothing at all (QA round 1, Q-2). Measured on the base: `requests=0`, buffer
+    mutated, second Enter also inert.
+
+    Both halves are asserted because either alone is passable by accident — the
+    picker must not open, AND the sentence must arrive as typed.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True)
+    (workspace / "README.md").write_text(README_BODY, encoding="utf-8")
+    (workspace / "my file.txt").write_text("spaced\n", encoding="utf-8")
+    stream = ScriptedStream([text_turn("ok")])
+    session = build_session(tmp_path / "session", stream, cwd=workspace)
+    session.set_conversation_name("at-realpath-prose", user_set=True)
+    app = OperatorApp(lambda: _factory(session))
+    draft = "run glab mr create --assignee @me"
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await drain(pilot)
+            editor = app.query_one(Editor)
+            await _type_keystrokes(pilot, app, draft)
+
+            assert not editor.picker.is_open(), (
+                "a subsequence row opened the FILE list for a token the resolver "
+                "calls prose, which is what makes Enter rewrite it"
+            )
+
+            await pilot.press("enter")
+            settled = await _settle(pilot, lambda: bool(stream.requests))
+            assert settled, "the prose draft could not be sent"
+            assert (
+                editor.text != "run glab mr create --assignee @README.md"
+            ), "the operator's prose was rewritten into a filename"
+            sent = _sent_to_model(stream)
+            assert draft in sent, "the sentence did not reach the model as typed"
+            assert (
+                "MARKER_README_913" not in sent
+            ), "a file the operator never referenced reached the model"
     finally:
         await dispose_quietly(session)
