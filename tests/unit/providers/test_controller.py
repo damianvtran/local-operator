@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
+import time
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -2054,11 +2055,12 @@ class TestQwenCloudConsoleRoute:
 
         from local_operator.providers.registry import PROVIDER_REGISTRY
 
-        resolved = sorted(
-            definition.id
-            for definition in PROVIDER_REGISTRY
-            if controller._qwencloud_console_creds(definition.id)[0] is not None
-        )
+        resolved = []
+        for definition in PROVIDER_REGISTRY:
+            creds, _ = await controller._qwencloud_console_creds(definition.id)
+            if creds is not None:
+                resolved.append(definition.id)
+        resolved.sort()
         assert resolved == ["alibaba-token-plan", "alibaba-token-plan-oauth"]
 
     @pytest.mark.asyncio
@@ -2091,7 +2093,7 @@ class TestQwenCloudConsoleRoute:
         assert "qwencloud-console" not in asked, "the ticket namespace is QwenCloud's alone"
         assert calls == [], "anthropic's dead grant must not reach the console route"
         assert [r.identity for r in reports] == ["other@example.test"]
-        assert controller._qwencloud_console_creds("anthropic") == (None, None)
+        assert await controller._qwencloud_console_creds("anthropic") == (None, None)
 
     @pytest.mark.asyncio
     async def test_the_console_report_merges_into_one_credits_row(
@@ -2237,10 +2239,12 @@ class TestQwenCloudConsoleRoute:
         """
         self._ticket(store)
 
-        assert controller._qwencloud_console_creds("alibaba-token-plan-oauth")[0] is not None
-        assert controller._qwencloud_console_creds(
+        assert (await controller._qwencloud_console_creds("alibaba-token-plan-oauth"))[
+            0
+        ] is not None
+        assert await controller._qwencloud_console_creds(
             "alibaba-token-plan-oauth"
-        ) == controller._qwencloud_console_creds("alibaba-token-plan")
+        ) == await controller._qwencloud_console_creds("alibaba-token-plan")
 
     @pytest.mark.asyncio
     async def test_a_ticketless_row_is_not_a_credential(self, controller, store) -> None:
@@ -2253,7 +2257,7 @@ class TestQwenCloudConsoleRoute:
         """
         store.upsert_credential("qwencloud-console", {"ticket": "", "project_id": "p"})
 
-        assert controller._qwencloud_console_creds("alibaba-token-plan") == (None, None)
+        assert await controller._qwencloud_console_creds("alibaba-token-plan") == (None, None)
 
 
 class TestQwenCloudTicketFromSecretStore:
@@ -2303,14 +2307,42 @@ class TestQwenCloudTicketFromSecretStore:
         )
 
     @staticmethod
-    def _store_exists(monkeypatch, exists: bool = True) -> None:
-        """Pin ``store_path(...).exists()`` without building a real store."""
+    def _store_exists(monkeypatch, tmp_path, exists: bool = True) -> None:
+        """Make ``store_path(...).exists()`` answer ``exists``, via the config dir.
 
-        class _Path:
-            def exists(self) -> bool:
-                return exists
+        **Do not patch ``store_path`` itself — that leak is not cosmetic.**
+        ``local_operator.secrets.store`` does ``from ...keys import store_path``
+        at module scope (``store.py``:54-59), so whichever value is installed
+        the FIRST time that module is imported is bound there PERMANENTLY:
+        monkeypatch reverts the attribute on ``keys`` and never the copy
+        ``store`` already holds. An earlier version of this helper patched the
+        attribute with a duck-typed stub, and the stub escaped this class and
+        broke every later test that opened a real store — 33 failures in
+        ``test_qwencloud_console.py`` reading ``TypeError: expected str, bytes
+        or os.PathLike object``, with a traceback blaming ``secrets/store.py``,
+        a file neither slice touches. Pointing the same patch at a real ``Path``
+        does NOT fix it: measured, it still leaks and merely trades the
+        ``TypeError`` for ``sqlite3.OperationalError: unable to open database
+        file`` (35 failed). The capture is the defect; the stub's type was only
+        how it announced itself.
 
-        monkeypatch.setattr("local_operator.secrets.keys.store_path", lambda base: _Path())
+        CI hid all of this because ``shard_tests.py --total 5`` happens to deal
+        the two files into different shards, and that split is rebalanced by
+        measured duration — so any new or retimed test can re-deal them
+        together.
+
+        So this steers ``LOCAL_OPERATOR_CONFIG_DIR`` instead, which
+        :func:`~local_operator.paths.config_dir` re-reads on every call for
+        exactly this reason (its own docstring says a module constant would
+        freeze whatever the first importer saw). Nothing is captured, the
+        patched state dies with the env var, and ``C1`` already drives the
+        guard this way.
+        """
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        if exists:
+            target = tmp_path / "secrets" / "store.db"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch()
 
     @staticmethod
     def _retrieval(monkeypatch, result):
@@ -2343,7 +2375,7 @@ class TestQwenCloudTicketFromSecretStore:
 
     @pytest.mark.asyncio
     async def test_the_value_reaches_the_fetcher_unchanged(
-        self, controller, store, monkeypatch
+        self, controller, store, monkeypatch, tmp_path
     ) -> None:
         """C2. The decrypted value arrives in the shape ``usage.py`` expects.
 
@@ -2354,7 +2386,7 @@ class TestQwenCloudTicketFromSecretStore:
         """
         self._dead_grant(store)
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         self._retrieval(monkeypatch, self.TICKET.encode())
         calls = self._spy(
             monkeypatch, controller, report=UsageReport(provider="alibaba-token-plan", limits=[])
@@ -2396,7 +2428,7 @@ class TestQwenCloudTicketFromSecretStore:
 
     @pytest.mark.asyncio
     async def test_a_locked_store_paints_a_note_not_an_empty_panel(
-        self, controller, store, monkeypatch
+        self, controller, store, monkeypatch, tmp_path
     ) -> None:
         """C3. The whole point: a locked store is VISIBLE and ACTIONABLE.
 
@@ -2409,7 +2441,7 @@ class TestQwenCloudTicketFromSecretStore:
 
         email = self._dead_grant(store)
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         self._retrieval(monkeypatch, BrokerDenied("no lop session is registered with the broker"))
         self._spy(monkeypatch, controller)
 
@@ -2424,7 +2456,7 @@ class TestQwenCloudTicketFromSecretStore:
 
     @pytest.mark.asyncio
     async def test_a_locked_store_never_crashes_the_gather(
-        self, controller, store, monkeypatch
+        self, controller, store, monkeypatch, tmp_path
     ) -> None:
         """C4. ``fetch_usage`` fans out under ``asyncio.gather``.
 
@@ -2437,7 +2469,7 @@ class TestQwenCloudTicketFromSecretStore:
         self._dead_grant(store)
         self._migrated_row(store)
         store.upsert_credential("deepseek", {"key": "fake-deepseek-key", "type": "api_key"})
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         self._retrieval(monkeypatch, BrokerLocked("locked"))
         self._spy(monkeypatch, controller, report=UsageReport(provider="deepseek", limits=[]))
 
@@ -2446,7 +2478,9 @@ class TestQwenCloudTicketFromSecretStore:
         assert {r.provider for r in reports} >= {"alibaba-token-plan", "deepseek"}
 
     @pytest.mark.asyncio
-    async def test_a_missing_secret_names_the_repair(self, controller, store, monkeypatch) -> None:
+    async def test_a_missing_secret_names_the_repair(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
         """C5. Metadata present, value gone — a real state with its own fix.
 
         Distinct from locked: unlocking cannot help, the ticket has to be
@@ -2456,7 +2490,7 @@ class TestQwenCloudTicketFromSecretStore:
 
         self._dead_grant(store)
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         self._retrieval(monkeypatch, SecretNotFound("QWENCLOUD_CONSOLE_TICKET"))
         self._spy(monkeypatch, controller)
 
@@ -2468,7 +2502,9 @@ class TestQwenCloudTicketFromSecretStore:
         assert "secret unlock" not in reports[0].notes
 
     @pytest.mark.asyncio
-    async def test_an_unreadable_store_stays_silent(self, controller, store, monkeypatch) -> None:
+    async def test_an_unreadable_store_stays_silent(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
         """The fourth outcome, and the one that must NOT paint a note.
 
         A note is a promise that the user can act. A corrupt store offers no
@@ -2479,7 +2515,7 @@ class TestQwenCloudTicketFromSecretStore:
 
         self._dead_grant(store)
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         self._retrieval(monkeypatch, SecretStoreError("db is corrupt"))
         self._spy(monkeypatch, controller)
 
@@ -2487,13 +2523,160 @@ class TestQwenCloudTicketFromSecretStore:
 
         assert [r.notes for r in reports] == [] or all(r.notes is None for r in reports)
 
+    @pytest.mark.asyncio
+    async def test_a_note_on_a_successful_api_key_report_still_reschedules(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
+        """The note must expire on the API-key route too — the third branch.
+
+        The polarity defect this pins is the one the whole re-probe exists to
+        prevent, re-armed on the one path no test covered. Both branches that
+        return a note for a MISSING report schedule the 10 s re-probe; this
+        third one attaches the note to a LIVE 200 and then handed it to
+        ``_mark_account_success``, which sets ``next_probe_at_ms = None``. The
+        note then outlived ``lop secret unlock`` for the full jittered TTL
+        (measured: 358890 ms, ~6 minutes) unless the user pressed ``r``.
+        ``_settle_live_report``'s guard does not cover this path.
+
+        Reachable by any user with a valid ``api_key`` row plus a
+        migrated-but-locked ticket — they read the remedy, run it, and the
+        panel keeps telling them to run it. Every pre-existing ``report.notes``
+        assertion sits on the dead-grant path, which is how it shipped.
+        """
+        from local_operator.providers.usage_cache import USAGE_FAILURE_BACKOFF_MS
+        from local_operator.secrets.client import BrokerLocked
+
+        store.upsert_credential(
+            "alibaba-token-plan", {"key": "fake-inference-key", "type": "api_key"}
+        )
+        self._migrated_row(store)
+        assert (
+            controller._expected_oauth_identities("alibaba-token-plan") == []
+        ), "no OAuth row: this is the API-key route, not the dead-grant one"
+        self._store_exists(monkeypatch, tmp_path)
+        self._retrieval(monkeypatch, BrokerLocked("locked"))
+        # A LIVE report: the fetch succeeds on the api_key, and only the ticket
+        # is locked. `report is not None` plus a note is the uncovered case.
+        self._spy(
+            monkeypatch, controller, report=UsageReport(provider="alibaba-token-plan", limits=[])
+        )
+
+        now_ms = int(time.time() * 1000)
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.notes is not None and "lop secret unlock" in report.notes
+        # The assertion that discriminates. `is not None` alone passes against
+        # the defect only if the success path left a stamp, and it leaves None;
+        # the bound pins it to the SHORT re-probe rather than to any schedule,
+        # so a value drawn from the ~5-minute TTL fails here.
+        assert report.next_probe_at_ms is not None, "the note was left with no re-probe scheduled"
+        assert (
+            report.next_probe_at_ms <= now_ms + USAGE_FAILURE_BACKOFF_MS + 1_000
+        ), "the note is scheduled on the full TTL, so it outlives `lop secret unlock`"
+
+    @pytest.mark.asyncio
+    async def test_exposed_file_modes_are_reported_not_swallowed(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
+        """A world-readable store is the one state the user MUST be told about.
+
+        ``InsecurePermissions``'s own docstring calls it "a condition to stop
+        on, not one to quietly repair — the exposure already happened and the
+        operator needs to know". Returning the silent ``None`` this clause used
+        to give it does the repairing-by-hiding it forbids: the window simply
+        vanishes and nothing anywhere says the ticket is readable by another
+        account.
+
+        The remedy was RUN, not assumed — ``lop secret status`` against a 0644
+        throwaway store prints the offending path and its ``chmod 0600`` fix.
+        """
+        from local_operator.secrets.errors import InsecurePermissions
+
+        email = self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch, tmp_path)
+        self._retrieval(monkeypatch, InsecurePermissions("store.db has mode 0644"))
+        self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(reports) == 1, "an exposed store must not make the block disappear"
+        assert reports[0].identity == email
+        assert reports[0].notes is not None
+        assert "lop secret status" in reports[0].notes
+        # Distinct from the other three: a user who reads `secret unlock` or
+        # `qwencloud-ticket set` here runs a command that cannot fix the mode
+        # bits and leaves the exposure in place.
+        assert "unlock" not in reports[0].notes
+        assert "qwencloud-ticket" not in reports[0].notes
+
+    @pytest.mark.asyncio
+    async def test_a_version_skewed_broker_is_reported_not_swallowed(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
+        """A daemon left running across a runtime update names its own fix.
+
+        ``BrokerIncompatible`` exists BECAUSE collapsing "live but unusable"
+        into "unreachable" silently disarmed a safety property (its round-4 Q4
+        note). Answering it with a silent ``None`` here is that same collapse
+        one layer up — and it arms itself precisely at a runtime update, which
+        ``AGENTS.md`` calls routine on this machine because ``lop-update`` runs
+        under live sessions.
+        """
+        from local_operator.secrets.errors import BrokerIncompatible
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch, tmp_path)
+        self._retrieval(monkeypatch, BrokerIncompatible("protocol 2", pid=123, protocol=2))
+        self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(reports) == 1
+        assert reports[0].notes is not None
+        assert "lop secret broker restart" in reports[0].notes
+        # The pid and protocol ride on the exception for the CLI's benefit;
+        # a panel note is 40 cells and they would cost the remedy its room.
+        assert "123" not in reports[0].notes
+
+    @pytest.mark.asyncio
+    async def test_an_unreachable_broker_stays_silent(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
+        """``BrokerUnavailable`` is transient, so it gets no note — deliberately.
+
+        The sibling of ``test_an_unreadable_store_stays_silent``, pinned
+        separately because the reasoning differs: a corrupt record has no
+        repair verb at all, while "nothing answered" is usually a race the next
+        auto-refresh wins — the daemon starts lazily and exits on its own idle
+        timer. A note here would ask the user to act on something that has
+        already fixed itself.
+
+        Pinned so that a later round cannot quietly give this class a note on
+        the grounds that the other two got one.
+        """
+        from local_operator.secrets.errors import BrokerUnavailable
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch, tmp_path)
+        self._retrieval(monkeypatch, BrokerUnavailable("socket absent"))
+        self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert all(r.notes is None for r in reports)
+
     # -- the note fits the panel -------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_the_note_survives_truncation_at_60_columns(self) -> None:
-        """C6. The REMEDY survives the panel's own truncation, not the length.
+    async def test_the_note_survives_truncation_at_narrow_widths(self) -> None:
+        """C6. The REMEDY survives the panel's truncation across the WIDTH RANGE.
 
-        Two things this deliberately does NOT do, both of which produce a
+        Three things this deliberately does NOT do, each of which produces a
         green test over a note the user cannot act on:
 
         1. It does not assert ``len(note) <= N``. That pins the wrong
@@ -2505,40 +2688,72 @@ class TestQwenCloudTicketFromSecretStore:
            box (58 for a 60-column terminal), so a derived budget overflows by
            two. The derived version of this test went green against a note
            that visibly truncated in a rendered frame.
+        3. It does not test ONE width. The previous version rendered only at
+           60 and passed, while the shipped locked note lost its remedy at
+           every width from ``PANEL_MIN_WIDTH`` (32) to 59 — most of the range
+           a split pane actually gets. Rendering at the widest supported size
+           is the same class of error as deriving the budget: both check the
+           case that cannot fail.
 
-        So it renders the real panel at 60 columns and reads the painted line
-        back — the only check that cannot drift from what ships.
+        So it renders the real panel at each width down to the floor and reads
+        the painted line back. ``_lowest`` is the narrowest terminal each note
+        is claimed to survive, measured from these frames, and the assertion
+        runs at every width at or above it.
         """
         from local_operator.providers.controller import (
+            QWENCLOUD_TICKET_BROKER_NOTE,
+            QWENCLOUD_TICKET_EXPOSED_NOTE,
             QWENCLOUD_TICKET_LOCKED_NOTE,
             QWENCLOUD_TICKET_ORPHAN_NOTE,
         )
         from local_operator.tui.app import OperatorApp
         from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-        for note, remedy in (
-            (QWENCLOUD_TICKET_LOCKED_NOTE, "lop secret unlock"),
-            (QWENCLOUD_TICKET_ORPHAN_NOTE, "lop qwencloud-ticket set"),
-        ):
-            app = OperatorApp(lambda: _factory(FakeSession()))
-            async with app.run_test(size=(60, 30)) as pilot:
-                await pilot.pause()
-                panel = app._usage_panel()
-                assert panel is not None
-                panel.start_fetch()
-                panel.show_reports(
-                    [UsageReport(provider="alibaba-token-plan", limits=[], notes=note)]
-                )
-                await pilot.pause()
-                painted = [
-                    line.plain
-                    for line in panel._body().lines
-                    if "ticket" in getattr(line, "plain", "")
-                ]
+        # (note, remedy, narrowest terminal it survives). The floor is 40 for
+        # the locked note rather than `PANEL_MIN_WIDTH`: at 36 and below the
+        # card's budget is 25 cells and `lop secret unlock` alone is 19, so no
+        # phrasing that keeps the command runnable as printed fits beside a
+        # state word. Notes are painted raw by the body builder — only the
+        # per-account note routes through `_fit_status_note`'s shortening
+        # ladder — so going lower needs that seam, which is `usage_panel.py`'s.
+        cases = (
+            (QWENCLOUD_TICKET_LOCKED_NOTE, "lop secret unlock", 40),
+            (QWENCLOUD_TICKET_ORPHAN_NOTE, "lop qwencloud-ticket set", 50),
+            (QWENCLOUD_TICKET_EXPOSED_NOTE, "lop secret status", 45),
+            (QWENCLOUD_TICKET_BROKER_NOTE, "lop secret broker restart", 55),
+        )
 
-            assert painted, "the note never reached the panel at all"
-            assert remedy in painted[0], f"the remedy is truncated at 60 columns: {painted[0]!r}"
-            assert "…" not in painted[0]
+        for note, remedy, lowest in cases:
+            # The note's own head, so the line is located by what is being
+            # asserted rather than by a word ("ticket") that two of these four
+            # notes do not contain — a filter that matches nothing makes the
+            # `painted` assertion the only thing standing between a silently
+            # skipped case and a green run.
+            head = note.split(" ")[0]
+            for columns in (60, 58, 55, 50, 45, 40, 36, 32):
+                if columns < lowest:
+                    continue
+                app = OperatorApp(lambda: _factory(FakeSession()))
+                async with app.run_test(size=(columns, 30)) as pilot:
+                    await pilot.pause()
+                    panel = app._usage_panel()
+                    assert panel is not None
+                    panel.start_fetch()
+                    panel.show_reports(
+                        [UsageReport(provider="alibaba-token-plan", limits=[], notes=note)]
+                    )
+                    await pilot.pause()
+                    painted = [
+                        line.plain
+                        for line in panel._body().lines
+                        if line.plain.strip().startswith(head)
+                    ]
+
+                assert painted, f"{note!r} never reached the panel at {columns} columns"
+                assert (
+                    remedy in painted[0]
+                ), f"the remedy is truncated at {columns} columns: {painted[0]!r}"
+                assert "\u2026" not in painted[0]
 
     # -- the guards --------------------------------------------------------
 
@@ -2573,7 +2788,7 @@ class TestQwenCloudTicketFromSecretStore:
 
     @pytest.mark.asyncio
     async def test_no_other_provider_reaches_the_secret_store(
-        self, controller, store, monkeypatch
+        self, controller, store, monkeypatch, tmp_path
     ) -> None:
         """C9. The storage-id guard, asserted by EXECUTION over the registry.
 
@@ -2584,21 +2799,22 @@ class TestQwenCloudTicketFromSecretStore:
         from local_operator.providers.registry import PROVIDER_REGISTRY
 
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         retrievals = self._retrieval(monkeypatch, self.TICKET.encode())
 
-        reached = sorted(
-            definition.id
-            for definition in PROVIDER_REGISTRY
-            if controller._qwencloud_console_creds(definition.id)[0] is not None
-        )
+        reached = []
+        for definition in PROVIDER_REGISTRY:
+            creds, _ = await controller._qwencloud_console_creds(definition.id)
+            if creds is not None:
+                reached.append(definition.id)
+        reached.sort()
 
         assert reached == ["alibaba-token-plan", "alibaba-token-plan-oauth"]
         assert len(retrievals) == len(reached), "no other provider may query the namespace"
 
     @pytest.mark.asyncio
     async def test_the_ticket_is_spent_at_most_once_per_cycle(
-        self, controller, store, monkeypatch
+        self, controller, store, monkeypatch, tmp_path
     ) -> None:
         """C10. One ticket, one retrieval, however many dead grants.
 
@@ -2623,7 +2839,7 @@ class TestQwenCloudTicketFromSecretStore:
                 },
             )
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
         retrievals = self._retrieval(
             monkeypatch, BrokerDenied("no lop session is registered with the broker")
         )
@@ -2636,11 +2852,75 @@ class TestQwenCloudTicketFromSecretStore:
             "re-attempting it per identity multiplies a 10 s broker stall"
         )
 
+    @pytest.mark.asyncio
+    async def test_a_slow_retrieval_does_not_block_the_event_loop(
+        self, controller, store, monkeypatch, tmp_path
+    ) -> None:
+        """C12. The retrieval runs off the loop, so the TUI keeps painting.
+
+        ``retrieve_secret`` is SYNCHRONOUS and can take a measured 10 s when
+        the broker will not start (``ensure_broker`` polls to
+        ``STARTUP_TIMEOUT_S`` twice). This runs inside the ``asyncio.gather``
+        that paints the usage panel, on an auto-refresh the user never asked
+        for, so on the loop it freezes the whole TUI for that time —
+        ``client.py``'s own #401 note records this codebase already freezing
+        the TUI with exactly that shape of blocking call.
+
+        Pinned by OBSERVABLE, not by asserting ``asyncio.to_thread`` appears in
+        the source: a concurrent task is started and must get its turn WHILE
+        the retrieval is still in flight. A test that only checked the return
+        value passes with the hop deleted, because the answer is the same
+        either way — only the latency of everything else changes.
+
+        The retrieval sleeps 200 ms rather than 10 s: the property is "the loop
+        advanced at all during it", which any blocking interval demonstrates,
+        and a real stall would make this suite unrunnable.
+        """
+        import asyncio as _asyncio
+
+        self._dead_grant(store)
+        self._migrated_row(store)
+        self._store_exists(monkeypatch, tmp_path)
+
+        from local_operator.secrets import access
+
+        def _slow_retrieve(name, base=None):
+            time.sleep(0.2)
+            return self.TICKET.encode()
+
+        monkeypatch.setattr(access, "retrieve_secret", _slow_retrieve)
+        self._spy(
+            monkeypatch, controller, report=UsageReport(provider="alibaba-token-plan", limits=[])
+        )
+
+        ticks = 0
+
+        async def _heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                await _asyncio.sleep(0.01)
+                ticks += 1
+
+        beat = _asyncio.create_task(_heartbeat())
+        try:
+            await controller.fetch_usage(["alibaba-token-plan"])
+        finally:
+            beat.cancel()
+
+        # On the loop the heartbeat cannot run at all while the retrieval
+        # blocks; off it, ~20 ticks fit in the 200 ms. The bound is deliberately
+        # far below that so ordinary scheduler jitter on a contended box cannot
+        # fail it, while zero-or-one tick — the blocking signature — still does.
+        assert ticks >= 5, (
+            f"the event loop advanced only {ticks} times during a 200 ms retrieval: "
+            "the blocking call is back on the loop"
+        )
+
     # -- the note clears itself --------------------------------------------
 
     @pytest.mark.asyncio
     async def test_unlocking_clears_the_note_without_a_manual_refresh(
-        self, controller, store, monkeypatch
+        self, controller, store, monkeypatch, tmp_path
     ) -> None:
         """The note must not outlive the remedy the user just ran.
 
@@ -2660,7 +2940,7 @@ class TestQwenCloudTicketFromSecretStore:
 
         self._dead_grant(store)
         self._migrated_row(store)
-        self._store_exists(monkeypatch)
+        self._store_exists(monkeypatch, tmp_path)
 
         locked = {"value": True}
         from local_operator.secrets import access
