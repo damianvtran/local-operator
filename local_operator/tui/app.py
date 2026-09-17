@@ -16722,8 +16722,11 @@ class OperatorApp(App[None]):
         that refuses on every attempt — and a retry names an action the second
         half rules out. Pasting a file path bypasses the clipboard read
         entirely, so it survives both halves and survives a full volume; it is
-        also the move ``remote`` and ``unattachable`` already spell the same
-        way, so the family teaches one route rather than three.
+        also the move ``remote`` already spells, so the family teaches one
+        route rather than three. ``unattachable`` used to spell it too and does
+        not any more — round 2 removed the phrase from its copy (its own branch
+        comment below says why, D10) — so a reader looking for a second sibling
+        notice will not find one (design round 2, D3).
 
         Capitalised, noun-first: this is a state notice, the family
         ``No provider configured`` belongs to, not a gesture receipt like
@@ -16780,8 +16783,9 @@ class OperatorApp(App[None]):
             # attempt is refused, so the notice named an action that could not
             # work. The path route bypasses the clipboard READ altogether, so
             # it survives both halves - and "Paste a file path" is already the
-            # family's own vocabulary (`remote` and `unattachable` both name
-            # it), so this is not a new move to teach.
+            # family's own vocabulary (`remote` names it, and `unattachable`
+            # did until round 2 removed the phrase from its copy), so this is
+            # not a new move to teach.
             text = "Clipboard not read. Paste a file path instead."
         elif message.reason == "unattachable":
             # No "paste its file path" here any more: the path route runs the

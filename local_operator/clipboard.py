@@ -729,8 +729,11 @@ def _classify_scratch_failure(errno_value: int | None) -> str:
 
 
 #: What the probe WRITES into each scratch base, and the size is the point.
-#: `tempfile`'s own writability probe writes exactly these four bytes (its
-#: private ``_text``) before unlinking, because a create only proves the
+#: `tempfile`'s own writability probe writes exactly these four bytes before
+#: unlinking — the literal is inlined in ``_get_default_tempdir`` as
+#: ``_os.write(fd, b'blat')``, with no named constant to cite (verified on
+#: 3.12.13 and 3.14.7; the ``_text*`` names that do exist are ``tempfile``'s
+#: open-FLAGS, which are unrelated), because a create only proves the
 #: directory accepts a NAME — it is the ALLOCATION behind the write that a
 #: full volume or an exhausted quota refuses, which is the failure this probe
 #: exists to name. A create-only probe is therefore strictly weaker than the
@@ -1364,8 +1367,17 @@ def read_clipboard(
     which left the platform of the incident — a screenshot on macOS is the
     gesture this module exists for — as the one path still audited, with an
     `OSError(EMFILE)` or any new raise in :func:`_read_macos` ending the app at
-    `rc=1`. Nothing in this function is outside the guard except the plain
-    attribute read of ``system`` that its own log line needs.
+    `rc=1`. The guard therefore covers the dispatch and EVERY backend, darwin
+    included, and that is the precise version of the claim rather than the
+    tidier one, which is false (review round 2, MINOR-1): two things do sit
+    outside it — the plain attribute read of ``system`` that the guard's own
+    log line needs, and the shared result assembly at the end of the function,
+    which is outside on the non-darwin branch because that branch falls out of
+    the ``try`` instead of returning from inside it the way darwin does. The
+    assembly is ordinary arithmetic over values the backends already returned
+    — ``bool()``, a list index, a :class:`ClipboardContents` construction — and
+    none of it can raise out of the read, so :attr:`ClipboardContents.read_failed`
+    is still the answer for every path where a read was attempted.
 
     Wayland is chosen over X11 by ``WAYLAND_DISPLAY`` rather than by
     distribution: a Wayland session commonly also runs XWayland, so ``DISPLAY``
