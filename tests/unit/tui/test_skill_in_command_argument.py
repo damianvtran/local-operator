@@ -46,10 +46,16 @@ COMMAND_NAMES = frozenset(name.lower() for c in SLASH_COMMANDS for name in c.nam
 PROMPT_COMMANDS = frozenset(
     name.lower() for c in SLASH_COMMANDS if c.consumes_prompt for name in c.names
 )
+# The registry's `name_argument` FLAG, which is the fact `Editor.set_commands`
+# and `CommandPicker.set_commands` both read now. Deliberately not
+# `arguments is not ArgumentMode.NONE`: those two stopped being the same
+# question when `/goal` and `/loop` gained a value list with no name slot, and
+# reading the proxy here would assert the floor against a vocabulary the
+# composer no longer uses — the drift this fixture exists to catch.
 NAME_COMMANDS = frozenset(
     name.lower()
     for c in SLASH_COMMANDS
-    if c.consumes_prompt and c.arguments is not ArgumentMode.NONE
+    if c.consumes_prompt and c.name_argument
     for name in c.names
 )
 ARGUMENT_COMMANDS = tuple(
@@ -405,9 +411,11 @@ class TestPhaseDisjointness:
     def test_name_prompt_commands_match_name_argument_commands(self):
         """The registry-derived set must equal the hand-written one it describes.
 
-        A guard, not a tautology: if a `consumes_prompt` command grows an argument
-        list that is not a team/agent roster, the two-set formulation stops
-        describing the registry and the floor's name-slot rule needs rethinking.
+        A guard, not a tautology: the composer's set is derived from the
+        registry's ``name_argument`` flag and this tuple is hand-written, so the
+        two agree only while the flag is set on exactly the commands the slate
+        names. `test_slash_goal_loop_flags` pins the flag itself against the
+        registry, which is the half this assertion cannot see.
         """
         editor = self._editor()
         assert editor._name_prompt_commands == frozenset(Editor.NAME_ARGUMENT_COMMANDS)

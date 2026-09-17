@@ -278,12 +278,24 @@ the one the desktop client reads): nothing is rolled back, the
 ephemeral goal and uses the shared terminal judge protocol. The shared prompts,
 verdict parser and count rules now live in `session/goal_loop.py`; terminal imports
 remain compatible. The runtime waits for actual turn completion rather than HTTP
-admission. It never answers gates. `stop|cancel|abort` cancels the driver and only
-its own queued/active iteration; another frontend's manual turn is not cancelled
-as collateral. `/loop status` reads state. The canonical frontend snapshot carries
+admission. It never answers gates. `--stop|stop|cancel|abort` cancels the driver and
+only its own queued/active iteration; another frontend's manual turn is not cancelled
+as collateral. `--clear` is the other half and is deliberately NOT a cancel: while the
+driver runs it answers `a loop is running — /loop --stop to stop it first` (code
+`loop_running`) and changes nothing, and when nothing runs it REPLACES the published
+state with `{"status": "idle", "completed": 0}` and checkpoints it, which is what a
+desktop surface dismisses and what keeps a restart from restoring the cleared run.
+`/loop status` reads state. The canonical frontend snapshot carries
 loop status/count/reason. A viewer detach does not stop/restart it; runtime teardown
 cancels it, and a replaced runtime labels a retained active checkpoint interrupted
 rather than automatically spending more tokens.
+
+`/goal --clear` unsets the standing goal (the bare words `clear|none|reset` still
+work). It is stored nowhere and starts no turn: the receipt is the whole effect, and
+the argument is matched as a WHOLE, so `/goal --clear the flaky job` remains an
+ordinary objective. The terminal's argument picker offers `--clear` on an empty `/goal `
+argument while a goal is set, and `--stop` on an empty `/loop ` argument while that
+terminal is running a loop.
 
 ## Provider and reporting endpoints
 

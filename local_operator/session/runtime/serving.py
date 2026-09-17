@@ -54,6 +54,12 @@ from local_operator.mobile.types import (
     SessionProjection,
     ask_pending_request,
 )
+
+# The `/loop` argument vocabulary, imported rather than spelled out: `--stop` and
+# `--clear` have to mean the same thing in this dispatcher as in the TUI's two
+# handlers, and a second copy of the words is how `--stop` would cancel a loop in
+# one window and start one toward the literal goal `--stop` in another.
+from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
@@ -3822,8 +3828,26 @@ class ServingSessionHandle(SessionHandle):
             return self._compact_slash(session, SlashResult)
         if command == "loop":
             driver = self._loop_driver()
-            if args.lower() in ("stop", "cancel", "abort"):
+            if args.lower() in LOOP_STOP_ARGS:
                 await driver.cancel()
+            elif args.lower() in LOOP_CLEAR_ARGS:
+                # Refused while a loop RUNS, and the refusal names the way out.
+                # Clearing a running loop's snapshot would leave the driver
+                # pushing turns with no surface saying so, and silently
+                # cancelling on `--clear` would make an ambiguous word destroy
+                # real work — the two things this branch must not do.
+                #
+                # A code of its own rather than `loop_busy`: that one is the
+                # START refusal (`a loop is already running`), and the desktop
+                # route turns it into a 409. This is a different condition with a
+                # different remedy, so it rides the ordinary error receipt and
+                # the renderer shows the sentence that names `/loop --stop`.
+                if not await driver.clear():
+                    return SlashResult(
+                        kind="error",
+                        text="a loop is running — /loop --stop to stop it first",
+                        data={"code": "loop_running"},
+                    )
             elif args.lower() != "status":
                 if driver.running:
                     return SlashResult(
@@ -3851,6 +3875,8 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        from local_operator.session.goal import GOAL_CLEAR_ARGS, MAX_GOAL_CHARS
+
         arg = arg.strip()
         if not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
@@ -3858,13 +3884,15 @@ class ServingSessionHandle(SessionHandle):
             current = getattr(session, "goal", "")
             text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
             return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in ("clear", "none", "reset"):
+        # The clear forms are matched as the WHOLE argument, so `--clear` can
+        # never be stored as the goal body: nothing below runs for it, and no
+        # turn is started (`goal_set` is what the viewer submits).
+        if arg.lower() in GOAL_CLEAR_ARGS:
             session.set_goal("")
             self._notify()
             return SlashResult(kind="notice", text="goal cleared", style="info")
         stored = session.set_goal(arg)
         self._notify()
-        from local_operator.session.goal import MAX_GOAL_CHARS
 
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(

@@ -1,0 +1,494 @@
+"""The flag forms of ``/goal`` and ``/loop``, and the picker row that teaches them.
+
+Two things are being held in place here at once, and they pull in opposite
+directions:
+
+* ``--clear``/``--stop`` are FLAGS. ``/goal --clear`` must unset the goal and
+  never become the standing objective ``--clear``, on every host that implements
+  ``/goal``: the TUI's local handler, its routed one (the owner backend a
+  follower calls), and the detached runtime's (``session/runtime/serving.py``,
+  exercised in ``tests/unit/session/runtime/test_goal_submission.py`` and
+  ``test_desktop_loop.py``).
+* ``/goal`` and ``/loop`` are still FREE-TEXT commands. They now open a value
+  list at the space so the flag row is discoverable, and the two behaviours that
+  a value list would otherwise take away — the ``$skill`` claim inside the
+  argument, and the inline reassembly of a bare ``/goal`` — are asserted
+  unchanged, because the code that decided them used to read "has a value list"
+  as "has a NAME slot" and those two facts were only ever the same by accident.
+
+The picker half is driven through the real ``OperatorApp``: the row is a
+rendered surface, so the assertion is on the rows the widget derived, not on a
+call the test made.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from local_operator.session.goal import GOAL_CLEAR_ARGS
+from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
+from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.command_picker import PickerMode, skill_token
+from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+from .test_app_pilot import FakeSession, _factory
+
+#: Every host's vocabulary, read from the one definition each host imports. A
+#: test that spelled the words out would pass while a host drifted.
+CLEAR_WORDS = ("clear", "none", "reset")
+
+
+async def _boot(pilot, app: OperatorApp) -> None:
+    """Settle until the session exists — `_cmd_goal` rejects a set before then."""
+    for _ in range(40):
+        await pilot.pause()
+        if app._session is not None:
+            return
+
+
+def _notice_texts(app: OperatorApp) -> list[str]:
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
+
+
+async def _submit(pilot, app: OperatorApp, text: str) -> None:
+    """Type a line into the real editor and press Enter — the reported path.
+
+    The picker is dismissed first where it is showing: Enter on an open list
+    COMPLETES the highlighted row and runs THAT, so a test aiming at the typed
+    form would otherwise be testing the picker. That row path is covered on its
+    own by ``test_accepting_the_goal_row_submits_the_flag``; this helper drives
+    the other one, the words the user typed with the list dismissed.
+    """
+    editor = app.query_one(Editor)
+    editor.focus()
+    editor.text = text
+    editor.move_cursor(editor._end_of_buffer())
+    await pilot.pause()
+    if editor._picker.is_open():
+        await pilot.press("escape")
+        await pilot.pause()
+    await pilot.press("enter")
+    # The submit path runs as a worker, so the prompt the handler started is not
+    # recorded by the time Enter returns; settle it before asserting on it.
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    await pilot.pause()
+
+
+async def _draft(app: OperatorApp, pilot, text: str) -> Editor:
+    """Put ``text`` in the composer with the caret at its END.
+
+    The caret position is the whole subject for the picker assertions:
+    `slash_argument` is caret-anchored, so a caret left at offset 0 is not
+    "inside the argument region" and the contract would go untested.
+    """
+    editor = app.query_one(Editor)
+    editor.focus()
+    await pilot.pause()
+    editor.load_text(text)
+    editor.move_cursor(editor._end_of_buffer())
+    for _ in range(50):
+        await pilot.pause()
+        if editor.picker.is_open():
+            break
+    return editor
+
+
+def _row_names(editor: Editor) -> list[str]:
+    return [name for name, _ in editor.picker._matches]
+
+
+# ---------------------------------------------------------------------------
+# `/goal --clear` — local TUI, on the typed path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_goal_flag_clears_the_goal_and_runs_no_turn() -> None:
+    """`/goal --clear` takes the goal away and sends nothing.
+
+    The pairing matters: a clear that also submitted would hand the model the
+    literal argument, which is the one outcome the flag exists to prevent.
+    """
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/goal --clear")
+        assert session.goal == ""
+        assert session.prompts == []
+        assert "goal cleared" in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("word", CLEAR_WORDS)
+async def test_the_bare_clear_words_still_work(word: str) -> None:
+    """Backwards compatibility: the undocumented forms keep working."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, f"/goal {word}")
+        assert session.goal == ""
+        assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_the_goal_flag_is_never_stored_as_a_goal_body() -> None:
+    """The flag belongs to ``GOAL_CLEAR_ARGS``, and the goal is empty after it.
+
+    Asserting on ``session.goal`` rather than on the notice is the point: the
+    failure this guards would show "goal set" over a standing objective that
+    reads ``--clear``, and only the state tells the two apart.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/goal --clear")
+        assert session.goal == ""
+        assert "--clear" not in session.goal
+        assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_a_goal_body_that_opens_with_the_flag_is_still_a_goal() -> None:
+    """The flag is the WHOLE argument, never a prefix.
+
+    ``/goal --clear the flaky job`` is free text a user meant as an objective;
+    treating it as a flag would silently eat the tail of a real goal — the one
+    command whose argument the model is told.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/goal --clear the flaky job")
+        assert session.goal == "--clear the flaky job"
+        assert session.prompts == ["--clear the flaky job"]
+
+
+# ---------------------------------------------------------------------------
+# `/goal --clear` — the routed (owner-backend) path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arg", ["--clear", *CLEAR_WORDS])
+async def test_the_routed_goal_handler_clears_without_submitting(arg: str) -> None:
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        result = await app.run_slash_authoritative("goal", arg)
+        assert result["kind"] == "notice"
+        assert result["text"] == "goal cleared"
+        assert session.goal == ""
+        assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_the_routed_goal_flag_is_not_a_goal_body() -> None:
+    """A follower's ``/goal --clear`` must not store the flag on the owner."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        result = await app.run_slash_authoritative("goal", "--clear")
+        assert session.goal == ""
+        # No `goal_set` receipt means no viewer is told to submit anything.
+        assert "data" not in result or not result.get("data")
+
+
+# ---------------------------------------------------------------------------
+# `/loop --stop` and `/loop --clear` — local TUI
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arg", ["--stop", "stop", "cancel", "abort"])
+async def test_the_loop_stop_forms_ask_a_running_loop_to_stop(arg: str) -> None:
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._loop_running = True
+        await _submit(pilot, app, f"/loop {arg}")
+        assert app._loop_cancelled is True
+        assert "loop will stop after the current turn" in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_the_loop_stop_forms_still_refuse_when_nothing_runs() -> None:
+    """The honest sentence stays exactly as it was: what THIS terminal knows."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/loop --stop")
+        assert app._loop_cancelled is False
+        assert "no loop is running in THIS terminal" in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_loop_clear_while_running_refuses_and_names_the_flag() -> None:
+    """`--clear` never stops work it did not start, and says which word does."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._loop_running = True
+        await _submit(pilot, app, "/loop --clear")
+        assert app._loop_cancelled is False
+        notices = _notice_texts(app)
+        assert any("/loop --stop" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_loop_clear_when_idle_uses_the_existing_sentence() -> None:
+    """In the TUI there is no published loop state to clear.
+
+    The app-local loop is published nowhere, so `--clear` answers with the
+    sentence `--stop` already produces rather than inventing a second story
+    about a surface no viewer has.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/loop --clear")
+        assert "no loop is running in THIS terminal" in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arg", ["--stop", "--clear"])
+async def test_the_routed_loop_handler_answers_the_flags(arg: str) -> None:
+    """The owner-backend path carries the same two flags, the same two ways."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        idle = await app.run_slash_authoritative("loop", arg)
+        assert idle["kind"] == "notice"
+        assert "no loop is running" in idle["text"]
+
+        app._loop_running = True
+        running = await app.run_slash_authoritative("loop", arg)
+        assert running["kind"] == "notice"
+        if arg == "--stop":
+            assert running["text"] == "loop will stop after the current turn"
+        else:
+            assert "/loop --stop" in running["text"]
+        assert app._loop_cancelled is (arg == "--stop")
+
+
+# ---------------------------------------------------------------------------
+# The picker row — rendered through the real app
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_empty_goal_argument_offers_the_clear_flag() -> None:
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ")
+        assert editor.picker.mode is PickerMode.ARGUMENT
+        assert _row_names(editor) == ["--clear"]
+        row = editor.picker.render_rows(100)[0].plain
+        assert "Clear the standing goal" in row
+
+
+@pytest.mark.asyncio
+async def test_the_goal_row_goes_once_anything_is_typed() -> None:
+    """Free text is the argument's ordinary content, so the offer withdraws."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ship it")
+        assert _row_names(editor) == []
+        assert not editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+async def test_no_goal_means_no_goal_row() -> None:
+    """A palette advertising `--clear` with nothing to clear is a dead end."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ")
+        assert _row_names(editor) == []
+        assert not editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+async def test_a_running_loop_offers_the_stop_flag() -> None:
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._loop_running = True
+        editor = await _draft(app, pilot, "/loop ")
+        assert editor.picker.mode is PickerMode.ARGUMENT
+        assert _row_names(editor) == ["--stop"]
+        assert "Stop the running loop" in editor.picker.render_rows(100)[0].plain
+
+
+@pytest.mark.asyncio
+async def test_an_idle_loop_offers_nothing() -> None:
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/loop ")
+        assert _row_names(editor) == []
+        assert not editor.picker.is_open()
+
+
+@pytest.mark.asyncio
+async def test_accepting_the_goal_row_submits_the_flag() -> None:
+    """The row is the whole point: Enter on it runs `/goal --clear`."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ")
+        assert _row_names(editor) == ["--clear"]
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert session.goal == ""
+        assert session.prompts == []
+        assert "goal cleared" in _notice_texts(app)
+
+
+# ---------------------------------------------------------------------------
+# What the value list must NOT have taken away
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_skill_token_still_opens_inside_the_goal_argument() -> None:
+    """`/goal` has a value list now, and still no NAME slot.
+
+    The floor that lets `$skill` open inside the argument asks whether the
+    command's first token is a roster NAME. Reading "has a value list" there
+    swallowed the token for `/goal` and `/loop` when the flag row landed, which
+    is why the fact lives on the registry as `name_argument`.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal $cte")
+        token = skill_token(
+            editor.text,
+            editor._caret_offset(),
+            editor._command_names,
+            editor._prompt_command_names,
+            editor._name_prompt_commands,
+        )
+        assert token is not None and token.query == "cte"
+        assert editor._picker_phase() == "skill"
+
+
+@pytest.mark.asyncio
+async def test_a_typed_goal_still_submits_as_free_text() -> None:
+    """The list is an OFFER: nothing here filters what may be submitted."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/goal land the OAuth refresh fix")
+        assert session.goal == "land the OAuth refresh fix"
+        assert session.prompts == ["land the OAuth refresh fix"]
+
+
+@pytest.mark.asyncio
+async def test_the_picker_row_does_not_start_a_turn_when_the_draft_is_typed_over() -> None:
+    """Typing over the offer leaves an ordinary goal: no row, no interference."""
+    session = FakeSession()
+    session.set_goal("land the OAuth refresh fix")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = await _draft(app, pilot, "/goal ")
+        assert _row_names(editor) == ["--clear"]
+        editor.load_text("/goal ship the flag work")
+        editor.move_cursor(editor._end_of_buffer())
+        for _ in range(10):
+            await pilot.pause()
+        assert not editor.picker.is_open()
+        await _submit(pilot, app, "/goal ship the flag work")
+        assert session.goal == "ship the flag work"
+
+
+# ---------------------------------------------------------------------------
+# The registry declarations the mechanism rests on
+# ---------------------------------------------------------------------------
+
+
+def test_the_palette_descriptions_name_the_flag_forms() -> None:
+    """Discoverability is the requirement, so the palette must carry the flag."""
+    goal = slash_command_for("/goal")
+    loop = slash_command_for("/loop")
+    assert goal is not None and "--clear" in goal.description
+    assert loop is not None and "--stop" in loop.description and "--clear" in loop.description
+
+
+def test_the_clear_vocabularies_hold_the_flag_and_the_legacy_words() -> None:
+    """One definition per command, read by every host that implements it."""
+    assert "--clear" in GOAL_CLEAR_ARGS
+    assert {"clear", "none", "reset"} <= GOAL_CLEAR_ARGS
+    assert {"stop", "cancel", "abort"} <= LOOP_STOP_ARGS and "--stop" in LOOP_STOP_ARGS
+    assert LOOP_CLEAR_ARGS == frozenset({"--clear"})
+    # The two loop sets are disjoint on purpose: collapsing them would make
+    # `--clear` cancel live work by accident.
+    assert not (LOOP_STOP_ARGS & LOOP_CLEAR_ARGS)
+
+
+def test_the_name_slot_flag_is_only_on_the_roster_commands() -> None:
+    """`name_argument` states the fact the picker floor and the composer read.
+
+    Pinned because it is a defaulted field: without this a new command silently
+    inherits "no name slot", and — the reason the field exists — a command with
+    a value list would inherit a name slot it does not have.
+    """
+    flagged = {command.name for command in SLASH_COMMANDS if command.name_argument}
+    assert flagged == {"team", "agent"}
+    spellings = {
+        name for command in SLASH_COMMANDS if command.name_argument for name in command.names
+    }
+    assert spellings == set(Editor.NAME_ARGUMENT_COMMANDS)
+
+
+@pytest.mark.asyncio
+async def test_the_editor_and_the_picker_derive_the_same_name_slot_set() -> None:
+    """Both copies come from the registry flag, so they cannot disagree."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        assert editor._name_prompt_commands == editor.picker._name_prompt_commands
+        assert editor._name_prompt_commands == frozenset(Editor.NAME_ARGUMENT_COMMANDS)

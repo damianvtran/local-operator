@@ -45,6 +45,32 @@ class GoalLoop:
             self.abort()
             await asyncio.gather(self.task, return_exceptions=True)
 
+    async def clear(self) -> bool:
+        """Reset a FINISHED loop's published state so its surface can be dismissed.
+
+        ``False`` while a loop is actually running, and deliberately so: the
+        caller turns that into a refusal naming `/loop --stop`. Clearing a
+        running loop's state would leave the loop driving provider turns with
+        nothing on any surface saying so — the one outcome worse than a refusal.
+
+        The state is REPLACED, not updated. ``publish`` merges, and a merge
+        would carry the previous run's ``goal``/``reason``/``iterations`` into
+        the idle snapshot, so the desktop's loop surface would still describe an
+        objective that no longer exists after being told the loop was dismissed.
+
+        ``checkpoint`` runs for the reason every other transition runs it: the
+        published state rides the durable frontend checkpoint, and a restart
+        restores it. Without this the clear would hold until the next turn end
+        and then reappear as the state a replaced runtime restores.
+        """
+        if self.running:
+            return False
+        self.state = {"status": "idle", "completed": 0}
+        self.publish()
+        if self.checkpoint is not None:
+            await self.checkpoint()
+        return True
+
     def start(
         self, args: str, standing_goal: str, *, goal_override: str | None = None
     ) -> dict[str, Any]:
@@ -147,6 +173,23 @@ LOOP_REASON_CHARS = 1_000
 #: one-sentence explanation. It is also the bound the frame guard already
 #: asserts, which is now a real bound rather than a hopeful one.
 LOOP_GOAL_CHARS = 2_000
+
+#: The ``/loop`` arguments that STOP a running loop rather than naming a count or
+#: a goal. The bare words predate the flag; ``--stop`` is the discoverable form.
+#:
+#: Shared by every host that implements ``/loop`` (the TUI's local handler, its
+#: routed one, and the detached runtime's dispatcher) so the escape hatch cannot
+#: work in one window and start a loop toward the literal goal ``stop`` in
+#: another.
+LOOP_STOP_ARGS = frozenset({"stop", "cancel", "abort", "--stop"})
+
+#: The ``/loop`` argument that clears a FINISHED loop's published state.
+#:
+#: Separate from :data:`LOOP_STOP_ARGS` because the two do genuinely different
+#: things and only one is available while the loop runs: stopping cancels the
+#: driver, clearing resets the snapshot a dismissed surface was left holding.
+#: Collapsing them would make ``--clear`` cancel live work by accident.
+LOOP_CLEAR_ARGS = frozenset({"--clear"})
 
 _BOTCHED_COUNT_RE = re.compile(r"\d[A-Za-z0-9.]*$")
 

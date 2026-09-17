@@ -501,7 +501,14 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # message. Submission owns its user row; status/clear never start a turn.
     SlashCommand(
         "goal",
-        "Set the goal and start work; show or clear it",
+        # 52 cells, inside the ~55 at which the description column wraps (see
+        # `/model`, `/rename`). The flag is NAMED here for the reason `/rename`
+        # names `--refresh`: the palette and the `/help` table are where a user
+        # learns the form exists, and `--clear` is otherwise only discoverable by
+        # guessing the bare word `clear`. "show" gave up its cell to it — a bare
+        # `/goal` still reports the goal, while an unstated flag was reachable
+        # from nowhere.
+        "Set the goal and start work; /goal --clear unsets it",
         echo=True,
         consumes_prompt=True,
         # The trailing text is the objective, this command's own argument.
@@ -509,6 +516,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # ANY, not the NONE default: the command owns its trailing text
         # whatever it says (see ArgumentShape's precedence note).
         argument_shape=ArgumentShape.ANY,
+        # OPTIONAL, like `/rename`: the space offers the `--clear` row for a user
+        # who has a goal to unset, and Enter on the bare command still reports
+        # the current goal — the distinction `/login`'s REQUIRED draws. NOT a
+        # name slot: `--clear` is a flag, and `/goal ship it` stays free text, so
+        # `name_argument` is left at its default.
+        arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.goal",
     ),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
@@ -523,10 +536,17 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "loop",
         # Advertises all THREE forms so each is discoverable from the palette
         # without reading the source: free text is a goal a judge decides is met,
-        # a number is a bounded iteration count, and `stop` is the escape hatch —
-        # which used to appear only in a launch notice or an already-running
-        # refusal, i.e. after the user needed it (UX round 1, U6).
-        "Loop toward a goal: /loop <goal text>, /loop <n>, or /loop stop to cancel",
+        # a number is a bounded iteration count, and the stop flag is the escape
+        # hatch — which used to appear only in a launch notice or an
+        # already-running refusal, i.e. after the user needed it (UX round 1, U6).
+        #
+        # 62 cells, SHORTER than the 73-cell form it replaces, which was one of
+        # the two rows that wrapped in `/help` at 100 columns. That is why the
+        # two flags share one clause: the distinction between them (stop cancels
+        # a running loop, clear dismisses a finished one) belongs to the picker
+        # row that offers each and to `docs/DESKTOP_CONTROLS.md`, not to a
+        # description already at the wrap boundary.
+        "Loop toward a goal: /loop <goal>, /loop <n>, --stop or --clear",
         consumes_prompt=True,
         # The trailing text is the loop instruction or count, this command's own
         # argument.
@@ -534,6 +554,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # ANY, not the NONE default: the command owns its trailing text
         # whatever it says (see ArgumentShape's precedence note).
         argument_shape=ArgumentShape.ANY,
+        # OPTIONAL for the same reason `/goal` is, and NOT a name slot: the
+        # running loop's `--stop` row is the offer, the iteration count and the
+        # goal text stay free text, so `name_argument` is left at its default.
+        arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.loop",
     ),
     # NOT an exception, and the reason IS the feature. The question does reach
@@ -704,6 +728,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "List teams, chart a team's org, or send a request to a team's manager",
         aliases=("teams",),
         arguments=ArgumentMode.OPTIONAL,
+        # The first token is a ROSTER NAME with free text after it, which is a
+        # different fact from "the space opens a list" (see the field).
+        name_argument=True,
         # The request AFTER the team name is a prompt the manager is given, so an
         # inline `/team` reassembles to the front (name from the autofill, the
         # draft as the request) rather than eating the draft as the name.
@@ -731,6 +758,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "List agents, or speak to this session as one",
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
+        # Same name slot as `/team`, whose every surface this mirrors.
+        name_argument=True,
         # The message AFTER the agent name is a prompt the persona is given, so
         # an inline `/agent` reassembles to the front like `/team`.
         consumes_prompt=True,
