@@ -440,8 +440,8 @@ with its title and age:
 | `/resume` | Pick a past conversation and continue it |
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
 | `/update` | Install the latest version from PyPI and relaunch |
-| `/goal <text>` | Set the session objective and send the same text to start work; bare `/goal` shows it and `/goal clear` clears it without starting a turn |
-| `/loop` | Iterate autonomously toward the session objective |
+| `/goal <text>` | Set the session objective and send the same text to start work; bare `/goal` shows it and `/goal --clear` clears it without starting a turn (`/goal clear`, `none` and `reset` still work) |
+| `/loop` | Iterate autonomously toward the session objective: `/loop <n>` for a bounded count, `/loop <goal>` toward an inline goal; `/loop --stop` cancels a running one and `/loop --clear` clears it — which on a detached owner means dismissing a finished run's published state |
 | `/btw` | Ask a side question off the record; it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |

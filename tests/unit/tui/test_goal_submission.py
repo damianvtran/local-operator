@@ -42,7 +42,7 @@ async def test_composer_goal_submits_or_steers_one_plain_user_message(busy):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arg", ["", "clear", "none", "reset", "CLEAR"])
+@pytest.mark.parametrize("arg", ["", "clear", "none", "reset", "CLEAR", "--clear"])
 async def test_goal_metadata_forms_do_not_start_work(arg):
     session = GoalSession()
     session.set_goal("existing")
