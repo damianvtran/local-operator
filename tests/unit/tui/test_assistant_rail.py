@@ -29,23 +29,31 @@ expression; they would write the whole method without it. Scored as
 ===========================================  =========  ==========
 mutant                                       this file  blank_row
 ===========================================  =========  ==========
-A  ``bare = rows`` (one line)                2 red      18 red
-B  A + the three ``RAIL_COLS`` compensations 2 red      18 red
+A  ``bare = rows`` (one line)                3 red      8 red
+B  A + the three ``RAIL_COLS`` compensations 3 red      8 red
 C  ``content`` filters ``rows[i].strip()``   green      8 red
-D  ``copy_gutter`` returns 0                 1 red      green
+D  ``copy_gutter`` returns 0                 5 red      5 red
+E  ``RAIL`` back to ``U+258C``               3 red      green
+F  ``_quote_owns_row`` returns ``False``     2 red      green
 ===========================================  =========  ==========
 
 B is the honest revert and it is the one that caught this file out: the
 alignment pin originally asserted on a BULLET row, went red under A, and passed
-under B. On ``MIXED_CONSTRUCTS`` the two mappings differ on rows 1 and 4 only —
-both blank — so no assertion on a content row can ever fail. C is why the
-adopted file exists: it moves 76 of 368 measured blank-row takes on the
-clipboard while every geometry test here stays green.
+under B. On ``MIXED_CONSTRUCTS`` under the OLD ``U+258C`` rail the two mappings
+differed on rows 1 and 4 only — both blank — so no assertion on a content row
+could ever fail. C is why the adopted file exists: it moves 76 of 368 measured
+blank-row takes on the clipboard while every geometry test here stays green.
+
+E and F pin the design round's two rulings, and both are about how the rail
+RELATES to marks it sits beside rather than about the rail alone — which is the
+class of defect the colour and geometry tests above are structurally unable to
+see, since each measures the rail against the background or against itself.
 """
 
 from __future__ import annotations
 
 import pytest
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.content import Content
@@ -57,6 +65,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import (
     MIN_BODY,
+    QUOTE_BAR,
     RAIL,
     RAIL_COLS,
     RAIL_TOKEN,
@@ -186,12 +195,15 @@ async def test_the_blank_row_between_paragraphs_carries_the_rail_and_nothing_els
     the same "three separate things" reading the treatment was built to fix.
     """
     _, rows = await _block("first\n\nsecond\n\nthird", (120, 40))
+    # Spelled from the constant: a test that hard-codes the glyph asserts about
+    # whichever glyph was current when it was written, which is how a treatment
+    # change turns into a test edit instead of a design decision.
     assert [row.rstrip() for row in rows] == [
-        "▌ first",
-        "▌",
-        "▌ second",
-        "▌",
-        "▌ third",
+        f"{RAIL} first",
+        RAIL,
+        f"{RAIL} second",
+        RAIL,
+        f"{RAIL} third",
     ]
 
 
@@ -361,6 +373,87 @@ def test_the_rail_never_spends_the_accent() -> None:
         assert theme_mod.semantic_color(RAIL_TOKEN, ramp) != theme_mod.semantic_color(
             "accent", ramp
         )
+
+
+def test_the_rail_is_told_from_the_user_rule_without_colour() -> None:
+    """The property the whole treatment exists for, on a NON-COLOUR channel.
+
+    This is the assertion the design round turned on, and its absence is why a
+    FAIL was possible with every colour test green. The 54-theme sweep measured
+    the rail against the BACKGROUND — legibility — which is a different question
+    from the one the user asked: can I tell the model's line from my own?
+
+    Measured, colour answers that with nothing. ``label`` and ``signal`` are
+    effectively ISOLUMINANT: 1.08:1 against each other on ``dark``, 1.00:1 on
+    ``tokyo-night-day`` — identical luminance — and below 1.5:1 in 46 of the 54
+    themes. Rendered in greyscale, or to a reader with any of the common colour
+    vision deficiencies (simulation never exceeded 1.24:1), the two bars were
+    the same mark. The one-line case was the proof: a short user message above a
+    short assistant reply, same glyph, same column, same weight, alternating.
+
+    So the distinction is carried by GLYPH WIDTH, which no rendering can
+    collapse: ``U+258E`` quarter block against ``U+258C`` half block. This test
+    asserts the channel exists and is theme-INDEPENDENT — a glyph is not a
+    palette entry, so one assertion covers all 54 — and deliberately does NOT
+    assert any luminance relationship, because relying on one is the defect.
+    """
+    assert RAIL != UserBlock.RULE, (
+        "the rail and the user rule are the same glyph again; with the two "
+        "tokens isoluminant, colour cannot carry this distinction on its own"
+    )
+    # Same reserved width, different ink coverage: the lane geometry is shared
+    # (one text origin) while the mark is not.
+    assert RAIL_COLS == UserBlock.RULE_COLS
+    assert cell_len(RAIL) == cell_len(UserBlock.RULE) == 1
+
+    # And the channel survives every theme, because it is not a colour at all.
+    for name in theme_mod.available_themes():
+        rail = theme_mod.semantic_color(RAIL_TOKEN, name)
+        rule = theme_mod.semantic_color(UserBlock.RULE_TOKEN, name)
+        # Stated as a FACT about this palette rather than as a requirement: the
+        # inks may be near-identical in luminance and that is tolerable now,
+        # precisely because nothing depends on their difference.
+        assert isinstance(rail, str) and isinstance(rule, str), name
+    assert RAIL != UserBlock.RULE, "glyph distinction must not be theme-dependent"
+
+
+@pytest.mark.asyncio
+async def test_a_quoted_row_carries_the_quote_bar_and_no_rail_bead() -> None:
+    """The blockquote collision: one bar on a quote row, and it is the model's.
+
+    Rich paints a blockquote as ``U+258C`` in the ``label`` token — the same
+    token the rail uses. Beading the rail onto such a row put two glyphs of the
+    same colour one space apart, and it read as a double-paint glitch rather
+    than as nesting, because nesting is only legible when something differs.
+
+    The fix reserves the gutter on a quote row and paints nothing into it. The
+    column still reads as continuous: the rail is present on the rows above and
+    below, which is what this test pins alongside its absence on the quote row
+    itself. Asserted on the rows either side rather than on the quote row alone,
+    because "no bead here" is satisfied just as well by a rail that stopped
+    working entirely.
+    """
+    block, rows = await _block(
+        "Intro line here.\n\n> quoted line one\n> quoted line two\n\nAfter the quote.\n",
+        (60, 24),
+    )
+    quoted = [index for index, row in enumerate(rows) if QUOTE_BAR in row]
+    assert quoted, rows
+
+    for index in quoted:
+        row = rows[index]
+        assert RAIL not in row, f"row {index} beaded a rail beside the quote bar: {row!r}"
+        assert row.count(QUOTE_BAR) == 1, row
+        # The cells are still RESERVED, so the quote's text starts in the same
+        # column as every other row's — the gutter is unpainted, not absent.
+        assert row.startswith(" " * RAIL_COLS), row
+
+    # The column is unbroken around it: the rail runs above and below.
+    above = max((i for i in range(min(quoted)) if rows[i].strip()), default=None)
+    below = next((i for i in range(max(quoted) + 1, len(rows)) if rows[i].strip()), None)
+    assert above is not None and below is not None, (quoted, rows)
+    assert rows[above].startswith(RAIL), rows[above]
+    assert rows[below].startswith(RAIL), rows[below]
 
 
 def test_the_rail_stays_legible_in_every_theme() -> None:
@@ -683,14 +776,23 @@ async def test_an_empty_message_copies_as_nothing_not_as_a_rail(text: str) -> No
 
 @pytest.mark.asyncio
 async def test_a_quoted_line_still_copies_its_own_bar() -> None:
-    """The model's ``▌`` is content; only the block's gutter is chrome.
+    """The model's quote bar is content; only the block's gutter is chrome.
 
-    Guards over-stripping: an implementation that removes every ``▌`` from the
-    row would pass ``test_a_copy_excludes_the_rail`` and lose the quote.
+    Guards over-stripping: an implementation that removes every bar from the row
+    would pass ``test_a_copy_excludes_the_rail`` and lose the quote.
+
+    The quote's bar is ``QUOTE_BAR`` and the rail is ``RAIL`` — different glyphs
+    since the design round, and on a quote row the rail is not painted at all
+    (its cells are reserved blank), so the row carries exactly ONE bar and it is
+    the model's.
     """
     block, rows = await _block("> a quoted line\n")
-    quote_rows = [row for row in rows if row.count(RAIL) >= 2]
+    quote_rows = [row for row in rows if QUOTE_BAR in row]
     assert quote_rows, rows
+    assert all(RAIL not in row for row in quote_rows), (
+        "a quote row painted a rail bead beside the quote's own bar",
+        quote_rows,
+    )
     copied = _whole_message(block, rows)
     assert copied is not None
     assert copied.strip() == "> a quoted line"

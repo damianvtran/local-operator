@@ -26,6 +26,14 @@ them:
 ``THEME`` (default ``dark``) selects the palette, because the rail's ``label``
 ink moves per theme and the decision that it stays legible and stays distinct
 from the prompt's ``signal`` is a claim about every palette, not about one.
+
+``SURFACE`` (default ``transcript``) selects WHICH surface is captured.
+``subagent`` renders the delegated-job page instead, and it is not optional
+coverage: the rail appears there by design, and that page is the one where the
+treatment's value is genuinely in question, because every prose block on it is a
+model response. A marker on all of them may carry no information while still
+spending the inset — which is a judgement to be made from a rendered frame
+rather than argued from the source.
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -49,6 +58,9 @@ from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
+from tests.unit.tui.test_band_panels import FakeSession as BandSession  # noqa: E402
+from tests.unit.tui.test_band_panels import _async_factory, _fake_jobs  # noqa: E402
+from tests.unit.tui.test_subagent_view import TRAJECTORY, _job_with  # noqa: E402
 
 #: Multi-paragraph, and every construct that paints its own furniture. The
 #: blockquote is here for the glyph collision; the fence is here because a code
@@ -104,6 +116,22 @@ def _seed(app: OperatorApp) -> None:
     app._append_block(_answer(SHORT))
 
 
+async def _open_subagent(app: OperatorApp, pilot: Any, job_id: str) -> None:
+    """Drive the real page open, the way ``test_subagent_view`` drives it.
+
+    The session has to arrive before the page can be asked for; the poll is the
+    same bounded one the tests use rather than a fixed sleep, so a slow import
+    lengthens the wait instead of producing a frame of an empty page.
+    """
+    for _ in range(80):
+        await pilot.pause()
+        if app._session is not None:
+            break
+    app._open_subagent_view(job_id)
+    for _ in range(8):
+        await pilot.pause()
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -111,6 +139,33 @@ async def main() -> None:
         cols, rows = sys.argv[2].split("x")
         size = (int(cols), int(rows))
     theme = sys.argv[3] if len(sys.argv) > 3 else None
+    surface = sys.argv[4] if len(sys.argv) > 4 else "transcript"
+
+    if surface == "subagent":
+        # The delegated-job page, built from the same trajectory fixture the
+        # subagent tests fold, so the frame shows the shape that ships rather
+        # than one composed for the capture.
+        job = _job_with(TRAJECTORY)
+        job.prompt = "audit the ingest path"
+        session = BandSession()
+        session.jobs = _fake_jobs(job)
+        app = OperatorApp(_async_factory(session))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            if theme is not None:
+                app._apply_theme(theme)
+                await pilot.pause()
+            await _open_subagent(app, pilot, str(job.id))
+            await pilot.pause()
+            await settle_status_line(pilot, app)
+            screen = app.screen
+            print(
+                f"size={screen.size} virtual={screen.virtual_size} "
+                f"vscroll={screen.show_vertical_scrollbar}",
+                file=sys.stderr,
+            )
+            save_capture(app, out)
+        return
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
