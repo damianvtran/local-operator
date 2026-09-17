@@ -17,7 +17,10 @@ resolution-markers = [
 ]
 
 [manifest]
-overrides = [{ name = "requests", specifier = ">=2.32.0" }]
+overrides = [
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10,<3" },
+    { name = "requests", specifier = ">=2.32.0" },
+]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -2280,10 +2283,11 @@ wheels = [
 
 [[package]]
 name = "local-operator"
-version = "0.44.26"
+version = "0.56.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apscheduler" },
+    { name = "cryptography" },
     { name = "dill" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -2292,6 +2296,7 @@ dependencies = [
     { name = "pillow-heif" },
     { name = "pydantic" },
     { name = "pygments" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
@@ -2304,9 +2309,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/34/f4/134e995bd3fabc31775dcbd77403514a995a160763385b34e4fe56c00b77/local_operator-0.44.26.tar.gz", hash = "sha256:0dcee906dffe9669223a2adec220cf87a63da6cc0a407c424c60d12526b610d7", size = 3443399, upload-time = "2026-09-02T01:02:48.195Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/74/42cda2bc0311d6dd479053aba229d527b11ec3094d5aaeb41bae2792f0b7/local_operator-0.56.4.tar.gz", hash = "sha256:0eadf17e4cd5c164650df970498ecd44395b9b6eaafb4f8453f2886cc33f5cc2", size = 7336836, upload-time = "2026-09-17T01:08:50.206Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/06/9517042458e32fb7a600906f3bb3232a239679df11904e177e75ed1dbc6a/local_operator-0.44.26-py3-none-any.whl", hash = "sha256:76bb3099a567795af313da8686ebdde710a4ebd924d2e98fd9765a7bdd92f9c5", size = 3672707, upload-time = "2026-09-02T01:02:46.067Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/46/b0fe9cc478bff4bf08f1e2d389e747b00e0a76bfe8e30f94d83bfbd61a2e/local_operator-0.56.4-py3-none-any.whl", hash = "sha256:3ee16276b30081e0ad83a51d08fa75a96ed17b8e5673fadb2815644757cc91e1", size = 7693101, upload-time = "2026-09-17T01:08:47.264Z" },
 ]
 
 [[package]]
@@ -2324,7 +2329,7 @@ wheels = [
 
 [[package]]
 name = "lop-osworld-v2-adapter"
-version = "0.1.0"
+version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -2614,7 +2619,7 @@ dependencies = [
     { name = "mcp-types", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "opentelemetry-api", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "pydantic", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
-    { name = "pyjwt", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["crypto"], marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
+    { name = "pyjwt", extra = ["crypto"], marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "python-multipart", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "sse-starlette", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "starlette", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
@@ -2678,8 +2683,7 @@ version = "1.38.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
-    { name = "pyjwt", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, extra = ["crypto"], marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
-    { name = "pyjwt", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["crypto"], marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b8/1f/10f9d47a63d3a2e61b2c43e15bee6b95682aab827018f9a1b97a80787e25/msal-1.38.0.tar.gz", hash = "sha256:4f10ff1257bacfd1781f22e85bd2b8d43ad1b490f3b6aafd7906671cadedd464", size = 203411, upload-time = "2026-08-24T10:22:46.053Z" }
@@ -3706,38 +3710,8 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.8.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version >= '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version == '3.13.*' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version == '3.13.*' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'darwin'",
-    "python_full_version < '3.13' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version < '3.13' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.13' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
-]
-sdist = { url = "https://files.pythonhosted.org/packages/30/72/8259b2bccfe4673330cea843ab23f86858a419d8f1493f66d413a76c7e3b/PyJWT-2.8.0.tar.gz", hash = "sha256:57e28d156e3d5c10088e0c68abb90bfac3df82b40a71bd0daa20c65ccd5c23de", size = 78313, upload-time = "2023-07-18T20:02:22.594Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/4f/e04a8067c7c96c364cef7ef73906504e2f40d690811c021e1a1901473a19/PyJWT-2.8.0-py3-none-any.whl", hash = "sha256:59127c392cc44c2da5bb3192169a91f429924e17aff6534d70fdc02ab3e04320", size = 22591, upload-time = "2023-07-18T20:02:21.561Z" },
-]
-
-[package.optional-dependencies]
-crypto = [
-    { name = "cryptography", marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
-]
-
-[[package]]
-name = "pyjwt"
 version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'darwin'",
-]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
@@ -3745,7 +3719,7 @@ wheels = [
 
 [package.optional-dependencies]
 crypto = [
-    { name = "cryptography", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
+    { name = "cryptography" },
 ]
 
 [[package]]
@@ -8578,7 +8552,7 @@ resolution-markers = [
 dependencies = [
     { name = "cachetools", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "dataclasses", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
-    { name = "pyjwt", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
+    { name = "pyjwt", extra = ["crypto"], marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
     { name = "requests", marker = "python_full_version >= '3.14' and sys_platform == 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3d/13/77cd9b2f3cad0f2fe6baded20fc20a02c3e62f14487117c296fdd2abeec0/zhipuai-1.0.7.tar.gz", hash = "sha256:b80f699543d83cce8648acf1ce32bc2725d1c1c443baffa5882abc2cc704d581", size = 5901, upload-time = "2023-06-12T12:15:31.812Z" }
@@ -8608,7 +8582,7 @@ dependencies = [
     { name = "httpx", marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
     { name = "pydantic", marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
     { name = "pydantic-core", marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
-    { name = "pyjwt", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
+    { name = "pyjwt", extra = ["crypto"], marker = "python_full_version < '3.14' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9b/9b/972de785a9859bbb5ee6425e011f154001886207860acdedebd174b7f2c2/zhipuai-2.1.5.20250825.tar.gz", hash = "sha256:50fc3982565ee631bd640b1166a1d223de227958026a74a1dd0e26dbd58d729c", size = 69899, upload-time = "2025-08-25T10:58:52.796Z" }
 wheels = [
