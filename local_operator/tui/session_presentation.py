@@ -844,6 +844,14 @@ def project_settled_rows(
         _resume_tail_start,
     )
 
+    # The SAME classification the live path applies at finalize — one
+    # implementation, so live and replay cannot drift about what they showed.
+    from local_operator.tui.narration import (
+        DEFAULT_NARRATION,
+        is_intermediate_narration,
+    )
+    from local_operator.tui.settings import settings_get
+
     # Results are keyed by the call they answer, and a tool message can sit
     # several messages after its call (one assistant turn issues a batch).
     # Indexing first is what lets each call render WITH its outcome instead
@@ -938,6 +946,10 @@ def project_settled_rows(
         self._resume_head_notice = notice
         self._append_block(notice)
         appended = True
+    # ONCE per pass, not per message: `settings_get` is cached, but this loop
+    # runs over hundreds of messages and a display preference cannot change
+    # part-way through a single projection.
+    hide_narration = not settings_get("display.narration", DEFAULT_NARRATION)
     # ONE mount for the whole conversation. Per-block mounting made Textual
     # re-walk its stylesheet, invalidate the container and schedule a settle
     # callback 297 times over on a 396-message session, for a layout that is
@@ -1128,7 +1140,22 @@ def project_settled_rows(
             # thing both surfaces must read from one place. Leaving it as a
             # bare truthiness test here is what let the phone's own bare test
             # drift — the helper is only load-bearing if both hosts call it.
-            if assistant_row_text(text):
+            # HOISTED above the block gate: the same two fields the live path
+            # classifies on have to be in hand BEFORE the block is created,
+            # because the decision is whether to create it at all.
+            tool_calls = getattr(message, "tool_calls", None) or []
+            # PARITY with the live path's removal in
+            # `app.py::on_assistant_message_end` — both surfaces call
+            # `is_intermediate_narration` so a resumed session cannot disagree
+            # with the live one about what it showed. Replay NEVER MOUNTS
+            # rather than mounting-then-removing: it has the settled message in
+            # hand and no streaming to show, so not mounting avoids the
+            # multi-block arrangement seam the live path cannot avoid.
+            hidden = hide_narration and is_intermediate_narration(
+                stop_reason=getattr(message, "stop_reason", None),
+                has_tool_calls=bool(tool_calls),
+            )
+            if assistant_row_text(text) and not hidden:
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
                 # Before `update_text`: this block authors its rows through the
@@ -1139,7 +1166,6 @@ def project_settled_rows(
                 block.finalize_text()
                 self._append_block(block)
                 appended = True
-            tool_calls = getattr(message, "tool_calls", None) or []
             for call in tool_calls:
                 # Only the FIRST call of a bang assistant message is the
                 # command's own card; the shape record_shell writes has

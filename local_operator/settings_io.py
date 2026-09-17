@@ -1405,6 +1405,16 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("animate the working line", "static working line"),
     ),
     Setting(
+        key="display.narration",
+        path=("display.narration",),
+        section="appearance",
+        label="Mid-turn narration",
+        kind=Kind.BOOL,
+        default=True,
+        help="Keep the agent's mid-turn narration in the transcript after its tool calls run.",
+        choices=_bool_choices("keep narration", "hide narration once tools run"),
+    ),
+    Setting(
         # Default changed to False by maintainer
         key="display.comfortable_rows",
         path=("display.comfortable_rows",),
