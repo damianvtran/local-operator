@@ -47,7 +47,7 @@ from local_operator.evaluation.adapters.worker import _error_detail
 from local_operator.evaluation.evidence.models import ErrorPayload
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.runner.episode import EpisodeRunner
-from tests.unit.evaluation.adapters.osworld import fixtures
+from tests.unit.evaluation.adapters.osworld import fixtures, spawn_helpers
 from tests.unit.evaluation.runner.conftest import (
     RecordingResponder,
     ScriptedModel,
@@ -134,7 +134,7 @@ def _selector(tmp_path: Path, workspace: Path, adapter: OSWorldV2Adapter) -> Ada
         schema_version=ADAPTER_SCHEMA_VERSION,
         adapter_id="osworld-v2",
         distribution="lop-osworld-v2-adapter",
-        version="0.1.2",
+        version=spawn_helpers.ADAPTER_VERSION,
         entry_point="lop_osworld_v2_adapter:create",
         package_digest=metadata.package_digest,
         release_digest=metadata.release_digest,

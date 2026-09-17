@@ -47,6 +47,7 @@ from local_operator.server.models.schemas import (
     CRUDResponse,
     ExecutionVariable,
     ExecutionVariablesResponse,
+    ImportedAgent,
 )
 from local_operator.types import AgentState
 
@@ -522,7 +523,11 @@ async def upload_agent_to_radient(
 
 @router.get(
     "/v1/agents/{agent_id}/download",
-    response_model=CRUDResponse[Agent],
+    # ``ImportedAgent``, not ``Agent``: FastAPI coerces the response into the
+    # declared model and DROPS unknown keys, so declaring the narrower model
+    # here silently discards ``renamed_from`` — the field that tells a caller a
+    # pull landed under a suffixed name (contract §3.6).
+    response_model=CRUDResponse[ImportedAgent],
     summary="Download (pull) an agent from Radient Agent Hub",
     description="Download (pull) an agent from the Radient agents marketplace by agent ID.",
     openapi_extra={
@@ -537,6 +542,7 @@ async def upload_agent_to_radient(
                             "result": {
                                 "id": "imported-agent-123",
                                 "name": "Imported Agent",
+                                "renamed_from": None,
                                 "created_date": "2024-01-01T00:00:00",
                                 "version": "0.2.16",
                                 "security_prompt": "Example security prompt",
@@ -578,7 +584,9 @@ async def download_agent_from_radient(
 
         # Download from Radient
         try:
-            imported_agent = agent_registry.download_agent_from_radient(radient_client, agent_id)
+            imported_agent, renamed_from = agent_registry.download_agent_from_radient(
+                radient_client, agent_id
+            )
         except Exception as e:
             logger.exception("Error downloading agent from Radient")
             raise HTTPException(
@@ -586,6 +594,10 @@ async def download_agent_from_radient(
             )
 
         agent_serialized = imported_agent.model_dump()
+        # A pull whose name is already held locally lands under a suffixed name;
+        # the note is what lets the caller explain that instead of leaving the
+        # user looking for an agent under the name they asked for (contract §3.6).
+        agent_serialized["renamed_from"] = renamed_from
         return CRUDResponse(
             status=200,
             message="Agent downloaded from Radient successfully",
@@ -874,7 +886,11 @@ async def clear_agent_conversation(
 
 @router.post(
     "/v1/agents/import",
-    response_model=CRUDResponse[Agent],
+    # ``ImportedAgent``: same reason as the download route above. This handler
+    # returns a JSONResponse directly (it needs 201), which FastAPI passes
+    # through unvalidated — so the declaration is documentation here, and it has
+    # to describe what the handler actually sends.
+    response_model=CRUDResponse[ImportedAgent],
     summary="Import an agent",
     description=(
         "Import an agent from a ZIP file containing agent state files with an agent.yml file."
@@ -890,6 +906,7 @@ async def clear_agent_conversation(
                         "result": {
                             "id": "imported-agent-123",
                             "name": "Imported Agent",
+                            "renamed_from": None,
                             "created_date": "2024-01-01T00:00:00",
                             "version": "0.2.16",
                             "security_prompt": "Example security prompt",
@@ -947,8 +964,14 @@ async def import_agent(
 
         # Use the AgentRegistry's import_agent method
         try:
-            agent_obj = agent_registry.import_agent(zip_path)
+            agent_obj, renamed_from = agent_registry.import_agent(zip_path)
             agent_serialized = agent_obj.model_dump()
+            # Named on the response so the caller can say "imported as X — you
+            # already have an agent called Y" rather than silently handing back
+            # a name under which nothing the user asked for can be found. The
+            # key is always present (null when nothing was renamed) so a client
+            # never has to guess whether the backend was just too old to send it.
+            agent_serialized["renamed_from"] = renamed_from
 
             response = CRUDResponse(
                 status=201,

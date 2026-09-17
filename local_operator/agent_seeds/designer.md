@@ -1,5 +1,6 @@
 ---
 name: designer
+version: 1.0.0
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---

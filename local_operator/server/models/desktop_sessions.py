@@ -145,9 +145,35 @@ class ChildTranscriptPage(HistoryPage):
 
 
 class SnapshotPayload(BaseModel):
+    """The snapshot frame's body: canonical state, the durable page, and WHY.
+
+    ``cold`` is the boolean every renderer already reads. The two fields beside
+    it make the answer ACTIONABLE rather than merely honest, and both are
+    additive — an older backend omits them, and the documented fallback for a
+    reader that predates them is ``cold ? "no-runtime" : null``, which is what
+    every client assumed before this existed.
+
+    * ``cold_reason`` — which of the three cases a cold read is: no pid holds
+      the session's transcript lease (``no-runtime``); one does and did not
+      deliver canonical state (``owner-silent``); or the record is finishing work
+      in flight first (``owner-leaving``). ``None`` when the frame is live. A
+      TOKEN, not a sentence: the copy belongs to the surface, the same discipline
+      the error ladder's ``code`` follows.
+    * ``attaching`` — an authenticated dial is retained and its canonical state
+      has not arrived yet. The reads keep answering from disk meanwhile, and the
+      sync that lands later publishes the rollover the renderer already handles
+      for an epoch change.
+
+    Defaulted rather than required so a payload built by a host that does not
+    track the distinction (an in-process one, a test's stand-in) still validates:
+    ``cold_reason`` defaults to ``None`` and ``attaching`` to ``False``.
+    """
+
     frontend: FrontendSync
     history: HistoryPage
     cold: bool
+    cold_reason: Literal["no-runtime", "owner-silent", "owner-leaving"] | None = None
+    attaching: bool = False
 
 
 class DraftPreviewPayload(BaseModel):
