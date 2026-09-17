@@ -505,13 +505,15 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
 
     generic = "Session owner is unavailable. Reconnect and reconcile before retrying."
 
-    async def relay(error: BaseException) -> dict[str, str]:
+    async def relay(error: BaseException) -> dict[str, Any]:
         with pytest.raises(HTTPException) as raised:
             async with errors():
                 raise error
         assert raised.value.status_code == 503
-        detail = raised.value.detail
-        assert isinstance(detail, dict), detail
+        # ``HTTPException.detail`` is declared ``str``; this ladder answers a
+        # coded OBJECT, so the cast is the test's claim about the shape it is
+        # asserting rather than a narrowing pyright could make on its own.
+        detail = cast("dict[str, Any]", raised.value.detail)
         assert detail["code"] == "runtime_unreachable"
         return detail
 

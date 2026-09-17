@@ -581,7 +581,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 122 public members and a POSITIVE
+    than stylistic. This protocol carries 124 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -608,7 +608,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``set_drain_callback`` joined the viewer contract, 121 once the desktop's
     interrupt rung needed ``interrupt`` to stop a turn without ending the
     session, 122 once the same rung needed ``owner_reachable`` so a mid-resync
-    viewer could not be read as an absent owner), so recompute it rather
+    viewer could not be read as an absent owner, 124 once a read had to report
+    WHY it served cold — ``cold_reason`` and ``attaching``, one rung that adds
+    two members because the wire tells a renderer both the fact and the
+    in-flight state), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1272,6 +1275,35 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         read a mid-resync viewer as an absent owner. Declared here because the
         desktop interrupt route reads it off a duck-typed bound facade to choose
         between an ``idle`` answer and dialling the owner.
+        """
+        ...
+
+    @property
+    def attaching(self) -> bool:
+        """Whether an authenticated dial is retained, waiting for its sync.
+
+        The desktop bridge puts this on the wire (``snapshot.payload.attaching``)
+        so a renderer can tell "the runtime is gone" from "the runtime has
+        accepted us and its state has not arrived yet" — the second is an
+        ordinary busy loop, and reading it as the first is what made a read
+        refuse a session that was running. Declared because the read reports it
+        off a duck-typed facade; an owner ``Session`` has no dial at all, so the
+        state does not exist for it.
+        """
+        ...
+
+    @property
+    def cold_reason(self) -> str | None:
+        """WHY a cold facade is cold, as one of the three wire tokens, or None.
+
+        ``"no-runtime"`` (no pid holds the session's transcript lease),
+        ``"owner-silent"`` (one does, and did not deliver canonical state) or
+        ``"owner-leaving"`` (the record is finishing work in flight first). The
+        read routes report it so the renderer can act on the difference instead
+        of treating every cold frame as a lost conversation; ``None`` means the
+        frame is live. Declared here for the same reason as :attr:`attaching` —
+        the read reports it off a bound facade, and the question is meaningless
+        for an owner session.
         """
         ...
 
