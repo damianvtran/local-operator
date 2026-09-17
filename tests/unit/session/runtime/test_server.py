@@ -15,7 +15,7 @@ import json
 import statistics
 import threading
 import time
-from typing import Any, Coroutine, cast
+from typing import Any, Callable, Coroutine, cast
 
 import pytest
 
@@ -1325,31 +1325,58 @@ async def test_injected_sink_is_used_as_is() -> None:
         runtime.close()
 
 
-async def _until_push(reader: asyncio.StreamReader, want: object) -> dict[str, Any]:
+async def _until_push(
+    reader: asyncio.StreamReader,
+    want: object,
+    *,
+    activity: str | None = None,
+    schedule: Callable[[], None] | None = None,
+    deadline_s: float = 60.0,
+) -> dict[str, Any]:
     """Read pushed projections until one carries ``want`` as the band's age.
 
     A push is a whole repaint and several can be in flight for one change, so
     waiting for the value under test is the only assertion that names the frame
     it means; the failure message carries the last value seen.
+
+    The wait drives its own deadline and RE-ASKS for a repaint (``schedule``)
+    rather than trusting one event's delivery, because the push is coalesced
+    onto the runtime's own loop: a single scheduling lost its frame on a loaded
+    CI shard (PR #1241, ``test (3.12, 1)``), and that is a property of the wait,
+    not of the age under test.
+
+    ``activity`` matches the BAND LABEL as well as the age, and it has to: two
+    phases in a row both start at a known zero (``thinking`` then
+    ``responding``), so "the first frame carrying 0.0" is not the edge a caller
+    means — the label is what names it.
     """
     last: object = "<no frame>"
-    for _ in range(30):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while loop.time() < deadline:
+        if schedule is not None:
+            schedule()
         try:
-            raw = await asyncio.wait_for(reader.readline(), timeout=5)
-        except TimeoutError as exc:
-            raise AssertionError(
-                f"no pushed frame carried activity_started_s={want!r} (last {last!r})"
-            ) from exc
+            raw = await asyncio.wait_for(reader.readline(), timeout=2)
+        except TimeoutError:
+            continue
         text = raw.decode("utf-8", "replace").strip()
         if not text:
             continue
         frame = json.loads(text)
         if frame.get("op") != "projection":
             continue
+        seen = frame["data"].get("activity")
         last = frame["data"].get("activity_started_s")
-        if last == want:
+        if last == want and (activity is None or seen == activity):
             return frame
-    raise AssertionError(f"no pushed frame carried activity_started_s={want!r} (last {last!r})")
+        last_pair = f"{seen!r}/{last!r}"
+        last = f"activity {last_pair}"
+    raise AssertionError(
+        f"no pushed frame carried activity_started_s={want!r}"
+        + (f" for phase {activity!r}" if activity else "")
+        + f" (last {last!r})"
+    )
 
 
 @pytest.mark.asyncio
@@ -1404,7 +1431,9 @@ async def test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach(
 
         session.emit(AgentStartEvent(generation=1))
         session.emit(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
-        frame = await _until_push(reader, 0.0)
+        frame = await _until_push(
+            reader, 0.0, activity="responding", schedule=runtime._schedule_push
+        )
         assert frame["data"]["activity"] == "responding"
         assert frame["data"]["activity_started_s"] == 0.0, "a watched edge publishes a KNOWN zero"
 
@@ -1413,11 +1442,11 @@ async def test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach(
         # edge's zero.
         clock.advance(45)
         session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
-        await _until_push(reader, 45.0)
+        await _until_push(reader, 45.0, activity="responding", schedule=runtime._schedule_push)
 
         # An instant the fold cannot date still crosses as unknown, never as a zero.
         session.emit(AgentEndEvent(generation=1))
-        await _until_push(reader, None)
+        await _until_push(reader, None, schedule=runtime._schedule_push)
     finally:
         if writer is not None:
             writer.close()
