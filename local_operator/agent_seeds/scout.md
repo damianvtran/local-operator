@@ -1,5 +1,6 @@
 ---
 name: scout
+version: 1.0.0
 description: "Read-only research: investigates a question across the workspace and on the web, and reports findings with evidence. Changes nothing."
 when_to_use: "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified."
 tools: read, glob, grep, list_variables, read_variable, web_search, web_fetch

@@ -7163,8 +7163,29 @@ class Session:
         # now" is not knowable at fold time in any useful way, since the whole
         # point is to have the seed ready for a viewer that has not arrived
         # yet. Bounded retention is the cheaper guarantee.
+        # A turn BOUNDARY is admitted on its own, and it is not a hole in the
+        # rule above: that rule exists to keep PER-TOKEN fold work off a session
+        # nobody is watching, while ``agent_start``/``agent_end`` arrive twice
+        # per turn. The end is the one that needs it — it is held and flushed
+        # from the pipeline's ``finally``, i.e. AFTER ``_run_turn``'s own
+        # ``finally`` cleared ``_is_streaming`` (see ``_flush_held_end``), so on
+        # the normal path an unobserved runtime folded NOTHING at the boundary
+        # and the ended turn's ``live_events`` survived in the frontend state
+        # until the next turn's ``agent_start`` — straight into the snapshot of
+        # any viewer that opened the conversation in between.
+        #
+        # Cost, and it is the whole cost: one extra ``observe_event`` per turn.
+        # ``agent_start`` is already admitted (``_is_streaming`` is set before
+        # the loop runs), the abort/error ends skip the hold and are emitted
+        # while still streaming, and every event INSIDE the turn was admitted
+        # already — so only the normal end is new work.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None and (self._has_ui or store.has_subscribers or self._is_streaming):
+        if store is not None and (
+            self._has_ui
+            or store.has_subscribers
+            or self._is_streaming
+            or isinstance(event, (AgentStartEvent, AgentEndEvent))
+        ):
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
             # compaction, pruning, or a fold; unchanged events do no extra work.

@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-16T18:04:36Z",
+  "generator_version": "0.56.2",
+  "source": "https://github.com/damianvtran/local-operator",
+  "seeds": [
+    {
+      "name": "architect",
+      "description": "Explores a codebase and produces a design or technical proposal with trade-offs; may draft documents but never modifies existing source.",
+      "when_to_use": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
+      "version": "1.0.0",
+      "instructions_sha256": "f952bcf03353ba5b4818f1c9d85e9cd0b34c381ed30961103172441774a36e5c",
+      "instructions_chars": 763,
+      "tools": [
+        "read",
+        "glob",
+        "grep",
+        "list_variables",
+        "read_variable",
+        "bash",
+        "todo",
+        "write",
+        "web_search",
+        "web_fetch"
+      ],
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role",
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,write,web_search,web_fetch"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/architect.md"
+    },
+    {
+      "name": "coder",
+      "description": "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified.",
+      "when_to_use": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+      "version": "1.0.0",
+      "instructions_sha256": "b3334f8aca596d32089f28f80109e9f50f3b09f22ac35dfa2d93d6acacd35a0c",
+      "instructions_chars": 1098,
+      "tools": null,
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/coder.md"
+    },
+    {
+      "name": "designer",
+      "description": "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings.",
+      "when_to_use": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+      "version": "1.0.0",
+      "instructions_sha256": "fc49cf44d9395658904f8e15636059ab0957cec192c4a12b46ec97820569d948",
+      "instructions_chars": 1614,
+      "tools": null,
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/designer.md"
+    },
+    {
+      "name": "manager",
+      "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
+      "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+      "version": "1.0.0",
+      "instructions_sha256": "29c38ffb2f19fc05ac40bb7877ad39b509e17b64a50090a59b10ffdf6781ce72",
+      "instructions_chars": 1056,
+      "tools": [
+        "read",
+        "glob",
+        "grep",
+        "list_variables",
+        "read_variable",
+        "bash",
+        "todo",
+        "web_search",
+        "web_fetch"
+      ],
+      "effort": null,
+      "delegate": true,
+      "tags": [
+        "role",
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch",
+        "delegate:yes"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/manager.md"
+    },
+    {
+      "name": "reviewer",
+      "description": "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews.",
+      "when_to_use": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+      "version": "1.0.0",
+      "instructions_sha256": "72449cac50f090d066c086db372d8bded7071f0a19beada5354696b94e664b15",
+      "instructions_chars": 1909,
+      "tools": [
+        "read",
+        "glob",
+        "grep",
+        "list_variables",
+        "read_variable",
+        "bash",
+        "todo",
+        "web_search",
+        "web_fetch"
+      ],
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role",
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/reviewer.md"
+    },
+    {
+      "name": "scout",
+      "description": "Read-only research: investigates a question across the workspace and on the web, and reports findings with evidence. Changes nothing.",
+      "when_to_use": "Answering a question about how something works, locating code, finding where a function or class is defined, tracing a flow, understanding existing behaviour, researching a library or an API on the web, or gathering evidence — read-only, nothing is modified.",
+      "version": "1.0.0",
+      "instructions_sha256": "84c304894e36c0c018f306070527f10f2a788f75c52702cdac8e6fa0b9044fc9",
+      "instructions_chars": 801,
+      "tools": [
+        "read",
+        "glob",
+        "grep",
+        "list_variables",
+        "read_variable",
+        "web_search",
+        "web_fetch"
+      ],
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role",
+        "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/scout.md"
+    }
+  ]
+}

@@ -427,6 +427,20 @@ def _batch(current: Observation, kind: str) -> ActionBatch:
                 "text": "hello",
             }
         ]
+    elif kind.startswith("wait:"):
+        # A declared wait in milliseconds. ``_batch``'s plain ``wait`` is 1 ms
+        # (a guard test needs a batch that acts, and waiting is transparent to
+        # the floundering guards); this form exists so a test can declare
+        # waiting that EXCEEDS the call's configured timeout, which is the
+        # shape that used to kill an episode outright -- see
+        # evaluation/deadlines.py for the measurement.
+        actions = [
+            {
+                "kind": "wait",
+                "observation_id": current.observation_id,
+                "duration_ms": int(kind.split(":", 1)[1]),
+            }
+        ]
     else:
         actions = [
             {
