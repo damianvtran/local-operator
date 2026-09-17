@@ -389,6 +389,12 @@ async def test_create_transcription_provider_quota_refusal_is_402(
     # cannot tell a quota refusal from an ordinary provider fault.
     assert "insufficient_quota" in detail
     assert "Upstream responded 500" in detail
+    # Actionable for the person reading it: the provider account is Radient's
+    # (Radient's agent-server owns the provider credential), so the fix this app
+    # can offer is a provider switch or credits on the reader's own Radient
+    # account -- not "add credits to that provider".
+    assert "add credits to your Radient account" in detail
+    assert "Add credits to that provider" not in detail
 
 
 @pytest.mark.asyncio
@@ -514,3 +520,146 @@ async def test_create_transcription_provider_rejection_is_502_with_provider_word
     detail = response.json()["detail"]
     assert "The openai provider rejected the transcription request." in detail
     assert "Incorrect API key provided" in detail
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_radient_credential_rejection_blames_radient(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """Radient's own 401 is reported as Radient's, in the incident's exact shape.
+
+    This is the failure that started it: Radient's edge refusing the daemon's
+    credential, sent with no `provider` field. The status and the body were
+    already right; the sentence pointed the reader at the provider's
+    configuration for a Radient auth failure.
+    """
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(real_response(401, b'{"detail":"Invalid or expired token"}'))
+    )
+
+    response = await _post_transcription(test_app_client, temp_audio_file, mock_radient_client)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "Radient refused this app's credentials" in detail
+    assert "Sign in again in the app" in detail
+    # Radient's own words and status survive; nothing blames the provider.
+    assert "Invalid or expired token" in detail
+    assert "401" in detail
+    assert "provider rejected" not in detail
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_radient_validation_rejection_blames_radient(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """A 422 in Radient's own validation envelope is not the provider's doing."""
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(
+            real_response(422, b'{"detail":[{"loc":["body","file"],"msg":"Field required"}]}')
+        )
+    )
+
+    response = await _post_transcription(
+        test_app_client, temp_audio_file, mock_radient_client, {"provider": "openai"}
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "Radient rejected the request" in detail
+    assert "Field required" in detail
+    assert "provider rejected" not in detail
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_wrong_base_url_404_points_at_the_endpoint(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """A 404 is a base-URL mistake, and the body may be an HTML page.
+
+    Nothing about this shape is provider-shaped evidence, and the only remedy is
+    to look at the URL the daemon was configured with.
+    """
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(real_response(404, b"<html><body>Not Found</body></html>"))
+    )
+
+    response = await _post_transcription(test_app_client, temp_audio_file, mock_radient_client)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "the Radient endpoint the daemon is configured to call was not found" in detail
+    assert "base URL" in detail
+    assert "<html>" in detail
+    assert "provider rejected" not in detail
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_200_without_a_result_does_not_claim_a_200(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """A failure carried in a 200 body does not read as "Upstream responded 200".
+
+    Radient reports some failures in the body of a 200, so the clause has to say
+    that rather than repeat the status next to the word "failed".
+    """
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(real_response(200, b'{"status":"ok","msg":"no result"}'))
+    )
+
+    response = await _post_transcription(test_app_client, temp_audio_file, mock_radient_client)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "Transcription failed upstream." in detail
+    assert "Radient reported an error (HTTP 200)" in detail
+    assert "no result" in detail
+    assert "Upstream responded 200" not in detail
+
+
+@pytest.mark.asyncio
+async def test_create_transcription_billing_wording_alone_is_not_a_quota_refusal(
+    test_app_client: Any,
+    temp_audio_file: str,
+    real_response: Callable[[int, bytes], requests.Response],
+):
+    """`billing` on its own no longer classifies a failure as a quota refusal.
+
+    The marker was a bare substring, so a region restriction or a docs link
+    containing "/account/billing" was reported to the user as an exhausted
+    account: a wrong instruction, which is worse than no classification.
+    """
+    mock_radient_client = MagicMock()
+    mock_radient_client.api_key = "fake_api_key"
+    mock_radient_client.create_transcription = MagicMock(
+        side_effect=_upstream_failure(
+            real_response(
+                500,
+                b'{"error":"[internal] Transcription failed: region eu-west-1 is not '
+                b'enabled for billing"}',
+            )
+        )
+    )
+
+    response = await _post_transcription(test_app_client, temp_audio_file, mock_radient_client)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "has run out of credits" not in detail
+    assert "enabled for billing" in detail
