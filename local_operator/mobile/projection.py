@@ -107,6 +107,27 @@ from local_operator.session.frontend_state import (
 
 logger = logging.getLogger(__name__)
 
+#: The folded phases an ATTACH may adopt the producer's instant for, by NAME.
+#:
+#: A phase qualifies only when the producer HOLDS its instant across the events
+#: the fold renders that phase for — one zero per phase, restamped only when the
+#: phase is ENTERED — so a fold that reads the instant while the producer is
+#: already inside the phase is reading the number the producer itself holds.
+#:
+#: ``responding`` and ``composing`` are those phases: the prose edge is the first
+#: non-empty delta of a model call, the dictation edge is a batch's first
+#: announcement (and deliberately ONE zero for the batch's whole dictation).
+#: ``thinking`` does NOT qualify: the producer re-zeroes it at every provider
+#: call (``message_start``), turn boundary and tool end, and every label this
+#: fold derives for it comes from one of those very events — so adopting an
+#: older instant there would date a phase that has just begun by a previous
+#: phase's zero, the exact pairing ``FrontendStateStore.activity_phase_clock``
+#: exists to prevent. ``running`` does not qualify either: its finer anchor is
+#: the call (step 1) and its folded edge is the batch's FIRST call, so a
+#: narrowed label would report a shed sibling's age (the TUI's D9). ``queued``
+#: is never folded by the producer, so it can match nothing.
+_PHASE_ANCHOR_ADOPTABLE = frozenset({ACTIVITY_PHASE_RESPONDING, ACTIVITY_PHASE_COMPOSING})
+
 #: How much of a tool result's text the expand payload carries. The phone's
 #: expanded row is a readable window, not a log file — beyond this the right
 #: surface is the terminal.
@@ -230,6 +251,27 @@ def _stated_epoch(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+def _phase_pair(value: Any) -> tuple[str, float | None]:
+    """The ``(phase, instant)`` a probed accessor answered, or an empty pair.
+
+    The read is PROBED, so what comes back is whatever a host chose to return:
+    a reduced facade or a stand-in may answer ``None``, a shape of its own, or
+    a pair it built wrongly, and unpacking that here raises at the ATTACH — off
+    ``RuntimeServer._serve``, whose handler ends the runtime ("session runtime
+    loop died"), or into the app's rebind, which swallows it and leaves the
+    bridge silently unsubscribed. Both are worse than the answer this returns:
+    an empty pair matches no phase, so an unusable accessor withholds the clock
+    exactly like a session that has no fold at all.
+
+    ``str(phase or "")`` is why a stand-in's repr cannot match: an object whose
+    string is not a phase word is not equal to any phase the fold displays.
+    """
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return "", None
+    phase, started_at = value
+    return str(phase or ""), started_at
 
 
 def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
@@ -1665,6 +1707,11 @@ class ProjectionFold:
         ``restart_clock`` marks an edge this fold OBSERVED for itself, so its
         instant is now — a turn boundary, a tool finishing — and any attach-time
         anchor for that phase is dropped rather than allowed to date it.
+
+        Which phases may adopt an attach-time instant at all is
+        :data:`_PHASE_ANCHOR_ADOPTABLE`'s question, and it is narrower than
+        "the phase matches": the phase must also be one the producer HOLDS,
+        rather than re-zeroes on every event of its kind.
         """
         p = self.projection
         if restart_clock:
@@ -1684,22 +1731,21 @@ class ProjectionFold:
            this is the step that dates a start event the fold sees LATE (a
            relayed stream, a redelivered seed) from the call rather than from
            the phone's arrival.
-        2. the folded PHASE instant, while it is pending and matches. This is
-           how a phone that attached mid-``thinking`` or mid-``responding``
-           learns how long the model call has been going, which no per-call
-           stamp can answer because there is no call behind it. ``running`` is
-           excluded on purpose: that phase's finer anchor is the call, and its
-           folded edge is the batch's oldest call, which a shed sibling would
-           misreport (D9, mirrored from ``frontend_state``'s own fold).
+        2. the folded PHASE instant, while it is pending, matching, and a phase
+           the producer HOLDS (:data:`_PHASE_ANCHOR_ADOPTABLE`). This is how a
+           phone that attached mid-prose or mid-dictation learns how long the
+           model call has been going, which no per-call stamp can answer
+           because there is no call behind it.
         3. this fold's own arrival instant — today's behaviour, and the only
-           honest answer when the producer stated nothing at all.
+           honest answer when the producer stated nothing, or for a phase whose
+           label it can only derive from the very event that restamped it.
         """
         stated = _stated_epoch(epoch)
         if stated is not None:
             return monotonic_from_epoch(stated)
         if (
             self._phase_anchor is not None
-            and phase != ACTIVITY_PHASE_RUNNING
+            and phase in _PHASE_ANCHOR_ADOPTABLE
             and self._phase_anchor_phase == phase
         ):
             anchor = self._phase_anchor
@@ -2127,20 +2173,27 @@ class ProjectionFold:
 
         * a source that cannot answer at all — a reduced facade, a legacy
           producer, an embedder with no fold — seeds nothing, and today's
-          behaviour stands rather than an exception being raised on attach;
+          behaviour stands rather than an exception being raised on attach. The
+          read is SHAPE-checked as well as probed (``_phase_pair``): a host that
+          has the member but answers something that is not a pair would
+          otherwise raise here, and this call sits on the unattended attach path
+          (``RuntimeServer._serve``) where a raise ends the session for every
+          viewer;
         * a call present in the map with ``None`` states that it STARTED
           without stating when, so NO entry is seeded for it: its end event
           then measures what it measured before rather than inheriting an
           instant this fold invented;
         * the phase instant is stored PENDING, never applied. A label asks for
           it through ``_activity_anchor``, which hands it over only when the
-          phase it is about to display EQUALS the folded one. A phase mismatch
-          — the phone about to say ``responding`` while the producer is still
-          mid-``thinking``, a compaction fallback, a facade answering
-          ``("", None)`` — adopts nothing, because one phase's zero under
-          another phase's label is a wrong number where a blank one would be
-          honest. ``FrontendStateStore.activity_phase_clock`` exists, and takes
-          its two fields in one call, for the same reason.
+          phase it is about to display EQUALS the folded one AND that phase is
+          one the producer HOLDS rather than re-zeroes on every event of its
+          kind (:data:`_PHASE_ANCHOR_ADOPTABLE` — ``responding`` and
+          ``composing``). A mismatch — the phone about to say ``responding``
+          while the producer is still mid-``thinking``, a compaction fallback, a
+          facade answering ``("", None)`` — adopts nothing, because one phase's
+          zero under another phase's label is a wrong number where a blank one
+          would be honest. ``FrontendStateStore.activity_phase_clock`` exists,
+          and takes its two fields in one call, for the same reason.
 
         Entries seeded for live calls live exactly as long as an observed one:
         the call's own end event pops it, and a later start under a reused id
@@ -2148,8 +2201,8 @@ class ProjectionFold:
         """
         phase_clock = getattr(session, "activity_phase_clock", None)
         if callable(phase_clock):
-            phase, phase_started_at = cast("tuple[str, float | None]", phase_clock())
-            self._phase_anchor_phase = str(phase or "")
+            phase, phase_started_at = _phase_pair(phase_clock())
+            self._phase_anchor_phase = phase
             stated = _stated_epoch(phase_started_at)
             self._phase_anchor = monotonic_from_epoch(stated) if stated is not None else None
         starts = getattr(session, "live_tool_start_epochs", None)
