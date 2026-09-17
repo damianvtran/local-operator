@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import time
+from typing import Any
 
 import pytest
 
-from local_operator.evaluation.adapters.api import InspectRequirementsParams
+from local_operator.evaluation import deadlines
+from local_operator.evaluation.adapters.api import (
+    ExecuteParams,
+    InspectRequirementsParams,
+)
 from local_operator.evaluation.adapters.rpc import (
     MAX_RPC_BYTES,
     IncrementalReader,
@@ -17,6 +24,8 @@ from local_operator.evaluation.adapters.rpc import (
     canonical_line,
     parse_canonical_line,
 )
+from local_operator.evaluation.evidence.models import canonical_digest
+from local_operator.evaluation.protocol import ActionBatch
 
 
 def request_line() -> bytes:
@@ -127,6 +136,245 @@ async def test_timeout_sends_cancel_then_terminates() -> None:
     assert terminated.is_set()
     for fd in (requests_read, requests_write, responses_read, responses_write):
         os.close(fd)
+
+
+def _declaring_execute(*durations_ms: int) -> ExecuteParams:
+    """An ``execute`` whose batch declares exactly these waits, in order.
+
+    The shape the campaign died on: a batch is legal up to ``MAX_BATCH_SIZE``
+    (64) waits of up to ``MAX_WAIT_MS`` (60 s), and the call's budget used to
+    ignore both.
+    """
+
+    batch = ActionBatch.model_validate(
+        {
+            "protocol_version": "1.0",
+            "task_id": "task",
+            "episode_id": "episode",
+            "observation_id": "obs",
+            "actions": [
+                {"kind": "wait", "observation_id": "obs", "duration_ms": duration_ms}
+                for duration_ms in durations_ms
+            ],
+        }
+    )
+    return ExecuteParams(
+        operation_id="exec-declared",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+
+
+def _undeclared_execute() -> ExecuteParams:
+    """An ``execute`` whose batch declares no duration, as a key batch does."""
+
+    batch = ActionBatch.model_validate(
+        {
+            "protocol_version": "1.0",
+            "task_id": "task",
+            "episode_id": "episode",
+            "observation_id": "obs",
+            "actions": [{"kind": "key", "observation_id": "obs", "keys": ["enter"]}],
+        }
+    )
+    return ExecuteParams(
+        operation_id="exec-undeclared",
+        action_batch=batch,
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+    )
+
+
+async def _finish_peer(task: asyncio.Task[None], *fds: int) -> None:
+    """Retire the peer, then close every protocol fd. ALWAYS run this first.
+
+    A call that timed out leaves a reader thread blocked inside
+    ``asyncio.to_thread`` on the response pipe, and a peer that never answers
+    never releases it; closing the WRITE end is what gives that read its EOF.
+    So this has to run before ANY assertion in these tests, and for every
+    exception rather than the expected one: an assertion raised while the
+    thread is still parked hangs the loop's own shutdown (measured: still
+    hanging at 45 s) instead of reporting a clean failure, which turns a test
+    failure into an infrastructure error.
+    """
+
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    for fd in fds:
+        os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_declares_waiting_is_funded_past_the_callers_budget() -> None:
+    """A LEGAL batch is never killed by a budget that never saw it.
+
+    The scale is smaller than the campaign's (0.6 s of declared waiting against
+    a 0.2 s budget, rather than 240 s against 180 s) because the assertion is
+    about which of the two numbers governs the call, not about the size of
+    either; the real numbers are pinned in
+    ``tests/unit/evaluation/test_deadlines.py``. The peer sleeps the declared
+    time for the same reason the real worker does: ``wait`` is an
+    ``asyncio.sleep`` inside the worker (``adapter.py``'s ``execute``), so a
+    cancel cannot shorten it -- the parent's deadline is the only thing that
+    decides whether the batch finishes.
+
+    On the tree without the derivation this call raises ``TimeoutError`` after
+    0.2 s and poisons the channel; the peer's full declared sleep then finishes
+    into a channel nobody reads. That failure is the recorded defect.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    params = _declaring_execute(150, 150, 150, 150)
+
+    async def peer() -> None:
+        line = await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+        request = parse_canonical_line(line, RpcRequest)
+        assert isinstance(request, RpcRequest)
+        await asyncio.sleep(0.6)
+        response = RpcResponse(
+            jsonrpc="2.0", id=request.id, method=request.method, result={"applied": True}
+        )
+        try:
+            IncrementalWriter(responses_write).write(canonical_line(response))
+        except OSError:
+            # The poisoned side of the BASE tree closed nothing, but a future
+            # teardown that does must not turn this test into a pipe error.
+            pass
+
+    task = asyncio.create_task(peer())
+    started = time.monotonic()
+    timed_out: TimeoutError | None = None
+    result: dict[str, Any] | None = None
+    try:
+        try:
+            result = await client.call("execute", params, timeout=0.2)
+        except TimeoutError as error:
+            timed_out = error
+        elapsed = time.monotonic() - started
+        poisoned = terminated.is_set()
+    finally:
+        await _finish_peer(task, requests_read, requests_write, responses_read, responses_write)
+
+    assert timed_out is None, (
+        "BASE behaviour: the call was cut off at the caller's budget although the batch "
+        f"declared {0.6} s of waiting ({timed_out!r})"
+    )
+    assert result == {"applied": True}
+    assert elapsed >= 0.6
+    # Funding the declaration is not the same as disarming the deadline: the
+    # call completed because the worker did, so nothing poisoned anything.
+    assert not poisoned
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_execute_that_declares_nothing_still_times_out_and_poisons() -> None:
+    """The honest failure mode, unchanged: a wedged call declares no duration.
+
+    A batch of keys asks for no waiting, so there is nothing to fund and the
+    caller's budget is the whole deadline -- exactly as before. The channel is
+    then poisoned, because a late reply to a timed-out mutation must stay
+    unreadable rather than be mistaken for this call's answer.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+
+    async def peer() -> None:
+        # Reads the request and never answers: a worker wedged inside the
+        # adapter, which is the failure the timeout exists for.
+        await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+
+    task = asyncio.create_task(peer())
+    timed_out: TimeoutError | None = None
+    try:
+        try:
+            await client.call("execute", _undeclared_execute(), timeout=0.05)
+        except TimeoutError as error:
+            timed_out = error
+        poisoned = terminated.is_set()
+    finally:
+        # Before any assertion, and for every exception: see `_finish_peer`.
+        await _finish_peer(task, requests_read, requests_write, responses_read, responses_write)
+    assert timed_out is not None, "a wedged call must still time out"
+    assert poisoned, "a timed-out channel must still be poisoned"
+    with pytest.raises(RpcProtocolError, match="poisoned"):
+        await client.call("execute", _undeclared_execute(), timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_the_derived_budget_is_a_deadline_and_not_a_licence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wait-bearing call that then wedges is still cut off, at ITS budget.
+
+    Declaring work buys time for that work, not immunity: the deadline still
+    fires and still poisons. The assertion has to separate two numbers that are
+    only 0.09 s apart at their defaults (a 0.01 s configured budget and a
+    0.05 s + 0.05 s derived one, each buried under the timeout path's own 1 s
+    cancel grace), which is why the headroom is monkeypatched to 3 s: the
+    derived budget is then 3.05 s, so a LOWER bound on the elapsed time
+    distinguishes "the derived number governs" from "the configured number
+    governs". The UPPER bound is what keeps the derived number from simply
+    borrowing the peer's 30 s; that the deadline exists at all is the
+    `timed_out is not None` assertion, since an absent one would block forever
+    rather than trip a bound.
+
+    With the default headroom both bounds would be true on either tree, which
+    is what makes the monkeypatch load-bearing rather than decoration.
+    """
+
+    monkeypatch.setattr(deadlines, "DECLARED_WORK_HEADROOM_S", 3.0)
+    declared_s, headroom_s, configured_s = 0.05, 3.0, 0.01
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    params = _declaring_execute(int(declared_s * 1000))
+
+    async def peer() -> None:
+        await asyncio.to_thread(IncrementalReader(requests_read).read_line)
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(peer())
+    started = time.monotonic()
+    timed_out: TimeoutError | None = None
+    try:
+        try:
+            await client.call("execute", params, timeout=configured_s)
+        except TimeoutError as error:
+            timed_out = error
+        elapsed = time.monotonic() - started
+        poisoned_at_timeout = terminated.is_set()
+    finally:
+        # Before any assertion, and for every exception: see `_finish_peer`.
+        await _finish_peer(task, requests_read, requests_write, responses_read, responses_write)
+    assert timed_out is not None, "the deadline did not fire at all"
+    # LOWER bound: the call survived past `declared + headroom`, which the
+    # configured 0.01 s budget would not have allowed -- on the tree without the
+    # derivation it raises at ~1.01 s (the cancel grace alone) and fails here.
+    assert elapsed >= declared_s + headroom_s
+    # UPPER bound: it did NOT wait for the peer's 30 s, so the derived budget is
+    # a deadline rather than a licence.
+    assert elapsed < 10.0
+    assert poisoned_at_timeout
 
 
 def test_error_detail_stays_within_the_line_framing_and_bounds() -> None:

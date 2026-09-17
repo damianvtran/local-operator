@@ -113,7 +113,11 @@ async def install(body: NamedMutation, request: Request):
             ) from None
         if installed is None:
             raise HTTPException(404, "Packaged profile not found")
-        return profile_detail(agents, installed[0].name)
+        # Pass through whether this call WROTE anything. The install-all
+        # shortcut loops this op once per built-in, so without the flag its
+        # summary cannot distinguish a fresh install from an idempotent no-op
+        # and reports a count that is simply wrong (contract §5.6).
+        return profile_detail(agents, installed[0].name, already_installed=installed[1])
 
     async with errors():
         return reply(

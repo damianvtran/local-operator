@@ -6908,13 +6908,27 @@ def main() -> int:
                 )
                 radient_client = RadientClient(api_key=None, base_url=base_url)
                 try:
-                    imported_agent = agent_registry.download_agent_from_radient(
+                    imported_agent, renamed_from = agent_registry.download_agent_from_radient(
                         radient_client, agent_id
                     )
                     print(
                         f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
                         f"(ID: {imported_agent.id}) from Radient\033[0m"
                     )
+                    if renamed_from is not None:
+                        # The user asked for a name they already hold locally, so
+                        # the row landed under a suffix (contract §3.6). Saying so
+                        # is what stops the pull reading as "it did nothing", and
+                        # the name is echoed here because the alternative is
+                        # grepping the registry for where it went. "with that
+                        # name", not "called X": the row the user already holds
+                        # may carry a different spelling (``Coder`` arriving over
+                        # a local ``coder``), and naming the wrong one sends them
+                        # looking for a row that is not there.
+                        print(
+                            f"\033[1;33m  Renamed from '{renamed_from}': you already have an "
+                            f"agent with that name.\033[0m"
+                        )
                     return 0
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
