@@ -647,7 +647,17 @@ class SessionProjection:
     activity: str = ""
     # Monotonic-ish seconds since the activity began, for the clock next to
     # the label. Server-computed so every phone paints the same age.
-    activity_started_s: float = 0.0
+    #
+    # ``None`` is "this fold has no instant it can honestly date the phase
+    # from" — a label joined mid-flight whose producer stated none — and it is
+    # published AS absence rather than as a zero. A float, ``0.0`` included, is
+    # a KNOWN zero (the phase edge the fold watched begin), which the phone
+    # paints ``0s`` and counts up from; one field carries both because the
+    # client's question is exactly "is there an instant", and a value-plus-flag
+    # pair could disagree with itself. Same discipline as
+    # ``ToolExecutionStartEvent.started_at_epoch`` and the session's folded
+    # ``activity_phase_started_at``.
+    activity_started_s: float | None = None
     # Why streaming last stopped: "completed" (turn finished) or "aborted"
     # (the user/agent stopped it) — the phone's "interrupted — tap to resume"
     # affordance reads THIS, never an inference from streaming flipping,

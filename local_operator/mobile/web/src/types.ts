@@ -212,8 +212,14 @@ export interface SessionProjection {
 	/** What the turn is doing right now, TUI-working-line style: "thinking",
 	    "responding", or a running tool's intent. Empty when idle. */
 	activity: string;
-	/** Seconds since the activity began (server-computed). */
-	activity_started_s: number;
+	/** Seconds since the activity began (server-computed), or `null` when the
+	    server has no instant it can honestly date the phase from — a label the
+	    fold joined mid-flight whose producer stated none. `null` means WITHHOLD
+	    the digits, not `0`: a known zero is a real reading (`0.0`, the phase edge
+	    the server watched begin) and paints `0s` and counts up. One nullable
+	    number carries both because the client's only question is whether an
+	    instant exists, and a value-plus-flag pair could disagree with itself. */
+	activity_started_s: number | null;
 	/** Why streaming last stopped — "completed" | "aborted" | "" before the
 	    first turn ends. The resume affordance reads this, never an inference
 	    from the streaming flag flipping. */

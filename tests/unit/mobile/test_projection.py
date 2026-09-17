@@ -1858,7 +1858,12 @@ def test_a_thinking_label_never_adopts_the_attach_anchor() -> None:
     fold = _attached(_ClockSession(phase=("thinking", time.time() - 180.0)))
     fold.fold_event(MessageStartEvent(message=Message.assistant()))
     assert fold.projection.activity == "thinking"
+    # The refusal is a stale instant REFUSED, not a clock withheld: this event is
+    # the phase's own edge (the producer restamps `thinking` here), so the fold
+    # publishes a known zero — 0.0, not None — and the phone paints `0s` and
+    # counts up from it.
     assert fold.projection.activity_started_s == pytest.approx(0.0, abs=1.0)
+    assert fold.projection.activity_started_s is not None
 
 
 def test_a_phase_mismatch_seeds_nothing() -> None:
@@ -2029,3 +2034,248 @@ def test_the_phone_epoch_conversion_matches_the_tui_widgets(
         assert monotonic_from_epoch(epoch, clock=lambda: frozen_clock) == tui_monotonic_from_epoch(
             epoch, clock=lambda: frozen_clock
         ), epoch
+
+
+class _StubClock:
+    """A `time` stand-in the test advances by hand.
+
+    The band's arithmetic has to be DRIVEN, not slept through: a test that waits
+    a real second to watch a counter tick costs the suite that second on every
+    run, and the repo's epoch tests inject a clock for the same reason. Both
+    entries the fold reads are here — `monotonic` for the age it publishes and
+    `time` for the epochs the producer stated, plus `time_ns` for the notice ids
+    the fold mints — because a stub that moved one without the other would make a
+    stamped start and the fold's own arrival disagree by the test's whole drift.
+    """
+
+    def __init__(self) -> None:
+        self._wall = time.time()
+        self._monotonic = 5_000.0
+
+    def advance(self, seconds: float) -> None:
+        self._monotonic += seconds
+        self._wall += seconds
+
+    def time(self) -> float:
+        return self._wall
+
+    def time_ns(self) -> int:
+        return int(self._wall * 1_000_000_000)
+
+    def monotonic(self) -> float:
+        return self._monotonic
+
+
+def _freeze(monkeypatch: pytest.MonkeyPatch) -> _StubClock:
+    """Point the projection module's `time` at a clock this test owns."""
+    import local_operator.mobile.projection as projection_module
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    return clock
+
+
+def test_a_watched_phase_edge_publishes_a_known_zero_that_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, MAJOR 1: a phase the phone WATCHED BEGIN keeps its clock.
+
+    The band's gate is "does an instant exist", not "is the instant greater than
+    zero". Every phase edge publishes 0.0, so a gate on the VALUE deleted the
+    clock for the whole life of any phase this fold watched begin — the ordinary
+    case, including the single running tool call the clock is most needed for.
+    The two states are told apart here: a fold's OWN edges publish a known zero
+    and count up from it, and
+    `test_a_phase_joined_mid_flight_with_no_stated_instant_is_published_without_a_clock`
+    below pins the refusal on the case it was meant for.
+    """
+    clock = _freeze(monkeypatch)
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    assert fold.projection.activity == "thinking"
+    assert fold.projection.activity_started_s == 0.0  # known, and not withheld
+
+    # The producer restamps `thinking` at every message_start, so the label is
+    # re-derived without moving its zero — and the number the phone reads now
+    # describes the phase, not the event that repainted it.
+    clock.advance(300)
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    assert fold.projection.activity_started_s == 300.0
+
+    # The prose edge is this fold's own edge, so it zeroes there too — and a
+    # later delta of the SAME phase neither re-dates it nor withholds it: the
+    # wire carries the phase's own zero, and the phone's 1 Hz tick runs it
+    # forward between repaints (the component test pins that half). This is the
+    # state the previous head rendered with no digits for the phase's whole
+    # life.
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+    assert fold.projection.activity == "responding"
+    assert fold.projection.activity_started_s == 0.0
+
+    clock.advance(45)
+    fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta=" more "))
+    assert fold.projection.activity_started_s == 0.0
+    assert fold.projection.activity_started_s is not None
+
+
+def test_a_phase_joined_mid_flight_with_no_stated_instant_is_published_without_a_clock() -> None:
+    """The attach case the withhold was FOR: no instant, so no digits.
+
+    A producer that names the phase it is in but states no instant for it leaves
+    the fold with nothing it can date the label from — that phase was already
+    running when this fold arrived, and the event the fold is folding is the
+    middle of it. `None` on the wire is that answer, and the phone renders it by
+    withholding the digits while keeping the reserved cells. The alternative, the
+    fold's own arrival instant, is the fabricated zero this path exists to
+    remove.
+    """
+    for phase, event in (
+        (
+            "responding",
+            MessageUpdateEvent(message=Message.assistant(), delta="mid-prose"),
+        ),
+        (
+            "composing",
+            ToolCallComposeEvent(
+                tool_call_id="compose:0", tool_name="bash", argument_bytes=8, intent="counting rows"
+            ),
+        ),
+    ):
+        fold = _attached(_ClockSession(phase=(phase, None)))
+        fold.fold_event(event)
+        assert fold.projection.activity_started_s is None, phase
+
+
+def test_the_queued_labels_carry_no_clock() -> None:
+    """TUI parity for the one arm that has no instant at all.
+
+    `frontend_state`'s own comment beside the phase constants is the rule: the
+    TUI's working line passes no clock for a call waiting to run, "because there
+    is no instant a 'waiting to run' age could honestly count from". Both
+    terminal dictation frames are dated `queued` — a phase the producer never
+    folds — and carry no number even on a fold that watched the whole batch
+    begin, because an announcement is not a start.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:0", tool_name="bash", argument_bytes=8, intent="counting"
+        )
+    )
+    assert fold.projection.activity == "counting"
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:0", tool_name="bash", argument_bytes=8, dictation_complete=True
+        )
+    )
+    assert fold.projection.activity == "waiting to run bash"
+    assert fold.projection.activity_started_s is None
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:1",
+            tool_name="grep",
+            argument_bytes=4,
+            not_run_reason="Duplicate call id: skipped",
+        )
+    )
+    assert fold.projection.activity == "Duplicate call id: skipped"
+    assert fold.projection.activity_started_s is None
+
+
+def test_a_second_call_in_a_batch_keeps_the_batchs_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clock belongs to the PHASE, which is the TUI's own rule.
+
+    `WorkingBlock`'s clock moves when the phase moves, so a batch relabelling
+    from its first call to its second keeps counting the batch rather than
+    restarting — and the producer folds exactly ONE zero for a batch, so a fresh
+    zero here would be a number that never existed anywhere. The fold tracks its
+    own phase for this: only a phase change, a forced edge, or the first label
+    may zero the clock.
+    """
+    clock = _freeze(monkeypatch)
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={}, intent="first")
+    )
+    assert fold.projection.activity_started_s == 0.0
+
+    clock.advance(10)
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c2", tool_name="grep", args={}, intent="second")
+    )
+    assert fold.projection.activity == "second"
+    assert fold.projection.activity_started_s == 10.0
+
+    # A batch's later dictation announcement is the same phase and behaves the
+    # same way: the producer does not restamp `composing` either.
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="c1", content=[TextContent(text="ok")], is_error=False),
+        )
+    )
+    assert fold.projection.activity == "thinking"
+    assert fold.projection.activity_started_s == 0.0
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:0", tool_name="read", argument_bytes=8, intent="reading"
+        )
+    )
+    assert fold.projection.activity == "reading"
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="compose:1", tool_name="read", argument_bytes=8, intent="reading too"
+        )
+    )
+    assert fold.projection.activity == "reading too"
+    assert fold.projection.activity_started_s == 0.0
+
+    # A PHASE change still zeroes it: the dictation gave way to the model call.
+    clock.advance(7)
+    fold.fold_event(MessageStartEvent(message=Message.assistant()))
+    assert fold.projection.activity == "thinking"
+    assert fold.projection.activity_started_s == 0.0
+
+
+def test_a_late_live_call_map_answer_is_read_as_cannot_say() -> None:
+    """Review round 2, MINOR 2: the map read is shape-checked, like the pair.
+
+    Both attach-time reads are PROBED, so what comes back is whatever the host
+    answered. The phase half was shape-checked in round 1; the live-call map was
+    not, and `dict(answer or {})` raised on every shape that is not a mapping —
+    on the same unattended path (`RuntimeServer._serve`), where a raise ends the
+    runtime. A non-mapping answer means "cannot say", and the phase half of the
+    same attach must still be read.
+    """
+    for answer in (None, 3.5, "ab", SimpleNamespace(tool_call_id="c1")):
+        session = _ClockSession(phase=("responding", time.time() - 180.0))
+        session.live_tool_start_epochs = lambda answer=answer: answer  # type: ignore[method-assign]
+        fold = _attached(session)
+        fold.fold_event(MessageUpdateEvent(message=Message.assistant(), delta="attaching "))
+        assert fold.projection.activity == "responding", answer
+        assert fold.projection.activity_started_s == pytest.approx(180.0, abs=2.0), answer
+
+        # The map half seeds nothing, so a call this fold never saw start still
+        # measures from the fold's own arrival at the end event (today's
+        # behaviour) rather than raising before it gets there.
+        fold.fold_event(
+            ToolExecutionStartEvent(tool_call_id="c9", tool_name="bash", args={}, intent="probing")
+        )
+        fold.fold_event(
+            ToolExecutionEndEvent(
+                tool_call_id="c9",
+                tool_name="bash",
+                result=ToolResult(
+                    tool_call_id="c9", content=[TextContent(text="ok")], is_error=False
+                ),
+            )
+        )
+        row = [entry for entry in fold.projection.transcript if entry.tool_call_id == "c9"][-1]
+        assert row.elapsed_s == pytest.approx(0.0, abs=1.0), answer

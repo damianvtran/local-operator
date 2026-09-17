@@ -26,24 +26,32 @@ export function WorkingLine({
 	startedS,
 }: {
 	activity: string;
-	startedS: number;
+	startedS: number | null;
 }) {
 	const [frame, setFrame] = useState(0);
-	const [elapsed, setElapsed] = useState(startedS);
-	/* A start we do not know is not a start at ZERO. The wire carries one float
-	 * (``activity_started_s``) and the projection publishes 0.0 both for "this
-	 * phase began this instant" and for "no anchor was stated" (its third step,
-	 * the fold's own arrival). The band therefore withholds the digits on 0 —
-	 * exactly as every tool row does with its own ``elapsed_s > 0`` guard, and
-	 * for the same reason — while the SLOT stays reserved by the width class
-	 * below, so withholding cannot reflow the label beside it. Two answers to
-	 * one state on one screen (a fabricated ``0.0s`` here beside a row that shows
-	 * nothing) was the design round 1 D4 finding. */
-	const hasClock = startedS > 0;
+	const [elapsed, setElapsed] = useState(startedS ?? 0);
+	/* The wire says whether an instant EXISTS, and that is the whole gate: `null`
+	 * is a phase the server has no honest instant for (a label joined mid-flight
+	 * whose producer stated none) and renders no digits, while `0.0` is a KNOWN
+	 * zero — the phase edge the server watched begin — and renders `0s` from the
+	 * first frame and counts up, exactly as the TUI's working block does
+	 * (`transcript.py` `_clock = self._clock_text() if self._clock_known else ""`,
+	 * with the zero being the phase's own start).
+	 *
+	 * The previous head gated on `startedS > 0` instead, which conflated the two:
+	 * every phase edge publishes 0.0, so the band went blank for the whole life of
+	 * any phase the phone watched begin — including a single running tool call,
+	 * the "is this stuck?" reading the clock exists for (review round 2, MAJOR 1).
+	 * Withholding is now exactly "the server said it has no instant".
+	 *
+	 * Either way the SLOT stays reserved by the width class below, so withholding
+	 * cannot reflow the label beside it — the same cells the TUI keeps reserved
+	 * when its own clock is withheld. */
+	const hasClock = startedS !== null;
 
 	/* Re-seed the clock when the server sends a new phase or a fresh age. */
 	useEffect(() => {
-		setElapsed(startedS);
+		setElapsed(startedS ?? 0);
 	}, [activity, startedS]);
 
 	useEffect(() => {

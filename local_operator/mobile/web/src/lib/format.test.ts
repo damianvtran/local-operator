@@ -12,39 +12,39 @@
 // got re-clipped mid-tick (D2) and a row's clock got cut to a shorter, valid
 // looking duration (`1000h 40m` → `1000h`, D1).
 //
-// So the table below is the TUI's own table, and the sweep after it is the
-// property the callers depend on: BOUNDED AT SIX CELLS over the whole domain.
-// Nothing here asserts pixels — jsdom has no layout; the reserved slot is
-// pinned structurally in `components/working-line.test.tsx` and the geometry is
-// in the browser frames recorded on the PR.
+// So the table below is not this suite's opinion: it is the SHARED fixture
+// `format.parity.json`, regenerated from the Python by
+// `scripts/generate_clock_format_parity.py` and asserted against
+// `format_duration` by `tests/unit/mobile/test_tui_bridge.py`. One artifact, two
+// suites, one per formatter — so a change to either side fails in its own tree
+// rather than diverging with both green (review round 2, MINOR 4). The sweep
+// after it is the property the callers depend on: BOUNDED AT SIX CELLS over the
+// whole domain. Nothing here asserts pixels — jsdom has no layout; the reserved
+// slot is pinned structurally in `components/working-line.test.tsx` and the
+// geometry is in the browser frames recorded on the PR.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { formatElapsed } from "./format";
 
+interface ParityFixture {
+	cases: [number, string][];
+}
+
+/** The generated fixture, read from disk rather than imported: the vitest node
+ * environment resolves it the same way whatever the bundler's JSON settings do,
+ * and a moved or deleted fixture fails here loudly instead of silently
+ * shrinking the table. */
+const parity: ParityFixture = JSON.parse(
+	readFileSync(join(__dirname, "format.parity.json"), "utf8"),
+) as ParityFixture;
+
 describe("formatElapsed", () => {
-	it("matches the TUI's format_duration at every branch", () => {
-		// Values verified against the Python by running it directly:
-		// .venv/bin/python -c "from local_operator.tui.widgets.tool_card import format_duration as f; ..."
-		const cases: [number, string][] = [
-			[0, "0s"],
-			[0.4, "0s"], // sub-second work still leaves a mark
-			[0.9, "0s"],
-			[2.9, "2s"],
-			[45, "45s"],
-			[59, "59s"],
-			[60, "1m"], // a whole minute drops the seconds
-			[61, "1m1s"],
-			[135, "2m15s"],
-			[3599, "59m59s"],
-			[3600, "1h"],
-			[3661, "1h1m"],
-			[86399, "23h59m"],
-			[86400, "1d"],
-			[362400, "4d4h"],
-			[3602400, "41d16h"],
-			[100 * 86400, "100d+"], // the cap names the bound it fired at
-			[1000 * 86400, "100d+"],
-		];
-		for (const [seconds, expected] of cases) {
+	it("matches the TUI's format_duration on the shared parity fixture", () => {
+		// Every branch, every crossing the form changes at, and the ±3s steps
+		// around each crossing, where a rounding difference shows up first.
+		expect(parity.cases.length).toBeGreaterThan(40);
+		for (const [seconds, expected] of parity.cases) {
 			expect(formatElapsed(seconds), `${seconds}s`).toBe(expected);
 		}
 	});
