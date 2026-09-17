@@ -659,7 +659,7 @@ async def radient(
         # Dispatched before `endpoint` builds a path, because this op's real work
         # is the bounded fan-out above rather than one upstream call. It is a
         # read, so it takes no receipt.
-        async with errors():
+        async with errors(request):
             return reply(await agent_statuses(body, auth))
 
     method, path = endpoint(body)
@@ -714,7 +714,7 @@ async def radient(
             )
         return {"data": public_data(value, [token, stored_key])}
 
-    async with errors():
+    async with errors(request):
         result = (
             await execute()
             if method == "GET"
