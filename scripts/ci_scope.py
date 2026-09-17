@@ -621,18 +621,24 @@ def _git(args: Sequence[str], cwd: Path | None = None) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def resolve_base(rev: str) -> str | None:
+def resolve_base(rev: str, cwd: Path | None = None) -> str | None:
     """The merge base of `rev` and HEAD, falling back to `rev` itself.
 
     `--since origin/main` is how a developer thinks about it; the merge base is
     what makes the answer "this branch's own work". `--since <sha>` (an already
     resolved base) round-trips: the merge base of an ancestor and HEAD is that
     ancestor.
+
+    `cwd` is the resolved repository root, like every other git call in this
+    module. It used to be omitted, which made this the one function that read the
+    PROCESS cwd — so a perfectly good `--root` plus a valid base still failed to
+    resolve whenever the process happened to be started outside a repository,
+    and the fail-open branch fired even though the caller had named the repo.
     """
-    rc, out, _ = _git(["merge-base", rev, "HEAD"])
+    rc, out, _ = _git(["merge-base", rev, "HEAD"], cwd=cwd)
     if rc == 0 and out.strip():
         return out.strip().splitlines()[0].strip()
-    rc, out, _ = _git(["rev-parse", "--verify", f"{rev}^{{commit}}"])
+    rc, out, _ = _git(["rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=cwd)
     if rc == 0 and out.strip():
         return out.strip()
     return None
@@ -858,16 +864,19 @@ def default_root(module_file: Path) -> Path:
     wrong in exactly the place that matters: the `changes` step copies this
     module to `$RUNNER_TEMP` and runs the copy, so the file's grandparent is
     `/home/runner/work` — one level ABOVE the checkout and inside no repository.
-    `root` is also the `cwd` of every git call, so that default made `git diff`
-    exit 128 and the fail-open branch set every flag true on every pull request:
-    the classifier was right and never engaged, which is the failure this whole
-    change exists to remove.
+    `root` is also the `cwd` of every git call — `resolve_base` included, so an
+    explicit `--root` decides base resolution as well as the diff. That default
+    made `git diff` exit 128 on a runner, and the fail-open branch set every flag
+    true on every pull request: the classifier was right and never engaged, which
+    is the failure this whole change exists to remove.
 
     So: the git top level of the INVOCATION directory first (the step runs with
     the workspace as its cwd), then the tree this file was shipped inside, then
-    the invocation directory. The CI step also passes `--root
-    "$GITHUB_WORKSPACE"` explicitly, deliberately belt-and-braces: that flag is
-    what makes the workflow independent of this function's cleverness.
+    the invocation directory. All three branches are load-bearing: with the cwd
+    inside no repository, the middle branch is what turns a copy of this file
+    shipped inside a checkout back into a working run. The CI step also passes
+    `--root "$GITHUB_WORKSPACE"` explicitly, deliberately belt-and-braces: that
+    flag is what makes the workflow independent of this function's cleverness.
     """
     rc, out, _ = _git(["rev-parse", "--show-toplevel"])
     if rc == 0 and out.strip():
@@ -998,7 +1007,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Change classification unavailable",
             )
         else:
-            base = resolve_base(rev)
+            base = resolve_base(rev, cwd=root)
             base_label = rev
             if base is None:
                 flags = _all(True)

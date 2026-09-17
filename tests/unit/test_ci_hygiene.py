@@ -1637,3 +1637,100 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     # …and a test file with no relationship to that job still skips it: the
     # point is a curated input set, not "anything under tests/".
     assert scope.classify(["tests/unit/test_ci_hygiene.py"])["windows"] is False
+
+
+def test_an_explicit_root_is_authoritative_for_base_resolution(tmp_path: Path) -> None:
+    """F2. `--root` must decide the repository for BASE resolution too.
+
+    `resolve_base` was the only pair of git calls in the module with no `cwd`, so
+    it read the PROCESS cwd while everything downstream read the resolved root.
+    With the process started outside any repository — the case `default_root`'s
+    middle branch exists for — a valid `--root` naming a real checkout and a
+    valid base SHA still failed to resolve, the fail-open branch fired, and that
+    middle branch could never turn the situation into a classification: the
+    resolution order the docstring described was unreachable in a successful run.
+
+    The discriminating direction is the DOCS-ONLY case: a fail-open run sets
+    every flag true, so asserting "all true" would pass on the defect.
+
+    Mutation that must fail this: drop `cwd` from `resolve_base`'s git calls.
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "probe.md").write_text("base\n")
+    base = _commit_all(repo, "base")
+    (repo / "docs" / "notes.md").write_text("more\n")
+    _commit_all(repo, "docs on top")
+
+    outside = tmp_path / "not-a-repository"
+    outside.mkdir()
+    output = tmp_path / "flags"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / CI_SCOPE_REL),
+            "--event",
+            "pull_request",
+            "--base",
+            base,
+            "--root",
+            str(repo),
+            "--github-output",
+            str(output),
+        ],
+        cwd=str(outside),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "::warning" not in proc.stdout, (
+        "the base did not resolve even though `--root` named a repository that "
+        f"contains it, so `--root` is not authoritative:\n{proc.stdout}"
+    )
+    flags = _read_flags(output)
+    assert set(flags) == set(_scope().FLAGS)
+    assert all(value == "false" for value in flags.values()), (
+        "a docs-only diff classified as live from a cwd outside any repository "
+        f"({flags!r}); this is the fail-open answer, not a classification"
+    )
+
+
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
+
+def test_agents_doc_names_every_job_a_local_run_skips() -> None:
+    """F1. The local-exclusions paragraph must not undercount or omit a job.
+
+    That paragraph exists so a local green is not over-read, and the job it is
+    most dangerous to omit is the one a reader would assume their green covers:
+    `pip-audit` was added to `LOCAL_EXCLUSIONS` in the same commit that left the
+    prose saying "three gated jobs", which is exactly the drift this asserts
+    against. The count AND every name are checked, so bumping one without the
+    other fails.
+
+    Mutation that must fail this: add a job to `LOCAL_EXCLUSIONS` (or remove the
+    `pip-audit` sentence from `AGENTS.md`) without touching the other side.
+    """
+    scope = _scope()
+    doc = (REPO / "AGENTS.md").read_text()
+    marker = "gated jobs are never"
+    assert marker in doc, "the local-exclusions sentence is gone from AGENTS.md"
+    sentence = re.search(r"\*\*(\w+) gated jobs are never", doc)
+    assert sentence, (
+        "the local-exclusions sentence changed shape; re-point this guard at it "
+        "rather than deleting it"
+    )
+    word = sentence.group(1).lower()
+    assert word in _COUNT_WORDS, f"unknown count word {word!r} in AGENTS.md"
+    assert _COUNT_WORDS[word] == len(scope.LOCAL_EXCLUSIONS), (
+        f"AGENTS.md says {word!r} of the {len(scope.LOCAL_EXCLUSIONS)} jobs in "
+        f"LOCAL_EXCLUSIONS never run locally: {sorted(scope.LOCAL_EXCLUSIONS)}"
+    )
+    start = doc.index(marker)
+    paragraph = doc[start - 60 : start + 1200]
+    for job in scope.LOCAL_EXCLUSIONS:
+        assert f"`{job}`" in paragraph, (
+            f"AGENTS.md does not name `{job}` among the jobs a local run never "
+            "covers, so a reader can take a local green as covering it"
+        )
