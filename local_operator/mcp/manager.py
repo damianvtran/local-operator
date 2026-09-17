@@ -543,7 +543,27 @@ AUTH_REVALIDATE_INTERVAL_S = 60.0
 
 # Default per-request timeout; ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` overrides,
 # config ``timeout`` (ms) refines, ``0`` disables.
-DEFAULT_MCP_TIMEOUT_MS = 30_000.0
+#
+# 60 s, not 30 s, and the number is a PARITY figure rather than a taste one. The
+# sibling CLI harness this client is routinely paired with (Codex CLI) defaults
+# its per-tool-call budget to 60 s via ``mcp_servers.<name>.tool_timeout_sec``,
+# and MCP tool calls are ordinary network calls with the same latency
+# distribution on either side. A tighter default here therefore does not make
+# lop safer; it makes the SAME server flaky on one harness and not the other,
+# which is the hardest possible failure to attribute.
+#
+# Measured, not assumed: on the risk-assessment workload a batch screening call
+# exceeded 30 s and was killed client-side while two sibling calls completed at
+# 12.9 s and 20.2 s — i.e. the 30 s budget sat inside the workload's real
+# latency spread, so it fired on the tail rather than on a hang. The job of this
+# default is to bound a WEDGED server, not a slow-but-working one; 60 s still
+# does that (a stdio child that has died is caught by the stream-pump failure
+# path, not by this timer) while matching the harness it is compared against.
+#
+# Per-server refinement stays available and takes precedence, so a workload that
+# genuinely needs longer than the sibling harness's default can say so without
+# changing every other server's budget.
+DEFAULT_MCP_TIMEOUT_MS = 60_000.0
 
 
 class McpConnectionError(RuntimeError):
