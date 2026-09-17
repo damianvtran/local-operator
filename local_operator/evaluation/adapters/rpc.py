@@ -12,6 +12,7 @@ from typing import Any, Literal, TypeAlias
 from pydantic import Field, field_validator, model_validator
 
 from local_operator.evaluation.adapters.api import AdapterMethod
+from local_operator.evaluation.deadlines import funded_timeout
 from local_operator.evaluation.protocol import ProtocolModel
 
 MAX_RPC_BYTES = 1024 * 1024
@@ -366,6 +367,23 @@ class RpcClient:
         *,
         timeout: float,
     ) -> dict[str, Any]:
+        """One call, governed by the greater of ``timeout`` and what it declared.
+
+        ``timeout`` is the caller's budget, and it is a FLOOR rather than the
+        whole deadline: a request that declares its own duration (an
+        ``ActionBatch``'s waits, a ``CleanupPlan``'s selected per-action
+        timeouts and attempts) is always funded to finish what it asked for.
+        A request that declares nothing is unaffected to the byte -- this is the
+        same ``wait_for``, and a genuinely wedged call still times out here,
+        still sends its cancel, and still poisons the channel below.
+
+        Applied HERE, at the one deadline in the harness, rather than at each
+        caller: any caller added later inherits it, and no call site can
+        re-introduce the mismatch by passing a constant that never saw the
+        request. See :mod:`local_operator.evaluation.deadlines` for the measured
+        failure this exists to prevent and for the worst case it accepts.
+        """
+
         async with self._lock:
             if self._poisoned:
                 raise RpcProtocolError("RPC channel is poisoned")
@@ -383,7 +401,8 @@ class RpcClient:
             try:
                 self._writer.write(canonical_line(request))
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(self._read_response, request_id, method), timeout
+                    asyncio.to_thread(self._read_response, request_id, method),
+                    funded_timeout(timeout, params),
                 )
             except TimeoutError:
                 try:
