@@ -44,7 +44,6 @@ from local_operator.tui.widgets.session_picker import (
     NAME_MIN_CELLS,
     OUTER_INSET_COLS,
     OUTER_INSET_ROWS,
-    PASTE_BIDI_CONTROLS,
     PASTE_QUERY_MAX_CHARS,
     PICKER_MIN_WIDTH,
     STACK_BELOW_COLS,
@@ -968,8 +967,7 @@ async def test_a_pasted_bidi_override_cannot_forge_the_filter_row() -> None:
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
 
     assert screen.filter_query == "secretgnp.terces"
-    for code_point in PASTE_BIDI_CONTROLS:
-        assert chr(code_point) not in painted, repr(painted)
+    assert "\u202e" not in painted, repr(painted)
     assert "\u202e" not in screen.render_footer_for_test()
 
 
@@ -994,6 +992,123 @@ async def test_a_pasted_zwj_emoji_name_still_matches_its_row() -> None:
         await pilot.pause()
         assert "\u200d" in screen.filter_query
         assert [row.id for row in screen.visible_rows] == ["ccc333"]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_onto_a_query_that_already_ends_in_space_adds_no_second_one() -> None:
+    """Two adjacent spaces are a needle that matches nothing.
+
+    ``filter_rows`` strips the query's EDGES but never collapses its INTERIOR
+    (``session_search.py``), so ``'parser  crash'`` is an exact substring test
+    against a name that holds one space, and it admits 0 rows. The seam between
+    what is already in the query and what the paste carries gets exactly one
+    space, whichever side supplied it.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        for char in "parser ":
+            await pilot.press(char)
+        app.post_message(events.Paste(" crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_after_a_paste_that_ended_in_space_still_matches() -> None:
+    """The tab case, which no typed character can reach.
+
+    ``"\\t".isprintable()`` is False, so ``on_key`` can never put a tab in the
+    query — a query ending in one arrives only from an earlier paste, which is
+    why the seam rule tests ``PASTE_EDGE_SPACE`` and not ``" "``.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser\t"))
+        await pilot.pause()
+        await pilot.pause()
+        app.post_message(events.Paste("\tcrash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_a_paste_that_ends_in_a_space_keeps_it_for_the_next_one() -> None:
+    """The ``trail`` clause, pinned on its own.
+
+    Nothing else in this file reddens when ``trail`` alone is hardcoded ``""``:
+    the trailing-newline test passes under that mutation too, because a newline
+    is not in ``PASTE_EDGE_SPACE`` either way. This is the test that fails.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser "))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser "
+        app.post_message(events.Paste("crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parser crash"
+        assert [row.id for row in screen.visible_rows] == ["bbb222"]
+
+
+@pytest.mark.asyncio
+async def test_every_explicit_bidi_control_is_deleted_from_a_pasted_needle() -> None:
+    """Each of the nine, written out as a literal — not read from the constant.
+
+    A payload built from ``PASTE_BIDI_CONTROLS`` cannot prove the set: shrinking
+    the production set shrinks the payload with it, so the assertion stays green
+    (measured). These nine code points are spelled here independently, so
+    deleting any one of them from the production set leaves it in the query and
+    reddens this test.
+    """
+    explicit = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+    rows = [_row("aaa111", "asteroids game"), _row("bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("parser" + explicit + "crash"))
+        await pilot.pause()
+        await pilot.pause()
+        assert screen.filter_query == "parsercrash"
+        for code_point in explicit:
+            assert code_point not in screen.filter_query
+
+
+@pytest.mark.asyncio
+async def test_a_bidi_mark_in_a_legitimate_name_survives_as_a_needle() -> None:
+    """The counter-test to the narrowing, and the mirror of the ZWJ test.
+
+    U+200E/U+200F/U+061C are MARKS: their bidi classes are ``L``/``R``/``AL``,
+    so they nudge the ordering of neighbouring NEUTRALS and cannot reverse a
+    run the way ``RLO`` and the isolates can (measured against two independent
+    bidi engines). They are also ordinary content in real RTL text, so deleting
+    them breaks a legitimate name used as its own needle.
+    """
+    rows = [_row("aaa111", "asteroids game"), _row("ddd444", "report\u200f 2024 launch")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        app.post_message(events.Paste("report\u200f 2024 launch"))
+        await pilot.pause()
+        await pilot.pause()
+        assert "\u200f" in screen.filter_query
+        assert [row.id for row in screen.visible_rows] == ["ddd444"]
 
 
 @pytest.mark.asyncio

@@ -356,13 +356,21 @@ PASTE_QUERY_MAX_CHARS = 200
 #: DELETED rather than escaped: that function's ``\uXXXX`` escaping is right for a
 #: line whose whole job is to be read literally, but this string is a SEARCH NEEDLE —
 #: escaping every Cf turns a pasted ZWJ emoji name into a needle that matches the row
-#: it was copied from 0 times (measured). Only the 12 bidi controls go; ZWJ, ZWNJ and
-#: the rest survive.
+#: it was copied from 0 times (measured). ZWJ, ZWNJ and the rest survive.
+#:
+#: The three bidi MARKS — U+061C (ALM), U+200E (LRM), U+200F (RLM) — are deliberately
+#: NOT here, though they carry Unicode's ``Bidi_Control`` property. Their bidi classes
+#: are ``AL``/``L``/``R``: they nudge the ordering of neighbouring NEUTRALS and cannot
+#: reverse a run, which is the only thing this deletion exists to stop. Measured
+#: against two independent bidi engines, the marks' whole reachable effect on a
+#: plausible session name is transposing adjacent digits, while U+202E turns
+#: ``secret\u202egnp.terces`` into a rendered ``secret.png``. They are also ORDINARY
+#: CONTENT in real RTL text: deleting them made a session named
+#: ``"report\u200f 2024 launch"`` match its own row 0 times — the same breakage the ZWJ
+#: counter-test above exists to prevent, and the reason the criterion here is
+#: "reverses rendered order", not "holds the Bidi_Control property".
 PASTE_BIDI_CONTROLS = dict.fromkeys(
     [
-        0x061C,  # ARABIC LETTER MARK
-        0x200E,  # LEFT-TO-RIGHT MARK
-        0x200F,  # RIGHT-TO-LEFT MARK
         0x202A,  # LEFT-TO-RIGHT EMBEDDING
         0x202B,  # RIGHT-TO-LEFT EMBEDDING
         0x202C,  # POP DIRECTIONAL FORMATTING
@@ -1820,7 +1828,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
         core = " ".join(stripped.split())
         # `.split()` drops the EDGES too; a column-selection copy routinely carries
         # one, and welding it onto the typed prefix is what stops the match.
-        lead = " " if core and self._query and stripped[:1] in PASTE_EDGE_SPACE else ""
+        # ONE space at the seam, whoever supplied it. `trail` keeps a paste's own
+        # trailing space for the NEXT paste, so a `lead` that fired regardless of
+        # what preceded it produced `'parser  crash'` across two appends — and
+        # `filter_rows` strips the query's edges but never collapses its interior,
+        # so the doubled needle matched 0 rows (measured). Tab counts as an edge
+        # space here because `"\t".isprintable()` is False: a query can only end in
+        # one by having been pasted, never by being typed.
+        seam_is_open = bool(self._query) and self._query[-1:] not in PASTE_EDGE_SPACE
+        lead = " " if core and seam_is_open and stripped[:1] in PASTE_EDGE_SPACE else ""
         trail = " " if core and stripped[-1:] in PASTE_EDGE_SPACE else ""
         text = (lead + core + trail).translate(PASTE_BIDI_CONTROLS)[:PASTE_QUERY_MAX_CHARS]
         # Stopped whether or not anything survived the strip: the gesture was
