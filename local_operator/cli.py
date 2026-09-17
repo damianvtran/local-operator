@@ -3634,6 +3634,11 @@ def _wake_create(args: argparse.Namespace) -> int:
     from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
     from local_operator.session.transcript import Transcript
 
+    # NOT converted to the one-row reader, deliberately: this command WRITES
+    # through the same object a few lines below (``transcript.append_custom``),
+    # and an append needs a materialised ``_entries`` — reconstructing it after
+    # the read would pay the same whole-journal parse twice. There is no parse
+    # to save here, so the read rides the object the write already needs.
     transcript = Transcript(session_dir)
     latest = transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
     existing: list[dict[str, Any]] = []

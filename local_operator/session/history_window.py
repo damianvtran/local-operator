@@ -12,7 +12,6 @@ import base64
 import hashlib
 import hmac
 import json
-import sys
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -20,6 +19,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import AgentMessage, Message
+from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
     audit_slice,
     collect_prunes,
@@ -50,6 +50,13 @@ DISPLAY_HISTORY_BYTES = 512 * 1024
 # Per RUNTIME, not per viewer: a fleet of sessions must not retain a full replay
 # per speculative attach. Admission examines only the already bounded page,
 # never walks the whole canonical history merely to decide whether to cache it.
+#
+# The byte instrument this cache sizes entries with used to live here and now
+# lives in ``session/page_cache.py`` (``retained_bytes``): two caches needing the
+# same walk is one cache too many for two copies of it, and the page cache needs
+# the ``dataclass`` branch this one never did — its pages are plain dataclasses,
+# not pydantic models, so a walk without that branch would account a 2 MiB page
+# as a few dozen bytes.
 DISPLAY_PAGE_CACHE_ENTRIES = 4
 DISPLAY_PAGE_CACHE_BYTES = 2 * 1024 * 1024
 _CACHE_CONTAINER_ALLOWANCE = 4096
@@ -220,7 +227,7 @@ class _DisplayWindowCache:
         return cached[0].model_copy(deep=True)
 
     def put(self, key: tuple[object, ...], page: DisplayHistoryWindow) -> None:
-        size = _retained_size((key, page), DISPLAY_PAGE_CACHE_BYTES - _CACHE_CONTAINER_ALLOWANCE)
+        size = retained_bytes((key, page), DISPLAY_PAGE_CACHE_BYTES - _CACHE_CONTAINER_ALLOWANCE)
         if size is None:
             return
         previous = self.entries.pop(key, None)
@@ -234,54 +241,6 @@ class _DisplayWindowCache:
             self.retained_bytes -= removed
         self.entries[key] = (page.model_copy(deep=True), size)
         self.retained_bytes += size
-
-
-def _retained_size(value: object, limit: int) -> int | None:
-    """Bound the page's reachable data, including keys, tool metadata and media.
-
-    This is a small page walk, not a full-history admission pass (the latter
-    doubled cold 20k-row replay CPU in the measured prototype). Shared immutable
-    values count once within a page and conservatively again across cache entries.
-
-    Deliberately an OVER-estimate: ``sys.getsizeof`` charges per-object CPython
-    overhead (measured ~7.5x a pickled page — 91,960 accounted against 12,172
-    serialized), so the effective retention ceiling is well under the nominal
-    2 MiB. That direction is the safe one for a per-runtime budget multiplied
-    across a fleet, but anyone re-tuning the constant should size it against
-    ACCOUNTED bytes rather than expecting a wire-sized figure.
-    The fixed allowance covers the four LRU nodes and bookkeeping. Framework
-    class/schema objects are process-global, not retained by this cache.
-    """
-    pending = [value]
-    # Identity-keyed, and safe only because nothing here is freed mid-walk: the
-    # page and its key are held by `pending`/the caller for the whole traversal,
-    # so no id() can be recycled into a false "already counted".
-    seen: set[int] = set()
-    total = 0
-    while pending:
-        item = pending.pop()
-        identity = id(item)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        total += sys.getsizeof(item)
-        if total > limit:
-            return None
-        if isinstance(item, BaseModel):
-            pending.extend(
-                (
-                    item.__dict__,
-                    item.__pydantic_fields_set__,
-                    item.__pydantic_extra__,
-                    item.__pydantic_private__,
-                )
-            )
-        elif isinstance(item, dict):
-            pending.extend(item)
-            pending.extend(item.values())
-        elif isinstance(item, (list, tuple, set, frozenset)):
-            pending.extend(item)
-    return total
 
 
 def display_window(

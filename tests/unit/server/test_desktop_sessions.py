@@ -6456,3 +6456,293 @@ def test_the_refusal_message_is_the_one_the_ui_can_act_on():
                 "text": "/compact",
             }
         )
+
+
+# -- the pool lock's reach (perf/session-load-central-cache) -------------------
+#
+# The defect these pin was measured on the operator's live backend at load
+# average ~244: a 642-byte session's snapshot answered in **25 ms** on its own and
+# **829 ms** while the 261 MB session's open was in flight (33x, for a session
+# whose own read is trivial), the 261 MB open itself took 32.1 s, and a 96 MB open
+# returned 503 after 25.4 s — while `/health` answered in 5.5 ms throughout. The
+# server was alive; it was serialised. ``DesktopSessions.session`` held the
+# pool-wide lock across its WHOLE body, so one conversation's lookup (a
+# whole-journal parse before this change) and its socket attach were every other
+# conversation's wait.
+#
+# Every test here is STRUCTURAL: each asserts what COMPLETED, never how long it
+# took, because a wall-clock bound on a box at load average ~200 measures the
+# weather (AGENTS.md §Timing). Each carries ONE deadline, and it is a backstop
+# rather than the assertion — the pass condition is the state the deadline
+# wraps — so a regression fails the suite instead of hanging it. On the
+# pre-change code every one of these hangs at that backstop.
+
+#: Backstop for an open that must complete while another session is parked. Not a
+#: latency budget: 30 s is ~1000x what the same open costs on an idle box.
+_POOL_BACKSTOP_S = 30.0
+
+
+async def _open_and_release(pool: DesktopSessions, session_id: str) -> str:
+    """The door, start to finish: acquire a bridge, hold it for no time, release."""
+    async with pool.session(session_id):
+        return session_id
+
+
+def _park_marker_read(
+    monkeypatch: pytest.MonkeyPatch, session_id: str
+) -> tuple[threading.Event, threading.Event]:
+    """Park ``session_id``'s cold lookup inside its worker thread.
+
+    ``read_desktop_marker`` is called from ``locate()``, which the door runs
+    through ``asyncio.to_thread`` — so the parking uses THREADING events (set and
+    waited on inside the worker) while the test waits for ``entered`` through
+    ``asyncio.to_thread``. A time.sleep or an asyncio.Event here would park
+    nothing: one blocks the loop, the other is set on it.
+    """
+    entered, release = threading.Event(), threading.Event()
+    original = module.read_desktop_marker
+
+    def parked(path: Path) -> dict[str, Any] | None:
+        if path.name == session_id:
+            entered.set()
+            if not release.wait(_POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked lookup")
+        return original(path)
+
+    monkeypatch.setattr(module, "read_desktop_marker", parked)
+    return entered, release
+
+
+@pytest.mark.asyncio
+async def test_a_parked_lookup_does_not_delay_another_sessions_open(tmp_path, monkeypatch):
+    """One conversation's cold open is not another's wait.
+
+    This is the live symptom in its smallest form: ``slow`` holds the door for
+    its own session — parked inside the lookup, which is where the whole-journal
+    parse used to be — and a request for an unrelated session must complete while
+    it is parked.
+    """
+    pool = DesktopSessions(tmp_path)
+    parked_sid = await pool.create(str(tmp_path))
+    other_sid = await pool.create(str(tmp_path))
+    entered, release = _park_marker_read(monkeypatch, parked_sid)
+
+    parked = asyncio.create_task(_open_and_release(pool, parked_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the lookup never started"
+
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        async with pool.session(other_sid) as other:
+            assert other.session_id == other_sid
+
+    release.set()
+    assert await parked == parked_sid
+
+
+@pytest.mark.asyncio
+async def test_a_parked_lookup_does_not_delay_an_already_warm_session(tmp_path, monkeypatch):
+    """The warm half of the same property, and the one the operator noticed.
+
+    A session this process already holds a bridge for must answer without
+    consulting any pool-wide resource, so the session the user switches BACK to
+    is never the one that queues behind the session that is slow to open.
+    """
+    pool = DesktopSessions(tmp_path)
+    warm_sid = await pool.create(str(tmp_path))
+    cold_sid = await pool.create(str(tmp_path))
+    async with pool.session(warm_sid) as warm:
+        resident = warm
+
+    entered, release = _park_marker_read(monkeypatch, cold_sid)
+    parked = asyncio.create_task(_open_and_release(pool, cold_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the lookup never started"
+
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        async with pool.session(warm_sid) as again:
+            assert again is resident, "the warm session was rebuilt instead of reused"
+
+    release.set()
+    assert await parked == cold_sid
+
+
+@pytest.mark.asyncio
+async def test_two_cold_callers_share_one_lookup_and_one_bridge(tmp_path, monkeypatch):
+    """Single-flight: one journal read, one bridge, two viewers.
+
+    Two requests racing on a cold session used to run the lookup twice — two
+    whole-journal parses where the session has no ``desktop.json``. They must now
+    share one, and they must end up on the SAME bridge: a second one would mean
+    two facades attached to one owner runtime, one of them invisible to
+    ``close()``.
+    """
+    pool = DesktopSessions(tmp_path)
+    session_id = await pool.create(str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    original = module.read_desktop_marker
+
+    def parked(path: Path) -> dict[str, Any] | None:
+        if path.name == session_id:
+            entered.set()
+            if not release.wait(_POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked lookup")
+        return original(path)
+
+    monkeypatch.setattr(module, "read_desktop_marker", parked)
+
+    # THE INSTRUMENT IS THE FLIGHT, not the byte read: ``read_desktop_marker`` is
+    # also called by ``draft_birth_selection`` inside ``acquire``, so counting it
+    # would count a legitimate per-caller read and prove nothing about sharing.
+    # What must be unique is the LOOKUP TASK — a join hands back the leader's own
+    # task object, so identity is the assertion.
+    flights: list[Any] = []
+    real_flight = module.DesktopSessions._locate_flight
+
+    def counting_flight(self: Any, target: str, locate: Any) -> Any:
+        task = real_flight(self, target, locate)
+        if target == session_id:
+            flights.append(task)
+        return task
+
+    monkeypatch.setattr(module.DesktopSessions, "_locate_flight", counting_flight)
+
+    opened: list[Any] = []
+    both_in = asyncio.Event()
+
+    async def hold() -> None:
+        async with pool.session(session_id) as bridge:
+            opened.append(bridge)
+            if len(opened) == 2:
+                both_in.set()
+            await both_in.wait()
+
+    first = asyncio.create_task(hold())
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the lookup never started"
+    second = asyncio.create_task(hold())
+    # PUMP, because the follower's join is a loop step with no I/O behind it.
+    for _ in range(8):
+        await asyncio.sleep(0)
+    release.set()
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        await asyncio.gather(first, second)
+
+    assert (
+        len({id(task) for task in flights}) == 1
+    ), f"the two callers started {len({id(task) for task in flights})} journal reads"
+    assert len(opened) == 2
+    assert opened[0] is opened[1], "two bridges were built for one session"
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_awaiting_its_first_acquire_is_not_evicted(tmp_path, monkeypatch):
+    """``users == 0`` no longer means "idle", so the reservation says so.
+
+    The invariant the old code kept by holding the pool lock across its whole
+    body — "eviction must not remove a bridge between lookup and its first
+    acquire" — is now kept explicitly. Without it, a request at ``BRIDGE_COUNT``
+    would evict a bridge whose caller had been handed it but had not attached
+    yet, and the NEXT request for that session would build a SECOND bridge for
+    it. This test drives exactly that window: the first caller is parked before
+    ``users`` moves, and the second session's refusal is what proves the parked
+    bridge was not selected for eviction.
+    """
+    monkeypatch.setattr(module, "BRIDGE_COUNT", 1)
+    pool = DesktopSessions(tmp_path)
+    first_sid = await pool.create(str(tmp_path))
+    other_sid = await pool.create(str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    real_acquire = module.DesktopSessionBridge.acquire
+
+    # ``read`` is the door's envelope (``session(read=...)``): the stub
+    # accepts and FORWARDS it rather than swallowing it, so a caller parked
+    # here is still the caller the route's own signature would have made.
+    async def parked_acquire(self: Any, *, read: bool = False) -> Any:
+        if self.session_id == first_sid:
+            entered.set()
+            # Parked BEFORE ``users`` moves: the bridge is resident and resolved
+            # by a caller, and no one has attached to it yet.
+            if not await asyncio.to_thread(release.wait, _POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked acquire")
+        return await real_acquire(self, read=read)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "acquire", parked_acquire)
+
+    held = asyncio.create_task(_open_and_release(pool, first_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S), "the first open never parked"
+    assert pool.bridges[first_sid].users == 0, "the window this test is about never opened"
+
+    with pytest.raises(ValueError, match="Too many active desktop sessions"):
+        await asyncio.wait_for(_open_and_release(pool, other_sid), _POOL_BACKSTOP_S)
+    assert first_sid in pool.bridges, "the handed-out bridge was evicted under its own acquire"
+
+    release.set()
+    assert await held == first_sid
+    # And once that caller has finished with it, the ordinary rule returns: an
+    # idle bridge is a candidate again, so the cap still binds.
+    async with asyncio.timeout(_POOL_BACKSTOP_S):
+        async with pool.session(other_sid) as other:
+            assert other.session_id == other_sid
+    assert first_sid not in pool.bridges, "the idle bridge outlived the cap"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_open_leaves_no_reservation_behind(tmp_path, monkeypatch):
+    """The handout is released on every exit, including the refusal path.
+
+    A leaked reservation would make a bridge permanently unevictable, which at
+    ``BRIDGE_COUNT`` turns one failed request into a pool that can only refuse.
+    The refusal is taken twice here — once while the first session is parked (so
+    the handout is held and released by a FAILING caller), once after it settles.
+    """
+    monkeypatch.setattr(module, "BRIDGE_COUNT", 1)
+    pool = DesktopSessions(tmp_path)
+    first_sid = await pool.create(str(tmp_path))
+    other_sid = await pool.create(str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    real_acquire = module.DesktopSessionBridge.acquire
+
+    # ``read`` is the door's envelope (``session(read=...)``): the stub
+    # accepts and FORWARDS it rather than swallowing it, so a caller parked
+    # here is still the caller the route's own signature would have made.
+    async def parked_acquire(self: Any, *, read: bool = False) -> Any:
+        if self.session_id == first_sid:
+            entered.set()
+            if not await asyncio.to_thread(release.wait, _POOL_BACKSTOP_S):
+                raise AssertionError("the test never released the parked acquire")
+        return await real_acquire(self, read=read)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "acquire", parked_acquire)
+
+    held = asyncio.create_task(_open_and_release(pool, first_sid))
+    assert await asyncio.to_thread(entered.wait, _POOL_BACKSTOP_S)
+    with pytest.raises(ValueError, match="Too many active desktop sessions"):
+        await asyncio.wait_for(_open_and_release(pool, other_sid), _POOL_BACKSTOP_S)
+    assert pool._handouts == {first_sid: 1}, "the refused caller kept its reservation"
+
+    release.set()
+    assert await held == first_sid
+    assert pool._handouts == {}, "the reservations outlived their callers"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_warm_open_leaves_no_reservation_behind(tmp_path):
+    """The WARM refusal raises from inside the guarded block, and it used to strand.
+
+    ``assert_admitting`` is asked on the warm path as well as the cold one, and it
+    RAISES. A handout taken outside the guard would survive that raise, and a
+    session whose bridge is permanently reserved can never be evicted — so at
+    ``BRIDGE_COUNT`` the pool would reach a state where it can only refuse, which
+    is a worse failure than the refusal itself. The mutation this catches is the
+    reservation taken before the ``try`` (it was, until this test was written).
+    """
+    retiring = False
+    pool = DesktopSessions(tmp_path, retiring=lambda: retiring)
+    session_id = await pool.create(str(tmp_path))
+    async with pool.session(session_id):
+        pass  # resident, and users back to 0
+
+    retiring = True
+    with pytest.raises(module.DaemonRetiring):
+        async with pool.session(session_id):
+            pytest.fail("a latched daemon admitted an open")
+
+    assert pool._handouts == {}, "the warm refusal stranded a reservation"
+    assert pool._locate_flights == {}, "the refusal left a lookup flight behind"

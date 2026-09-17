@@ -29,6 +29,8 @@ from local_operator.session.transcript import (
     Transcript,
     TranscriptEntry,
     TranscriptPage,
+    read_latest_custom,
+    read_latest_custom_entry,
     read_replay_suffix,
     read_transcript_page,
     replay_entries,
@@ -1519,3 +1521,284 @@ async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> 
     await transcript.compact_file(min_reclaim_bytes=1)
     module, method = both(Transcript(tmp_path / "sess"))
     assert module == [] and method == module
+
+
+# --- the one-row metadata read (perf/session-load-central-cache) --------------
+#
+# ``read_latest_custom_entry``/``read_latest_custom`` exist because seven call
+# sites answered a ONE-ROW question by constructing a whole ``Transcript`` — a
+# full JSON decode of the journal. Measured against a clean ``origin/main``
+# worktree at ``bf67bf699`` — the ``trees.base`` side of the committed
+# ``bench_ab.json`` (median of 3 samples per operation; the artifact carries one
+# load figure for the whole run at completion, and the per-worker range is the
+# README's prose, not a field in it) — the full table being in
+# ``docs/evidence/session-load-central-cache``: 2286.7 ms to construct and
+# 2059.5 ms to read on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one,
+# and two of those seven sites are on the desktop OPEN path. Two things make the
+# swap safe and both are tested here: the DIFFERENTIAL (it must answer exactly
+# what the resident object answered) and the STRUCTURAL cost (it must not pay for
+# the rows above its match).
+
+
+#: Sentinel for "this key is absent from the row" — distinct from any real value,
+#: including ``None``, because a row with no ``details`` key and a row whose
+#: ``details`` is null are two different rows to both readers.
+_OMIT = object()
+
+
+def _custom_row(
+    row_id: str,
+    custom_type: Any = _OMIT,
+    *,
+    details: Any = _OMIT,
+    ts: float = 1.0,
+) -> str:
+    """One ``custom`` journal row, with either key omitted when not given."""
+    payload: dict[str, Any] = {}
+    if custom_type is not _OMIT:
+        payload["custom_type"] = custom_type
+    if details is not _OMIT:
+        payload["details"] = details
+    return TranscriptEntry(row_id, ts, "custom", payload).to_json()
+
+
+def _message_row(row_id: str) -> str:
+    return TranscriptEntry(
+        row_id, 0.5, ENTRY_MESSAGE, {"role": "user", "content": row_id}
+    ).to_json()
+
+
+def _mixed_custom_journal(directory: Path) -> None:
+    """Every shape the two readers must agree on, in one journal.
+
+    Three custom types interleaved with message rows, so "newest wins" and
+    "a different type does not stop the scan" are both exercised; a repeated
+    type; a row with NO ``custom_type`` key (which indexes under ``""`` in
+    ``_index_entry``); a ``details`` value that is not a mapping (where both
+    implementations must fail identically, because a caller cannot be allowed to
+    tell which one answered it); and a malformed line, which both skip.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for index in range(5):
+        lines.append(_message_row(f"m{index}"))
+        lines.append(
+            _custom_row(
+                f"todo-{index}",
+                "todo_snapshot",
+                details={"items": [{"n": index}], "version": index},
+                ts=10.0 + index,
+            )
+        )
+        lines.append(
+            _custom_row(
+                f"checkpoint-{index}",
+                "frontend_state_checkpoint_v1",
+                details={"state": {"cwd": f"/work/{index}"}},
+                ts=20.0 + index,
+            )
+        )
+        lines.append(
+            _custom_row(
+                f"roster-{index}", "subagent_roster", details={"records": [{"id": index}]}, ts=30.0
+            )
+        )
+    # Newest rows for each type, so an oldest-wins bug is visible rather than
+    # hidden behind a single occurrence.
+    lines.append(_custom_row("todo-last", "todo_snapshot", details={"items": ["last"]}, ts=99.0))
+    lines.append(_custom_row("untyped", _OMIT, details={"anything": True}, ts=98.0))
+    lines.append(_custom_row("not-a-mapping", "odd", details=["a", "list"], ts=97.0))
+    lines.append(_custom_row("no-details", "bare", ts=96.0))
+    # A MESSAGE row carrying a ``custom_type`` key, and it is LAST so a backward
+    # scan meets it first. ``_index_entry`` indexes custom rows only, so the
+    # resident object ignores this one entirely; a scan that filtered on the
+    # payload alone would answer it instead of the newest real row. That is not a
+    # hypothetical row: any writer that puts a ``custom_type`` field in a
+    # message payload produces it, and the two implementations must agree about
+    # what it means.
+    lines.append(
+        TranscriptEntry(
+            "decoy",
+            100.0,
+            ENTRY_MESSAGE,
+            {"role": "user", "content": "decoy", "custom_type": "todo_snapshot"},
+        ).to_json()
+    )
+    lines.append("{not json at all")
+    lines.append("")
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _answer(call: Any) -> Any:
+    """A call's result OR the exception it raised, in one comparable value."""
+    try:
+        return ("value", call())
+    except Exception as exc:  # noqa: BLE001 — the point is to compare the failure too
+        return ("raised", type(exc).__name__, str(exc))
+
+
+@pytest.mark.parametrize(
+    "custom_type",
+    [
+        "todo_snapshot",
+        "frontend_state_checkpoint_v1",
+        "subagent_roster",
+        "",
+        "odd",
+        "bare",
+        "never_written",
+    ],
+)
+def test_the_one_row_read_matches_the_resident_transcript(tmp_path, custom_type):
+    """The differential, with the resident ``Transcript`` as the reference.
+
+    ``Transcript`` is the reference because it IS what every call site used until
+    now: ``_index_entry`` keeps the LAST custom row per type as it walks the
+    journal forward, so "newest wins" is that object's rule and a backward scan
+    has to reproduce it. Both projections are compared, and both the VALUE and
+    the EXCEPTION, so a ``details`` value that is not a mapping cannot be papered
+    over by a reader that answers ``{}`` where the resident object raises.
+    """
+    directory = tmp_path / "sess"
+    _mixed_custom_journal(directory)
+    resident = Transcript(directory, defer_materialise=True)
+
+    assert _answer(lambda: read_latest_custom(directory, custom_type)) == _answer(
+        lambda: resident.latest_custom(custom_type)
+    )
+    assert _answer(lambda: read_latest_custom_entry(directory, custom_type)) == _answer(
+        lambda: resident.latest_custom_entry(custom_type)
+    )
+
+
+def test_the_newest_match_wins_and_the_scan_does_not_stop_on_another_type(tmp_path):
+    """The two ways a backward scan can answer the wrong row, pinned separately."""
+    directory = tmp_path / "sess"
+    _mixed_custom_journal(directory)
+
+    assert read_latest_custom(directory, "todo_snapshot") == {"items": ["last"]}
+    entry = read_latest_custom_entry(directory, "todo_snapshot")
+    assert entry is not None and entry.id == "todo-last"
+    # The type that appears BETWEEN the tail and ``todo-last`` must not end the
+    # scan: the very next row after ``todo-last`` is a different type.
+    assert read_latest_custom(directory, "subagent_roster") == {"records": [{"id": 4}]}
+    # A row whose details key is absent is `{}`, as the resident object has it.
+    assert read_latest_custom(directory, "bare") == {}
+
+
+def test_a_metadata_read_never_creates_the_directory(tmp_path):
+    """A pure read of somebody else's session leaves nothing behind.
+
+    ``Transcript`` mkdirs its directory on construction, which is why the TUI's
+    child reads had to borrow ``defer_materialise``; this reader opens the journal
+    read-only, so the guarantee is structural rather than opt-in. The phantom-
+    directory defect that rule descends from is in ``todo_panel``'s docstring.
+    """
+    missing = tmp_path / "never-created"
+
+    assert read_latest_custom(missing, "todo_snapshot") is None
+    assert read_latest_custom_entry(missing, "todo_snapshot") is None
+    assert not missing.exists()
+
+
+def test_a_metadata_read_decodes_only_the_rows_above_the_match(tmp_path, monkeypatch):
+    """A spy on ``TranscriptEntry.from_json``: the walk stops at the newest match.
+
+    THE MUTATION THIS CATCHES: dropping the early return — or filtering
+    ``custom_type`` only after assembling every row — turns the decode count back
+    into the whole journal, which is the 2.5-3.0 s this change removes on a real
+    conversation. Counted at the DECODE rather than in bytes or milliseconds: a
+    count is identical on an idle laptop and a wedged CI runner, while a wall
+    clock here measures the machine (AGENTS.md §Timing).
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    rows = [_message_row(f"m{index:04d}") for index in range(4000)]
+    rows.append(_custom_row("the-match", "todo_snapshot", details={"items": []}, ts=99.0))
+    rows.extend(_message_row(f"tail{index}") for index in range(2))
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    decoded = 0
+    real = transcript_module.TranscriptEntry.from_json
+
+    def counting(line: str) -> Any:
+        nonlocal decoded
+        decoded += 1
+        return real(line)
+
+    monkeypatch.setattr(transcript_module.TranscriptEntry, "from_json", staticmethod(counting))
+    entry = read_latest_custom_entry(directory, "todo_snapshot")
+
+    assert entry is not None and entry.id == "the-match"
+    assert decoded <= 5, f"the walk decoded {decoded} rows for a 3-row tail"
+    assert decoded >= 3, "the match and the rows above it must have been decoded"
+
+
+def test_a_metadata_read_near_the_head_costs_the_journal_and_is_still_correct(
+    tmp_path, monkeypatch
+):
+    """The honest worst case, pinned so it cannot be mistaken for a regression.
+
+    A legacy ``subagent_roster`` row written once near byte zero reaches the file
+    start, so that read costs what today's whole-file parse costs — never worse,
+    and it answers correctly rather than reporting a bounded "unknown". This is
+    the case the design refuses to add a ``max_bytes`` knob for: a ceiling here
+    would have to invent an answer for a caller that today always gets one.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    rows = [_custom_row("ancient", "subagent_roster", details={"records": []}, ts=1.0)]
+    rows.extend(_message_row(f"m{index:04d}") for index in range(500))
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    decoded = 0
+    real = transcript_module.TranscriptEntry.from_json
+
+    def counting(line: str) -> Any:
+        nonlocal decoded
+        decoded += 1
+        return real(line)
+
+    monkeypatch.setattr(transcript_module.TranscriptEntry, "from_json", staticmethod(counting))
+    entry = read_latest_custom_entry(directory, "subagent_roster")
+
+    assert entry is not None and entry.id == "ancient"
+    assert decoded == 501, "the walk must reach the file start to answer honestly"
+
+
+def test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises(tmp_path):
+    """The one NAMED divergence, pinned rather than left in a docstring.
+
+    A journal whose newest matching row holds one invalid byte — what an
+    interrupted append truncated mid-character leaves — is answered here: the
+    damaged byte decodes to U+FFFD under ``errors="replace"`` and the row still
+    parses. The resident ``Transcript`` decodes through a strict ``read_text`` and
+    raises ``UnicodeDecodeError`` for the same file.
+
+    The direction is deliberate (a damaged journal is answered, not turned into a
+    500 on the desktop open), and a differential that asserted EQUALITY for this
+    shape would be asserting the wrong thing — which is why the equality matrix
+    above covers every well-formed journal and the divergence gets this test
+    instead.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    raw = (
+        TranscriptEntry(
+            "torn",
+            2.0,
+            "custom",
+            {"custom_type": "todo_snapshot", "details": {"x": "MARKER-VALUE"}},
+        )
+        .to_json()
+        .encode("utf-8")
+    )
+    assert b'"MARKER-VALUE"' in raw
+    (directory / TRANSCRIPT_FILENAME).write_bytes(
+        raw.replace(b'"MARKER-VALUE"', b'"MARK\xffER-VALUE"') + b"\n"
+    )
+
+    with pytest.raises(UnicodeDecodeError):
+        Transcript(directory, defer_materialise=True)
+
+    assert read_latest_custom(directory, "todo_snapshot") == {"x": "MARK\ufffdER-VALUE"}

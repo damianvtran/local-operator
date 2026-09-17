@@ -471,6 +471,23 @@ def _iter_complete_lines_backward(
             return
 
 
+def validate_page_request(before_id: str | None, through_id: str | None, limit: int) -> None:
+    """The page read's preconditions, shared by the sync reader and the façade.
+
+    One validator rather than one per entry point, because these two are a
+    CONTRACT rather than input hygiene: whichever door a caller uses, the same
+    request has to fail the same way. It is not theoretical housekeeping — the
+    desktop route distinguishes the third precondition by TYPE (``history``
+    catches ``FileNotFoundError`` and reconciles, while both-cursors is a
+    programming error its tests pin), so a second copy of this check that drifted
+    by one clause would change what a client observes.
+    """
+    if before_id is not None and through_id is not None:
+        raise ValueError("choose before_id or through_id, not both")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
@@ -537,10 +554,7 @@ def read_transcript_page(
       read (a 500 on the desktop open). Robustness, not an accidental change:
       the two readers of the same file no longer disagree about a damaged row.
     """
-    if before_id is not None and through_id is not None:
-        raise ValueError("choose before_id or through_id, not both")
-    if limit < 1:
-        raise ValueError("limit must be at least 1")
+    validate_page_request(before_id, through_id, limit)
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         raise FileNotFoundError(path)
@@ -585,6 +599,96 @@ def read_transcript_page(
         return TranscriptPage(tail.entries, tail.has_more, True)
     rows = tuple(reversed(retained[:limit]))
     return TranscriptPage(entries=rows, has_more=len(retained) > limit)
+
+
+def read_latest_custom_entry(directory: str | Path, custom_type: str) -> TranscriptEntry | None:
+    """Newest custom row of ``custom_type``, without parsing the journal above it.
+
+    WHY THIS EXISTS. Answering "what did the last ``todo_snapshot`` /
+    ``frontend_state`` / ``subagent_roster`` row say" is a ONE-ROW question, and
+    every caller that asked it built a whole ``Transcript`` to answer it — a
+    construction that JSON-decodes the entire journal into memory. On the
+    operator's store that is **2286.7 ms of construction and 2059.5 ms for the
+    read** on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one — the
+    before column of the A/B in ``docs/evidence/session-load-central-cache``,
+    whose raw run is committed beside it as ``bench_ab.json``: median of 3 samples
+    per operation, on the clean ``origin/main`` worktree the artifact's own
+    ``trees.base`` records (``bf67bf699``, ``dirty: false``). That artifact
+    carries ONE load figure for the whole run — ``176.87 273.00 312.10`` at
+    completion — while the 179-260 range the README quotes with it is the same
+    run's console log, which is not committed: the harness only learned to record
+    a load per worker after this run.
+    Two of those callers are on the desktop OPEN path — ``DesktopSessions.
+    session().locate()`` when a session carries no ``desktop.json`` marker, and
+    ``_persisted_children`` — so a cold open paid seconds of JSON decode for one
+    row it then discarded.
+
+    The scan is the same backward walk as :func:`read_transcript_page`, and the
+    stop condition already existed in this module: ``read_replay_suffix``'s
+    ``checkpoint_types`` parameter is this scan with a compaction boundary and a
+    cursor beside it. Here it is alone, so the walk ends at the first matching
+    row and the cost is the distance from EOF to that row — a handful of chunks
+    for a snapshot re-appended on every change, and for a legacy row written
+    once near byte zero it reaches the file start, which is exactly today's cost
+    and never worse. There is deliberately NO byte budget: a bounded "not found"
+    would have to invent an answer for a caller that today always gets one, and
+    a second bound beside the honest one (stop when the row is not there) would
+    be a policy with no consumer.
+
+    Contract, matched row for row against :meth:`Transcript.latest_custom_entry`
+    — the resident object's own answer — rather than against a restatement of
+    it: ``type == ENTRY_CUSTOM`` and the same
+    ``str(payload.get("custom_type", ""))`` expression ``_index_entry`` uses, so
+    a row with no ``custom_type`` key is treated identically by both; malformed
+    rows are skipped individually, as in replay; an ABSENT journal answers
+    ``None``, which is what ``Transcript(absent)`` reports for the same
+    question. Nothing here creates the directory, so a pure read of somebody
+    else's session leaves nothing behind — the ``defer_materialise`` guarantee
+    the TUI's child reads used to borrow from ``Transcript`` by construction.
+
+    ONE NAMED DIVERGENCE from that reference, in the safe direction, and it is
+    the same one the page reader documents: this scan decodes with
+    ``errors="replace"``, so a BYTE-CORRUPT journal — an interrupted append
+    truncated mid-character — is read with the damaged bytes replaced. A row
+    that still parses is answered (a stray ``\xff`` inside a string value
+    becomes U+FFFD), and a row that no longer parses is skipped like any
+    malformed line. The resident implementation decodes through
+    ``Transcript.__init__``'s strict ``read_text`` and raises
+    ``UnicodeDecodeError`` for the same file, so "matched row for row" is exact
+    for every well-formed journal — and for a malformed LINE, which both skip —
+    but NOT for invalid UTF-8. Answering rather than failing is deliberate, and
+    it is pinned by
+    ``tests/unit/session/test_transcript.py::test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises``
+    so the sentence cannot drift away from the behaviour.
+    """
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
+            for raw in lines:
+                if not raw.strip():
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is None or entry.type != ENTRY_CUSTOM:
+                    continue
+                if str(entry.payload.get("custom_type", "")) == custom_type:
+                    return entry
+    return None
+
+
+def read_latest_custom(directory: str | Path, custom_type: str) -> dict[str, Any] | None:
+    """Details mapping of the newest ``custom_type`` row — the single-scan twin.
+
+    ``Transcript.latest_custom``'s projection, reproduced verbatim (``dict`` of
+    ``payload["details"]``, including its behaviour on a details value that is
+    not a mapping) so a caller cannot tell which implementation answered it.
+    Kept as a second wrapper rather than a parameter because the majority of
+    callers want only the mapping and must not be handed the entry.
+    """
+    entry = read_latest_custom_entry(directory, custom_type)
+    return dict(entry.payload.get("details", {})) if entry is not None else None
 
 
 @dataclass(frozen=True)

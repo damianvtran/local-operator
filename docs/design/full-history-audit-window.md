@@ -213,6 +213,9 @@ paint; `SessionPresentation.retainable` (`session_presentation.py:317`) bounds a
 parked view. Audit pages flow through all four untouched — they are ordinary
 `DisplayHistoryWindow` pages carrying an extra boolean.
 
+(The walker `_retained_size` now lives in `session/page_cache.py` as
+`retained_bytes`, shared with the page cache; the claim above is unchanged.)
+
 One thing to watch (§8): audit pages enter `_resume_pending_head`, which
 `retainable()` measures directly (`session_presentation.py:386`), and its
 docstring records the retained-text figure as 127–357 KiB against a 1 MiB
