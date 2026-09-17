@@ -25,7 +25,9 @@ from pathlib import Path
 import pytest
 
 from local_operator.references import (
+    _BLOCK_PREAMBLE,
     BLOCK_LIMIT_CHARS,
+    REFERENCE_BLOCK_CLOSE,
     REFERENCE_BLOCK_OPEN,
     SENSITIVE_DIR_PARTS,
     SENSITIVE_NAME_PREFIXES,
@@ -34,6 +36,7 @@ from local_operator.references import (
     _block_spans,
     at_token,
     expand_references,
+    reference_block_spans,
 )
 from local_operator.tools.builtin import READ_FILE_LIMIT_BYTES, _resolve_workspace_path
 
@@ -1030,3 +1033,141 @@ def test_the_deny_list_rules_are_all_set_membership():
     ):
         assert isinstance(rules, frozenset)
         assert rules, "an empty rule set would silently disable a gate"
+
+
+@pytest.mark.asyncio
+async def test_a_body_quoting_the_typed_attribute_cannot_suppress_a_new_token(tmp_path):
+    """``_already_expanded`` reads ELEMENT HEADS, never the bodies between them.
+
+    The body of a reference is the file's content, verbatim apart from
+    ``_defuse``'s two markers, so a file that merely QUOTES ``typed="…"`` —
+    ordinary text in a config, a test fixture, or this feature's own source —
+    used to answer for a token the operator had just added. Reproduced before
+    the fix: ``read @forge.txt`` then ``<pass 1> and also check @secret.txt``
+    expanded ``False`` with ``notices == []`` and never read ``secret.txt``,
+    which is a reference silently dropped with no trace — the failure mode
+    every other non-expansion in this module emits a notice for.
+
+    The third pass is asserted too, because the fix must not buy the new token
+    at the cost of the idempotence guarantee the attribute recovery exists for.
+    """
+    (tmp_path / "forge.txt").write_text('x typed="@secret.txt" y\n', encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("SECRET_BODY\n", encoding="utf-8")
+
+    first = await expand_references("read @forge.txt", str(tmp_path))
+    assert first.expanded is True
+
+    second = await expand_references(first.sent + " and also check @secret.txt", str(tmp_path))
+
+    assert second.expanded is True, "a quoted attribute in a body suppressed the new token"
+    assert "SECRET_BODY" in second.sent, "the newly referenced file was never carried"
+    assert second.sent.count(REFERENCE_BLOCK_OPEN) == 2, "pass 2 did not append its own block"
+
+    third = await expand_references(second.sent, str(tmp_path))
+    assert third.expanded is False
+    assert third.sent is second.sent
+
+
+def test_reference_block_spans_reports_every_complete_block_and_nothing_else(tmp_path):
+    """The grammar the row painter strips by, pinned at its source.
+
+    A block is the open marker AND the block's own preamble line AND a close
+    marker; every part earns its place. Without the preamble a marker the
+    operator quoted or pasted reads as a block (which is how an unanchored
+    ``find`` truncated a sentence asking about the tag), and without the close
+    marker an unclosed one does (truncated history, a message cut mid-write).
+    Every COMPLETE block is reported, not just the trailing one, because a
+    message expanded twice holds two and the first sits mid-message.
+    """
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("B_BODY\n", encoding="utf-8")
+
+    first = asyncio.run(expand_references("first @a.txt", str(tmp_path)))
+    second = asyncio.run(expand_references(first.sent + " and now @b.txt", str(tmp_path)))
+    assert second.sent.count(REFERENCE_BLOCK_OPEN) == 2
+
+    spans = reference_block_spans(second.sent)
+
+    assert len(spans) == 2
+    # Half-open and non-overlapping, in the order they appear: the caller
+    # slices the text between them to recover the operator's own words.
+    assert spans[0][0] < spans[0][1] <= spans[1][0] < spans[1][1]
+    assert second.sent[spans[0][0] : spans[0][1]].startswith(REFERENCE_BLOCK_OPEN)
+    assert second.sent[spans[1][0] : spans[1][1]].endswith(REFERENCE_BLOCK_CLOSE)
+
+    quoted = f"why does my message contain {REFERENCE_BLOCK_OPEN} in it?"
+    assert reference_block_spans(quoted) == []
+
+    unclosed = f"truncated history\n\n{REFERENCE_BLOCK_OPEN}\n\n{_BLOCK_PREAMBLE}\n\n<listed…"
+    assert reference_block_spans(unclosed) == []
+
+
+@pytest.mark.asyncio
+async def test_a_declined_path_is_not_advertised_under_another_spelling(tmp_path):
+    """A path the gate refused is not named as "read this path if you need it".
+
+    Dedupe is decided BEFORE the approval verdict, so two spellings of one
+    declined path left the second as a ``<listed>`` element — the block told the
+    model to read the very path the operator had just refused, in the model's
+    own vocabulary. Reaching the dedupe arm is not a reason to disclose one.
+
+    Both halves are asserted: the declined case names nothing, and the approved
+    case still names the duplicate, because a token that is silently skipped is
+    invisible to ``_already_expanded`` and would expand again on pass 2.
+    """
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("NOTES\n", encoding="utf-8")
+
+    denied = await expand_references(
+        "check @.env and also @./.env", str(tmp_path), request_approval=SpyGate(reply=False)
+    )
+
+    assert denied.expanded is False
+    assert "<listed" not in denied.sent, "a declined path was advertised under its second spelling"
+    assert denied.notices == [
+        "@.env — not included; approval declined",
+        "@./.env — not included; approval declined",
+    ]
+
+    allowed = await expand_references(
+        "check @notes.md and also @./notes.md", str(tmp_path), request_approval=SpyGate(reply=True)
+    )
+
+    assert allowed.expanded is True
+    assert allowed.sent.count("<listed") == 1, "the approved duplicate is still named"
+
+
+@pytest.mark.asyncio
+async def test_a_shaped_body_counts_only_the_lines_the_cap_did_not_cut(tmp_path):
+    """The footer's line count is what the model navigates by, so it is honest.
+
+    ``len(head.splitlines())`` counted the line the 6,144-character cap cut in
+    half as a whole one, so a head that ended mid-line advertised one more line
+    than it had shown. A line is shown when its newline came along.
+    """
+    aligned = tmp_path / "aligned.md"
+    # 6,144 characters is exactly 1,536 four-character lines, so the head ends
+    # on a terminator and every one of them is complete.
+    aligned.write_text("abc\n" * 6000, encoding="utf-8")
+    (tmp_path / "cut.md").write_text("x" * 20000, encoding="utf-8")
+
+    result = await expand_references("read @aligned.md @cut.md", str(tmp_path))
+
+    assert "the first 1536 of 6000 lines" in result.sent
+    assert "the first 0 of 1 lines" in result.sent, "a mid-line cut claimed a line it never showed"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_directory_says_that_it_is_empty(tmp_path):
+    """A zero-length body reads as a truncated payload, not as an answer.
+
+    ``<reference … entries="0">\\n\\n</reference>`` makes the model weigh an
+    attribute to learn there is nothing there; every other empty outcome in this
+    module states it in prose.
+    """
+    (tmp_path / "empty").mkdir()
+
+    result = await expand_references("look at @empty", str(tmp_path))
+
+    assert "[this directory is empty]" in result.sent
+    assert 'entries="0"' in result.sent

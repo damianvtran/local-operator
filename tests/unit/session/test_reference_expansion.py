@@ -140,3 +140,54 @@ async def test_a_declined_reference_still_completes_the_turn(tmp_path):
     assert len(stream.requests) == 1
     assert _sent_text(stream) == typed
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_rejected_mid_turn_reads_nothing_and_asks_nobody(tmp_path, monkeypatch):
+    """The re-entrancy probe comes FIRST — ahead of expansion, not behind it.
+
+    Expansion reads every referenced file and can raise a live approval card,
+    so with the probe below it a caller arriving mid-turn (`serving`,
+    `attached`, `mobile/tui_handle`, `goal_loop`, `subagent`) had the operator's
+    files read, and a card for a referenced `.env` ANSWERED, for a prompt this
+    method then rejected — the operator answering a question about a turn that
+    never ran. The docstring has always promised the probe is consulted first;
+    this is the test that keeps the promise a fact.
+
+    Two instruments, because the two halves fail independently: a recording
+    approval gate catches the card, and the module-level function every body is
+    read through catches the read. Both paths are exercised in one prompt — a
+    sensitive in-workspace file (escalates to the gate) and an ordinary one
+    (auto-approved, read, no card).
+    """
+    import local_operator.references as references
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env").write_text("SECRET_BODY=1\n", encoding="utf-8")
+    (workspace / "notes.md").write_text("NOTES_BODY\n", encoding="utf-8")
+
+    reads: list[str] = []
+    real_payload_of = references._file_payload_of
+
+    def record(path, limit, shown):
+        reads.append(str(path))
+        return real_payload_of(path, limit, shown)
+
+    monkeypatch.setattr(references, "_file_payload_of", record)
+
+    gate = SpyGate(reply=True)
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, cwd=str(workspace), request_approval=gate)
+
+    await session._turn_lock.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="already streaming"):
+            await session.prompt("read @.env and @notes.md")
+    finally:
+        session._turn_lock.release()
+
+    assert gate.asks == [], "a rejected prompt raised an approval card"
+    assert reads == [], "a rejected prompt read a referenced file"
+    assert stream.requests == [], "the rejected prompt reached the provider"
+    await session.dispose()

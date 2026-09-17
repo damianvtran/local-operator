@@ -326,7 +326,7 @@ def typed_line_of(text: str) -> str | None:
 
 
 def reference_block_stripped(text: str) -> str:
-    """``text`` without its appended ``<operator-references>`` block.
+    """``text`` without the ``<operator-references>`` blocks appended to it.
 
     An ``@path`` reference is expanded ONCE, at submit, and the expansion is
     appended to the message as a block. The model needs that block; the
@@ -339,30 +339,35 @@ def reference_block_stripped(text: str) -> str:
     leave the phone showing the block — which is precisely how one surface got
     the skill rule and the other did not.
 
-    ANCHORED TO THE END, and that is the whole of its correctness. The marker is
-    part of the product's visible vocabulary now, so quoting it is an ordinary
-    thing for an operator to type — asking about this feature, pasting a log
-    line, quoting a prompt. An unanchored ``find`` truncated every one of those
-    messages at the word they quoted: "why does my message contain
-    <operator-references> in it?" painted as "why does my message contain",
-    silently, with no notice, on both surfaces. The transcript showing strictly
-    less than what was typed is the failure R4 names.
+    EVERY COMPLETE BLOCK goes, and the spans come from
+    ``references.reference_block_spans`` rather than being found here. Both
+    halves are load-bearing:
 
-    The anchor is sound because expansion only ever APPENDS — the resolver
-    never substitutes in place, precisely so the typed token survives for this
-    row to paint — so a real block is the message's SUFFIX and nothing else is.
-    The last opener is taken rather than the first for the same reason: a
-    message that both quotes the marker and carries a real block must lose only
-    the block. A marker inside a reference BODY cannot fool that, because the
-    resolver defuses those on the way in.
+    - COMPLETE is what keeps the marker quotable. The tag is part of the
+      product's visible vocabulary now, so asking about this feature, pasting a
+      log line, or quoting a prompt is ordinary — and an unanchored ``find``
+      truncated every one of those messages at the word they quoted: "why does
+      my message contain <operator-references> in it?" painted as "why does my
+      message contain", silently, with no notice, on both surfaces. The
+      transcript showing strictly less than what was typed is the failure R4
+      names. A marker the operator quoted is not followed by the block's own
+      preamble line, so it is not a span; an UNCLOSED block is not provably one
+      and reports nothing either (truncated history, a message cut mid-write —
+      showing too much is recoverable, showing less than the operator typed, with
+      no notice, is not).
+    - EVERY is because a message can carry more than one. Expansion only ever
+      APPENDS, so a second pass over text that already held a block leaves the
+      FIRST one mid-message: pass 1's block, then prose carrying a new token,
+      then pass 2's block. Stripping only the trailing block painted 6,496
+      characters of file body — the whole of the first block — into the row,
+      which is the failure this function exists to prevent, reached through the
+      ordinary forwarding shape (a subagent launch re-prompting a manager's own
+      text).
 
-    An UNCLOSED block therefore no longer strips anything. It was handled once
-    — truncated history, a message cut mid-write — and the trade has since
-    reversed: an unclosed block is not provably a block, so removing text on
-    its say-so is the unanchored bug in a narrower costume, while the cost of
-    keeping it is a dangling marker on a history that was already truncated.
-    Showing too much is recoverable; showing less than the operator typed, with
-    no notice, is not.
+    The block's grammar lives with the code that writes it, because recognising
+    a real block means knowing the open marker AND the preamble line; a second
+    copy of that rule here is how the TUI and the phone came to disagree in the
+    first place.
 
     Lazy-imported and failure-swallowing by contract, like :func:`typed_line_of`
     above and for the same reason: this module stays host-free, and a broken or
@@ -370,21 +375,23 @@ def reference_block_stripped(text: str) -> str:
     degrades to "no block here", so the caller paints the text verbatim.
     """
     try:
-        from local_operator.references import (
-            REFERENCE_BLOCK_CLOSE,
-            REFERENCE_BLOCK_OPEN,
-        )
+        from local_operator.references import reference_block_spans
     except Exception:  # noqa: BLE001 — replay must never fail on this
         return text
-    trailing = text.rstrip()
-    if not trailing.endswith(REFERENCE_BLOCK_CLOSE):
+    spans = reference_block_spans(text)
+    if not spans:
         return text
-    opened = trailing.rfind(REFERENCE_BLOCK_OPEN)
-    if opened == -1:
-        # A closer with no opener is not a block; it is someone quoting half of
-        # one. Nothing to strip, and guessing a span would be the same defect.
-        return text
-    return trailing[:opened].rstrip()
+    kept: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        # The resolver appends a block as ``JOIN + block``, so the separator
+        # before one belongs to the block rather than to the operator's prose:
+        # keeping it would paint a blank line where the block stood, turning
+        # "first @a.txt and now @b.txt" into a two-paragraph row.
+        kept.append(text[cursor:start].rstrip())
+        cursor = end
+    kept.append(text[cursor:].rstrip())
+    return "".join(kept)
 
 
 def user_row_text(text: str) -> str:
