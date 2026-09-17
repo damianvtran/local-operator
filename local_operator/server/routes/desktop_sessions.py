@@ -40,6 +40,7 @@ from local_operator.server.models.desktop_sessions import (
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
+    PinState,
     PresenceReceipt,
     SessionList,
     SessionSearch,
@@ -451,6 +452,19 @@ class Notified(Input):
     # The two routes are otherwise unrelated — this one claims the right to
     # notify and NEVER acknowledges a read.
     completion_token: RequestID
+
+
+class Pin(Input):
+    """The pin STATE the caller wants this session to be in.
+
+    A desired state rather than a toggle verb, and that is deliberate: see the
+    route's docstring. ``extra="forbid"`` (inherited from ``Input``) is what
+    makes an omitted ``pinned`` a 422 rather than a silent false — the field is
+    the whole request, so a body that does not carry it is not a request this
+    route can honour.
+    """
+
+    pinned: bool
 
 
 class PresenceWindow(Input):
@@ -1805,6 +1819,52 @@ async def notified(session_id: str, body: Notified, request: Request):
     async with errors():
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
+
+
+@router.post("/v1/desktop/sessions/{session_id}/pin", response_model=CRUDResponse[PinState])
+async def pin(session_id: str, body: Pin, request: Request):
+    """Set a session's durable pin to the state the caller asked for.
+
+    THE PIN FILE IS NOW A CROSS-SURFACE CONTRACT. It began as the sidebar's own
+    index and it is now the durable record two front ends share — the TUI writes
+    it with f10 and reads it on every sidebar refresh, this route writes it for
+    the desktop app, and the catalogue row below reports it — so a change to its
+    shape is a coordinated change between the two surfaces and the backend, not
+    a private refactor of a TUI index. It stays a bare JSON array of session
+    directory names for the reasons `sidebar_pins` gives; nothing here adds a
+    field to it.
+
+    DESIRED STATE, NOT A TOGGLE. The TUI's verb is a toggle because it is a
+    keypress; over HTTP a toggle is not idempotent, so a request retried after a
+    dropped response flips the pin BACK and the user reports "the pin keeps
+    un-pinning itself". The body therefore carries the state the caller wants
+    and a retry lands on the same state — re-pinning a pinned session is a no-op
+    that does not even rewrite the file, which is also what keeps a retry from
+    reordering the user's pins (the store is newest-pin-first).
+
+    RECEIPT-FREE, deliberately, unlike the mutating routes around it. Receipts
+    buy at-most-once for calls that ADMIT WORK (a retried send must not run a
+    turn twice); this call is idempotent by construction, which is strictly
+    better than putting it on the ``ReceiptConflict`` 409 ladder.
+
+    LAST WRITER WINS across processes, accepted and documented rather than
+    fixed: a TUI f10 and a desktop press in the same instant mean the second
+    ``os.replace`` is what the file holds, and neither reader ever sees a torn
+    file — only an older one. A cross-process lock for a small index has no
+    precedent in this codebase, and the only visible consequence is that a user
+    who presses both within one animation sees their second press's outcome,
+    which is the correct reading of their own two actions.
+
+    ID SHAPE AND IS-DIR ONLY. Deliberately NOT the ``is_user_session`` check its
+    neighbour ``/seen`` applies: the sidebar pins delegated runs, and a route
+    that refused to unpin one would leave a pin the user can see and cannot
+    remove. Unknown and malformed ids both raise ``KeyError`` into ``errors()``
+    above, which answers the generic 404 — the reader cannot act on the
+    difference between the two, and inventing a code for it would be a
+    distinction with no remedy behind it.
+    """
+    async with errors():
+        return reply(await host(request).set_pin(session_id, body.pinned))
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

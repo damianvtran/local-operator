@@ -25,6 +25,23 @@ class SessionRow(BaseModel):
     #: holding a full transcript, because nothing on this path ever writes that
     #: field (design D19).
     preview: str = ""
+    #: Whether the sidebar has this conversation pinned: ALWAYS PRESENT, with
+    #: both values, on every row.
+    #:
+    #: IT MUST NEVER BE OMITTED, and the renderer is why: its row merge is
+    #: ``{...current, ...incoming}`` under the rule "an absent key is not a
+    #: claim", so a row that arrived without ``pinned`` would leave a stale
+    #: optimistic ``true`` in place forever — the pin glyph and the section
+    #: membership would outlive a successful unpin made anywhere else. Sending
+    #: both values is what makes a list read SETTLE the field.
+    #:
+    #: REQUIRED rather than defaulted, for that same reason: a projection that
+    #: forgot to fill it fails loudly here at validation, instead of publishing
+    #: an omitted key whose absence the client is entitled to read as no claim.
+    #:
+    #: The renderer's ``SessionCatalogueRow`` is this shape's hand-written
+    #: mirror, so this key is a change to a second file as well as this one.
+    pinned: bool
 
 
 class SessionList(BaseModel):
@@ -397,6 +414,22 @@ class NotificationClaim(BaseModel):
     """
 
     claimed: bool
+
+
+class PinState(BaseModel):
+    """What a session's pin is, after the write that set it.
+
+    Typed rather than ``dict[str, Any]`` for the reason ``AttentionState``
+    gives below: the renderer's hand-written copy of this shape cannot drift
+    from the authority silently.
+
+    ``pinned`` echoes the state the caller ASKED for, not delta information —
+    the request carries a desired state, so an idempotent retry returns exactly
+    what the first call returned and the client can reconcile on it.
+    """
+
+    session_id: str
+    pinned: bool
 
 
 class AttentionState(BaseModel):

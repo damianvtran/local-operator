@@ -101,6 +101,7 @@ from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import DesktopPresence, desktop_presence
 from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+from local_operator.tui.sidebar_pins import PINS_FILE
 from local_operator.wakes.store import read_index
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,11 @@ class DesktopFeed:
     ) -> None:
         self.root = root
         self.sessions_dir = root / "sessions"
+        #: The sidebar's own pin index, watched by the catalogue probe so a pin
+        #: written by EITHER surface moves the invalidation token. Taken from the
+        #: store rather than spelled here, so the file the TUI writes and the file
+        #: this probe stats cannot drift apart.
+        self.pins_path = root / PINS_FILE
         #: A fresh epoch per PROCESS start. Frames carry it so a client can tell
         #: "the backend restarted" from "the stream stuttered", exactly as the
         #: session stream's epoch does.
@@ -1191,6 +1197,12 @@ class DesktopFeed:
         30 s safety poll and its refetch on window focus are what cover that,
         and the row content a waiting user actually needs — the unseen mark —
         rides its own ``attention`` frame, which is not gated on this at all.
+
+        ONE TERM IS NOT ABOUT THE ROW SET AT ALL, and it is here because the
+        desktop plane's refetch on this token is the only mechanism that can
+        deliver a PIN change made on another surface: the pin index is shared
+        with the TUI, and its file is therefore read by this probe too. See the
+        key below.
         """
         names: list[str] = []
         try:
@@ -1221,7 +1233,27 @@ class DesktopFeed:
         # is compared across reconnects, and Python's string hashing is salted
         # per process — so a `hash()` here would report a change to every client
         # that reconnects to a restarted backend, for no reason at all.
-        key = ",".join(names) + "|" + repr(_fingerprint(self.sessions_dir))
+        key = (
+            ",".join(names)
+            + "|"
+            + repr(_fingerprint(self.sessions_dir))
+            # THE CROSS-SURFACE PIN STORE, and this term is a CORRECTNESS
+            # requirement rather than an optimisation. The pins file is shared by
+            # two front ends, so a pin made in the TUI has to reach the desktop
+            # app with no manual refresh — and this token is the only thing that
+            # can tell the feed to publish the `catalogue` frame the app's
+            # sidebar already refetches on. Without it the pins move under a
+            # token that did not change, the doorbell never rings, and the app
+            # falls back to its 30 s safety poll: bounded, but not the "I just
+            # pinned this in my terminal" feel this exists for.
+            #
+            # Cost: ONE extra `os.stat` per probe, and the probe runs once a
+            # second (CATALOGUE_PROBE_INTERVAL_S), not once a tick. The store
+            # writes by `os.replace`, so a pin (or unpin) always moves the
+            # fingerprint and always publishes exactly one frame.
+            + "|"
+            + repr(_fingerprint(self.pins_path))
+        )
         return zlib.crc32(key.encode()) & 0x7FFFFFFF, tuple(names)
 
     # -- the per-session status channel -------------------------------------
