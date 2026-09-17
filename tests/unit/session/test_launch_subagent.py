@@ -2767,3 +2767,43 @@ async def test_a_restored_swept_child_still_points_at_its_transcript(tmp_path, m
         assert row.session_dir == str(child_dir)
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declared_parent_inventory_bounds_its_child(tmp_path, monkeypatch):
+    """A declaration that stopped at the parent would leave the excluded set one
+    hop away: the parent cannot itself run ``bash``, but it could delegate to a
+    child that never heard of the bound. The child's reach is the parent's
+    declaration intersected with whatever its own role allows."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    parent.set_tool_inventory(["read", "task"], unattended=True)
+
+    child = await build_child(parent)
+
+    names = set(child.tool_inventory)
+    assert "read" in names
+    assert "task" in names
+    assert not names & {"bash", "write", "edit", "eval"}
+    # The approval for the inherited reach rides with it: a child that inherited
+    # a permitted tool but not the approval would have every one of its calls
+    # refused by a gate nobody is present to answer.
+    assert child._declared_tools_unattended is True
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_parent_leaves_its_child_untouched(tmp_path, monkeypatch):
+    """The negative case: with no declaration the child is built exactly as it
+    was before this feature existed — full local reach, no declaration recorded."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    child = await build_child(parent)
+
+    assert child._declared_tools is None
+    names = set(child.tool_inventory)
+    assert {"read", "bash", "write", "edit", "eval"} <= names
+    await child.dispose()
+    await parent.dispose()

@@ -2550,6 +2550,16 @@ async def wire_mcp_into_session(
         except Exception:  # noqa: BLE001 — a settle rebuild must never break the manager
             logger.debug("MCP settled outcome rebuild failed", exc_info=True)
             return
+        # A declaration made while servers were still connecting had nothing to
+        # grant (see ``Session.materialize_declared_tools``). Re-run it now that
+        # the round has settled, so a bounded runtime never ends up with its
+        # declaration enforced and its declared MCP tools still unreachable.
+        materialize = getattr(session, "materialize_declared_tools", None)
+        if callable(materialize):
+            try:
+                materialize()
+            except Exception:  # noqa: BLE001 — a grant must not break the settle path
+                logger.debug("declared-tool materialization failed", exc_info=True)
         session.mcp_startup = outcome
         if hasattr(session, "_frontend_state_store"):
             session.refresh_frontend_state()

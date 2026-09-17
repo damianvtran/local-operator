@@ -2088,6 +2088,29 @@ async def _construct_child_session(
     if _can_background(tools):
         drop = drop - {"jobs"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
+    # A DECLARED parent inventory carries down, or a bounded session could reach
+    # an excluded tool by delegating to a child that never heard of the bound.
+    # One hop is enough to make the declaration meaningful and is also all the
+    # grandchild level needs: this stamps the child, and the child stamps its own
+    # children off the same attribute. The child's own role allow-list has already
+    # narrowed its candidate set above, so the two intersect rather than either
+    # winning — a caller who declares a set that cannot reach what the delegated
+    # role needs has declared that; the alternative, letting the child's role
+    # widen the parent, is the leak this exists to stop.
+    #
+    # ``unattended`` rides along for the same reason the bound does: a child that
+    # inherited a reach but not the approval for it would be a session whose every
+    # permitted call is refused by a gate nobody is present to answer.
+    #
+    # Read through ``getattr`` because not every session shape is a real
+    # ``Session`` (reduced test doubles and the resume path construct children
+    # around hosts that predate this attribute).
+    declared = getattr(parent_session, "_declared_tools", None)
+    if declared is not None and hasattr(child, "set_tool_inventory"):
+        child.set_tool_inventory(
+            declared,
+            unattended=bool(getattr(parent_session, "_declared_tools_unattended", False)),
+        )
     # Record the denial on the child so its OWN children inherit it (see the
     # ``restricted`` computation above). Set UNCONDITIONALLY, outside the
     # ``mcp is not None`` branch below: a child built with no MCP surface --
