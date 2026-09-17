@@ -25,6 +25,23 @@ class SessionRow(BaseModel):
     #: holding a full transcript, because nothing on this path ever writes that
     #: field (design D19).
     preview: str = ""
+    #: Whether the sidebar has this conversation pinned: ALWAYS PRESENT, with
+    #: both values, on every row.
+    #:
+    #: IT MUST NEVER BE OMITTED, and the renderer is why: its row merge is
+    #: ``{...current, ...incoming}`` under the rule "an absent key is not a
+    #: claim", so a row that arrived without ``pinned`` would leave a stale
+    #: optimistic ``true`` in place forever — the pin glyph and the section
+    #: membership would outlive a successful unpin made anywhere else. Sending
+    #: both values is what makes a list read SETTLE the field.
+    #:
+    #: REQUIRED rather than defaulted, for that same reason: a projection that
+    #: forgot to fill it fails loudly here at validation, instead of publishing
+    #: an omitted key whose absence the client is entitled to read as no claim.
+    #:
+    #: The renderer's ``SessionCatalogueRow`` is this shape's hand-written
+    #: mirror, so this key is a change to a second file as well as this one.
+    pinned: bool
 
 
 class SessionList(BaseModel):
@@ -43,9 +60,33 @@ class SessionList(BaseModel):
     ignores it behaves byte-for-byte as it does today; the field is always
     PRESENT rather than omitted when empty, so a client can tell "nothing to
     report" from "this server is too old to know".
+
+    ``sessions`` IS MORE THAN THE PAGE, deliberately, and the consequence is
+    part of the contract: **``len(sessions)`` may exceed ``limit``**. It carries
+    the newest ``limit`` conversations AND every pinned conversation the page did
+    not reach, because it is the array a client REPLACES its rows with — a pinned
+    conversation parked in a sibling field would be one the client does not hold
+    until it learns about that field, and on a store larger than the page (the
+    ordinary case; 5,267 sessions against a 500-row page on the operator's) the
+    pin would then have no row, no count and no trace anywhere in the app. The
+    additions are ordinary rows in the catalogue's own ranking order — the page's
+    order continued below the page, NOT pin recency, which the store also holds
+    and which would put a second ordering authority inside one section — each
+    with ``pinned: true``, so a client sections them with no new field and no
+    sort. ``limit`` and ``truncated`` describe the PAGE ONLY.
+
+    The CLIENT half of that decision cannot be tested from this repository: there
+    is no in-tree consumer of this route, so what is pinned here is the shape the
+    app is handed, not the rendering it does with it. The boundary is worth
+    knowing before someone reads a green suite as coverage of the feature.
     """
 
     sessions: list[SessionRow]
+    #: Whether the ranking held more rows than the PAGE — the same question it
+    #: has always answered, and deliberately not "rows this answer does not
+    #: carry": the extras appended for pins are rows the client is being handed,
+    #: not history it is missing, and this flag is what a client uses to decide
+    #: whether more exists to fetch.
     truncated: bool = False
     limit: int = 100
     degraded: list[str] = Field(default_factory=list)
@@ -85,6 +126,23 @@ class SessionSearchRow(BaseModel):
     forked: bool = False
     rank: int
     body_match: bool = False
+    #: Whether this conversation is pinned: ALWAYS PRESENT, both values, on every
+    #: row — the same rule, and the same reason, as :attr:`SessionRow.pinned`.
+    #:
+    #: NOT OPTIONAL HERE EVEN THOUGH THE SEARCH IS A DIFFERENT QUESTION. A client
+    #: that synthesises a row from a search hit — which the app does, for a
+    #: conversation beyond the 500 rows its own page holds — would otherwise
+    #: render a pinned conversation in an ordinary section with no Pinned section
+    #: at all, and offer a pin control whose press is an idempotent no-op that
+    #: cannot repair the row (the pin is already true server-side, so the next
+    #: search answers the same way). An absent key there is not a neutral choice:
+    #: the client reads it as "no claim", so the omission is what makes the state
+    #: permanently wrong on that surface.
+    #:
+    #: REQUIRED rather than defaulted, like the list row's: a projection that
+    #: forgot it fails loudly here instead of shipping an omission the client is
+    #: entitled to read as no claim.
+    pinned: bool
 
 
 class SessionSearch(BaseModel):
@@ -423,6 +481,22 @@ class NotificationClaim(BaseModel):
     """
 
     claimed: bool
+
+
+class PinState(BaseModel):
+    """What a session's pin is, after the write that set it.
+
+    Typed rather than ``dict[str, Any]`` for the reason ``AttentionState``
+    gives below: the renderer's hand-written copy of this shape cannot drift
+    from the authority silently.
+
+    ``pinned`` echoes the state the caller ASKED for, not delta information —
+    the request carries a desired state, so an idempotent retry returns exactly
+    what the first call returned and the client can reconcile on it.
+    """
+
+    session_id: str
+    pinned: bool
 
 
 class AttentionState(BaseModel):

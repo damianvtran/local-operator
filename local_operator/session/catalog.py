@@ -894,6 +894,7 @@ def load_catalog(
     *,
     include_subagents: bool = False,
     pinned_hidden_ids: Sequence[str] = (),
+    pinned_off_page: Sequence[str] = (),
 ) -> list[CatalogEntry]:
     """Rank a shared lightweight candidate snapshot before materializing a page.
 
@@ -917,6 +918,16 @@ def load_catalog(
     hidden sessions resolvable while that layer is off. Both are keyword-only
     and default to the behaviour every existing caller already has: with the
     layer off this function issues exactly the syscalls it did before.
+
+    ``pinned_off_page`` keeps individually pinned sessions resolvable when the
+    PAGE does not carry them — the same promise ``pinned_hidden_ids`` makes on
+    the other axis, and a different one: a hidden id is absent because the
+    catalogue never built it, while an off-page id IS built here and is dropped
+    by the ``limit`` slice below. A caller that renders a pinned section must
+    have both, because a pin is a durable statement by the user and a recency
+    window is a property of the listing. The extras come back APPENDED, after
+    the page and in the ranking's own order (every extra ranks below every page
+    row by construction, so the concatenation IS rank order).
     """
     from dataclasses import replace
 
@@ -1122,7 +1133,7 @@ def load_catalog(
         # is the only read of that store, and it happens after the decoration.
         logger.warning("session catalogue could not read attention state", exc_info=True)
         rows = [row._replace(degraded=row.degraded + (DECORATION_ATTENTION,)) for row in rows]
-    entries = list(
+    ranked = list(
         rank_entries(
             [entry_for(row, attention.get(identities[row.id])) for row in rows]
             # The ONE join point. Sub entries are concatenated here rather than
@@ -1131,7 +1142,37 @@ def load_catalog(
             # `rank_entries` call over a single list.
             + subagent_entries
         )
-    )[:limit]
+    )
+    # THE PAGE, THEN THE PINS THAT FELL OUTSIDE IT. The slice is a RECENCY
+    # window, and a pin is the one thing in this listing that is not recency: it
+    # is a durable statement the user made about a conversation. On a store
+    # larger than the client's page a pinned session is therefore UNRENDERABLE
+    # without this — the row the client needs to draw in its pinned section is
+    # exactly the row the window removes — so the caller that renders pins names
+    # them and gets them back here.
+    #
+    # WHAT THIS COSTS: nothing measurable, and that is the reason it lives here
+    # rather than in a caller. Every candidate's row, decoration and attention
+    # lookup has ALREADY happened by this point — the slice is the only thing
+    # that discarded these entries — so an extra costs one membership test, not
+    # a scan, a hydration or a second `cached_session_rows` call. A caller-side
+    # union would have to re-scan the store or re-hydrate by id, and the id
+    # lookup it would need is the one thing this function does not return.
+    #
+    # SILENTLY ABSENT WHEN IT CANNOT BE RESOLVED, deliberately: an id that is
+    # not in ``ranked`` at all — a hidden (delegated) run, which never reaches
+    # ``candidates``, or a directory that has since been deleted — is simply not
+    # appended, rather than raising. The caller asked for a row it would like to
+    # render, not for a promise this store cannot keep.
+    entries = ranked[:limit]
+    if pinned_off_page:
+        # The window is the caller's own page bound, so a pinned row sitting
+        # exactly AT that bound is carried too — it is a row the caller's page
+        # does not carry, which is the whole condition. Order is preserved: the
+        # extras rank below every page row by construction, so appending them
+        # keeps the result in rank order.
+        wanted = set(pinned_off_page)
+        entries += [entry for entry in ranked[limit:] if entry.id in wanted]
     # KNOWN LIMITATION, decided rather than missed. This slice applies to the
     # COMBINED list, so a store with more than ~160 visible sessions cannot fit
     # both populations in CATALOG_SCAN_LIMIT. Sub rows do not lose that race:
@@ -1141,6 +1182,11 @@ def load_catalog(
     # user's OLDEST COLD sessions, never an active row. Raising the limit would
     # restore the per-poll row-building cost the comment on CATALOG_SCAN_LIMIT
     # exists to document removing, so it is deliberately not raised.
+    #
+    # A PINNED ID AMONG THEM IS NO LONGER PUSHED OUT, and that is the one thing
+    # `pinned_off_page` changes about this sentence: the row is still sliced off
+    # the page, and it comes back appended, which is cheaper than raising the
+    # limit for everyone to serve the few rows a user pinned.
     # Pinned by `test_the_layer_competes_for_the_page_on_a_full_store`.
     named = {
         row.id: row

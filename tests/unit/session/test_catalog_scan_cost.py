@@ -60,6 +60,7 @@ from typing import Any, Callable
 import local_operator.session.retention as retention
 from local_operator.resume import _recent_sessions_with_origin
 from local_operator.session.catalog import load_catalog
+from local_operator.session.creation import ensure_session_created_at
 from local_operator.session.retention import session_activity, session_activity_path
 
 
@@ -71,10 +72,22 @@ def _session(
     inbox: str | None = None,
     origin: str | None = None,
     stamp: float | None = None,
+    created: float | None = None,
 ) -> Path:
-    """One session directory in whichever awkward shape a test needs."""
+    """One session directory in whichever awkward shape a test needs.
+
+    ``created`` PINS ``created_at`` through the store's own writer, and any test
+    that asserts an ORDER must pass it. ``session_created_at`` reads the stored
+    sidecar first and falls back to ``st_birthtime``, which macOS has and Linux
+    does not — measured, not assumed: with the birthtime fallback removed (which
+    is CI's filesystem), the ranking of these fixtures collapses to the id
+    tie-break and order-dependent assertions pass locally and fail in CI. A
+    sidecar makes the order the same number on every platform.
+    """
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
+    if created is not None:
+        ensure_session_created_at(directory, created)
     if transcript is not None:
         (directory / "transcript.jsonl").write_text(transcript, encoding="utf-8")
     if inbox is not None:
@@ -1218,3 +1231,132 @@ class TestTheSubagentLayerIsOptIn:
             _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
 
         assert set(_picker_rows(tmp_path)) == {"user00000000", "user00000001"}
+
+
+class TestAPinnedConversationSurvivesThePage:
+    """``pinned_off_page``: the desktop half of the promise #1200 made to the TUI.
+
+    The page is a RECENCY window. A pin is a durable statement by the user about
+    a specific conversation, so on a store larger than the client's page — on the
+    reporting machine, 5,267 sessions against a 500-row page, i.e. the ordinary
+    case rather than an edge one — the row a pinned section must draw is exactly
+    the row the window removes. The TUI has kept such a pin resolvable since
+    #1200 (``pinned_hidden_ids``); these tests pin the visible-session half, which
+    is a different axis: a hidden id is never built, while an off-page id IS built
+    and used to be discarded by the slice.
+    """
+
+    def test_a_pinned_id_beyond_the_page_comes_back_appended_and_named(
+        self, tmp_path: Path
+    ) -> None:
+        """From ``ranked[limit:]``, appended, and hydrated by the SAME single
+        ``cached_session_rows`` call that names the page — so it carries the name
+        the page would have given it, not the empty placeholder a hand-built row
+        starts with."""
+        from local_operator.resume import write_session_title
+
+        for index in range(4):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
+        oldest = "user00000000"
+        write_session_title(
+            tmp_path / "sessions" / oldest, "Older pin", user_set=False, past_names=[]
+        )
+
+        plain = load_catalog(tmp_path, limit=2)
+        pinned = load_catalog(tmp_path, limit=2, pinned_off_page=[oldest])
+
+        # The page itself is untouched, and the extra is appended after it.
+        assert [entry.id for entry in pinned[:2]] == [entry.id for entry in plain]
+        assert [entry.id for entry in pinned[2:]] == [oldest]
+        assert pinned[2].row.name == "Older pin"
+
+    def test_without_the_parameter_the_same_id_stays_out(self, tmp_path: Path) -> None:
+        """The unpinned case, so the assertion above is about the parameter
+        rather than about the ranking happening to include it."""
+        for index in range(4):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
+
+        entries = load_catalog(tmp_path, limit=2)
+
+        assert [entry.id for entry in entries] == ["user00000003", "user00000002"]
+        assert "user00000000" not in {entry.id for entry in entries}
+
+    def test_the_extras_keep_the_ranking_s_own_order(self, tmp_path: Path) -> None:
+        """No re-sort, no pin-recency order, and not the caller's own list order
+        either: the appended rows come back in the RANKING's order, which is what
+        the page's rows use and what the TUI's `★ Pinned` section draws. A second
+        ordering here would make the app and the TUI present one list two ways.
+
+        The parameter is passed in the REVERSE of rank order on purpose: if this
+        function ordered the extras by the sequence it was handed — the shape a
+        caller-driven or pin-recency order would take — the assertion fails.
+        """
+        for index in range(5):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
+
+        entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000002", "user00000000"])
+
+        assert [entry.id for entry in entries] == [
+            "user00000004",
+            "user00000003",
+            "user00000002",
+            "user00000000",
+        ]
+
+    def test_a_pinned_id_inside_the_page_is_not_duplicated(self, tmp_path: Path) -> None:
+        """A pin on a conversation the page already carries must not buy it a
+        second row: the extras are ``ranked[limit:]``, not "everything pinned"."""
+        for index in range(4):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
+
+        entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000003"])
+        ids = [entry.id for entry in entries]
+
+        assert ids == ["user00000003", "user00000002"]
+        assert len(ids) == len(set(ids))
+
+    def test_an_id_the_store_cannot_resolve_is_simply_absent(self, tmp_path: Path) -> None:
+        """A deleted directory, a hidden (delegated) run — the layer is off, so
+        it never reaches ``candidates`` — and an id that was never a session all
+        resolve to nothing. The caller asked for a row it would like to render,
+        not for a promise this store cannot keep, and a pin on a delegated run
+        deliberately has no row here (design §9.2)."""
+        for index in range(3):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index, created=1000.0 + index)
+        _session(tmp_path, "sub000000001", origin="subagent", stamp=500.0, created=500.0)
+
+        entries = load_catalog(
+            tmp_path,
+            limit=2,
+            pinned_off_page=["aaaaaaaaaaaa", "sub000000001", "user00000000"],
+        )
+
+        assert [entry.id for entry in entries] == ["user00000002", "user00000001", "user00000000"]
+
+    def test_the_extras_do_not_evict_the_page_from_the_hydration_cache(
+        self, tmp_path: Path
+    ) -> None:
+        """THE CACHE GUARD, for the path that could so easily break it.
+
+        ``cached_session_rows`` ends with ``_ROW_CACHE.clear(); update(fresh)``,
+        so resolving the extras with a SECOND call would leave only their rows
+        cached and make the next poll re-read every page row from disk — the
+        measured 2.0 ms-vs-12.2 ms penalty the layer's own test documents. One
+        call with a concatenated candidate list is what keeps that from
+        happening, and the page's presence in the cache is the observable.
+        """
+        from local_operator.session.catalog import _ROW_CACHE
+
+        for index in range(4):
+            _session(
+                tmp_path,
+                f"user{index:08x}",
+                transcript="{}\n",
+                stamp=1000.0 + index,
+                created=1000.0 + index,
+            )
+
+        entries = load_catalog(tmp_path, limit=2, pinned_off_page=["user00000000"])
+
+        assert len(entries) == 3, "fixture: no extra was built"
+        assert len(_ROW_CACHE) == 3, "the extras evicted the page rows from the cache"

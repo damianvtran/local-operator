@@ -573,7 +573,7 @@ async def test_served_list_order_is_the_catalogs_rank(tmp_path):
         schedules=[{"id": "w1", "next_due_at": 10**12}],
     )
 
-    served = [row["id"] for row in await DesktopSessions(tmp_path).list(50)]
+    served = [row["id"] for row in (await DesktopSessions(tmp_path).list(50)).rows]
     catalog = load_catalog(tmp_path, limit=50)
     assert served == [entry.id for entry in catalog]
     # Re-ranked from a SHUFFLED input, so this pins the sort rather than merely
@@ -6210,7 +6210,7 @@ def test_a_stamped_page_still_names_a_failed_attention_read(tmp_path, monkeypatc
     monkeypatch.setattr(AttentionStore, "state_many", flaky)
 
     try:
-        rows = asyncio.run(DesktopSessions(tmp_path).list(50, status_stamps=stamps))
+        rows = asyncio.run(DesktopSessions(tmp_path).list(50, status_stamps=stamps)).rows
     finally:
         asyncio.run(feed.close())
 

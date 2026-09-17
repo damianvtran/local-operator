@@ -163,6 +163,55 @@ def test_session_factory_import_stays_off_the_heavy_stacks(
     _assert_absent(session_factory_modules, "textual", "TUI front end; the server has no terminal")
 
 
+# --- The desktop session adapter ----------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def server_sessions_modules() -> set[str]:
+    """Modules loaded by importing the desktop session adapter."""
+    return _imported_modules("local_operator.server.utils.desktop_sessions")
+
+
+@pytest.fixture(scope="module")
+def sidebar_pins_modules() -> set[str]:
+    """Modules loaded by importing the sidebar's durable pin store."""
+    return _imported_modules("local_operator.tui.sidebar_pins")
+
+
+def test_server_session_adapter_import_stays_textual_free(
+    server_sessions_modules: set[str],
+) -> None:
+    # The adapter reaches into `local_operator.tui` on purpose: the sidebar's pin
+    # store (`tui/sidebar_pins.py`, added for the desktop pin route) and
+    # `tui/move_targets.py` are deliberately widget-free, so the desktop plane
+    # reuses the TUI's own index rather than keeping a second copy of the format.
+    # The whole value of that reuse depends on those modules staying
+    # front-end-free, and nothing else forbids the server from growing a real
+    # Textual dependency through one of them — `session_factory_modules` above
+    # pins the composition root, which this module is not on. A `textual` import
+    # here would put a terminal stack on every backend serving the desktop API.
+    #
+    # ONLY `textual` IS PINNED HERE, deliberately. `rich` is ALREADY on this
+    # graph before the pin store is imported at all — `session.attached` pulls it
+    # in for `rich.cells`, measured on the commit this suite was written against
+    # — so asserting it absent would be a red test about the base commit rather
+    # than a guard on this module, and the next author would have to work out
+    # which half was the regression. The store's own graph is pinned separately
+    # below, where the widget-free promise actually lives.
+    _assert_absent(server_sessions_modules, "textual", "the server has no terminal")
+
+
+def test_sidebar_pin_store_import_is_widget_free(sidebar_pins_modules: set[str]) -> None:
+    # The promise `tui/sidebar_pins.py` makes in its own docstring — Textual-free,
+    # so a non-Textual frontend can ask which sessions a user pinned — is what
+    # makes the adapter's module-level import of it legitimate. That promise was
+    # prose until the desktop plane started depending on it, so it is pinned
+    # here: this module is now read on the backend's request path and must load
+    # neither front end's stack.
+    _assert_absent(sidebar_pins_modules, "textual", "a non-Textual reader must not need it")
+    _assert_absent(sidebar_pins_modules, "rich", "a non-Textual reader must not need it")
+
+
 # --- The tool registry -------------------------------------------------------
 
 

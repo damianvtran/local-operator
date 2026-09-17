@@ -22,7 +22,14 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.tui.sidebar_pins import PINS_FILE, PINS_LIMIT, read_pins, toggle_pin
+from local_operator.tui.sidebar_pins import (
+    PINS_FILE,
+    PINS_LIMIT,
+    _write_pins,
+    read_pins,
+    set_pin,
+    toggle_pin,
+)
 
 
 def _session(config: Path, session_id: str) -> Path:
@@ -180,3 +187,135 @@ def test_last_writer_wins(tmp_path: Path) -> None:
     toggle_pin(tmp_path, "a" * 12)
     toggle_pin(tmp_path, "b" * 12)
     assert read_pins(tmp_path) == ["b" * 12, "a" * 12]
+
+
+# --- ``set_pin``: the desired-state verb behind the desktop route -----------------
+#
+# The two properties below are the whole reason this verb exists beside
+# ``toggle_pin``: the HTTP route that calls it can be retried after its response
+# is lost, and a retried TOGGLE flips the pin back. So a repeat in the same
+# direction must be a NO-OP, not merely an equivalent end state — "does not
+# reorder" and "does not rewrite the file" are both load-bearing.
+
+
+def test_set_pin_pins_an_unpinned_session(tmp_path: Path) -> None:
+    _session(tmp_path, "a" * 12)
+    assert set_pin(tmp_path, "a" * 12, True) is True
+    assert read_pins(tmp_path) == ["a" * 12]
+
+
+def test_set_pin_unpins_a_pinned_session(tmp_path: Path) -> None:
+    _session(tmp_path, "a" * 12)
+    set_pin(tmp_path, "a" * 12, True)
+    assert set_pin(tmp_path, "a" * 12, False) is False
+    assert read_pins(tmp_path) == []
+
+
+def test_set_pin_false_does_not_toggle_an_unpinned_session(tmp_path: Path) -> None:
+    """The direction that separates this from ``toggle_pin``: an unpinned
+    session asked to be unpinned must stay unpinned, where a toggle would have
+    pinned it."""
+    _session(tmp_path, "a" * 12)
+    assert set_pin(tmp_path, "a" * 12, False) is False
+    assert read_pins(tmp_path) == []
+
+
+def test_re_pinning_does_not_reorder(tmp_path: Path) -> None:
+    """The retry-safety rule, and the assertion a ``toggle_pin``-shaped route
+    would fail: pin A, pin B (so the newest leads), then ask for A to be pinned
+    again. A retry must not move the row to the head, or a flaky link silently
+    rewrites the user's pin order."""
+    for session_id in ("a" * 12, "b" * 12):
+        _session(tmp_path, session_id)
+    set_pin(tmp_path, "a" * 12, True)
+    set_pin(tmp_path, "b" * 12, True)
+    assert set_pin(tmp_path, "a" * 12, True) is True
+    assert read_pins(tmp_path) == ["b" * 12, "a" * 12]
+
+
+def test_a_repeated_set_pin_writes_nothing(tmp_path: Path) -> None:
+    """Byte-identical AND mtime-identical, because "it wrote the same bytes"
+    would still be a write: the file is compared by content first so the
+    assertion states the useful property, then by ``st_mtime_ns`` because a
+    same-content rewrite is exactly what a no-op must not be — and it is also
+    what would wake the feed's catalogue probe for nothing."""
+    _session(tmp_path, "a" * 12)
+    set_pin(tmp_path, "a" * 12, True)
+    path = tmp_path / PINS_FILE
+    before_bytes = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+    assert set_pin(tmp_path, "a" * 12, True) is True
+    assert path.read_bytes() == before_bytes
+    assert path.stat().st_mtime_ns == before_mtime, "a no-op must not rewrite the file"
+
+
+def test_an_unpin_of_an_unpinned_session_writes_nothing(tmp_path: Path) -> None:
+    """No file at all, not an empty one: the store's resting state for "no
+    pins" is an absent file, and a no-op must not create it."""
+    _session(tmp_path, "a" * 12)
+    assert set_pin(tmp_path, "a" * 12, False) is False
+    assert not (tmp_path / PINS_FILE).exists()
+
+
+def test_set_pin_honours_the_cap_and_keeps_the_new_pin(tmp_path: Path) -> None:
+    """The cap drops the OLDEST, and a just-added pin is by construction the
+    newest, so it must survive — asserted rather than assumed, because the one
+    unacceptable failure of the cap is dropping the pin the user just made."""
+    for index in range(PINS_LIMIT):
+        session_id = f"{index:012x}"
+        _session(tmp_path, session_id)
+        set_pin(tmp_path, session_id, True)
+    _session(tmp_path, "f" * 12)
+    assert set_pin(tmp_path, "f" * 12, True) is True
+    pins = read_pins(tmp_path)
+    assert len(pins) == PINS_LIMIT
+    assert pins[0] == "f" * 12
+    assert f"{0:012x}" not in pins
+
+
+def test_the_writer_itself_applies_the_cap(tmp_path: Path) -> None:
+    """The CAP, pinned on ``_write_pins`` rather than on the verbs.
+
+    The two cap tests above drive ``toggle_pin`` and ``set_pin``, so they stay
+    green if the writer stops capping while both verbs keep their own trim — the
+    shape this test exists to make impossible. It is also the test a NEW verb
+    needs: the writer is the entry point the module's comment recommends, and an
+    over-long list handed to it must come out at ``PINS_LIMIT`` whatever the
+    caller believed it had trimmed.
+
+    The file is read RAW rather than through ``read_pins``: that read prunes
+    against ``sessions/``, so a capped list of ids with no directories would
+    come back empty and the assertion would be about the prune instead of the
+    cap.
+    """
+    entries = [f"{index:012x}" for index in range(PINS_LIMIT + 5)]
+
+    _write_pins(tmp_path, entries)
+
+    assert json.loads((tmp_path / PINS_FILE).read_text()) == entries[:PINS_LIMIT]
+    assert len(entries) == PINS_LIMIT + 5, "the caller's own list must not be trimmed in place"
+
+
+def test_set_pin_unpins_from_anywhere_in_the_list(tmp_path: Path) -> None:
+    """Removal is by identity, not by position: a mid-list unpin must leave the
+    others in their order."""
+    ids = [f"{index:012x}" for index in range(3)]
+    for session_id in ids:
+        _session(tmp_path, session_id)
+        set_pin(tmp_path, session_id, True)
+    assert set_pin(tmp_path, ids[1], False) is False
+    assert read_pins(tmp_path) == [ids[2], ids[0]]
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root writes to unwritable directories anyway")
+def test_a_failing_set_pin_never_raises(tmp_path: Path) -> None:
+    """Its caller is a route answering a user who just pressed something, so a
+    read-only config directory must cost them the pin and not the request."""
+    config = tmp_path / "readonly"
+    config.mkdir()
+    config.chmod(0o500)
+    try:
+        assert set_pin(config, "a" * 12, True) is True
+        assert read_pins(config) == []
+    finally:
+        config.chmod(0o700)

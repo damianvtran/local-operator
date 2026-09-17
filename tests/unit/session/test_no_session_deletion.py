@@ -223,14 +223,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # and neither can resolve under sessions/. The value written is a list of
     # session-id STRINGS, never a path this module opens or removes — pruning a
     # stale pin drops the id from that list and touches no directory.
+    #
+    # Named on `_write_pins`, which is now the SINGLE writer shared by both verbs
+    # (`toggle_pin` for the TUI's chord, `set_pin` for the desktop route): the
+    # two calls were pinned on `toggle_pin` while it owned them, and naming the
+    # shared writer is what keeps this entry correct if a third verb ever
+    # appears — it cannot, because there is only one place that writes.
     (
-        "local_operator/tui/sidebar_pins.py::toggle_pin",
+        "local_operator/tui/sidebar_pins.py::_write_pins",
         "os.replace",
         "Atomic replacement of the single sidebar-pins.json file in the config dir, "
         "never a directory and never under sessions/",
     ),
     (
-        "local_operator/tui/sidebar_pins.py::toggle_pin",
+        "local_operator/tui/sidebar_pins.py::_write_pins",
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
