@@ -230,6 +230,30 @@ class Agent(BaseModel):
     )
 
 
+class ImportedAgent(Agent):
+    """An agent this backend just WROTE from an archive or a hub pull.
+
+    It adds the one field the caller cannot derive: the name the profile was
+    renamed FROM when the registry already held the published one (cross-repo
+    contract §3.6). Without it a pull of ``Coder`` over a local ``coder``
+    returns a row called ``Coder (2)`` and nothing that explains why, so the
+    user goes looking for an agent under the name they asked for.
+
+    Declared as its own model rather than a field on :class:`Agent` because an
+    ordinary agent row never carries it, and it is ``None`` rather than an
+    absent key so a client can tell "nothing was renamed" from "this backend is
+    too old to report renames". The response models of the two importing routes
+    name this class, so FastAPI cannot silently drop the extra key the way it
+    does when a route declares the narrower :class:`Agent`.
+    """
+
+    renamed_from: Optional[str] = Field(
+        None,
+        description="The published name the import was renamed FROM because the local "
+        "registry already held it. None when the published name was free.",
+    )
+
+
 class AgentCreate(BaseModel):
     """Data required to create a new agent."""
 

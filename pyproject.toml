@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.56.2"
+version = "0.56.4"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -208,6 +208,13 @@ local_operator = [
     # wheel, and ``task(agent="reviewer")`` silently degrades to an unguided
     # child on every non-source install.
     "agent_seeds/*.md",
+    # The GENERATED built-in manifest beside them (scripts/
+    # gen_agent_seed_manifest.py writes it; tests/unit/test_agent_seed_manifest.py
+    # checks it). It ships with the seeds because it describes THEM: the public
+    # copy is what agent-server fetches to reserve the built-in names, so a wheel
+    # that dropped it would install the roles while having no record of which
+    # names the hub refuses to republish.
+    "agent_seeds/*.json",
     # The macOS notification sender's source and icon. Both must ship: the
     # bundle is compiled on the user's machine on first use (see
     # ``tui/notifier_app``), and without the `.m` there is nothing to build
