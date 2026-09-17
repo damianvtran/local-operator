@@ -69,7 +69,12 @@ class FakePool:
         self.remote = remote
 
     @contextlib.asynccontextmanager
-    async def session(self, session_id: str):
+    async def session(self, session_id: str, *, read: bool = False):
+        # ``read`` is the route's READ envelope (design D1). This pool has one
+        # remote and no dialling, so the flag changes nothing it can observe —
+        # but it must be ACCEPTED, or a route that moved into read mode would
+        # fail here for a reason that has nothing to do with what it reads.
+        del read
         if session_id != SESSION:
             raise KeyError("Unknown session")
         yield SimpleNamespace(remote=self.remote)

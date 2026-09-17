@@ -196,11 +196,18 @@ READ_ATTACH_BUDGET_S = 2.0
 #: :meth:`AttachedSession._retain_unsynced_dial` keeps an authenticated-but-
 #: unsynced dial alive so a sync that lands after the read's budget still
 #: installs state and publishes the rollover the renderer already handles. It
-#: cannot be kept indefinitely: an attach socket is term 3 of the runtime's own
-#: exit predicate (``session.runtime.process._should_exit``), so a viewer that
+#: cannot be kept indefinitely: an attach socket is a residency term of the
+#: runtime's own exit predicate (see the conditions below), so a viewer that
 #: has given up must stop holding an 82 MB process resident. This is the hard
 #: deadline after which the client is closed and the runtime's attach slot is
-#: given back.
+#: given back. That slot is a residency term only FOR A VISIBLE PANEL, which is
+#: worth stating because it is narrower than "an attach socket":
+#: ``runtime.server.attach_clients`` counts a ``kind == "attach"`` client and
+#: then, for a desktop surface, only while its lease is live AND
+#: ``desktop_visible or desktop_can_notify``. So a retained dial from a visible
+#: panel pins the runtime — the case this deadline exists for — and one from a
+#: background read holds nothing (while still occupying an ``ATTACH_MAX_CLIENTS``
+#: slot). The deadline is right either way; the sentence is narrower than it read.
 SYNC_LANDING_DEADLINE_S = 30.0
 
 #: How long the DIAL path waits for a desktop presence re-assert's ack.
@@ -2397,6 +2404,16 @@ class AttachedSession:
             # "is there already a client?", and a connected one owns this
             # facade's dial until it is discarded.
             if self.owner_reachable:
+                if budget is not None:
+                    # A CONNECTED facade is not an ABSENT one. Classifying here too
+                    # is what keeps the token honest in the window this file's own
+                    # ``is_cold`` docstring names: a client stays connected while
+                    # ``_ready_for_events`` is cleared for a display refresh, so a
+                    # snapshot taken then would otherwise fall back to
+                    # ``no-runtime`` — "no pid holds this session's transcript
+                    # lease" — while a socket to that very pid is up and serving
+                    # (review round 1, MINOR-1).
+                    self._note_read_cold_reason(None, self._runtime_pid)
                 return False
             record, owner = await asyncio.to_thread(
                 find_runtime_record, self._config_dir, self._session_id
@@ -2497,7 +2514,9 @@ class AttachedSession:
         """Bind a viewer before an explicitly requested owner control operation."""
         await self._ensure_bound()
 
-    async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+    async def update_desktop_watch(
+        self, *, visible: bool, can_notify: bool, timeout: float | None = None
+    ) -> None:
         """Update the existing attach lease; a proxy socket alone is not a human.
 
         The ``{visible, can_notify}`` pair is also the DESIRED presence for the
@@ -2507,14 +2526,45 @@ class AttachedSession:
         comment: ``DesktopSessionBridge.refresh_watch`` records a live VISIBLE
         lease before it warms, so the runtime it is about to start counts the
         viewer from its first tick instead of idling out under it.
+
+        THE RE-ASSERT IS BEST-EFFORT, BOUNDED AND SWALLOWED, and this is the
+        same argument the mute re-assert beside it on the dial path already
+        follows. What it asserts is the RENDERER's presence lease, whose own TTL
+        (``DESKTOP_WATCH_LEASE_S``, 45 s) expires it and whose next beat (15 s)
+        states it again — so a lost assertion is a cost, not a defect, and a READ
+        must never be refused because a presence hint went unacknowledged. The
+        asymmetry was the reported bug: this RPC sat on the dial path unbounded
+        and turned a silent-but-alive owner into ``OwnerAckTimeout`` after 15 s on
+        the way to a 503. It is now bounded by ``timeout`` (defaulting to
+        ``_DESKTOP_WATCH_ACK_BOUND_S``) rather than by ``ACK_TIMEOUT_S``, for the
+        reason that bound exists: a wedged owner must not hold a beat — or a
+        redial — open for the full request timeout over an optimisation.
+        ``timeout`` is the CALLER's clamp, so a read passes what is left of its
+        own budget and the presence hint can never lengthen it.
+
+        A CANCELLATION still propagates: that is not a lost hint, it is this dial
+        being abandoned, and ``_dial`` closes the half-open socket for it.
         """
         if self._surface != "desktop":
             raise ValueError("only a desktop viewer can renew a desktop lease")
         self._desktop_visible = visible
         self._desktop_can_notify = can_notify
         self._desktop_seen = time.monotonic()
-        if self._client is not None and self._client.connected:
-            await self._client.desktop_watch(visible=visible, can_notify=can_notify)
+        client = self._client
+        if client is None or not client.connected:
+            # Nothing to re-assert to. The recording above is the whole job while
+            # cold, and it is load-bearing rather than a no-op — see the class
+            # notes on the desired-presence pair.
+            return
+        bound = _DESKTOP_WATCH_ACK_BOUND_S
+        if timeout is not None:
+            bound = max(0.0, min(bound, timeout))
+        try:
+            await asyncio.wait_for(
+                client.desktop_watch(visible=visible, can_notify=can_notify), timeout=bound
+            )
+        except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
+            logger.debug("desktop watch re-assert failed", exc_info=True)
 
     async def answer_gate(
         self,
@@ -3561,23 +3611,28 @@ class AttachedSession:
         facade would still report itself cold in.
 
         The deadline is not optional. An attach socket is a RESIDENCY term of the
-        runtime's own exit predicate, so a viewer that will never get its sync —
-        a runtime wedged past any recovery — must hand the slot back rather than
-        hold an 82 MB process up for as long as the browser tab stays open.
+        runtime's own exit predicate FOR A VISIBLE PANEL — the desktop surface's
+        count needs the client's lease live and ``visible`` or ``can_notify``, so
+        this is the case that pins an 82 MB process and the one the deadline is
+        sized for. A viewer that will never get its sync must hand the slot back
+        rather than hold a process up for as long as the browser tab stays open.
         """
+        frontend: FrontendSync | None
         try:
             frontend = await asyncio.wait_for(
                 asyncio.shield(pending_sync), timeout=SYNC_LANDING_DEADLINE_S
             )
         except TimeoutError:
-            # THE LANDING DEADLINE: give the socket back. The future is left to
-            # settle on its own and is already consumed by the retention-time
-            # callback (see ``_retain_unsynced_dial``).
-            self._abandon_landing_claim(pending_sync)
-            return
+            # THE LANDING DEADLINE — settled first, because an expiry is not
+            # evidence that nothing landed (see :meth:`_settle_landed_sync`).
+            frontend = await self._settle_landed_sync(pending_sync)
+            if frontend is None:
+                self._abandon_landing_claim(pending_sync)
+                return
         except BaseException:  # noqa: BLE001 — disposal, or a socket that died
             self._abandon_landing_claim(pending_sync)
             return
+        assert frontend is not None, "both arms above return when there is no sync"
         if self._disposed or self._frontend_future is not pending_sync:
             # SUPERSEDED by a later dial (or disposed): that dial's state is this
             # facade's now, and installing a stale one here would be a silent
@@ -3615,6 +3670,37 @@ class AttachedSession:
             logger.debug("late frontend sync for %s was refused", self._session_id, exc_info=True)
             if not self._disposed and self._frontend_future is pending_sync:
                 self._discard_rejected_client()
+
+    async def _settle_landed_sync(
+        self, pending_sync: asyncio.Future[FrontendSync]
+    ) -> FrontendSync | None:
+        """The sync a tripped deadline may have discarded, or ``None``.
+
+        ``asyncio.wait_for``'s expiry is a HINT, not a fact, and this file has
+        already paid for learning it: ``_await_frontend`` documents a
+        reproduction where the deadline trips with the frame already in the
+        socket buffer — a race between the deadline and the SCHEDULER rather than
+        between the deadline and the work, which is why a bigger number buys only
+        a slower wrong answer — and answers it with ``FRONTEND_SYNC_SETTLE_TURNS``
+        turns of settlement instead of believing the clock.
+
+        The retained dial needs the same turns for the same reason, with a
+        sharper consequence: without them a sync that HAS landed is judged
+        absent, the socket is closed and canonical state the renderer was
+        promised a rollover for is thrown away — the facade stays cold until the
+        next read redials and asks again (review round 1, MINOR-4).
+        """
+        for _ in range(FRONTEND_SYNC_SETTLE_TURNS):
+            if pending_sync.done():
+                break
+            await asyncio.sleep(0)
+        if not pending_sync.done() or pending_sync.cancelled():
+            return None
+        if pending_sync.exception() is not None:
+            # A failed sync is not a landed one; the caller's abandonment path
+            # closes the socket and the pump's own reason is already logged.
+            return None
+        return pending_sync.result()
 
     def _cancel_landing_task(self) -> None:
         """Drop the retained dial's landing task, if one is still running.
@@ -3711,6 +3797,38 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 - teardown of a connection being abandoned
             logger.debug("closing a rejected owner connection failed", exc_info=True)
 
+    async def _connect_client(
+        self, client: AttachClient, record: SessionRecord, *, deadline: float | None
+    ) -> None:
+        """Authenticate a dial, bounded by the caller's deadline when it has one.
+
+        ``AttachClient.connect`` waits for the owner's WELCOME under its own
+        ``ACK_TIMEOUT_S`` (15 s). That is the right envelope for a viewer's
+        general dial and the wrong one for a read, because a WEDGED owner — the
+        shape this repo's own harness names, "A SIGSTOPped runtime cannot answer
+        its socket" — has its TCP connection accepted by the kernel and never
+        writes a welcome. Bounding only what runs AFTER ``connect`` returns (the
+        mute and presence re-asserts) therefore bounded the wrong leg: the read
+        still took ``ACK_TIMEOUT_S`` and answered cold ~15 s later, which is the
+        reported failure's latency arriving through a different door. Reproduced
+        against a mute loopback owner: with a 0.5 s budget the read's latency
+        tracked ``ACK_TIMEOUT_S`` exactly (1.01 s at 1.0, 2.51 s at 2.5).
+
+        The WRAP rather than a deadline parameter on ``connect``, for two
+        reasons: it bounds everything the dial does before it returns —
+        ``asyncio.open_connection`` included, which carries no timeout of its
+        own — and it leaves ``connect``'s named refusals ("owner did not send
+        its state") exactly as they are for every caller without a deadline,
+        which is every caller but a read. An expiry here is not an error for a
+        read: :meth:`_attach_existing_for_read` absorbs it and serves the
+        durable answer, which is the whole point of the budget.
+        """
+        if deadline is None:
+            await client.connect(record, self._session_id)
+            return
+        remaining = max(0.0, deadline - time.monotonic())
+        await asyncio.wait_for(client.connect(record, self._session_id), timeout=remaining)
+
     async def _dial(
         self, record: SessionRecord, *, deadline: float | None = None
     ) -> asyncio.Future[FrontendSync]:
@@ -3723,11 +3841,13 @@ class AttachedSession:
         resolves through it from the pump.
 
         ``deadline`` (an absolute ``time.monotonic()`` value) bounds this dial's
-        own best-effort re-asserts, for a caller whose budget covers the whole
-        attempt — a read. Without it the re-assert caps at
-        ``_DESKTOP_WATCH_ACK_BOUND_S`` regardless of what is left of the caller's
-        patience, so a "2 s read" would spend 5 s waiting for a presence hint on
-        the one path that must never wait for one.
+        WHOLE work — the connect and its welcome, and the best-effort re-asserts
+        that follow — for a caller whose budget covers the entire attempt, which
+        is a read. Without it the welcome caps at ``ACK_TIMEOUT_S`` (15 s) and
+        the re-asserts at ``_DESKTOP_WATCH_ACK_BOUND_S`` (5 s) regardless of what
+        is left of the caller's patience, so a "2 s read" would take 15 s against
+        a wedged owner and 5 s against a silent one: two separate overruns the
+        read's own budget exists to prevent.
         """
         if self._sync_landing_task is not None or self._socketed_unsynced:
             # A NEW dial supersedes a RETAINED unsynced one. The old socket is
@@ -3809,13 +3929,15 @@ class AttachedSession:
             ),
         )
         try:
-            await client.connect(record, self._session_id)
+            await self._connect_client(client, record, deadline=deadline)
         except BaseException:
             # A cancel (the app cancelling its engage worker at a swap) or a
             # failure inside `connect` leaves a half-open socket that nothing
             # else references; closing it here rather than leaving it to GC
             # is the same discipline `_deliver` keeps (review round 2,
-            # MINOR-1).
+            # MINOR-1). It covers the deadline wrap below for the same reason:
+            # a wait_for expiry cancels `connect` mid-flight, and the socket it
+            # had already assigned is nobody else's to close.
             client.close()
             raise
         if self._disposed:
@@ -3851,24 +3973,17 @@ class AttachedSession:
             # is the one that failed a read — a silent-but-alive owner turned
             # ``desktop_watch`` into ``OwnerAckTimeout`` after ``ACK_TIMEOUT_S``
             # (15 s, measured 15.27 s) and the route ladder answered 503, when
-            # the durable rows had been readable in 0.02 s. This RPC asserts the
-            # RENDERER's presence lease: its own TTL (45 s) expires it and the
-            # renderer's next ``/watch`` beat (15 s) re-states it, so a lost
-            # assertion is a cost, not a defect — and a READ must never be
-            # refused because a presence hint went unacknowledged.
-            watch_timeout = _DESKTOP_WATCH_ACK_BOUND_S
-            if deadline is not None:
-                watch_timeout = max(0.0, min(watch_timeout, deadline - time.monotonic()))
+            # the durable rows had been readable in 0.02 s. The RPC and its
+            # bounds now live in the one method the ``/watch`` beat also calls,
+            # so the dial and the beat cannot come to disagree about whether a
+            # lost presence hint is fatal; ``timeout`` carries this dial's own
+            # deadline so the hint can never lengthen a read.
             try:
-                await asyncio.wait_for(
-                    client.desktop_watch(
-                        visible=live and self._desktop_visible,
-                        can_notify=live and self._desktop_can_notify,
-                    ),
-                    timeout=watch_timeout,
+                await self.update_desktop_watch(
+                    visible=live and self._desktop_visible,
+                    can_notify=live and self._desktop_can_notify,
+                    timeout=None if deadline is None else max(0.0, deadline - time.monotonic()),
                 )
-            except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
-                logger.debug("desktop watch re-assert failed", exc_info=True)
             except BaseException:
                 # Cancellation, which is NOT a lost hint: the dial is being
                 # abandoned, so the half-open socket goes with it (same discipline

@@ -73,6 +73,13 @@ class _FakeOwner:
     independently on purpose — ``answer_watch`` is the presence re-assert,
     ``sync_on_connect`` is the canonical state — because the whole point of D2.1
     is that only the second one matters to a reader.
+
+    ``mute`` is the OTHER silent-owner shape, and it is not the same leg: the
+    owner here never writes a welcome at all, which is what a SIGSTOPped runtime
+    looks like from the socket — the kernel accepts the connection and nothing
+    ever comes back. A dial that answers cannot fail an unbounded wait, so a
+    fake that always welcomes cannot catch a read whose budget does not cover
+    the welcome (review round 1, MAJOR-1).
     """
 
     def __init__(
@@ -82,6 +89,7 @@ class _FakeOwner:
         *,
         answer_watch: bool = False,
         sync_on_connect: bool = False,
+        mute: bool = False,
         welcome_session_id: str | None = None,
     ) -> None:
         self.session_id = session_id
@@ -89,6 +97,7 @@ class _FakeOwner:
         self.cwd = str(cwd)
         self.answer_watch = answer_watch
         self.sync_on_connect = sync_on_connect
+        self.mute = mute
         self.port = 0
         self.conns = 0
         self.watch_calls = 0
@@ -105,6 +114,13 @@ class _FakeOwner:
         self._writers.append(writer)
         try:
             await reader.readline()  # the attach auth frame
+            if self.mute:
+                # Read for ever and write nothing: the connection stays OPEN (so
+                # the dial is waiting on a live socket, not a closed one) and no
+                # welcome ever arrives.
+                while await reader.readline():
+                    pass
+                return
             await self._write(
                 writer,
                 {
@@ -141,11 +157,7 @@ class _FakeOwner:
             return
 
     def _sync_frame(self, *, epoch: str = "fake-owner", sequence: int = 1) -> dict[str, Any]:
-        sync = FrontendSync(
-            epoch=epoch,
-            sequence=sequence,
-            snapshot=FrontendSessionState(session_id=self.session_id, epoch=epoch, cwd=self.cwd),
-        )
+        sync = _frontend_sync(self.session_id, Path(self.cwd), epoch=epoch, sequence=sequence)
         return {"op": "frontend_sync", "data": sync_wire_payload(sync)}
 
     async def send_sync(self, *, epoch: str = "fake-owner", sequence: int = 1) -> None:
@@ -179,6 +191,28 @@ async def _seed(root: Path, *, session_id: str = SESSION_ID, rows: int = 1) -> N
     for index in range(rows):
         await transcript.append_message(Message.user(f"durable question {index}"))
         await transcript.append_message(Message.assistant(f"durable answer {index}"))
+
+
+def _frontend_sync(
+    session_id: str = SESSION_ID,
+    cwd: Path | None = None,
+    *,
+    epoch: str = "fake-owner",
+    sequence: int = 1,
+) -> FrontendSync:
+    """A canonical sync for this session, shaped as the owner sends it.
+
+    Shared by the fake owner's wire frame and by the tests that drive the
+    landing task directly, so the two cannot drift into disagreeing about what
+    "a sync arrived" means.
+    """
+    return FrontendSync(
+        epoch=epoch,
+        sequence=sequence,
+        snapshot=FrontendSessionState(
+            session_id=session_id, epoch=epoch, cwd=str(cwd) if cwd is not None else ""
+        ),
+    )
 
 
 def _record(session_id: str, port: int, *, cwd: Path) -> SessionRecord:
@@ -291,6 +325,126 @@ async def test_a_read_reports_no_runtime_only_when_there_is_none(
     assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
     assert viewer.cold_reason == "no-runtime"
     assert viewer.attaching is False
+    await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mute_owner_is_served_cold_inside_the_read_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-1: the WELCOME leg is bounded too, not only the re-asserts.
+
+    The silent owner above answers the dial and then stays quiet about the SYNC.
+    This one never writes a welcome at all, which is what a wedged runtime looks
+    like from the socket — the kernel accepts the connection and nothing ever
+    comes back (the shape the e2e harness names: "A SIGSTOPped runtime cannot
+    answer its socket"). Budgeting only what runs AFTER ``connect`` returns left
+    this leg governed by ``ACK_TIMEOUT_S`` (15 s), so the read served cold at the
+    right status and the wrong latency, the same order as the reported failure.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    owner = _FakeOwner(SESSION_ID, tmp_path, mute=True)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    viewer = await _cold_viewer(tmp_path)
+
+    started = time.monotonic()
+    attached = await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S)
+    elapsed = time.monotonic() - started
+
+    assert attached is False
+    assert (
+        elapsed < READ_ATTACH_BUDGET_S + 1.0
+    ), f"a mute owner cost the read {elapsed:.2f}s; the welcome leg is unbounded"
+    assert owner.conns == 1
+    assert viewer.cold_reason == "owner-silent"
+    # A dial that never authenticated is not RETAINED: there is no sync to wait
+    # for on this socket, and holding it would be a slot for nothing.
+    assert viewer.attaching is False
+    await viewer.dispose()
+    await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_connected_but_unsynced_facade_is_not_reported_as_no_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1: the early return for a connected facade must CLASSIFY too.
+
+    ``is_cold`` is true for a facade whose client is up while
+    ``_ready_for_events`` is cleared for a display refresh — a state this file's
+    own docstring names — and that facade takes ``attach_existing``'s
+    ``owner_reachable`` early return. Without classifying there, the token fell
+    back to ``no-runtime``: "no pid holds this session's transcript lease",
+    reported while a socket to that very pid is connected and serving.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    owner = _FakeOwner(SESSION_ID, tmp_path, sync_on_connect=True)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    viewer = await _cold_viewer(tmp_path)
+    await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S)
+    assert viewer.is_cold is False, "the fixture did not reach a live facade"
+
+    # The mid-resync window: connected, serving, and not ready for events.
+    viewer._ready_for_events = False
+    viewer._read_cold_reason = None
+
+    assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
+    assert viewer.owner_reachable is True
+    assert (
+        viewer.cold_reason == "owner-silent"
+    ), "a connected facade must not be reported as having no runtime"
+    await viewer.dispose()
+    await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_sync_that_lands_during_the_deadline_settle_is_still_adopted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-4: an expired landing deadline is not evidence nothing landed.
+
+    ``_await_frontend`` documents a reproduction where ``wait_for``'s deadline
+    trips with the frame already buffered — a race against the SCHEDULER — and
+    answers it with bounded settle turns. The retained dial needs the same turns
+    for a sharper reason: without them a sync that HAS landed is judged absent,
+    its socket closed, and canonical state the renderer was promised a rollover
+    for is discarded. The deadline is forced to zero here so the expiry is
+    certain, and the sync lands a few turns later.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    monkeypatch.setattr(remote_module, "SYNC_LANDING_DEADLINE_S", 0.0)
+    viewer = await _cold_viewer(tmp_path)
+    rollovers: list[Any] = []
+    assert viewer.subscribe_frontend(rollovers.append) is not None
+    pending: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    viewer._frontend_future = pending
+    viewer._socketed_unsynced = True
+
+    async def _land_after_a_few_turns() -> None:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        pending.set_result(_frontend_sync(SESSION_ID, tmp_path))
+
+    asyncio.get_running_loop().create_task(_land_after_a_few_turns())
+    await viewer._await_late_sync(pending)
+
+    # Asserted on what was ADOPTED rather than on ``is_cold``: this facade has no
+    # client at all (the dial is the socket under test in the other files), so
+    # ``is_cold`` is true for it either way and would prove nothing here. What
+    # MINOR-4 is about is whether the landed state was installed and published or
+    # thrown away with the socket.
+    assert viewer.frontend_state.epoch == "fake-owner"
+    assert viewer._ready_for_events is True
+    assert viewer.attaching is False
+    assert viewer._read_cold_reason is None
+    assert (
+        rollovers and rollovers[-1].epoch == "fake-owner"
+    ), "the landed sync was installed silently; the renderer never learns"
     await viewer.dispose()
 
 
