@@ -8,7 +8,7 @@ it can switch on rather than as one prose sentence.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +18,7 @@ from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.clients._http import APIError
 from local_operator.clients.radient import INSTRUCTION_SET_FIELDS
 from local_operator.server.routes.agents import (
+    PUBLICATION_STATUS_BY_CODE,
     AgentPublicationRequest,
     _instruction_set_fields,
 )
@@ -487,6 +488,211 @@ async def test_publish_reports_a_hub_failure_it_did_not_describe(
     detail = response.json()["detail"]
     assert detail["code"] == "hub_unavailable"
     assert detail["details"] == {}
+
+
+@pytest.mark.parametrize(
+    "hub_status,hub_code",
+    [
+        # The two shapes a hub-side credential rejection can take: with no code at
+        # all, and with one this proxy's vocabulary does not define. Neither was
+        # in the code table, so both fell through to `hub_unavailable`/502.
+        (401, None),
+        (401, "unauthorized"),
+        (401, "invalid_api_key"),
+        # A 403 with no recognised code is the same class of refusal -- the hub
+        # answered and refused the caller -- where `not_owner` is a different one
+        # and keeps its own code (the table test above pins that).
+        (403, None),
+    ],
+    ids=["401-no-code", "401-unknown-code", "401-other-spelling", "403-no-code"],
+)
+@pytest.mark.asyncio
+async def test_publish_reports_a_refused_credential_rather_than_a_hub_outage(
+    test_app_client, dummy_registry: AgentRegistry, hub_status, hub_code
+) -> None:
+    """A refused credential asks the user to re-authenticate, not to retry.
+
+    The whole point of the `code` field is the next step it selects, and
+    `hub_unavailable` selects "retry" -- the one thing that cannot fix an expired
+    key, and the exact instruction the wrong code sent. The hub's own sentence
+    travels in `message` unchanged, so a caller that ignores `code` loses nothing.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.side_effect = APIError(
+            "Invalid API key provided.",
+            status_code=hub_status,
+            code=hub_code,
+            # An unrecognised refusal's details have no shape this proxy knows, and
+            # none travel: nothing here may reach the response.
+            details={"echo": "whatever the body held"},
+        )
+        response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
+
+    assert response.status_code == hub_status
+    detail = response.json()["detail"]
+    assert detail["code"] == "hub_unauthorized"
+    assert detail["message"] == "Invalid API key provided."
+    assert detail["details"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_hub_rate_limit_is_not_reported_as_a_refused_credential(
+    test_app_client, dummy_registry: AgentRegistry
+) -> None:
+    """A throttle keeps the retry-shaped answer; only the credential arm changed.
+
+    DELIBERATE, and named in the remediation comment rather than fixed here: a
+    rate limit wants its own code (with the retry semantics that go with it), and
+    inventing one in this PR would be a code no renderer knows. It stays on the
+    retry arm, which is the correct ACTION even though `hub_unavailable` is not the
+    correct word for it.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.side_effect = APIError(
+            "rate limited", status_code=429, code="too_many_requests"
+        )
+        response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "hub_unavailable"
+
+
+#: The fallback status per hub code, written out rather than read from the table
+#: under test. Reading them would make the test agree with ANY table, which is how
+#: the table stayed mutation-blind through review round 1: sabotaging every value
+#: left the suite green because every expectation was re-derived from the sabotage.
+#: A code added to the table without a case here still fails -- see the test below.
+STATUS_FALLBACK_CASES: Tuple[Tuple[str, int], ...] = (
+    ("invalid_instruction_set", 422),
+    ("moderation_rejected", 422),
+    ("payload_too_large", 413),
+    ("name_taken", 409),
+    ("name_claim_in_flight", 409),
+    ("name_reserved_builtin", 409),
+    ("not_owner", 403),
+    ("agent_not_found", 404),
+    ("moderation_unavailable", 503),
+)
+
+
+def test_every_mapped_hub_code_has_a_pinned_fallback_status() -> None:
+    """No code may sit in the table without a literal expectation of its status."""
+    assert {code for code, _status in STATUS_FALLBACK_CASES} == set(PUBLICATION_STATUS_BY_CODE)
+
+
+@pytest.mark.parametrize(
+    "code,fallback_status",
+    STATUS_FALLBACK_CASES,
+    ids=[case[0] for case in STATUS_FALLBACK_CASES],
+)
+@pytest.mark.asyncio
+async def test_publish_falls_back_to_the_mapped_status_when_the_hub_sent_none(
+    test_app_client, dummy_registry: AgentRegistry, code, fallback_status
+) -> None:
+    """Every value in the table is reachable, and sabotaging one fails this test.
+
+    ``api_error_from_response`` always sets the status from the response, so the
+    table's fallback branch cannot be entered through the client -- the other test
+    per code therefore passes its left-hand side every time and pinned nothing.
+    Review round 1 proved that by setting every value to 599 and watching 102 tests
+    stay green. This is the case that pins the values themselves.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.side_effect = APIError(
+            "The hub refused this publication.", status_code=None, code=code
+        )
+        response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
+
+    assert response.status_code == fallback_status
+    assert response.json()["detail"]["code"] == code
+
+
+@pytest.mark.parametrize(
+    "override,field",
+    [
+        # The coercion bugs review round 1 observed on head: bool("false") is True
+        # and list("osint") is five one-character tags -- both published silently.
+        ({"delegate": "false"}, "delegate"),
+        ({"delegate": 1}, "delegate"),
+        ({"tags": "osint"}, "tags"),
+        ({"tools": "read"}, "tools"),
+        ({"categories": "software"}, "categories"),
+        # And the shapes that escaped as an AttributeError reported as a 500
+        # blaming this machine for a request the hub would have refused.
+        ({"instructions": ["a"]}, "instructions"),
+        ({"name": 42}, "name"),
+        ({"when_to_use": None}, "when_to_use"),
+        ({"tags": ["osint", 7]}, "tags"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_publish_refuses_an_override_of_the_wrong_shape(
+    test_app_client, dummy_registry: AgentRegistry, override, field
+) -> None:
+    """A value of the wrong shape is refused with the hub's code, never coerced.
+
+    The client bound must not be looser than the server's: a coercion publishes
+    something the caller did not ask for, and an AttributeError reports the caller's
+    malformed request as a failure of this machine.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish", json={"document": override}
+        )
+
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_instruction_set"
+    assert detail["details"]["field"] == field
+    assert detail["details"]["rule"]
+    mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_publishes_the_values_whose_shapes_are_right(
+    test_app_client, dummy_registry: AgentRegistry
+) -> None:
+    """The positive control for the shape check: nothing valid is refused.
+
+    ``delegate: false`` reaching the wire as ``false`` is the specific inversion the
+    shape check exists to stop, so it is asserted on the document, not on the
+    absence of an error.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.return_value = {"agent_id": "hub-9"}
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish",
+            json={
+                "document": {
+                    "delegate": False,
+                    "tags": ["osint"],
+                    "tools": ["read"],
+                    "instructions": "You help.",
+                }
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    document = mock_client.return_value.publish_agent_instruction_set.call_args.args[0]
+    assert document["delegate"] is False
+    assert document["tags"] == ["osint"]
+    assert document["tools"] == ["read"]
+    assert document["instructions"] == "You help."
 
 
 @pytest.mark.asyncio

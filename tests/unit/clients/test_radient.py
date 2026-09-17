@@ -1191,6 +1191,67 @@ def test_validate_document_overrides_refuses_the_schema_fields() -> None:
         assert exc_info.value.field == key
 
 
+@pytest.mark.parametrize(
+    "override,field,rule",
+    [
+        # The shapes that were COERCED before this check existed: the string
+        # "false" is truthy, and list("osint") is five one-character tags, so both
+        # published something the caller did not ask for, silently.
+        ({"delegate": "false"}, "delegate", "must be true or false"),
+        ({"delegate": 0}, "delegate", "must be true or false"),
+        ({"delegate": None}, "delegate", "must be true or false"),
+        ({"tags": "osint"}, "tags", "must be a list of strings"),
+        ({"tools": "read"}, "tools", "must be a list of strings"),
+        ({"tags": ["osint", 7]}, "tags", "must be a list of strings"),
+        # And the shapes that escaped the builder as an AttributeError, which the
+        # route reported as a 500 about this machine rather than a 422 about the
+        # caller's request.
+        ({"instructions": ["a"]}, "instructions", "must be a string"),
+        ({"name": 42}, "name", "must be a string"),
+        ({"when_to_use": None}, "when_to_use", "must be a string"),
+    ],
+)
+def test_validate_document_overrides_refuses_a_value_of_the_wrong_shape(
+    override: Dict[str, Any], field: str, rule: str
+) -> None:
+    """A known field carrying the wrong shape is refused in the hub's vocabulary.
+
+    The rules are the client's, not the hub's, because the hub never sees these --
+    it would refuse them at decode under `invalid_instruction_set`, which is what
+    the route now answers. A client bound LOOSER than the server is the direction
+    that publishes content the caller did not write.
+    """
+    with pytest.raises(InstructionSetError) as exc_info:
+        validate_document_overrides(override)
+
+    assert exc_info.value.field == field
+    assert exc_info.value.rule == rule
+
+
+def test_validate_document_overrides_accepts_the_shapes_that_are_right() -> None:
+    """The control: the check refuses shapes, not values.
+
+    ``delegate: False`` is the specific value that must survive it, since a check
+    written as a truthiness test would refuse the one shape the wire uses for `no`.
+    """
+    overrides: Dict[str, Any] = {
+        "delegate": False,
+        "tags": ["osint"],
+        "tools": ["read", "write"],
+        "categories": ["software"],
+        "instructions": "You help.",
+        "name": "coder",
+        "when_to_use": "Writing code.",
+        "effort": "medium",
+        "description": "Writes code.",
+        "version": "1.0.0",
+    }
+
+    assert validate_document_overrides(overrides) == overrides
+    # An empty list is a list: it publishes no tools, which is not a shape error.
+    assert validate_document_overrides({"tags": []}) == {"tags": []}
+
+
 def test_publish_agent_instruction_set_posts_the_document(
     radient_client: RadientClient, base_url: str
 ) -> None:

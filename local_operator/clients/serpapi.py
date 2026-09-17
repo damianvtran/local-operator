@@ -4,7 +4,7 @@ from urllib.parse import urlencode
 import requests
 from pydantic import BaseModel, Field, SecretStr
 
-from local_operator.clients._http import response_body
+from local_operator.clients._http import response_body, scrubbed_response_body
 
 
 class SerpApiSearchMetadata(BaseModel):
@@ -509,9 +509,13 @@ class SerpApiClient:
         try:
             response = requests.get(url)
             if response.status_code != 200:
+                # A non-2xx this method sees itself, rather than one requests raised
+                # for it: the body comes through the shared scrubber for the same
+                # reason the raising path does -- it is the upstream's own echo, and
+                # a SERP key travels in the query string of the request it reflects.
                 raise RuntimeError(
                     f"SERP API request failed with status {response.status_code}, content:"
-                    f" {response.content.decode()}"
+                    f" {scrubbed_response_body(response)}"
                 )
             data = response.json()
             return SerpApiResponse.model_validate(data)

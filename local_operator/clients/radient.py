@@ -10,11 +10,11 @@ from pydantic import BaseModel, SecretStr
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.agents import MAX_AGENT_NAME_CHARS
 from local_operator.clients._http import (
-    NO_RESPONSE_BODY,
     APIError,
     api_error_from_response,
     redact_secrets,
     response_body,
+    scrubbed_response_body,
 )
 
 
@@ -610,9 +610,7 @@ class RadientClient:
             if error_response.status_code == 404:
                 return None  # Agent not found
             # For other HTTP errors, raise a runtime error
-            error_body = self._surfaceable_body(
-                error_response.content.decode() if error_response.content else NO_RESPONSE_BODY
-            )
+            error_body = self._surfaceable_body(scrubbed_response_body(error_response))
             raise RuntimeError(
                 f"Failed to get agent {agent_id} from Radient Agent Hub: "
                 f"HTTP {error_response.status_code}, Response Body: {error_body}"
@@ -1065,9 +1063,7 @@ class RadientClient:
             if response.status_code == 204:
                 return
             # If not 204, try to extract error details
-            error_body = self._surfaceable_body(
-                response.content.decode() if response.content else NO_RESPONSE_BODY
-            )
+            error_body = self._surfaceable_body(scrubbed_response_body(response))
             raise RuntimeError(
                 f"Failed to delete agent from Radient Agent Hub: HTTP {response.status_code}, "
                 f"Response Body: {error_body}"
@@ -1404,6 +1400,52 @@ INSTRUCTION_SET_FIELDS = (
     *INSTRUCTION_SET_CONTENT_FIELDS,
 )
 
+#: The SHAPE each overridable content field must have. Anything absent is text.
+#:
+#: WHY A SHAPE TABLE AND NOT JUST THE BUILDER'S OWN CHECKS: the builder coerces --
+#: ``bool(delegate)``, ``list(tags)`` -- and a coercion publishes something the
+#: caller did not ask for, silently. ``{"delegate": "false"}`` published ``true``
+#: (the string is truthy), ``{"tags": "osint"}`` published five one-character
+#: tags, and a list or an int where text belongs escaped the builder entirely as
+#: an ``AttributeError`` -- a 500 blaming this machine for a request the hub would
+#: have refused at decode with ``invalid_instruction_set``. So the shape is refused
+#: HERE, with the rule text and the field the hub would use, before the builder
+#: can coerce anything.
+#:
+#: ``bool`` rather than "accepts 0/1": the wire says true or false, Python's
+#: ``bool`` is the only value whose meaning is not a guess, and ``isinstance(1,
+#: bool)`` is False, so an int is refused rather than reinterpreted.
+INSTRUCTION_SET_FIELD_SHAPES: Dict[str, str] = {
+    "tools": "list",
+    "categories": "list",
+    "tags": "list",
+    "delegate": "bool",
+}
+
+#: The rule text per shape, phrased as the hub phrases the rules it states itself
+#: ("must be at most N characters", "must hold at most N items"), because
+#: ``details.rule`` is what the desktop app's inline error quotes.
+INSTRUCTION_SET_SHAPE_RULES: Dict[str, str] = {
+    "str": "must be a string",
+    "list": "must be a list of strings",
+    "bool": "must be true or false",
+}
+
+
+def _matches_field_shape(value: Any, shape: str) -> bool:
+    """Whether an override value has the shape its field requires.
+
+    A ``str`` is deliberately NOT a list, however sequence-like it is: that is
+    the whole production bug -- ``list("osint")`` is five tags -- and a check
+    written as ``isinstance(value, (list, tuple))`` cannot make that mistake.
+    """
+
+    if shape == "list":
+        return isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value)
+    if shape == "bool":
+        return isinstance(value, bool)
+    return isinstance(value, str)
+
 
 #: Whitespace that is ALSO a control character: Go's `unicode.IsSpace ∩
 #: unicode.IsControl`, which is the tab, the vertical tab, the form feed, the
@@ -1504,9 +1546,7 @@ def _name_rule(name: str) -> Optional[str]:
     return None
 
 
-def _items_rule(
-    values: Sequence[str], *, field: str, max_items: int, max_item_chars: int
-) -> Optional[str]:
+def _items_rule(values: Sequence[str], *, max_items: int, max_item_chars: int) -> Optional[str]:
     """The rule a list field breaks, or ``None``.
 
     One implementation for tools and tags: both are "at most N items of 1..M
@@ -1599,7 +1639,6 @@ def build_instruction_set_document(
     tool_list = list(tools or ())
     rule = _items_rule(
         tool_list,
-        field="tools",
         max_items=INSTRUCTION_SET_TOOLS_MAX_ITEMS,
         max_item_chars=INSTRUCTION_SET_TOOL_MAX_CHARS,
     )
@@ -1620,7 +1659,6 @@ def build_instruction_set_document(
     tag_list = list(tags or ())
     rule = _items_rule(
         tag_list,
-        field="tags",
         max_items=INSTRUCTION_SET_TAGS_MAX_ITEMS,
         max_item_chars=INSTRUCTION_SET_TAG_MAX_CHARS,
     )
@@ -1664,23 +1702,34 @@ def validate_document_overrides(overrides: Mapping[str, Any]) -> Dict[str, Any]:
     the same set. An unknown key is refused rather than dropped, for the reason the
     hub refuses one — silent field-dropping is how a publisher believes it
     published something it did not — and ``document_type``/``document_version``
-    are not overridable at all.
+    are not overridable at all. A known field carrying a value of the wrong SHAPE
+    is refused the same way, so a coercion the builder would have performed on the
+    caller's behalf (``bool("false")`` is ``True``, ``list("osint")`` is five
+    tags) cannot publish something the caller did not ask for, and a shape the
+    builder cannot coerce is a 422 rather than an ``AttributeError`` reported as a
+    failure of this machine.
 
     The FIRST unknown key in the caller's order is the one reported, matching the
     hub's streaming scan (a map's iteration order would make the reported field
-    non-deterministic, and a non-deterministic error is untestable).
+    non-deterministic, and a non-deterministic error is untestable). The shape pass
+    runs after it, in the same caller order, for the same reason.
 
     Args:
         overrides: The caller-supplied document fields.
 
     Returns:
-        The same fields, validated as a known-key mapping.
+        The same fields, validated as a known-key mapping of correctly shaped values.
 
     Raises:
-        InstructionSetError: When a key is not part of a version-1 document.
+        InstructionSetError: When a key is not part of a version-1 document, or a
+            known key's value is not the shape that field takes.
     """
 
     for key in overrides:
         if key not in INSTRUCTION_SET_CONTENT_FIELDS:
             raise InstructionSetError(key, "is not a recognised field")
+    for key, value in overrides.items():
+        shape = INSTRUCTION_SET_FIELD_SHAPES.get(key, "str")
+        if not _matches_field_shape(value, shape):
+            raise InstructionSetError(key, INSTRUCTION_SET_SHAPE_RULES[shape])
     return dict(overrides)

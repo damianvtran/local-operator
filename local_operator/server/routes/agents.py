@@ -657,13 +657,29 @@ PUBLICATION_STATUS_BY_CODE: Dict[str, int] = {
     "moderation_unavailable": 503,
 }
 
-#: The two codes this proxy adds to the hub's vocabulary. They exist because the
+#: The three codes this proxy adds to the hub's vocabulary. They exist because the
 #: proxy can fail in ways the hub never sees and never describes: it can fail to
-#: REACH the hub (``hub_unavailable``), and it can fail on this machine before the
-#: hub is asked anything (``local_failure``). Reporting either as a hub code would
-#: blame a dependency that was never involved.
+#: REACH the hub (``hub_unavailable``), it can fail on this machine before the
+#: hub is asked anything (``local_failure``), and the hub can REFUSE THIS
+#: MACHINE'S CREDENTIAL (``hub_unauthorized``) -- which the hub answers with a
+#: status rather than with a code of its own, so the vocabulary has to name it.
+#: Reporting any of them as a hub code would misdescribe which side failed.
 HUB_UNAVAILABLE_CODE = "hub_unavailable"
 LOCAL_FAILURE_CODE = "local_failure"
+#: A refusal of this machine's Radient credential, on a route that authenticates
+#: with it. Deliberately NOT a member of :data:`PUBLICATION_STATUS_BY_CODE`: that
+#: table is the HUB's vocabulary, and this code is the proxy's own. The status is
+#: always the hub's here (a code we do not know still arrives on a real response),
+#: so nothing needs a fallback for it.
+#:
+#: WHY IT IS NOT ``hub_unavailable``: the two need opposite next steps. This one
+#: means "the hub answered, your key was refused" -- re-authenticate, and retrying
+#: cannot help. ``hub_unavailable`` means "we could not reach it, or it did not
+#: answer in its own vocabulary" -- retry. A renderer told the first when the
+#: second is true (or the reverse, which is what shipped) sends the user to do the
+#: one thing that cannot work. The hub's prose travels in ``message`` unchanged
+#: either way, so a client that ignores ``code`` loses nothing by the change.
+HUB_UNAUTHORIZED_CODE = "hub_unauthorized"
 
 #: Local registry tags that ENCODE a profile field rather than tag the agent.
 #: ``role`` marks the row as a delegation role, and ``tools:``/``effort:``/
@@ -714,8 +730,10 @@ def _publication_detail(
 def _publication_http_error(exc: APIError) -> HTTPException:
     """Map a hub refusal onto the local response.
 
-    A code the vocabulary defines keeps its meaning and its status; anything else
-    is the hub failing to describe a failure, which is reported as
+    A code the vocabulary defines keeps its meaning and its status; a REFUSAL OF
+    THIS MACHINE'S CREDENTIAL (401, or a 403 no known code accounts for) is
+    reported as :data:`HUB_UNAUTHORIZED_CODE` so the caller re-authenticates;
+    anything else is the hub failing to describe a failure, which is reported as
     :data:`HUB_UNAVAILABLE_CODE` with a 502 rather than as a rejection of the
     document the user sent. The upstream BODY never travels: a response shape we do
     not recognise is the case where the body may be a proxy's HTML page, and that
@@ -726,6 +744,23 @@ def _publication_http_error(exc: APIError) -> HTTPException:
         return HTTPException(
             status_code=exc.status_code or PUBLICATION_STATUS_BY_CODE[exc.code],
             detail=_publication_detail(exc.code, str(exc), exc.details),
+        )
+    # The auth arm, and the order matters: a KNOWN code wins above, so the hub's
+    # ``not_owner`` keeps its own meaning on the 403 it arrives with. What is left
+    # is a status that says the hub answered and refused the CALLER -- 401 always,
+    # and a 403 nothing in the vocabulary explains. The hub's own status travels
+    # through, so an expired key reads as 401 rather than as a 502 about reach.
+    #
+    # ``details`` is NOT passed through here, unlike the known-code arm: an
+    # unrecognised refusal's details are the one part of that body we have no shape
+    # for, and an auth refusal has never needed more than its code and sentence.
+    if exc.status_code in (401, 403):
+        logger.warning(
+            "Radient Agent Hub refused this machine's credential: HTTP %s", exc.status_code
+        )
+        return HTTPException(
+            status_code=exc.status_code,
+            detail=_publication_detail(HUB_UNAUTHORIZED_CODE, str(exc)),
         )
     logger.warning(
         "Radient Agent Hub returned an unrecognised publication failure: HTTP %s",
@@ -1060,7 +1095,7 @@ async def republish_agent_to_radient(
         raise HTTPException(
             status_code=500,
             detail=_publication_detail(
-                LOCAL_FAILURE_CODE, "This agent could not be published from this machine."
+                LOCAL_FAILURE_CODE, "This agent could not be republished from this machine."
             ),
         )
 
