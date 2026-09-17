@@ -1985,11 +1985,15 @@ class AnalyticsStore:
             # half the days do not belong to — so a capped plan would re-derive
             # the same newest days on every launch, forever, and the latch R2 set
             # out to remove would survive with a per-launch cost on top. Its work
-            # is bounded by the LEDGER's day span instead: at most one label per
-            # retention day (91 at the default 90), a one-off repair, ~2.5 ms per
-            # label measured, so ~0.23 s at that worst case on the maintenance
-            # thread. A normal ``pass`` keeps its budget, because that one IS
-            # resumable: it records how far it got.
+            # is bounded by the LEDGER's day span instead, which is the ledger's
+            # AGE: post-prune that is one label per retention day (91 at the
+            # default 90, ~0.23 s at the measured ~2.5 ms per label), but before
+            # the first prune it is however long the ledger has been recording —
+            # 200 labels on a 200-day unpruned ledger at ``retention_days=90``,
+            # measured. Still a one-off repair rather than a recurring pass, and
+            # each day is its own transaction so no lock is held across it. A
+            # normal ``pass`` keeps its budget, because that one IS resumable: it
+            # records how far it got.
             return SessionDailyPlan(_days_descending(oldest_day, top), "rebucket", 0)
         covered = state.get(_SESSION_DAILY_META_COVERED, "")
         last_sweep = state.get(_SESSION_DAILY_META_LAST_SWEEP, "")
@@ -2461,16 +2465,16 @@ class AnalyticsStore:
             rollup's buckets are derived from the SAME snapshots, so their
             edges would be visible where the ledger's ``_PARENT_EDGE_SQL``
             substitutes ``''`` — the two surfaces would disagree about the tree.
-            DEFENCE IN DEPTH, not the only thing standing there: the rollup read
-            substitutes ``''`` too when the column is missing (round 1 Q2), so
-            the two paths agree in that state whether or not this refuses. Kept
-            because refusing is the cheaper and more honest answer for a ledger
-            whose edge data is physically absent, and because ``_migrate``
-            normally makes the state unreachable — a guard that can only fire on
-            a store this code could not have opened is still worth naming
-            rather than silently absent. The count check cannot see a side-map
-            divergence, which is exactly why the agreement is enforced in the
-            read rather than assumed from the guard.
+            Kept as DEFENCE IN DEPTH, and the honest scope of that: through
+            ``aggregate()`` the rollup read is never reached in this state,
+            because this refusal fires first. The read also substitutes ``''``
+            when the predicate is false (round 1 Q2), which is what makes it
+            safe if the guard is ever bypassed — but the guarded shape itself is
+            NOT closed, and the count check cannot see an edge divergence by
+            construction. See the note above the substitution in
+            :meth:`_session_daily_aggregate` for the measured difference.
+            ``_migrate`` normally makes the state unreachable anyway, so this is
+            named rather than silently absent.
         ``not-day-aligned``  ``aggregate()`` accepts arbitrary millisecond
             bounds; the rollup is day-grain. A bound that is not the first
             instant of a local day cannot be expressed as a day range, so the
@@ -2525,7 +2529,10 @@ class AnalyticsStore:
             coverage the oldest day, the zone the labelling rule — so a hole in
             the MIDDLE of a window is invisible to all of them, and a pre-rollup
             writer leaves exactly that as soon as a maintained process writes a
-            newer row. Compared directly (~5 ms: two index-only counts) rather
+            newer row. Compared directly (21.8-26.7 ms on a 1.2 M-call ledger;
+            see the precondition's comment for what share of the fast path that
+            is — quoting this check without its pair is how it came to be
+            described as ~5 ms twice) rather
             than inferred, because this is the one that decides whether a total
             is right. It is also the check that makes a hole SELF-CLEARING
             rather than permanent: the sweep verifies day by day and re-derives
@@ -2613,16 +2620,23 @@ class AnalyticsStore:
         # ledger's row count. Both sides are index-only (``COUNT(*)`` rides
         # ``idx_calls_ts``, the rollup side is 9k rows), but the cost is a
         # function of the WINDOW rather than of the table: measured 21.8 ms for a
-        # 30-day window and 26.7 ms unbounded on a 1.2 M-call ledger, because on
-        # a ledger that is all recent history a 30-day window IS the whole file.
-        # It converges toward ~5 ms as the file fills out (a 30-day window over
-        # 90 days of history scans a third of the rows), so it is ~20 % of the
-        # committed 187 ms fast path today rather than the ~4 % an earlier
-        # comment claimed from a stale measurement — and it still pays for itself
-        # on every read rather than only in the sweep, because a wrong total is
-        # not a diagnostic.
+        # 30-day window and 26.7 ms unbounded on a 1.2 M-call ledger (QA's own
+        # run of the same SQL: 22.6 / 24.1 ms), because on a ledger that is all
+        # recent history a 30-day window IS the whole file. It converges toward
+        # ~5 ms as the file fills out, a 30-day window over 90 days of history
+        # scanning a third of the rows.
         #
-        # WHY IT IS WORTH THE 5 ms: every other check pins a boundary. The tail
+        # SAYING WHAT THAT IS A SHARE OF, because the last version of this
+        # comment mixed two sessions: against the committed shipping pair —
+        # 187 ms wall / 166 ms CPU, both arms at load ~215-280 — it is roughly
+        # an EIGHTH (21.8 / 187 = 12 % of wall, 13 % of CPU; 15-17 % on QA's
+        # slightly slower clock for the same SQL). The ~20 % figure that used to
+        # sit here was 26.7 ms over the SUPERSEDED 123 ms arm, which is the
+        # error this PR was already corrected for once. Either way it pays for
+        # itself on every read rather than only in the sweep, because a wrong
+        # total is not a diagnostic.
+        #
+        # WHY IT IS WORTH THAT: every other check pins a boundary. The tail
         # check pins the NEWEST row, coverage pins the OLDEST day, the zone pins
         # the labelling rule — so a hole in the MIDDLE of the window is invisible
         # to all of them, and a ``lop`` on the pre-rollup binary writes exactly
@@ -2698,10 +2712,23 @@ class AnalyticsStore:
         # side map while every call COUNT still matched, which is a divergence the
         # count check is blind to by construction. That state is unreachable in
         # practice (``_migrate`` adds the column, and nothing drops it), which is
-        # why the gate also refuses it outright with ``no-parent-column`` — but a
-        # guard that cannot fire must not be the only thing between a schemaless
-        # ledger and an edge map nothing else verifies. Mirroring the fallback
-        # makes the two paths agree in that state whether or not the guard runs.
+        # why the gate also refuses it outright with ``no-parent-column``.
+        #
+        # WHAT THIS DOES AND DOES NOT CLOSE (review F1, QA Q4 — the earlier text
+        # here claimed more than the code does): the substitution is keyed on
+        # ``_has_parent_column()``, the SAME predicate the guard uses, so through
+        # ``aggregate()`` it is unreachable — a false predicate refuses
+        # ``no-parent-column`` and the rollup read never runs. What it closes is
+        # the flag-false shape, where both paths then report no edges instead of
+        # one reporting the rollup's. The shape round 1 measured — the column
+        # renamed away on a ledger whose ``session_daily`` still holds edges — is
+        # NOT closed: ``_migrate`` re-adds the column, so the flag is true, the
+        # substitution does not apply, and the two maps still disagree (6 533 vs
+        # 0 at live scale) while every call count matches. That state needs an
+        # out-of-band edit no product path performs, and the guard is therefore
+        # defence in depth rather than an enforced agreement — with the count
+        # check blind to a side-map divergence by construction, a future read
+        # that keys on these edges should verify them itself.
         edge = "MAX(parent_session_id)" if self._has_parent_column() else "''"
         top = conn.execute(f"SELECT {sums} FROM session_daily{clause}", params).fetchone()
         per_provider = conn.execute(

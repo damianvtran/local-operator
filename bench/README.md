@@ -406,7 +406,7 @@ reported beside the CPU everywhere.
 | last 7 days, wall p50 / CPU p50 | 2,360 / 1,662 ms | **141 / 117 ms** | 17x / 14x |
 | **first** read of a fresh copy (cold stand-in) | 2,764 ms / 2,134 ms CPU | **247 ms / 176 ms CPU** | 11x / 12x |
 | route payload (`asdict` + `json.dumps`, 3.74 MB) | 37.2 ms CPU | 52.4 ms CPU | — |
-| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.07 / 0.22 / 0.49 ms | 0.12 / 0.35 / 0.71 ms (+session_daily 0.12 / 0.35 / 0.71) | +0.05 / +0.13 / +0.22 ms |
+| `record_batch`, batch of 1 / 5 / 20, CPU p50 | 0.07 / 0.22 / 0.49 ms (ledger + calendar rollups) | 0.12 / 0.35 / 0.71 ms (with the session rollup) | +0.05 / +0.13 / +0.22 ms |
 | backfill sweep of the existing ledger | n/a (reads fell back to the ledger) | 27 days, 2,206 ms wall / 1,789 ms CPU (9,060 buckets) | 64 ms/day p50 |
 | per-day verify pass (the R3 fix) | n/a | **66.5 ms** over 27 labels, ~2.5 ms/label | once per launch |
 
