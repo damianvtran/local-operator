@@ -387,7 +387,24 @@ _SHAREABLE_STATE_FIELDS = frozenset(
 #: calls measured 2,619,443 B). Both sailed through a bound that was looking at
 #: a different key. Measuring the row is what makes the NEXT payload-bearing
 #: field bounded on the day it is added rather than on the day it overflows.
-LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 60_000
+#:
+#: The value is 60,000 less the clock a retained end now carries. The fold
+#: stamps every settled end with its call's own ``started_at_epoch`` (see
+#: ``_fold_live_event``), which is 39 B on the row's ENVELOPE — outside the
+#: ``result`` this budget clips — so the only thing in this field that can give
+#: those bytes back is the text share itself: 60,000 - 39 x
+#: :data:`LIVE_EVENT_END_ROWS_MAX` (100) = 56,100. Without it the field's own
+#: worst case grows past the frame it has to coexist with, and the class guard
+#: is where that lands: with every other field at its own maximum the all-year
+#: fixture measures 1,051,092 B against the 1,048,576-byte line — 2,516 B over,
+#: because ``model_catalogue``, the frame's slack absorber, could give back only
+#: 1,208 B of the stamp's 3,900 B before its own floor. Paid here instead, the
+#: same fixture measures 1,048,400 B, which is what it measures on the released
+#: build: the stamp costs the frame nothing and the seed keeps its row cap, its
+#: fixture and its ~99 KB worst case. The cost is 39 characters off a preview
+#: the field already truncates, spent in the order the retention rule already
+#: ranks (identity and outcome first, then preview text, then ``details``).
+LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 56_100
 LIVE_EVENT_TEXT_FLOOR_CHARS = 200
 
 #: Placeholder for a result block too big to ride the reconnect seed.
@@ -5358,6 +5375,45 @@ class FrontendStateStore:
             # at turn end — on a call that had SUCCEEDED (QA round 1, Q2).
             # A joiner that never saw the start still renders correctly: the
             # app buffers an unmatched end in ``_pending_tool_ends``.
+            #
+            # The end is also the only frame of the PAIR that states no time,
+            # and the line below is what drops the one that did: the start
+            # carried ``started_at_epoch`` and the end REPLACES it, so a viewer
+            # joining mid-turn is handed a settled row with no clock on the
+            # wire at all. A client cannot invent one — the renderer refuses to
+            # date a frame at its own arrival instant — so that row would paint
+            # unplaced, and naming nothing that ran, until a durable page
+            # reached it, on a runtime whose TUI has had the row in its true
+            # position since the call ran. Carry the call's own start instant
+            # onto the retained end instead.
+            #
+            # The value is readable ONLY at this statement, and that is the
+            # constraint the line rests on: the anchor lives in
+            # ``live_tool_started_at``, and ``_fold_live_tool_starts`` — which
+            # pops the entry on this very event — runs AFTER this method, so
+            # ``observe_event`` folds the seed first and no later point in the
+            # turn can read the start back.
+            #
+            # A call whose start was never seen contributes NO KEY rather than a
+            # placeholder: ``live_tool_started_at`` is empty for it, and the
+            # tempting substitutes — this fold's own ``now``, or a zero — are
+            # precisely the arrival-instant-dressed-as-a-start that
+            # ``_fold_live_tool_starts`` refuses for the same reason. The ABSENT
+            # key is the wire's "states no time", which leaves the client's own
+            # rule in charge of withholding the row; a fabricated instant would
+            # print a plausible wrong age where the client's blank column is the
+            # truth.
+            #
+            # COMPATIBILITY, both directions, with no ``PROTOCOL_VERSION`` move
+            # — the same story ``AgentEndEvent.cut_off`` records: the seed entry
+            # is an untyped dict on the wire, and this key name is one clients
+            # ALREADY read on the sibling ``tool_execution_start`` (it is the
+            # value their clock helper keys on). An older client ignores an
+            # unknown key on a seed entry; an older runtime simply never stamps,
+            # and the client refuses the row exactly as it does today.
+            started_at = self._state.live_tool_started_at.get(call_id)
+            if started_at is not None:
+                data["started_at_epoch"] = started_at
             live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
             live.append(data)
         # Shallow copy on purpose: this runs per streaming delta on the session
