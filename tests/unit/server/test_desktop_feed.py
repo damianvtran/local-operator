@@ -1934,6 +1934,20 @@ def _rank(root: Path, session_id: str) -> tuple[int, int]:
     return entry.rank[0], entry.rank[1]
 
 
+def _pair(root: Path, session_id: str) -> tuple[str, str]:
+    """The row's DEDUPE PAIR, derived the way the feed derives it — from the same home.
+
+    The assertion that a case is a COLLISION (identical pair, different position)
+    has to be made on the pair the comparison actually sees, not on a transcription
+    of it: the pair is built from the row's attention state as the store answers it,
+    which is what ``entry_for`` gets on both sides.
+    """
+    entry = {row.id: row for row in load_catalog(root)}[session_id]
+    store = AttentionStore(root / "attention.db")
+    attention = store.state_many([f"session/{session_id}"]).get(f"session/{session_id}")
+    return status_dedupe_key(entry.row, attention)
+
+
 def test_a_row_that_completes_inside_active_invalidates_the_catalogue(tmp_path):
     """THE REPORTED CASE: the position moved, the SECTION did not.
 
@@ -1961,7 +1975,6 @@ def test_a_row_that_completes_inside_active_invalidates_the_catalogue(tmp_path):
     start = opened["payload"]["catalogue_revision"]
     _tick(feed)
     assert _queued(subscription) == []
-    before = feed._position_seen[completer]
     assert _rank(root, completer) == (4, 2)
     assert [entry.id for entry in load_catalog(root)] == [elder, completer]
 
@@ -1971,17 +1984,25 @@ def test_a_row_that_completes_inside_active_invalidates_the_catalogue(tmp_path):
     _tick(feed)
     frames = _queued(subscription)
     kinds = [frame["type"] for frame in frames]
-    assert kinds.count("catalogue") == 1, kinds
+    assert kinds.count("catalogue") == 1, (
+        f"the row finished inside Active (4 -> 1, active True -> True) and the feed "
+        f"published {kinds.count('catalogue')} invalidation(s): {kinds} — a comparison "
+        f"that asks only whether the row's SECTION moved is blind to this move"
+    )
     # AFTER the status frame, so the client paints the checkmark and then re-reads
     # a list that already agrees with it.
     assert kinds.index("catalogue") > kinds.index("session_status"), kinds
-    assert feed._position_seen[completer] != before, "the key was never advanced"
     assert _rank(root, completer) == (1, 2)
     revision = frames[kinds.index("catalogue")]["payload"]["revision"]
     assert revision > start, "the client has seen this revision and would not refetch"
     # ...and the list that refetch reads is the one that leads with the completed
     # row: the invalidation is only worth publishing if the backend agrees.
     assert [entry.id for entry in load_catalog(root)] == [completer, elder]
+    # The feed's own record of the position IS the position the list just published,
+    # so the comparison cannot be satisfied by a map that stopped tracking the sort.
+    # Deliberately the LAST assertion: on a tree whose comparison is gated behind the
+    # pair, the drift above is what this test reports, not an ``AttributeError`` here.
+    assert feed._position_seen[completer][:2] == _rank(root, completer)
     asyncio.run(feed.close())
 
 
@@ -2008,16 +2029,17 @@ def test_an_acknowledgement_with_a_record_invalidates_the_catalogue(tmp_path):
     subscription = feed.subscribe()
     _tick(feed)
     assert _queued(subscription) == []
-    before = feed._position_seen[sid]
     assert _rank(root, sid) == (1, 2)
 
     AttentionStore(root / "attention.db").acknowledge(f"session/{sid}", token)
     _tick(feed)
     frames = _queued(subscription)
     kinds = [frame["type"] for frame in frames]
-    assert kinds.count("catalogue") == 1, kinds
-    after = feed._position_seen[sid]
-    assert after != before, "the acknowledgement moved the row and nobody was told"
+    assert kinds.count("catalogue") == 1, (
+        f"acknowledging a resident completion moved the row 1 -> 5 inside Active and the "
+        f"feed published {kinds.count('catalogue')} invalidation(s): {kinds} — a "
+        f"comparison that asks only whether the row's SECTION moved is blind to this move"
+    )
     assert _rank(root, sid) == (5, 2)
     entry = {row.id: row for row in load_catalog(root)}[sid]
     # Only the two MUTABLE terms are compared: the feed builds its row from the
@@ -2025,7 +2047,12 @@ def test_an_acknowledgement_with_a_record_invalidates_the_catalogue(tmp_path):
     # file and its third term is 0.0 where the catalogue's is the real birth. Birth
     # and id cannot move, so every EDGE — which is all the comparison is for — is
     # unaffected by the difference.
-    assert (entry.rank[0], entry.rank[1], entry.active) == (after[0], after[1], True)
+    assert entry.active is True
+    # Last, and against the list's own key: on a tree whose comparison is gated
+    # behind the pair, the drift above is what this test reports, not an
+    # ``AttributeError`` here.
+    after = feed._position_seen[sid]
+    assert after[:2] == (entry.rank[0], entry.rank[1]), "the feed did not record the move"
     asyncio.run(feed.close())
 
 
@@ -2048,18 +2075,23 @@ def test_a_resumed_completion_invalidates_the_catalogue(tmp_path):
     subscription = feed.subscribe()
     _tick(feed)
     assert _queued(subscription) == []
-    before = feed._position_seen[sid]
     assert _rank(root, sid) == (1, 2)
 
     _record_publish(root, sid, busy=True)
     _tick(feed)
     frames = _queued(subscription)
     kinds = [frame["type"] for frame in frames]
-    assert kinds.count("catalogue") == 1, kinds
-    after = feed._position_seen[sid]
-    assert after != before
+    assert kinds.count("catalogue") == 1, (
+        f"the row started working again (1 -> 4, active True -> True) and the feed "
+        f"published {kinds.count('catalogue')} invalidation(s): {kinds} — a comparison "
+        f"that asks only whether the row's SECTION moved is blind to this move"
+    )
     assert _rank(root, sid) == (4, 2)
     assert {row.id: row for row in load_catalog(root)}[sid].active is True
+    # Last, so a gated comparison reports the drift above rather than an
+    # ``AttributeError`` here.
+    after = feed._position_seen[sid]
+    assert after[:2] == _rank(root, sid), "the feed did not record the move"
     asyncio.run(feed.close())
 
 
@@ -2085,13 +2117,89 @@ def test_a_pair_change_that_keeps_the_position_invalidates_nothing(tmp_path):
     _tick(feed)
     assert [frame["payload"]["code"] for frame in _statuses(_queued(subscription))] == ["approval"]
 
-    before = feed._position_seen[sid]
     _record_publish(root, sid, pending="answer")
     _tick(feed)
     frames = _queued(subscription)
     assert [frame["payload"]["code"] for frame in _statuses(frames)] == ["answer"], frames
-    assert "catalogue" not in [frame["type"] for frame in frames], frames
-    assert feed._position_seen[sid] == before
+    kinds = [frame["type"] for frame in frames]
+    assert "catalogue" not in kinds, (
+        f"the pair changed (approval -> answer) inside tier 0, so the row did not move "
+        f"and nothing owed a refetch — the feed published {kinds}"
+    )
+    # The row really did not move, so the only thing that changed is the pair the
+    # client is told about: the negative is meaningful against the LIST's own key,
+    # which is what the comparison is supposed to track.
+    assert _rank(root, sid) == (0, 2)
+    asyncio.run(feed.close())
+
+
+def test_a_section_move_behind_a_byte_identical_pair_still_invalidates(tmp_path):
+    """M1: the pair is NOT a superset of the key, so the comparison cannot sit behind it.
+
+    The exact collision the round-1 review reproduced on the real writers, pinned
+    here. Two reachable states share ``status_dedupe_key`` byte for byte and differ
+    in the ORDER KEY — and the difference is a SECTION move, the subsumed case:
+
+    ================================  =============  ========
+    state                             rank (t, band)  active
+    ================================  =============  ========
+    cold row with an armed wake       (6, 0, …)       False
+    that row live and DETACHED, same
+    wake still armed                  (5, 2, …)       True
+    ================================  =============  ========
+
+    Both derive ``("scheduled", "Scheduled (1 wake)")``: the wake label outranks
+    the idle one, and ``wake_rank`` is scoped to COLD rows. A comparison made only
+    for pair-CHANGED candidates therefore never runs for this move at all — the row
+    climbs out of "Previous chats" into "Active chats" with the gate shut behind
+    it and NOTHING published, which is this mechanism's class through a second
+    door. The pair is asserted byte-identical in the test itself, so the collision
+    cannot quietly stop being one and leave this passing for the wrong reason.
+
+    Reachability is narrow and worth stating rather than hiding: it needs the row
+    observed cold-and-armed and then live-idle-DETACHED with no intervening pair
+    change (an attach would move the pair). Narrow is not unreachable — a runtime
+    that attaches and detaches inside one ``STATUS_PROBE_INTERVAL_S`` does it.
+    """
+    root = tmp_path
+    session_id, neighbour = "ad" * 6, "ae" * 6
+    for sid, birth in ((neighbour, 1_700_000_000.0), (session_id, 1_700_000_600.0)):
+        _listable_session(root, sid)
+        _birth(root, sid, birth)
+    _wake(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick(feed)
+    assert _queued(subscription) == []
+    before_pair = _pair(root, session_id)
+    assert before_pair == ("scheduled", "Scheduled (1 wake)"), before_pair
+    assert _rank(root, session_id) == (6, 0)
+    assert {row.id: row for row in load_catalog(root)}[session_id].active is False
+
+    # The runtime's own record arrives, detached, and the wake is untouched: the
+    # row is live and idle, so the SECTION changes and nothing else the pair sees.
+    _record_publish(root, session_id, pid=_FOREIGN_LIVE_PID, detached=True)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    frames = _queued(subscription)
+    kinds = [frame["type"] for frame in frames]
+    after_pair = _pair(root, session_id)
+    assert after_pair == before_pair, (
+        f"this case is only a collision while the pair is byte-identical: "
+        f"{before_pair} -> {after_pair}"
+    )
+    assert _rank(root, session_id) == (5, 2), "the row did not move, so this case proves nothing"
+    assert {row.id: row for row in load_catalog(root)}[session_id].active is True
+    assert "catalogue" in kinds, (
+        f"the row moved from 'Previous chats' into 'Active chats' behind a "
+        f"byte-identical pair {before_pair} and the feed published {kinds} — a "
+        f"comparison that is skipped whenever the pair is unchanged is blind to "
+        f"this move"
+    )
+    assert (
+        "session_status" not in kinds
+    ), f"the pair was asserted unchanged above, so no status frame was owed: {kinds}"
     asyncio.run(feed.close())
 
 
@@ -2179,7 +2287,12 @@ def test_a_burst_of_completions_inside_active_costs_one_invalidation(tmp_path):
         _tick(feed)
         frames = _queued(subscription)
         assert len(_statuses(frames)) == 2, frames
-        assert [frame["type"] for frame in frames].count("catalogue") == 1, frames
+        kinds = [frame["type"] for frame in frames]
+        assert kinds.count("catalogue") == 1, (
+            f"two rows reordered inside Active in one tick and the feed published "
+            f"{kinds.count('catalogue')} invalidation(s): {kinds} — a comparison that "
+            f"asks only whether a row's SECTION moved is blind to both moves"
+        )
         assert _rank(root, completer) == (1, 2)
         assert _rank(root, re_spelled) == (2, 2)
         # Consumed, not deferred: nothing waits for the next tick.
@@ -2257,6 +2370,18 @@ def _state_dormant(root: Path, sid: str, pid: int) -> None:
     _wake(root, sid, dormant=True)
 
 
+def _state_detached_armed(root: Path, sid: str, pid: int) -> None:
+    """The same armed wake on a LIVE, DETACHED row: tier 5, Active, wake band 2.
+
+    The after-half of the M1 collision. Its pair is the armed wake's —
+    ``("scheduled", "Scheduled (1 wake)")``, byte-identical to the cold armed row
+    it follows, because the wake label outranks the idle one and ``wake_rank`` is
+    scoped to cold rows — while the POSITION moves section, 6 -> 5, band 0 -> 2.
+    """
+    _record_publish(root, sid, pid=pid, detached=True)
+    _wake(root, sid)
+
+
 #: The drift matrix: ``(name, state before, state after)``. Both halves of every
 #: transition are materialised through the REAL writers, on a fresh store, so the
 #: comparison is the feed's rule against ``load_catalog``'s own sort.
@@ -2272,6 +2397,10 @@ _DRIFT_CASES: tuple[tuple[str, _DriftState, _DriftState], ...] = (
     ("a cold row starting a turn", _state_cold, _state_busy),
     ("a cold row being armed", _state_cold, _state_armed),
     ("an armed wake going dormant", _state_armed, _state_dormant),
+    # The M1 collision: a SECTION move whose pair is byte-identical, so the case
+    # only discriminates because the matrix drives every transition through the
+    # real writers and asks the comparison for a frame.
+    ("a cold armed row attaching as a detached live row", _state_armed, _state_detached_armed),
 )
 
 
@@ -2348,10 +2477,17 @@ def test_the_key_and_the_sort_cannot_drift(tmp_path):
                 f"rank_entries have drifted apart"
             )
             # The tick really derived this row, so a silent case is not a dead feed.
-            # Deliberately shape-agnostic: an older comparison stored the boolean
-            # SECTION under this key, and subscripting it here would raise instead
-            # of reporting the drift the iff above has already caught.
-            assert feed._position_seen.get(target) is not None, f"{name}: never derived"
+            # SHAPE-AGNOSTIC, which is the claim above implemented rather than
+            # restated: a tree whose comparison stored the boolean SECTION under its
+            # own name raised ``AttributeError`` here on the matrix's FIRST (silent)
+            # case, i.e. it reported a rename where the iff above exists to report
+            # the drift — and a reader checking "does this go red before the fix?"
+            # read that as coverage. Reading whichever map the tree has keeps the
+            # iff the thing that fails.
+            derived = getattr(feed, "_position_seen", None)
+            if derived is None:
+                derived = getattr(feed, "_activity_seen")
+            assert derived.get(target) is not None, f"{name}: never derived"
             (moved if key_before != key_after else still).append(name)
             if order_before != order_after:
                 order_moved.append(name)
@@ -2487,17 +2623,21 @@ def test_a_failing_tick_is_visible_rather_than_a_quiet_machine(tmp_path, monkeyp
 
 
 def test_a_failed_publish_does_not_lose_the_section_move(tmp_path, monkeypatch):
-    """Review round 2 MINOR 2: the section-move flag commits LAST too.
+    """Review round 2 MINOR 2: the position-change flag commits LAST too.
 
     ``_publish_status_changes`` states the COMMIT-LAST rule and follows it for
-    ``_status_seen`` and the revisions. The activity map was advancing inside the
-    build loop instead, three lines above the rule — so a raising ``_publish``
-    (a payload that will not serialize, a ``_frame`` bug, MemoryError) lost the
-    invalidation for good: the next tick re-derived the same pair, found the
-    activity already recorded, left the flag unset, and the row stayed in the
-    wrong section until the 30 s safety poll — the exact symptom this mechanism
-    exists to remove. Committing it beside ``_status_seen`` gives it the retry the
-    status side already had.
+    ``_status_seen`` and the revisions. ``_position_seen`` — the map this rule now
+    guards, since the section comparison it was first written for is the subsumed
+    case of the ORDER KEY (round 1, M1) — was advancing inside the build loop
+    instead, three lines above the rule, so a raising ``_publish`` (a payload that
+    will not serialize, a ``_frame`` bug, MemoryError) lost the invalidation for
+    good: the next tick re-derived the same pair, found the position already
+    recorded, left the flag unset, and the row stayed in the wrong slot until the
+    30 s safety poll — the exact symptom this mechanism exists to remove. This case
+    is a SECTION move (``recent`` in "Previous chats" -> an unread completion in
+    "Active chats"), which is why the assertion below still says section; the rule
+    it guards is the same one for an intra-section reorder. Committing the map
+    beside ``_status_seen`` gives it the retry the status side already had.
 
     The retry is the assertion: the first tick's fan-out raises, and the second
     (with a working ``_publish``) must publish the status frame AND the
