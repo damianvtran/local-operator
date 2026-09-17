@@ -774,17 +774,35 @@ def test_the_hop_timeout_is_the_per_hop_constant_outside_a_walk() -> None:
     assert reporter_mod._hop_timeout_s() == reporter_mod.PARENT_LOOKUP_TIMEOUT_S
 
 
-def test_an_expired_budget_answers_like_any_other_unanswered_hop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``0.0`` is a real timeout: the lookup gives up at once and never raises."""
-    monkeypatch.setattr(reporter_mod._WALK_DEADLINE, "value", time.monotonic() - 1)
-    assert reporter_mod._hop_timeout_s() == 0.0
-    started = time.monotonic()
-    # A ``ps`` fast enough to answer inside an expired budget may still answer;
-    # what must never happen is an exception or a bogus pid.
-    assert reporter_mod._default_parent_pid(os.getpid()) in (None, os.getppid())
-    assert time.monotonic() - started < 1.0
+def test_an_expired_budget_answers_like_any_other_unanswered_hop() -> None:
+    """``0.0`` is a real timeout: the lookup gives up at once and never raises.
+
+    The deadline is written directly and deleted again, NOT monkeypatched:
+    ``threading.local`` only grows a ``value`` attribute once a walk has run on
+    this thread, so ``monkeypatch.setattr(..., raising=True)`` made this test
+    pass or error depending on what ran before it (review R3-1). Nothing here
+    depends on another test, and the cleanup assertion at the end pins that the
+    thread-local does not leak into a later test.
+
+    ``0.0`` is the guard for a budget that expired between the walk's pre-check
+    and the lookup — a state the walk's own ordering makes hard to reach, so
+    what this pins is :func:`_hop_timeout_s`'s contract rather than a walk
+    outcome. The end-to-end expiry path is covered by
+    ``test_the_walk_gives_its_last_hop_no_more_than_the_budget_left``.
+    """
+    local = reporter_mod._WALK_DEADLINE
+    assert getattr(local, "value", None) is None
+    try:
+        local.value = time.monotonic() - 1
+        assert reporter_mod._hop_timeout_s() == 0.0
+        started = time.monotonic()
+        # A ``ps`` fast enough to answer inside an expired budget may still
+        # answer; what must never happen is an exception or a bogus pid.
+        assert reporter_mod._default_parent_pid(os.getpid()) in (None, os.getppid())
+        assert time.monotonic() - started < 1.0
+    finally:
+        del local.value
+    assert reporter_mod._hop_timeout_s() == reporter_mod.PARENT_LOOKUP_TIMEOUT_S
 
 
 def test_the_ancestry_walk_is_cycle_and_self_parent_safe() -> None:
@@ -942,6 +960,11 @@ def test_the_default_probe_passes_the_pane_explicitly(
     binary = tmp_path / "herdr"
     binary.write_text(f'#!/bin/sh\nprintf %s "$*" > {log}\necho \'{{"result":{{}}}}\'\n')
     binary.chmod(0o755)
+    # The property under test is the ARGV, not the budget. Widened for the
+    # healthy spawn so a loaded machine cannot turn a slow-but-working `herdr`
+    # into a red test (review R3-2); the failure cases below are bounded
+    # tightly instead, and none of this weakens what is asserted.
+    monkeypatch.setattr(reporter_mod, "PANE_PROBE_TIMEOUT_S", 30.0)
     assert reporter_mod._default_pane_probe("w1:p9", str(binary)) == '{"result":{}}\n'
     assert log.read_text() == "pane process-info --pane w1:p9"
     monkeypatch.setattr(reporter_mod, "PANE_PROBE_TIMEOUT_S", 0.5)
