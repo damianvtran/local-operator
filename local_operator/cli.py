@@ -482,6 +482,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "status", help="Whether a cookie is stored and how old it is; never the value"
     )
     qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
+    qwencloud_actions.add_parser(
+        "migrate", help="Move a plaintext ticket into the encrypted secret store"
+    )
 
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
@@ -5888,6 +5891,7 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
     from local_operator.providers.qwencloud_console import (
         QWENCLOUD_TICKET_STALE_MS,
         TicketStoreError,
+        TicketStoreLocked,
         delete_ticket,
         read_ticket_record,
         store_ticket,
@@ -5937,6 +5941,13 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         # file.
         try:
             record = read_ticket_record(store)
+        # No separate `TicketStoreLocked` clause here, unlike `rm`. The remedy
+        # ("Run `lop secret unlock`") lives in the EXCEPTION MESSAGE that Slice
+        # A raises, and this clause interpolates it, so a locked store already
+        # exits 1 naming the remedy. A specific clause would need a body
+        # identical to this one -- measured: deleting it changed neither the
+        # exit code nor a byte of stderr. `rm` earns its second clause because
+        # its two bodies genuinely differ.
         except TicketStoreError as exc:
             print(
                 f"lop qwencloud-ticket status: {exc}\n"
@@ -5958,6 +5969,16 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         else:
             age = "age unknown"
         print(f"QwenCloud console ticket stored ({record['length']} characters, {age}).")
+        # A METADATA ORPHAN: the row in `auth.db` says a ticket was stored but
+        # its encrypted value is gone, so `/usage` has nothing to read. The
+        # default is True so a pre-migration row, whose value still lives in
+        # `auth.db` itself, does not trip the warning.
+        if not record.get("secret_present", True):
+            print(
+                "  WARNING: the ticket's metadata is stored but its ENCRYPTED VALUE "
+                "is missing, so /usage cannot read it. Re-run "
+                "\"printf %s '<TICKET>' | lop qwencloud-ticket set\" to restore it."
+            )
         if captured and age_ms > QWENCLOUD_TICKET_STALE_MS:
             print(
                 "  This is older than a console session usually lasts. If /usage has "
@@ -6010,10 +6031,22 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         # give: it would remove the mitigation and say it had worked.
         try:
             removed = delete_ticket(store)
+        except TicketStoreLocked as exc:
+            # First, for the same reason as `status`: caught by the clause
+            # below it, the one failure with a remedy reads as one without.
+            print(
+                f"lop qwencloud-ticket rm: {exc}\n"
+                "  The ticket MAY STILL BE STORED. Unlock the secret store and "
+                "re-run, and revoke the session in the QwenCloud console to "
+                "be certain.",
+                file=sys.stderr,
+            )
+            return 1
         except TicketStoreError as exc:
             print(
                 f"lop qwencloud-ticket rm: {exc}\n"
-                "  The ticket MAY STILL BE STORED. Re-run once the store is "
+                "  The ticket MAY STILL BE STORED, in the credential store, the "
+                "encrypted secret store, or both. Re-run once they are "
                 "readable, and revoke the session in the QwenCloud console to "
                 "be certain.",
                 file=sys.stderr,
@@ -6040,9 +6073,28 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         )
         return 0
 
+    if command == "migrate":
+        return _qwencloud_ticket_migrate(store)
+
     print(
-        "usage: lop qwencloud-ticket {set,status,rm}\n"
+        "usage: lop qwencloud-ticket {set,status,rm,migrate}\n"
         "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _qwencloud_ticket_migrate(store: Any) -> int:
+    """Move a plaintext ticket out of `auth.db` and into the encrypted store.
+
+    Not implemented in this build. It exits NON-ZERO rather than reporting a
+    no-op success: a migration verb that returns 0 without moving anything
+    tells the user their plaintext ticket is gone when it is still on disk,
+    which is the same false success `TicketStoreUnreadable` exists to prevent.
+    """
+    del store  # the implementation takes the open store; the stub reads nothing
+    print(
+        "lop qwencloud-ticket migrate: not yet available in this build.",
         file=sys.stderr,
     )
     return 2
