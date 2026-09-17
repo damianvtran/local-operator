@@ -1,7 +1,10 @@
 # Design: one update mechanism for every component
 
-Status: proposal (architect), **revision 2** — round-1 review findings worked in
-(R2 is now §1.6, the spine of the document; R1 reshaped §5.1/§6.1). Base:
+Status: proposal (architect), **revision 3** — round-1 review findings worked in
+(R2 is now §1.6, the spine of the document; R1 reshaped §5.1/§6.1) and round 2's
+(R10 makes the daemons' live reading the generation each actually *runs*, which
+sharpens §1.6 rather than softening it; R11 names the owner of the convergence;
+R12 scopes the client-release state and says whose bound it is). Base:
 `origin/main` `5766653f9` (local-operator) and `9a39bcbf1` (local-operator-ui).
 Docs-only: no `pyproject.toml` or `package.json` bump — the window's release
 owner handles that. Six PRs (§7).
@@ -52,7 +55,7 @@ the most:
 | what answers `/health` | **0.56.8** | `installed_version()` read **per request** (`local_operator/server/routes/health.py:79-81`) |
 | what the serve record says | **0.56.2** | the record is stamped at boot (`server/registry.py:398-405`), and `~/.local-operator/run/serve/52156.json` says `version: 0.56.2`, `retiring_from: 0.56.2`, `retiring_to: 0.56.9` |
 | the app's selection stamp | **0.55.7** | `selected-environment.json`'s `backendVersion`, written once when the env was prepared (`local-operator-ui:src/main/backend/managed-python.ts:932-944`) |
-| **the install the four supervised daemons load** | **0.56.9** | `~/.local/share/lop/current` → `generations/20260917T091055Z-0.56.9`; every `com.local-operator.*` LaunchAgent names `~/.local/share/lop/bin/python3`, the shim that resolves that pointer (`update.py:1140-1153`) |
+| **the install the four supervised daemons are *running*** | **0.56.6 (mobile), 0.56.2 (the other three)** | each daemon's argv names the generation it started from: the mobile daemon (pid 54993) on `…/generations/20260917T055738Z-0.56.6/…`, and the browser, tunnel and wakes daemons (pids 80178/88076/57921) on `…/generations/20260916T212045Z-0.56.2/…`. Every `com.local-operator.*` LaunchAgent's `Program` names `~/.local/share/lop/bin/python3`, the shim that resolves `current` — **once, at exec** (`update.py:1161-1163`) — so a running daemon is pinned to the generation it started with; the pointer itself says **0.56.9**, which is what a daemon restarted *now* would load |
 | **the install `lop` on PATH runs** | **0.56.11** | `~/.local/bin/lop` → `~/.local/share/uv/tools/local-operator/bin/lop`; dist-info at `lib/python3.14/site-packages/local_operator-0.56.11.dist-info`, `.lop-source` = `5766653f9… main` |
 | PyPI | **0.56.11** | `check_latest()` (`update.py:436`) |
 
@@ -86,6 +89,11 @@ v0.56.11
 $ ~/.local/share/lop/bin/python3 -c 'import local_operator; print(local_operator.__file__)'
 .../generations/20260917T091055Z-0.56.9/tools/local-operator/lib/python3.14/site-packages/local_operator/__init__.py
 ```
+
+That last reading is a **fresh child** of the shim: it resolves `current` at
+exec, so it reports what a daemon started *now* would load — not what the running
+daemons load, which is 0.56.6 and 0.56.2, because that resolution happens once,
+when the process starts (the daemon row of the table above, and §1.6).
 
 `installed_build()` names the tree the *reading process* runs — by design, so
 `lop --version` describes the code in memory (`update.py:1328-1336`). `disk_build()`
@@ -241,11 +249,14 @@ Five things, all small relative to what exists:
    (`:688-700`). With the generation layout the units name the **stable shim**
    (`~/.local/share/lop/bin/python3`, confirmed in all four live
    `~/Library/LaunchAgents/com.local-operator.*.plist`), so a pointer flip
-   changes no unit and these daemons keep serving the superseded generation.
-   **This is not hypothetical and not future: it is the state of this machine
-   right now** — all four are on 0.56.9 while 0.56.11 is published (§1.6). The
-   same is true on a systemd host through the sibling unit renderer (§2's note
-   on supervision).
+   changes no unit — **and, because the shim resolves `current` once at exec, a
+   daemon that is already running is pinned to whatever generation it started
+   with**, which is why only a restart ever moves one. **This is not hypothetical
+   and not future: it is the state of this machine right now** — the mobile
+   daemon runs 0.56.6 and the other three 0.56.2, five and nine patches behind the
+   published 0.56.11, while the pointer they would load on a restart says 0.56.9
+   (§1.6). The same is true on a systemd host through the sibling unit renderer
+   (§2's note on supervision).
 4. **The mobile daemon is bounced unconditionally** (`refresh_mobile_after_upgrade`,
    `update.py:3495`) — a fix for a much older gap, and the one place today where
    an upgrade interrupts a live daemon rather than deferring to it.
@@ -291,16 +302,34 @@ What this machine actually runs, verified today:
   generation, so it came from this path (or from `lop-fleet-update`, the
   operator's tool that drives `lop update` around a live fleet,
   `~/tools/lop-fleet-update/docs/README.md`). **The four supervised daemons load
-  Path 2**: every `com.local-operator.*` LaunchAgent's `Program` is
-  `~/.local/share/lop/bin/python3`, and a child of that shim reports prefix
-  `…/generations/20260917T091055Z-0.56.9/tools/local-operator` and build
-  `0.56.9` — for all four.
+  Path 2, and are running generations older than its pointer**: every
+  `com.local-operator.*` LaunchAgent's `Program` is
+  `~/.local/share/lop/bin/python3`, the shim that resolves `current` — and it
+  resolves it **once, at exec**: "It resolves the install pointer ONCE, here, and
+  execs that generation's interpreter by an absolute path" (`update.py:1161-1163`).
+  A running daemon therefore keeps the generation it started with, and no pointer
+  flip reaches it. Live now: the mobile daemon (pid 54993) runs
+  `…/generations/20260917T055738Z-0.56.6/…`, and the browser, tunnel and wakes
+  daemons (pids 80178/88076/57921) run
+  `…/generations/20260916T212045Z-0.56.2/…`, started between Sep 16 17:20 and Sep
+  17 05:07 — **five and nine patches behind the published 0.56.11**, not the one
+  patch the pointer's 0.56.9 implies. A child of that shim spawned *now* does
+  report `…-0.56.9/tools/local-operator` and build `0.56.9`; that is a fresh
+  launch's reading, and it was mistaken for the daemons' own.
+
+  **This makes the section's point stronger, not weaker.** The pointer's 0.56.9
+  is not the daemons' state — it is the state of a restart that has not happened
+  — and the once-at-exec resolution is precisely why a restart is the only thing
+  that ever moves a supervised daemon, and why the pointer flip alone changes
+  nothing for them.
 
 **Two publishers, one shared artifact.** `~/.local/bin/lop` is written by uv
 (Path 1) and by `write_stable_launchers` (Path 2), with no coordination between
 them: whichever ran last wins. Today Path 1 won, so `lop` resolves the uv-tool
-tree while the pointer — and therefore every supervised daemon — stays on
-0.56.9.
+tree while the pointer — and therefore what a supervised daemon would load on a
+restart — stays on 0.56.9. What those daemons are *running* is older still
+(0.56.6 and 0.56.2 in §1.1's row), because each resolved the pointer once, at
+exec, and has kept that generation since.
 
 Three consequences, and the first one *is* the operator's requirement failing:
 
@@ -308,7 +337,9 @@ Three consequences, and the first one *is* the operator's requirement failing:
    on PATH, `check_latest()` compares `installed_version()` = 0.56.11 against
    PyPI's 0.56.11 and prints "is the latest", returning 0 before any upgrade
    (`update.py:3984-3986`). `refresh_daemons_after_upgrade()` (`:3713`) is
-   therefore never reached, and the four daemons stay two releases behind.
+   therefore never reached, and the four daemons stay pinned to the generations
+   they started on — 0.56.6 and 0.56.2, five and nine patches behind the published
+   0.56.11 — for as long as nothing restarts them.
    Executed here rather than inferred:
 
    ```
@@ -350,8 +381,9 @@ moving nothing — the same class of lie as §1.2, one level up.
 
 Until convergence lands, the honest report says *which* install each reading
 belongs to: "0.56.11 is published and is what `lop` runs" and "your four
-supervised daemons are on 0.56.9" are both true, and neither is the whole
-answer. That is what §6's per-component report is for.
+supervised daemons are running 0.56.6 and 0.56.2, and would load 0.56.9 at their
+next restart" are both true, and neither is the whole answer. That is what §6's
+per-component report is for.
 
 ## 2. Component inventory and ownership
 
@@ -407,7 +439,7 @@ whichever number was nearest.
 | **what is published** | PyPI's `info.version` | `check_latest()` (`update.py:436`) — the only live network read; `cached_latest()` (`:470`) is the offline fallback and never fetches | a version anybody has not fetched |
 | **what is installed on disk** | the dist-info name plus `.lop-source` under an install root — `installed_build(root)` (`update.py:867`) | `installed_build(prefix)` for a named root. For **the pointer** — the tree a daemon launched through `<stable>/bin/python3` loads — `disk_build()` (`:1328-1374`), which reads `current_install_root()`. Its docstring calls that "the build a FRESH `lop` would load", and that holds **only on a converged host**: here `~/.local/bin/lop` names the legacy uv-tool tree, so `disk_build()` answers 0.56.9 while `lop --version` answers v0.56.11 (§1.6) | `/health` (it is a *running* process's reading) |
 | **what is running right now, and from which install** | `installed_build(process_install_root())` for the build — but the identity is `prefix` + `install_kind` + `pid` + `instance_id` from `/health` (`health.py:90-99`), cross-checked against the serve record (`registry.py:238-329`) | `DaemonStatusSnapshot.prefix` / `.installKind` already carry it to the app (`local-operator-ui:src/shared/backend-status.ts:73-74`) | a PATH lookup, a version string alone |
-| **what the next launch will load** | for a generation install: the generation `current` resolves to (`current_generation()`, `update.py:1197`; `flip_pointer()` `:1547` is the only write) — which for a *supervised* daemon is also what it loads, because its unit names the shim (`daemon_image_path()` `:1140-1153`). For the app's env: the venv the pointer names (`readManagedSelection` `local-operator-ui:src/main/backend/managed-python.ts:613`). For a session runtime: whatever `local-operator` resolves at spawn | `installed_version()` / `lop --version` for the *reading* process; `disk_build()` for the pointer | the boot stamp of a live process |
+| **what the next launch will load** | for a generation install: the generation `current` resolves to (`current_generation()`, `update.py:1197`; `flip_pointer()` `:1547` is the only write) — which for a *supervised* daemon is also what it loads **on its next start**, because its unit names the shim (`daemon_image_path()` `:1140-1153`) and the shim resolves once at exec; a daemon already running is still on the generation it started with (§1.6). For the app's env: the venv the pointer names (`readManagedSelection` `local-operator-ui:src/main/backend/managed-python.ts:613`). For a session runtime: whatever `local-operator` resolves at spawn | `installed_version()` / `lop --version` for the *reading* process; `disk_build()` for the pointer | the boot stamp of a live process |
 
 Four consequences the design depends on:
 
@@ -636,14 +668,16 @@ reported as a queued move rather than a failure (`control.py:1572-1594`).
 ### 5.4 One gap this leaves, stated rather than smoothed over
 
 The four supervised daemons name the **stable shim**, so neither a pointer flip
-nor a unit rewrite restarts them, and the daemon refresh is a no-op when the
+nor a unit rewrite restarts them — and because the shim resolves `current` once
+at exec, a running daemon is pinned to the generation it started with, so a
+restart is the only thing that moves it. The daemon refresh is a no-op when the
 rendered unit is unchanged (`launchd.py:682`, `:688-700`;
 `mobile/install.py:187-199`; the systemd renderer behaves the same way). This is
 why §1.5 items 3 and 4 are on the PR plan rather than left implicit: a correct
 `lop update` that leaves the mobile daemon, the extension workers and the tunnel
-serving the previous generation for an unbounded time is not "properly updated"
-in the operator's sense, however clean the pointer flip was — **and §1.6 shows
-that is the state of this machine today**, not a risk.
+serving the generation each started on for an unbounded time is not "properly
+updated" in the operator's sense, however clean the pointer flip was — **and
+§1.6 shows that is the state of this machine today**, not a risk.
 
 ## 6. The clickable action
 
@@ -665,7 +699,7 @@ harness already uses rather than a new set:
 | `deferred-until-idle` | the build landed; this component is still on the old one and will move by itself at its own boundary | `busy` / `draining` (`control.py:1555-1560`), `LEAVING_FOR_BUILD` (`types.py:411`) |
 | `needs-a-package-manager` | the app may not write this tree; a command is named | `update-install.ts:3125-3127` |
 | `could-not` | the attempt ran and did not land (with the installer's own stderr tail) | `update-service.ts:4115-4135` |
-| `awaiting-client-release` | the build landed; this component is held by a stream **the caller itself owns** and has not let go of yet (the app's own daemon relay) | new, and §5.1's standing term is why it must exist |
+| `awaiting-client-release` | the build landed; this component is held by a stream **this action cannot release**, and the detail names the holder (the app's own daemon relay when the app is that client; a phone-held SSE stream when it is not) | new, and §5.1's standing terms are why it must exist |
 | `not-checked` | **nothing was read about this component** | new, and the point of it |
 
 Two of these are load-bearing. `not-checked` is the rule that a surface may not
@@ -679,11 +713,15 @@ today can be printed over a component nobody asked.
 `awaiting-client-release` exists because §5.1's app-owned daemon cannot be
 bounced by a predicate the app's own relay makes false: the action must release
 that relay (`retire.py:145-159`), and until it has, the honest state is "waiting
-on us", not "deferred-until-idle" (which would blame the daemon) and not
-`could-not` (which would blame the installer). It also gives the daemon class the
-bound the review round asked for: the action waits a stated window for its own
-release, and if it does not come the result says so and the daemon keeps serving
-— a **stated** deferral, which is the opposite of the present silence.
+on someone", not "deferred-until-idle" (which would blame the daemon) and not
+`could-not` (which would blame the installer). The holder is named in the detail
+because the app is not always the one holding it: a phone on the same daemon's
+SSE stream (§2 row 11, §5.3) is a standing term this action cannot release at
+all, and the state has to say so rather than report a wait on us. What the action
+bounds is **its own wait, not the class**: it waits a stated window for the
+release, and if the release does not come the result says so and the daemon keeps
+serving. The class's bound is the client's release — which is exactly why the
+window has to be stated rather than assumed.
 
 ### 6.2 What the button may claim when it finishes
 
@@ -753,9 +791,9 @@ reason is in §7.1.
 | 3 | local-operator-ui | app-owned environment updates by **publishing a new generation** (prepare → install → smoke → pointer flip) instead of `pip install --upgrade` in place | it is the only PR that writes to a live tree's neighbour; it needs PR 2's ownership resolution to know when it applies |
 | 4 | local-operator | supervised daemons take the new build **without a unit rewrite**: the refresh path restarts a daemon whose *install* moved, where "its install" is **the pointer the shim resolves** (`disk_build()`), not the console script's tree — at its idle boundary, on launchd **and** systemd, and reports it | this is the `update.py`/unit half of §1.5 items 3–4; it is language-separate from PRs 1–3 and independently testable (fake units, fake `launchctl`/`systemctl`). Without the two readings named apart it restarts a daemon onto the build it was already loading (§1.6) |
 | 5 | local-operator | `serve` daemons gain a bounded, announced handover for an **app-owned, unsupervised** daemon — announce → client release → drain → re-attach, with the release window stated — and `lop refresh --all`'s vocabulary covers them | depends on nothing in PRs 1–3; the safety argument (successor readiness) is the hard part and deserves its own round. Scope is app-owned only: an adopted daemon a person started is **named with its remedy and not moved** (§5.1), because the app has no more standing to restart it than it has to write its tree |
-| 6 | local-operator-ui | the one-click `updateAll()` action and its per-component report | last, because it is the surface over results PRs 2–5 produce; building it first would freeze a contract against unbuilt behaviour |
+| 6 | local-operator-ui | the one-click `updateAll()` action, its per-component report, and the consent-taking convergence it owns (the third note below) | last, because it is the surface over results PRs 2–5 produce; building it first would freeze a contract against unbuilt behaviour |
 
-Three notes the table cannot carry:
+Four notes the table cannot carry:
 
 * **The PR 2 → PR 3 gap.** After PR 2 the app-owned env is the subject and the
   plan has no command for it (§4.4 keeps the per-install front end for
@@ -769,11 +807,28 @@ Three notes the table cannot carry:
   is a stated skew plus the exact command (§5.1), and that is a deliberate choice
   — an app that restarted somebody's `lop serve` would be the same class of
   overreach as an app that pip-installed into somebody's uv tool tree.
-* **PR 6 is gated on a convergence the operator has to accept.** Until
-  `~/.local/bin` resolves through `current`, `canManageUpdate` is false on this
-  host and the button is legitimately off (§6.2). PR 6's honest rendering of
-  that state — command, reason, remedy — is what makes the interim acceptable;
-  a disabled button with no explanation is not.
+* **PR 6 is gated on a convergence the operator has to accept — and PR 6 is
+  what owns offering it.** Until `~/.local/bin` resolves through `current`,
+  `canManageUpdate` is false on this host and the button is legitimately off
+  (§6.2). PR 6's honest rendering of that state — command, reason, remedy — is
+  what makes the interim acceptable; a disabled button with no explanation is
+  not. **No other PR in this plan owns the step that closes the loop**: §1.6(iii)
+  puts the convergence *inside* the action this gate blocks, and §7.1 leaves
+  fleet-wide migration to a rollout, so the owner is named here rather than left
+  to the reader. PR 6 must offer the convergence as a consent-taking action, not
+  only print it: run `lop install migrate` (`update.py:2846`, idempotent by
+  outcome, refused only for a source checkout) through the install that currently
+  owns `~/.local/bin`, then re-check. Until that runs, the clickable-update half
+  of the operator's requirement stays unmet on a host like this one, and the
+  report says so instead of implying otherwise.
+
+* **PR 4 depends on a generation tree that nothing but the installer writes.**
+  Its restart path goes through the stable shim into a generation's own `bin/`
+  (§9's last risk), and the shim prefers the branded image planted there whenever
+  that path is executable (`update.py:1173-1174`). This host writes into live
+  generations today — 167 orphaned plant temps, and a branded image that came and
+  went inside four minutes — so PR 4 states the invariant it needs in the PR, and
+  its QA runs on a root no test run has written into.
 
 ### 7.1 The split I would change
 
@@ -900,6 +955,38 @@ holds a stream.
 * **A same-version rebuild.** Version equality is not build equality
   (`control.py:1597-1619`); every comparison in the new code must carry
   `source_ref`, or `lop-update`'s dominant handover shape will read as "current".
+* **A generation tree written by something other than the installer — the
+  assumption PR 4's restart path rests on, with a live counterexample.** PR 4
+  restarts a supervised daemon through this chain: the unit →
+  `<stable>/bin/python3` (the shim) → `current`, resolved once at exec → `exec
+  <generation>/tools/local-operator/bin/{Local Operator | python3}`
+  (`update.py:1140-1176`). Two links are outside PR 4's control — the shim, and
+  the generation being a tree only the installer has written. The second is an
+  assumption, and it is not literally true even by design: the harness plants its
+  own branded image into `<venv>/bin` on first use (`ensure_branded_interpreter`,
+  `procname.py:563`, link-to-temp then `os.replace`), so PR 4 has to tolerate that
+  writer. The invariant worth stating is that nothing *else* writes there. On this
+  host something else does, or did today:
+  `<stable>/generations/*/tools/local-operator/bin/` holds **167** mode-`700`
+  `.Local Operator.<pid>.tmp` entries (85 in the 0.56.2 generation, 21 in 0.56.6,
+  61 in 0.56.9 — up from the ~60 counted earlier today), which is the residue
+  `_plant_hardlink` leaves when a process dies between its `os.link` and its
+  `os.replace` (`procname.py:502-510`). The shipped sweeper (`:457-486`) removes
+  only temps whose embedded pid is already dead, and 22 of these 167 now resolve
+  to a live process (pid reuse), so the debris accumulates rather than being
+  reaped; a hardlink carries the source inode's mtime, so none of it can be dated
+  from the filesystem. This is not only untidiness: the shim's first branch execs
+  `<generation>/tools/local-operator/bin/Local Operator` **whenever that path
+  exists and is executable** (`update.py:1173-1174`), and today that image is
+  absent from all three generations — so a writer into a generation's `bin/`
+  decides which image the *next* restart runs, i.e. it can change what PR 4
+  restarts *onto*. The same class appears in a shim spawn aborting on `dyld:
+  Library not loaded: @rpath/libpython3.14.dylib` from a
+  `pytest-of-damian/garbage-<uuid>/popen-gw2/…` path, and in an executable that
+  existed in one of those directories at 15:31 and was gone by 15:35 today. This
+  document records the dependency rather than diagnosing it (a separate agent owns
+  that investigation): PR 4 should carry the invariant it needs, and its QA must
+  run on a root no test run has written into.
 
 ## 10. What I would NOT do
 
