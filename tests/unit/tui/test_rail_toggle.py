@@ -50,6 +50,8 @@ from pathlib import Path
 
 import pytest
 from textual.content import Content
+from textual.geometry import Offset
+from textual.selection import Selection
 
 from local_operator import settings_io
 from local_operator.tui.widgets.assistant import (
@@ -377,6 +379,180 @@ async def test_no_row_paints_outside_the_block_at_any_width(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("painted", "copied"),
+    [(True, False), (False, True)],
+    ids=["painted-on-flag-flips-off", "painted-off-flag-flips-on"],
+)
+async def test_a_copy_matches_the_frame_it_was_painted_from_not_the_live_flag(
+    monkeypatch: pytest.MonkeyPatch, painted: bool, copied: bool
+) -> None:
+    """M1: the clipboard follows the PAINT, even when the setting moved since.
+
+    The production gesture this reproduces is a settings cache drop with NO
+    repaint. ``_on_config_change``'s ``display.*`` arm calls ``settings_reload``
+    and nothing else, so an external write — another pane, ``lop config edit`` —
+    changes what ``settings_get`` answers while every mounted block keeps the
+    rows it already painted. The in-app repaint sweep can miss a block too: it
+    swallows a per-block ``retheme`` exception and carries on, and its preview
+    pass deliberately skips offscreen blocks.
+
+    Before the fix the copy path re-read the flag and measured the CURRENT
+    setting against rows painted under the OLD one, silently. Measured at 60
+    columns: painted-on/copied-off put the rail itself on the clipboard
+    (``'▎ Here is prose.\\n▎\\n▎  • alpha item…'``) and painted-off/copied-on ate
+    the first two characters of every row and lost row 0 entirely
+    (``'- alpha item\\n- beta item\\n\\n> a quoted line'``). No visible symptom —
+    the frame looks right and the paste is wrong, which is the failure class
+    ``get_selection``'s docstring says it exists to prevent.
+
+    Asserted against the SAME message copied with no flip at all, rather than
+    against a written-out string: the claim is that the flip is invisible to
+    the clipboard, so the unflipped copy is the honest oracle.
+
+    The fix records the gutter width at paint time and answers the copy from
+    the record, so this is a test of a construction rather than of a guard —
+    reverting ``copy_gutter`` to call ``_rail_cols()`` again turns it red with
+    exactly the two strings above.
+    """
+    import local_operator.tui.widgets.assistant as _assistant
+
+    real = _assistant.settings_get
+    state = {"value": painted}
+    monkeypatch.setattr(
+        _assistant,
+        "settings_get",
+        lambda key, default=None: (state["value"] if key == "display.rail" else real(key, default)),
+    )
+
+    async def _copy(flip_to: bool | None) -> str:
+        app = StyledTranscriptApp()
+        async with app.run_test(size=(60, 24)) as pilot:
+            view = app.query_one(TranscriptView)
+            block = AssistantBlock()
+            view.append_block(block)
+            await pilot.pause()
+            block.update_text(MIXED_CONSTRUCTS)
+            block.finalize_text()
+            await pilot.pause()
+            await pilot.pause()
+
+            visual = block._render()
+            assert isinstance(visual, Content)
+            rows = visual.plain.split("\n")
+            if flip_to is not None:
+                # The cache drop, with nothing repainted: exactly what the
+                # config arm does.
+                state["value"] = flip_to
+            selection = Selection(Offset(0, 0), Offset(len(rows[-1]), len(rows) - 1))
+            got = block.get_selection(selection)
+            assert got is not None
+            return got[0]
+
+    state["value"] = painted
+    faithful = await _copy(None)
+    state["value"] = painted
+    skewed = await _copy(copied)
+
+    assert skewed == faithful, (
+        "the copy followed the live setting instead of the painted frame.\n"
+        f"painted={painted} then flag flipped to {copied}\n"
+        f"got:      {skewed!r}\n"
+        f"expected: {faithful!r}"
+    )
+    assert RAIL not in skewed, f"the rail reached the clipboard: {skewed!r}"
+    assert skewed.startswith("Here is prose."), f"content was eaten: {skewed!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_gutter_survives_a_repaint_and_tracks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record follows every painting path, because it is set in the funnel.
+
+    ``_apply_rows`` is the single place rows are applied, so ``update_text``,
+    ``finalize_text``, ``refit_width`` and ``retheme`` all pass through it. This
+    pins that a REPAINT re-reads the flag and updates the record — the record
+    must be stale only with respect to a paint that did not happen, never with
+    respect to one that did, or a legitimate flip would never reach the copy.
+    """
+    import local_operator.tui.widgets.assistant as _assistant
+
+    real = _assistant.settings_get
+    state = {"value": True}
+    monkeypatch.setattr(
+        _assistant,
+        "settings_get",
+        lambda key, default=None: (state["value"] if key == "display.rail" else real(key, default)),
+    )
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        block.update_text(THREE_PARAGRAPHS)
+        block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+        assert block.copy_gutter(0) == RAIL_COLS
+
+        # No repaint: the record holds the old frame's answer.
+        state["value"] = False
+        assert block.copy_gutter(0) == RAIL_COLS
+
+        # A real repaint through the production seam: the record moves with it.
+        block.retheme()
+        await pilot.pause()
+        assert block.copy_gutter(0) == 0
+        visual = block._render()
+        assert isinstance(visual, Content)
+        assert all(RAIL not in row for row in visual.plain.split("\n"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_rail_off")
+async def test_copy_gutter_answers_live_before_the_block_has_ever_painted() -> None:
+    """M2: the unpainted block, which is the one case with no frame to match.
+
+    ``copy_gutter`` answers from the recorded paint, so it needs a defined
+    answer before any paint has happened. A fresh block has none, and the
+    honest answer there is the live setting: there is no frame to be faithful
+    to, so the record cannot be more truthful than the flag.
+
+    Reachable in production only through the empty-message path —
+    ``get_selection`` returns via ``super()`` when ``_full_text`` is blank, and
+    the base implementation applies ``copy_gutter`` per row. Pinned directly
+    on the method as well as through that fallback, because the fallback's own
+    assertion is about the copied text rather than about this number.
+    """
+    block = AssistantBlock()
+    assert block._painted_rail_cols == -1, "a fresh block must not claim a paint"
+    # The rail is OFF for this test, so the live answer is 0 rather than the
+    # constant — which is what distinguishes "asked the setting" from "returned
+    # RAIL_COLS because it never looked".
+    assert block.copy_gutter(0) == 0
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        empty = AssistantBlock()
+        view.append_block(empty)
+        await pilot.pause()
+        empty.update_text("   \n  \n")
+        empty.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+        # The empty-message fallback: whatever it returns, it must not be built
+        # on a gutter this block never painted.
+        selection = Selection(Offset(0, 0), Offset(10, 1))
+        got = empty.get_selection(selection)
+        if got is not None:
+            assert RAIL not in got[0], got
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("_rail_off")
 async def test_the_quote_bar_still_renders_when_the_rail_is_off() -> None:
     """T2-b. Turning the rail off must not take Rich's blockquote bar with it.
@@ -405,9 +581,6 @@ async def test_copy_is_clean_with_the_rail_off(monkeypatch: pytest.MonkeyPatch) 
     against a written-out string, because the claim is that the setting is
     invisible to the clipboard.
     """
-    from textual.geometry import Offset
-    from textual.selection import Selection
-
     import local_operator.tui.widgets.assistant as _assistant
 
     real = _assistant.settings_get

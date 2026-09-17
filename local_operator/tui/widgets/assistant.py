@@ -439,6 +439,17 @@ class AssistantBlock(TranscriptBlock):
         #: against it so a height-only resize — which every height pin raises
         #: — does not re-flatten a message to reproduce identical rows.
         self._built_width: int = -1
+        #: The gutter width the applied rows were actually PAINTED with, in the
+        #: ``_built_width`` mould: what the frame on screen is, not what the
+        #: setting says now. The copy path measures against this rather than
+        #: re-reading ``display.rail``, because the two reads happen at
+        #: different times and nothing forces them to agree — see
+        #: :meth:`copy_gutter` (review round 2, M1).
+        #:
+        #: ``-1`` means "never painted", which the copy path resolves live: a
+        #: block with no rows has no frame to be faithful to, and answering
+        #: from the setting is the only defined answer there.
+        self._painted_rail_cols: int = -1
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -625,7 +636,18 @@ class AssistantBlock(TranscriptBlock):
         is impossible by construction rather than by a guard.
         """
         self._built_width = self._flat_width()
-        if settings_get("display.rail", DEFAULT_RAIL):
+        # ONE read of the flag per paint, recorded beside the width it was
+        # painted at. Every later question about THIS frame — what the copy
+        # must strip, where a selection column starts — is answered from the
+        # record rather than by reading the setting again, so the frame and the
+        # clipboard cannot disagree even when the setting changes underneath a
+        # block that has not repainted (review round 2, M1). Recorded here
+        # because this method is the single funnel every row-producing path
+        # ends in, so one assignment covers update_text, refit_width, retheme
+        # and finalize_text alike.
+        rail_cols = self._rail_cols()
+        self._painted_rail_cols = rail_cols
+        if rail_cols:
             text = rail_rows(text)
         # Counted from the RAILED text, because that is what gets painted. The
         # gutter adds no rows, but the pin must describe the frame it reserves
@@ -885,10 +907,31 @@ class AssistantBlock(TranscriptBlock):
         copy path was fixed for — the constant is necessary and nowhere near
         sufficient.
 
-        Zero when ``display.rail`` is off: there is no gutter to strip, and
-        reporting two would take two cells of real content off the clipboard.
+        Zero when the rail was off when these rows were painted: there is no
+        gutter to strip, and reporting two would take two cells of real content
+        off the clipboard.
+
+        **Answered from what was PAINTED, not from what the setting says now**
+        (review round 2, M1). The paint and the copy happen at different times,
+        and nothing forces the flag to hold still between them: an external
+        write — another pane, ``lop config edit`` — drops the settings cache
+        without repainting anything, and the in-app repaint sweep can skip a
+        block too (a swallowed per-block ``retheme``, or the offscreen skip).
+        Re-reading the flag here then measures the CURRENT setting against rows
+        painted under the OLD one, and the reader silently gets the wrong
+        document: measured at 60 columns, painted-on/copied-off put the rail
+        itself on the clipboard, and painted-off/copied-on ate the first two
+        characters of every row and lost row 0 entirely. Reading the record
+        makes the frame and the clipboard unable to disagree by construction,
+        which is the argument this file makes everywhere else.
+
+        Falls back to the live answer only when this block has NEVER painted
+        (``-1``). There is no frame to be faithful to in that case, and the
+        empty-message path returns before any of this anyway.
         """
-        return self._rail_cols()
+        if self._painted_rail_cols < 0:
+            return self._rail_cols()
+        return self._painted_rail_cols
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The selected text as MARKDOWN, so it pastes cleanly anywhere.
@@ -1028,7 +1071,14 @@ class AssistantBlock(TranscriptBlock):
         # ``display.rail`` off no gutter is painted: slicing a constant two
         # would eat the first two characters of real content and every
         # ``+ RAIL_COLS`` comparison would be off by the same two.
-        rail_cols = self._rail_cols()
+        #
+        # Taken from :meth:`copy_gutter`, which answers from what was PAINTED
+        # rather than from the setting's current value. ``rows`` above came out
+        # of the rendered frame, so the number that de-rails them has to be the
+        # number that railed them — re-reading the flag here is how a copy ends
+        # up measuring this frame against a setting that changed after it was
+        # painted (review round 2, M1).
+        rail_cols = self.copy_gutter(0)
         bare = [row[rail_cols:] for row in rows]
         mapping = _copy_markdown.align(self._full_text, bare)
 
