@@ -96,6 +96,12 @@ WEDGED_MESSAGE = (
     "This conversation's runtime is not responding. Retry in a moment, or stop that conversation."
 )
 
+#: The clause every refusal MAY end on, kept as one constant because it is only true
+#: on the paths where the write really did leave nothing behind — and the one path
+#: that cannot promise it REPLACES the whole sentence rather than re-using this one
+#: (review round 4, MINOR-3).
+NOTHING_WRITTEN = "Nothing was written."
+
 #: The refusal for an owner the server can SEE but cannot DIAL — a live pid in
 #: ``.session.pid`` with no usable discovery record. A separate sentence because
 #: the common one is FALSE in this state (review round 3, R6's minor): there may be
@@ -107,9 +113,35 @@ WEDGED_MESSAGE = (
 OWNER_UNKNOWN_MESSAGE = (
     "This conversation's schedule file is claimed by process {pid}, which does not "
     "answer as a runtime — either a conversation open in an older build, or a stale "
-    "owner marker left by a pid the system has since reused. Nothing was written. "
+    "owner marker left by a pid the system has since reused. " + NOTHING_WRITTEN + " "
     "If nothing has this conversation open, the marker at {marker} is stale and can "
     "be removed; otherwise change its schedules from that session."
+)
+
+#: The THIRD owner state (review round 4, MINOR-2): the pid is live and the
+#: runtime registry could not be READ, so this server cannot say whether that owner
+#: is dialable. ``dialable_record_exists`` returns None here, and its own docstring
+#: is explicit that a failed read "is not evidence of absence". Reusing the
+#: mirror-only sentence would assert a cause this code has not established, and
+#: reusing the dialable one would assert the opposite; so the sentence names the
+#: unread registry and asks for the retry that would resolve it. Refusing is the
+#: conservative side of "pace rather than refuse": a write sent behind an owner we
+#: could not identify is the lost reminder this guard exists to prevent, and the
+#: retry IS the pacing.
+OWNER_REGISTRY_UNREAD_MESSAGE = (
+    "This conversation is held by another process (pid {pid}) and this server could "
+    "not read the runtime registry to say whether it is answering, so the schedules "
+    "were left alone. Retry in a moment."
+)
+
+#: Shown INSTEAD of a refusal's own sentence when the write could not be confirmed
+#: undone (review round 4, MINOR-3): the older text ended "Nothing was written",
+#: which is exactly what is unknown here. It keeps the refusal's status and code,
+#: because the caller's branch is unchanged — only the promise is.
+UNSETTLED_MESSAGE = (
+    "This conversation is held by another process, and whether this request's write "
+    "took effect could not be established. Reconcile the conversation's wake list "
+    "before retrying."
 )
 
 
@@ -120,13 +152,14 @@ class WakeWriteError(Exception):
     it is the SAME text ``build_wake_schedule`` returns to the agent's tool, so
     one wording exists for "you cannot arm a 17th wake" across every surface.
 
-    ``wrote`` says whether THIS request had already appended a snapshot when the
-    refusal was raised — the fact the receipt journal's release rule needs and
-    cannot infer (review round 3, R8). The write sequence rolls its own appends
-    back before refusing, so today every raise here carries ``False``; the flag
-    is what makes that structural rather than a promise in a comment, and a
-    refusal that ever does escape an unrolled-back write is recorded by the
-    journal instead of being released for a retry that would duplicate it.
+    ``wrote`` says whether any of THIS request's bytes may still be in effect — the
+    fact the receipt journal's release rule needs and cannot infer (review round 3,
+    R8). The write sequence rolls its own appends back before refusing and reports
+    the result, so it is ``True`` in exactly two places: the conflict refusal, whose
+    verify loop cannot prove which attempt landed, and the undo-failure path, which
+    hands the caller UNSETTLED_MESSAGE instead of the refusal's own sentence
+    (review round 4, MINOR-3 and the NIT — this paragraph used to claim every raise
+    carried ``False``, which the conflict raise contradicts).
     """
 
     def __init__(self, message: str, *, status: int, code: str, wrote: bool = False) -> None:
@@ -169,10 +202,19 @@ async def arm_wake(
     *,
     cwd: str | None = None,
     now_ms: int | None = None,
+    request_id: str = "",
 ) -> WakeWriteOutcome:
     """Add one schedule to ``session_id``'s wakes. ``request`` is the same
     ``message``/``in``/``at``/``every``/``until``/``limit`` mapping the agent's
-    ``wake`` tool takes, validated by the same function."""
+    ``wake`` tool takes, validated by the same function.
+
+    ``request_id`` is the CALLER's request id when it has one (the desktop route
+    always does). It is stamped on the row as its origin so that a later attempt
+    of the same request can ask whether its write landed by IDENTITY rather than by
+    comparing fields no further than the wake's own firing can change — the defect
+    review round 4 (R9) drove. Writers with no request id (the agent's tool, the
+    CLI) leave it unset and fall back to id-plus-message.
+    """
 
     def mutate(
         existing: list[WakeSchedule], now: int
@@ -181,9 +223,11 @@ async def arm_wake(
         if "error" in built:
             raise _refusal(built)
         schedule = built["schedule"]
+        if request_id:
+            schedule = schedule.model_copy(update={"request_id": request_id})
         return schedule.id, [*existing, schedule], schedule.next_due_at
 
-    return await _apply(config_dir, session_id, mutate, cwd=cwd, now_ms=now_ms)
+    return await _apply(config_dir, session_id, mutate, cwd=cwd, now_ms=now_ms, intent=request_id)
 
 
 async def cancel_wake(
@@ -256,6 +300,7 @@ async def _apply(
     *,
     cwd: str | None,
     now_ms: int | None,
+    intent: str = "",
 ) -> WakeWriteOutcome:
     session_dir = Path(config_dir) / "sessions" / session_id
     if not await asyncio.to_thread(session_dir.is_dir):
@@ -298,7 +343,9 @@ async def _apply(
             code="wake_write_unavailable",
         ) from None
     try:
-        rows, wake_id, due = await _mutate_locked(config_dir, session_dir, session_id, mutate, now)
+        rows, wake_id, due = await _mutate_locked(
+            config_dir, session_dir, session_id, mutate, now, intent=intent
+        )
         # The INDEX write is inside the lock too, and that is not incidental: it
         # is written from the list this call produced, so a writer that released
         # before writing it could overwrite a successor's newer entry with its
@@ -354,6 +401,8 @@ async def _mutate_locked(
     session_id: str,
     mutate: Mutation,
     now: int,
+    *,
+    intent: str = "",
 ) -> tuple[list[WakeSchedule], str, int | None]:
     """read -> mutate -> guard -> append -> verify -> guard, under the caller's lock.
 
@@ -369,6 +418,23 @@ async def _mutate_locked(
     that writer, not a substitute for the lock.
 
     Returns the full new list, the row's id and its due instant.
+
+    WHAT THE IDENTITY LEAVES BEHIND, stated rather than implied. A write that
+    carries the caller's request id (every desktop arm does) is now settled by an
+    exact lookup, so the duplicate-row class the last two rounds drove is closed
+    for it in both directions: the retry of a write that may have landed finds its
+    own row and reports APPLIED — before any mutation, so the 16-schedule cap
+    cannot refuse a request that already succeeded and no second id slot is taken,
+    and no second row means no second fire budget (``fired_count``/``limit``
+    accounting stays on the ONE row, whose current ``next_due_at`` the reply now
+    reports) — while a retry whose row is ABSENT re-arms it, which is correct:
+    that wake really was lost. A write with NO identity (the agent's ``wake`` tool,
+    the CLI) keeps the content-based settling of round 3, which cannot see through
+    a re-timed copy of its own row; what it does have is the id-based rollback, so
+    a refusal leaves its row behind and a caller that repeats the write gets one
+    row per intent rather than a silent second one. There is no retry contract for
+    those writers to break: neither has a request id, so neither can reach the
+    released-then-re-armed path this whole mechanism exists for.
     """
     rows: list[WakeSchedule] = []
     wake_id = ""
@@ -380,19 +446,16 @@ async def _mutate_locked(
     written: tuple[list[WakeSchedule], list[WakeSchedule]] | None = None
     for attempt in (0, 1):
         existing = await asyncio.to_thread(_read_rows, session_dir)
-        if attempt and _absorbed(before, rows, existing):
-            # OUR OWN WRITE IS ALREADY IN THIS BASE (review round 3, R8). The
-            # writer that overtook us took our snapshot as its base — a live
-            # session's persist that had already read the transcript after our
-            # append, which is what its entry carries. Re-applying the mutation
-            # here is what appended the row a SECOND time inside one request; the
-            # change is already in effect, so the base IS the answer — including
-            # its due instant, which the owner may have re-timed.
-            logger.info(
-                "wake write for %s was overtaken by a base that already carries it", session_id
-            )
-            landed = next((row for row in existing if row.id == wake_id), None)
-            return existing, wake_id, (landed.next_due_at if landed is not None else due)
+        landed = _settled(before, rows, existing, intent)
+        if landed is not None:
+            # THIS REQUEST'S CHANGE IS ALREADY IN THIS BASE (rounds 3 and 4,
+            # R8/R9). The change is in effect, so the base IS the answer —
+            # including the due instant the row now carries, which the session's
+            # own firing may have advanced. No mutation runs, so a retry of an
+            # applied arm cannot be refused by the 16-cap either, and cannot
+            # consume a second id slot.
+            logger.info("wake write for %s is already in the base it read", session_id)
+            return existing, landed[0], landed[1]
         before = existing
         wake_id, rows, due = mutate(existing, now)
         try:
@@ -404,7 +467,7 @@ async def _mutate_locked(
             # that every refusal this module raises really does leave nothing
             # durable behind (which is what lets the journal release its claim
             # and let a retry run — see ``WakeWriteError.wrote``).
-            raise await _refusal_after_undoing(refusal, session_dir, written)
+            raise await _refusal_after_undoing(refusal, session_dir, written, intent)
         entry = await _append(session_dir, rows)
         written = (existing, rows)
         try:
@@ -424,7 +487,7 @@ async def _mutate_locked(
             # The append is undone, so the refusal leaves no lasting state for the
             # owner to delete — and the retry that follows routes through the
             # owner's own command instead of re-writing behind it.
-            raise await _refusal_after_undoing(refusal, session_dir, written)
+            raise await _refusal_after_undoing(refusal, session_dir, written, intent)
         if await asyncio.to_thread(_latest_entry_id, session_dir) == entry:
             break
         # STILL REACHED, but no longer by a peer using this module: the lock
@@ -450,77 +513,131 @@ async def _mutate_locked(
     return rows, wake_id, due
 
 
-def _absorbed(
-    before: list[WakeSchedule], after: list[WakeSchedule], latest: list[WakeSchedule]
-) -> bool:
-    """Whether ``latest`` already carries every change ``before -> after`` made.
+def _is_ours(row: WakeSchedule, intent: str, our_version: WakeSchedule) -> bool:
+    """Whether ``row`` is the row THIS write made — whatever its fields now say.
 
-    The idempotence that stops a rebase duplicating a row, and it is deliberately
-    mutation-agnostic: a create adds a row, an edit changes one and a cancel
-    removes one, and all three are "satisfied" by the same question — is the
-    intended state already this base's state?
+    By the request id when this write has one: that is what the field exists for,
+    and it is the only test that survives the session's own firing advancing
+    ``next_due_at``/``fired_count`` on the row it just absorbed (round 4, R9 —
+    content comparison read that as "not mine", the loop re-mutated under a fresh
+    id, and one request id left two rows for one intent).
 
-    Compared by IDENTITY (id plus fields), never by content alone: a user may
-    legitimately arm the same message twice, so "a row that looks like ours"
-    would merge two real schedules into one. The base only carries our id if a
-    writer that read our snapshot produced it — which is precisely the case this
-    exists for.
-
-    WHY "ALREADY THERE" IS TREATED AS APPLIED RATHER THAN AS A FRESH RACE. The
-    only writer that can put our row into a NEW snapshot is one that read the
-    transcript after our append, which means it holds our row in its own state —
-    for a live session that is its in-memory list, so the wake is armed and will
-    fire, and refusing it would be a false negative that the owner's next persist
-    would undo anyway. The residual is therefore not this path but the one that
-    needs TWO other writers at once: an owner that loaded its list BEFORE our
-    append (so its memory lacks the row) plus a non-owner writer that ignored the
-    per-session lock and carried our row onto the top in between. Nothing this
-    module can see distinguishes that from the benign case above; it is narrower
-    than the band the guards close, and the guards' rollback means the refusal
-    half of the same window never leaves a row the owner will delete.
+    Without a request id (the agent's tool, the CLI) the fallback is the handle
+    this write allocated plus the message: a handle alone can be reused after a
+    cancel, and the message is what says the row is this intent's rather than a
+    later row that happens to hold the same ``w`` number.
     """
+    if intent:
+        return row.request_id == intent
+    return row.id == our_version.id and row.message == our_version.message
+
+
+def _settled(
+    before: list[WakeSchedule],
+    after: list[WakeSchedule],
+    latest: list[WakeSchedule],
+    intent: str,
+) -> tuple[str, int | None] | None:
+    """This request's row and due instant, if ``latest`` already carries its change.
+
+    THE IDEMPOTENCE THAT STOPS A RETRY FROM DUPLICATING A ROW, and it is asked on
+    EVERY attempt — including the first — because with an identity it needs no
+    history: a row carrying this request's id can only have come from this request,
+    so "did my write land?" is one exact lookup with no reference to what the row
+    looked like when we wrote it. That also settles the retry of an arm whose claim
+    the journal RELEASED: the row is still standing, so the retry reports APPLIED
+    with the same ``wake_id`` instead of arming a second one — and it does so
+    before the mutation runs, so the 16-schedule cap cannot refuse a request that
+    already succeeded, and no second id slot is consumed.
+
+    A write with NO identity (the agent's tool, the CLI) keeps the earlier,
+    content-based question, and only from the second attempt on — where this call
+    has a base and an appended list of its own to compare: a row this write added
+    and a value this write set are "landed" if the base still holds them; a row it
+    cancelled is landed if the base no longer has it. Round 3's cancel-404 (the
+    peer's snapshot had already absorbed the cancel, so re-applying raised
+    not-found) is why the absence half exists at all.
+
+    WHY "ALREADY LANDED" IS APPLIED RATHER THAN A FRESH RACE. The only writer that
+    can carry our row into a NEW snapshot is one that read the transcript after our
+    append, which means it holds our row in its own state — for a live session that
+    is its in-memory list, so the wake is armed and will fire, and refusing it
+    would be a false negative the owner's next persist would undo anyway.
+
+    An edge worth naming: an identity match is the WHOLE answer, so a second POST
+    that reuses a request id with a DIFFERENT body reports the first one's row
+    rather than arming the new request. That is the same contract the receipt
+    journal already gives that id (it replays the recorded outcome without looking
+    at the body), so the two agree rather than diverge.
+    """
+    if intent:
+        for row in latest:
+            if row.request_id == intent:
+                return row.id, row.next_due_at
+        # ABSENT IS AN ANSWER TOO: the wake really was lost, so the mutation runs
+        # afresh below and re-arms it. Deliberately not falling through to the
+        # content question — an identity match is the only thing that can prove
+        # this request's row is there, which is the whole point of the field.
+        return None
+
     latest_by_id = {row.id: row for row in latest}
+    settled_id = ""
+    settled_due: int | None = None
     for row in after:
-        later = latest_by_id.get(row.id)
-        if later is None or later != row:
-            return False
+        # A row this write added OR changed: the base holds it as we left it. Both
+        # are content questions by nature — the write's intent is the value itself —
+        # which is why the identity path above exists separately.
+        current = latest_by_id.get(row.id)
+        if current is None or current != row:
+            return None
+        settled_id, settled_due = row.id, current.next_due_at
     for row in before:
         if row.id in {changed.id for changed in after}:
             continue
         if row.id in latest_by_id:
-            return False
-    return True
+            return None
+        settled_id, settled_due = row.id, None
+    return (settled_id, settled_due) if settled_id else None
 
 
 async def _refusal_after_undoing(
     refusal: WakeWriteError,
     session_dir: Path,
     written: tuple[list[WakeSchedule], list[WakeSchedule]] | None,
+    intent: str,
 ) -> WakeWriteError:
-    """The refusal to raise once this request's own append has been undone.
+    """The refusal to raise once this request's own write has been undone.
 
     ``written`` is None when nothing was appended (the attempt-0 case), and the
     refusal is returned untouched. Otherwise the rollback is what lets the refusal
     be RELEASED by the journal — a retry re-runs and can succeed, which is what
-    these sentences promise — so if the rollback itself cannot be done, the refusal
-    has to say so instead: ``wrote=True`` makes the journal record it, and a
-    caller who is told to reconcile is better served than one told to retry a
-    write that may still be standing.
+    these sentences promise — so when the undo is not COMPLETE the refusal has to
+    say so instead: ``wrote=True`` makes the journal record it, and the sentence
+    becomes one that never claims nothing was written (round 4, MINOR-3), because
+    here that is exactly what cannot be guaranteed.
     """
     if written is None:
         return refusal
     try:
-        await _roll_back(session_dir, before=written[0], after=written[1])
+        complete = await _roll_back(session_dir, before=written[0], after=written[1], intent=intent)
     except Exception:  # noqa: BLE001 - any failure here leaves our bytes unproven
         logger.exception("could not undo the wake write for %s", session_dir.name)
-        return WakeWriteError(str(refusal), status=refusal.status, code=refusal.code, wrote=True)
+        complete = False
+    if not complete:
+        return WakeWriteError(
+            UNSETTLED_MESSAGE, status=refusal.status, code=refusal.code, wrote=True
+        )
     return refusal
 
 
 async def _roll_back(
-    session_dir: Path, *, before: list[WakeSchedule], after: list[WakeSchedule]
-) -> None:
-    """Append a snapshot that undoes THIS write's rows, preserving everyone else's.
+    session_dir: Path,
+    *,
+    before: list[WakeSchedule],
+    after: list[WakeSchedule],
+    intent: str,
+) -> bool:
+    """Append a snapshot that undoes THIS write, preserving everyone else's.
 
     ``before`` is the base this write read and ``after`` the list it appended, so
     the difference between them is exactly this write's effect: rows it added or
@@ -529,30 +646,57 @@ async def _roll_back(
     that persisted a DIFFERENT change meanwhile must not have it reverted by a
     rollback that only ever meant to withdraw one arm.
 
+    IDENTITY, NOT CONTENT, and that is the round-4 correction (R9): the previous
+    rule was "keep any row that differs from what we wrote", so a re-timed copy of
+    OUR OWN row was kept, the undo reported itself as done, and the released retry
+    armed a second one. A row this write CREATED is now dropped whenever it is ours
+    by :func:`_is_ours`, whatever the session's own firing has since done to its
+    fields. A row this write EDITED is reverted only while the value standing is
+    the one we wrote — a newer value means a peer changed it after us, and
+    reverting that would be clobbering a change this request never made. A row this
+    write CANCELLED comes back AT THE INDEX IT HELD (round 4, MINOR-1): a refused
+    cancel must not reorder a list it was supposed to leave alone, which is the
+    same principle ``edit_wake`` keeps when it edits in place.
+
     An APPEND rather than an edit of the file: the transcript is append-only, and
     rewriting it would delete a row a writer that does not take this lock appended
-    between our two moments. A no-op (nothing of ours is on top) writes nothing.
+    between our two moments.
+
+    Returns whether the undo is COMPLETE — whether nothing of this request is still
+    in effect in the list just written. That is what ``wrote`` reports, so it
+    answers "are our bytes still standing?" rather than "did the call raise?": the
+    two differ exactly when the rollback wrote a list that still carries our row.
     """
     latest = await asyncio.to_thread(_read_rows, session_dir)
     ours = {row.id: row for row in after}
     before_by_id = {row.id: row for row in before}
     restored: list[WakeSchedule] = []
-    kept: set[str] = set()
     for row in latest:
-        kept.add(row.id)
-        if ours.get(row.id) != row:
-            restored.append(row)
+        our_version = ours.get(row.id)
+        if our_version is None:
+            restored.append(row)  # a row this write never touched
             continue
+        if row.id not in before_by_id and _is_ours(row, intent, our_version):
+            continue  # our own creation: dropped, re-timed or not
         previous = before_by_id.get(row.id)
-        if previous is not None:
-            restored.append(previous)
-    for row in before:
-        if row.id in ours or row.id in kept:
+        if previous is not None and previous != our_version and row == our_version:
+            restored.append(previous)  # our edit, still standing: undone
             continue
-        restored.append(row)
-    if restored == latest:
-        return
-    await _append(session_dir, restored)
+        restored.append(row)  # a peer's own version of it: kept
+    # Rows this write removed come back where they were, not at the end.
+    present = {row.id for row in restored}
+    for index, row in enumerate(before):
+        if row.id in present or row.id in ours:
+            continue
+        restored.insert(min(index, len(restored)), row)
+    complete = not any(
+        row.id not in before_by_id and _is_ours(row, intent, ours[row.id])
+        for row in restored
+        if row.id in ours
+    )
+    if restored != latest:
+        await _append(session_dir, restored)
+    return complete
 
 
 async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
@@ -646,10 +790,21 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     # dialable record is the difference the client can act on, and
     # ``dialable_record_exists`` is the tree's own answer for it.
     dialable = await asyncio.to_thread(dialable_record_exists, Path(config_dir), owner)
+    if dialable is None:
+        # A THIRD STATE, and the one the helper's own docstring warns about: the
+        # registry could not be read, so "no usable record" and "a record I cannot
+        # see" are indistinguishable from here. Both other sentences would assert a
+        # cause this code has not established (review round 4, MINOR-2).
+        raise WakeWriteError(
+            OWNER_REGISTRY_UNREAD_MESSAGE.format(pid=owner),
+            status=STATUS_OWNER_BUSY,
+            code="wake_owner_present",
+        )
     if dialable:
         raise WakeWriteError(
             "This conversation is open in a running session, which owns its schedules. "
-            "Retry in a moment, or change them from that session.",
+            + NOTHING_WRITTEN
+            + " Retry in a moment, or change them from that session.",
             status=STATUS_OWNER_BUSY,
             code="wake_owner_present",
         )

@@ -663,6 +663,12 @@ async def test_a_contended_lock_refuses_rather_than_writing_unlocked(
     assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
 
 
+def _rows_from_transcript_due(directory: Path, wake_id: str) -> int | None:
+    """The ``next_due_at`` the LATEST snapshot holds for ``wake_id``."""
+    rows = _rows_from_transcript(directory)
+    return next((row["next_due_at"] for row in rows if row["id"] == wake_id), None)
+
+
 def _snapshot_count(directory: Path) -> int:
     """How many ``wake_schedules`` entries a transcript holds — the write log."""
     return sum(
@@ -721,3 +727,196 @@ async def test_a_rebase_on_a_base_that_already_carries_the_row_does_not_append_t
         "the row appended a second time"
     )
     assert len(appends) == 1, f"the mutation re-appended instead of finding its own base: {appends}"
+
+
+@pytest.mark.asyncio
+async def test_a_retimed_copy_of_our_own_row_is_still_ours(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, R9 — the row is identified by its origin, not its fields.
+
+    The overtaking writer is the session's own persist, and it carries our row with
+    ONE field changed: the wake fired, so ``next_due_at`` advanced and
+    ``fired_count`` moved. Comparing content read that as "not mine", the loop
+    re-mutated under a fresh id, and one request id left two rows for one intent —
+    the damage the round-3 fix was supposed to have closed. The stamp on the row is
+    what makes the question exact: this request's id can only have come from this
+    request.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    session_dir = _session(root, "retimed01", [_row("w1")])
+    original_append = arm_module._append
+    appends: list[int] = []
+
+    async def append_then_fire_and_retime_our_row(directory: Path, rows: list[WakeSchedule]) -> str:
+        appends.append(len(rows))
+        entry = await original_append(directory, rows)
+        if len(appends) == 1:
+            # The session's own persist, having read the transcript after our
+            # append and delivered the wake in between.
+            await original_append(
+                directory,
+                [
+                    (
+                        row.model_copy(
+                            update={"next_due_at": row.next_due_at + 1_000, "fired_count": 1}
+                        )
+                        if row.request_id == "req-retimed"
+                        else row
+                    )
+                    for row in rows
+                ],
+            )
+        return entry
+
+    monkeypatch.setattr(arm_module, "_append", append_then_fire_and_retime_our_row)
+    before = _snapshot_count(session_dir)
+
+    outcome = await arm_wake(
+        root, "retimed01", {"message": "raced", "in": "45m"}, request_id="req-retimed"
+    )
+
+    assert outcome.wake_id == "w2"
+    # The due instant reported is the base's, which is the owner's current truth.
+    assert outcome.next_due_at == _rows_from_transcript_due(session_dir, "w2")
+    landed = _rows_from_transcript(session_dir)
+    assert [row["id"] for row in landed] == ["w1", "w2"], landed
+    assert sum(1 for row in landed if row.get("request_id") == "req-retimed") == 1
+    assert _snapshot_count(session_dir) - before == 2, (
+        "the request wrote a snapshot beyond its own and the owner's re-timed copy, "
+        "which is the row appended a second time"
+    )
+    assert len(appends) == 1, f"the mutation re-appended instead of recognising its row: {appends}"
+
+
+@pytest.mark.asyncio
+async def test_a_released_claim_retried_with_the_same_request_id_lands_once(root: Path) -> None:
+    """The retry the journal RELEASED finds its own row and reports APPLIED.
+
+    This is the other half of R9's damage: after a released refusal the retry
+    reached the writer and armed a second row. With the origin stamp the retry is
+    one exact lookup at the FIRST attempt — no history needed — and because no
+    mutation runs, the 16-cap cannot refuse a request that already succeeded and no
+    second id slot is consumed.
+    """
+    root_session = _session(root, "released01", [])
+    before = _snapshot_count(root_session)
+
+    first = await arm_wake(root, "released01", {"message": "once", "in": "30m"}, request_id="req-1")
+    second = await arm_wake(
+        root, "released01", {"message": "once", "in": "30m"}, request_id="req-1"
+    )
+
+    assert second.wake_id == first.wake_id
+    assert second.next_due_at == first.next_due_at
+    assert _snapshot_count(root_session) - before == 1, "the retry appended a second row"
+    assert len(_rows_from_transcript(root_session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_back_cancel_puts_the_row_back_where_it_was(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, MINOR-1: a refused cancel must not reorder the list.
+
+    The rollback used to append the rows it restored at the END, so cancelling
+    ``w2`` out of ``[w1, w2, w3]`` and being refused left ``[w1, w3, w2]`` — the
+    user's page reordered by a refusal that is supposed to have changed nothing,
+    which is the situation ``edit_wake`` edits in place to avoid.
+
+    The owner is planted INSIDE the append, so the post-append guard is the call
+    that refuses — the only shape in which this request's cancel is standing when
+    the refusal is raised, and therefore the only one that has a row to put back.
+    """
+    import local_operator.wakes.arm as arm_module
+
+    session_dir = _session(root, "reorder01", [_row("w1"), _row("w2"), _row("w3")])
+    original_append = arm_module._append
+    planted: list[int] = []
+
+    async def append_then_claim_the_session(directory: Path, rows: list[WakeSchedule]) -> str:
+        entry = await original_append(directory, rows)
+        if not planted:
+            planted.append(1)
+            (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+        return entry
+
+    monkeypatch.setattr(arm_module, "_append", append_then_claim_the_session)
+
+    with pytest.raises(WakeWriteError) as refused:
+        await cancel_wake(root, "reorder01", "w2")
+
+    assert refused.value.code == "wake_owner_present"
+    assert refused.value.wrote is False, "the undo completed, so the retry may run"
+    assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1", "w2", "w3"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_registry_is_not_reported_as_an_absent_record(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, MINOR-2: the third owner state has its own sentence.
+
+    ``dialable_record_exists`` returns None when the registry could not be read,
+    and its own docstring says that is not evidence of absence. Reading it as
+    falsy showed the mirror-only sentence, which asserts a cause the code has not
+    established — so the unread state now says so and asks for the retry that would
+    resolve it.
+    """
+    session_dir = _session(root, "unread01", [_row("w1")])
+    (session_dir / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    # The guard imports the helper at call time, so its own module is the seam.
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.dialable_record_exists", lambda *a, **k: None
+    )
+
+    with pytest.raises(WakeWriteError) as refused:
+        await arm_wake(root, "unread01", {"message": "x", "in": "30m"})
+
+    message = str(refused.value)
+    assert refused.value.code == "wake_owner_present"
+    assert "could not read the runtime registry" in message
+    assert "does not answer as a runtime" not in message
+    assert "open in a running session" not in message
+    assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_could_not_be_undone_never_claims_nothing_was_written(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, MINOR-3: the sentence must match what the code can promise.
+
+    When the rollback cannot be completed the refusal is RECORDED (``wrote=True``,
+    so a retry replays instead of duplicating) — and its sentence must not end
+    "Nothing was written", because whether our bytes still stand is exactly what
+    could not be established. The status and the code are kept, so a client's
+    branch is unchanged; only the promise is.
+    """
+    import local_operator.wakes.arm as arm_module
+    from local_operator.wakes.arm import UNSETTLED_MESSAGE
+
+    _session(root, "unproven01", [_row("w1")])
+    original_append = arm_module._append
+    planted: list[int] = []
+
+    async def append_then_claim_the_session(directory: Path, rows: list[WakeSchedule]) -> str:
+        entry = await original_append(directory, rows)
+        if not planted:
+            planted.append(1)
+            (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+        return entry
+
+    async def cannot_undo(*args: object, **kwargs: object) -> bool:
+        raise OSError("the transcript is gone")
+
+    monkeypatch.setattr(arm_module, "_append", append_then_claim_the_session)
+    monkeypatch.setattr(arm_module, "_roll_back", cannot_undo)
+
+    with pytest.raises(WakeWriteError) as refused:
+        await arm_wake(root, "unproven01", {"message": "x", "in": "30m"})
+
+    assert refused.value.wrote is True
+    assert str(refused.value) == UNSETTLED_MESSAGE
+    assert "Nothing was written" not in str(refused.value)

@@ -283,6 +283,7 @@ async def create_wake(body: WakeCreate, request: Request):
                     body.session_id,
                     op="create",
                     wake_request=_wake_request(body),
+                    request_id=body.request_id,
                 )
                 if body.title:
                     # An EXPLICIT name is the only reason to touch an existing
@@ -306,7 +307,9 @@ async def create_wake(body: WakeCreate, request: Request):
 
         session_id, cwd = await _create_session(request, body)
         try:
-            outcome = await arm_wake(root, session_id, _wake_request(body), cwd=cwd)
+            outcome = await arm_wake(
+                root, session_id, _wake_request(body), cwd=cwd, request_id=body.request_id
+            )
         except WakeWriteError as error:
             # THIS SHAPE TRANSLATES ITS REFUSALS TOO. It used to call the writer
             # directly and re-raise, so every refused schedule answered 500 while
@@ -604,6 +607,7 @@ async def _mutate(
     op: str,
     wake_request: dict[str, Any],
     wake_id: str = "",
+    request_id: str = "",
 ) -> dict[str, Any]:
     root = request.app.state.config_manager.config_dir
     async with host(request).session(session_id) as bridge:
@@ -631,6 +635,7 @@ async def _mutate(
             wake_id=wake_id,
             wake_request=wake_request,
             cwd=bridge.cwd,
+            request_id=request_id,
         )
 
 
@@ -698,6 +703,7 @@ async def _via_files(
     wake_id: str,
     wake_request: dict[str, Any],
     cwd: str | None,
+    request_id: str = "",
 ) -> dict[str, Any]:
     """The cold path: nobody owns the session, so ``arm.py`` is the writer.
 
@@ -709,7 +715,14 @@ async def _via_files(
 
     async def run():
         if op == "create":
-            return await arm_wake(root, session_id, wake_request, cwd=cwd)
+            # ``request_id`` STAMPS THE ROW AS THIS REQUEST'S ORIGIN (review round 4,
+            # R9). It is what lets a later attempt of the same request ask "did my
+            # write land?" by identity rather than by comparing fields the wake's own
+            # firing changes — the duplicate-row class the round-4 review drove. The
+            # edit and cancel ops deliberately do not stamp: a row's origin is the
+            # arm that created it, and their own identity is the row's absence (or
+            # value), which is exact already.
+            return await arm_wake(root, session_id, wake_request, cwd=cwd, request_id=request_id)
         if op == "edit":
             return await edit_wake(root, session_id, wake_id, wake_request, cwd=cwd)
         if op == "cancel":

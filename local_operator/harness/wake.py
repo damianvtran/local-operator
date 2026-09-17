@@ -93,6 +93,17 @@ class WakeSchedule(BaseModel):
     limit: int | None = None  # retire after N deliveries
     fired_count: int = 0
     created_at: int = 0
+    #: The desktop request that ARMED this row, when one did — its origin, not its
+    #: provenance in the bookkeeping sense. It exists so that "did this request's
+    #: write land?" has an exact answer: every other field of a row is something a
+    #: legitimate concurrent writer changes (the session's own persist advances
+    #: ``next_due_at``/``fired_count`` when the wake fires, and re-times it on
+    #: catch-up), so a question asked by comparing content can be answered wrongly
+    #: by a writer that did nothing but let the wake run — review round 4, R9.
+    #: Absent for rows the agent's ``wake`` tool or the CLI created, which have no
+    #: request id to record; those keep the id-plus-message fallback that
+    #: ``wakes/arm.py`` documents.
+    request_id: str | None = None
 
 
 class DueWake(BaseModel):

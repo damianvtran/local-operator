@@ -725,7 +725,9 @@ async def test_the_created_id_comes_back_when_the_rollback_declines(
 
     client, root = desktop
 
-    async def arm_and_adopt(config_dir, session_id, request, *, cwd=None, now_ms=None):
+    async def arm_and_adopt(
+        config_dir, session_id, request, *, cwd=None, now_ms=None, request_id=""
+    ):
         # Something wrote into the draft between the create and the arm, so the
         # rollback's identity proof fails by design — then the arm refuses.
         (Path(config_dir) / "sessions" / session_id / "transcript.jsonl").write_text(
