@@ -467,7 +467,7 @@ def test_the_fleet_advice_is_not_printed_when_restart_would_skip_them(
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
-    assert "the stale ones cannot be moved by `lop services restart`; restart them by hand" in lines
+    assert "the stale daemon cannot be moved by `lop services restart`; restart it by hand" in lines
     assert not any("run `lop services restart`" in line for line in lines)
 
 
@@ -505,9 +505,26 @@ def test_a_guard_that_refuses_silences_every_promise(
     # which happens whatever this caller is (measured by bouncing the real daemon from
     # a checkout), nor about the serve half, which never consults the guard.
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: False)
+    # Only BROWSER is installed here, so nothing bounces: `refresh_mobile_after_upgrade`
+    # returns without a bounce when there is no mobile plist, and naming a bounce would
+    # over-warn about a daemon the reader does not have (round 13 R13-1, design D21).
     lines = services.status_lines()
     joined = " ".join(lines)
     assert "puts them on the current build" not in joined
+    assert not any("bounces the mobile relay" in line for line in lines)
+    assert any("repoints them only from the" in line for line in lines)
+
+    # With the mobile plist present the bounce DOES happen whatever this caller is
+    # (measured by bouncing the real daemon from a checkout), so the note says so.
+    monkeypatch.setattr(
+        services,
+        "_supervised_daemon_plists",
+        lambda: [
+            Path("/tmp/com.local-operator.mobile.plist"),
+            Path("/tmp/com.local-operator.browser.plist"),
+        ],
+    )
+    lines = services.status_lines()
     assert any("still bounces the mobile relay" in line for line in lines)
     assert any("repointed only by the install that owns them" in line for line in lines)
 
@@ -561,6 +578,10 @@ def test_the_predicate_body_is_the_guard_and_only_the_guard(
     """
     from local_operator import update
 
+    # NO POINTER, which is the only state where the old stamp-only body and this one
+    # differ — with `pointer`'s stamp pinned to NEW they agree, so the test passed
+    # against the reverted body (round 13, R13-2).
+    pointer["stamp"] = None
     monkeypatch.setattr(update, "_repair_refusal", lambda: None)
     assert services._install_may_repoint_daemons() is True
 
