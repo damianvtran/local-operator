@@ -10,6 +10,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -39,6 +40,24 @@ from local_operator.update import (
 _REAL_SERVICES_REFUSAL = update_mod._services_refusal
 
 
+def _install_kind_double(kind: InstallKind):
+    """A stand-in for `install_kind` that mirrors its REAL signature.
+
+    NOT `lambda *a, **k`. That accepts anything, which means it cannot see a
+    POSITIONAL call to a keyword-only function — and a positional call is exactly
+    what shipped in serve-reload review round 6's R6-1: `install_kind(mine)` raised
+    `TypeError` in production while 145 tests passed, because every double here had
+    a wider signature than the function it stood in for and the guard happened to
+    short-circuit before reaching the line in this venv. A double must be no more
+    permissive than the thing it replaces, or it is a test that cannot fail.
+    """
+
+    def _kind(*, prefix: Any = None, executable: Any = None) -> InstallKind:
+        return kind
+
+    return _kind
+
+
 @pytest.fixture(autouse=True)
 def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default to "this install owns the fleet" for every test in this module.
@@ -61,7 +80,7 @@ def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
     WHAT THIS HIDES, stated so it is not discovered by surprise: while it is in
     force NO test in this module can see the guard through
     `update_command`. That is why the test that must see it — the upgrade-path one
-    below, which is the shape that broke in R4-1 — restores the real refusal and
+    below, which is the shape that broke in serve-reload R4-1 — restores the real
     drives `update_command` itself rather than calling `_services_stage`.
 
     The restore is `_REAL_SERVICES_REFUSAL`, not a re-implementation: a test's own
@@ -632,7 +651,7 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_update_runs_the_services_stage_when_nothing_needs_installing(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """R1-2: the reported bug, as a regression test.
+    """serve-reload R1-2: the reported bug, as a regression test.
 
     `lop update` on the reporting machine printed "0.59.0 is the latest" and
     returned 0 without reaching the daemon/services stage — because `behind` is a
@@ -682,7 +701,7 @@ def test_update_no_services_still_repairs_the_supervised_daemons(
 def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """R3-2: the guard must ask ownership, not just install kind.
+    """serve-reload R3-2: the guard must ask ownership, not just install kind.
 
     Asking only "is this an installation at all" let a pip-installed `lop update`
     on a uv-tool machine reload the fleet that install owns. Harmless in
@@ -697,7 +716,7 @@ def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
 
     called: list[str] = []
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
-    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(InstallKind.UV_TOOL))
     monkeypatch.setattr(update, "stable_root", lambda: Path("/nowhere/lop"))
     monkeypatch.setattr(sys_mod, "prefix", "/usr/local/lib/python3.12/site-packages")
     monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
@@ -709,7 +728,7 @@ def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
 def test_update_command_moves_the_services_on_the_upgrade_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R4-1's regression: the caller that just flipped the pointer is SUPERSEDED.
+    """serve-reload R4-1's regression: the caller that just flipped the pointer is SUPERSEDED.
 
     ``perform_upgrade`` installs into a new generation and flips the pointer **in
     this same process** — nothing re-execs — so the guard's first attempt, which
@@ -719,7 +738,7 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
     generation later.
 
     This drives `update_command` itself rather than `_services_stage`, because the
-    module's autouse fixture hides the guard from `update_command` (R4-3) — the
+    module's autouse fixture hides the guard from `update_command` (serve-reload R4-3) — the
     path that broke has to be the path under test.
     """
     import sys as sys_mod
@@ -737,13 +756,13 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
     # THE POINTER IS ACTUALLY CREATED, so the pre-fix failure is the one this
     # docstring narrates — "is not the install the pointer names" — rather than the
     # "the install pointer names no build" a missing symlink produces (serve-reload
-    # review round 5, R5-4). A regression test whose failure mode is a different
+    # serve-reload review round 5, R5-4). A regression test whose failure mode is a different
     # refusal is one that would keep passing if the real check were deleted.
     (tmp_path / "lop" / "current").symlink_to(current)
 
     ran: list[str] = []
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
-    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(InstallKind.UV_TOOL))
     monkeypatch.setattr(update, "stable_root", lambda: tmp_path / "lop")
     monkeypatch.setattr(sys_mod, "prefix", str(superseded))
     monkeypatch.setattr(
@@ -760,9 +779,9 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
 
 @pytest.mark.parametrize("kind", [InstallKind.EDITABLE, InstallKind.UNKNOWN])
 def test_the_services_stage_refuses_a_checkout(
-    kind: object, monkeypatch: pytest.MonkeyPatch, capsys
+    kind: InstallKind, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """R2-1's sentence: a worktree does not own this machine's services.
+    """serve-reload R2-1's sentence: a worktree does not own this machine's services.
 
     Before the services stage existed this was unreachable by construction (a
     checkout that was behind hit `editable_refusal`; one that was not behind
@@ -774,7 +793,7 @@ def test_the_services_stage_refuses_a_checkout(
 
     called: list[str] = []
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
-    monkeypatch.setattr(update, "install_kind", lambda *a, **k: kind)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(kind))
     monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
     update._services_stage()
     assert called == []
@@ -786,7 +805,7 @@ def test_a_generation_of_this_install_may_proceed(
 ) -> None:
     """The guard must not refuse the callers it exists for — either of them.
 
-    Both shapes are real, and the second is the one R4-1 was about:
+    Both shapes are real, and the second is the one serve-reload R4-1 was about:
 
     * steady state — `lop` invoked through `current`;
     * the superseded build — the process that has just performed the upgrade.
@@ -807,7 +826,7 @@ def test_a_generation_of_this_install_may_proceed(
     superseded.mkdir(parents=True)
 
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
-    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(InstallKind.UV_TOOL))
     monkeypatch.setattr(update, "stable_root", lambda: tmp_path / "lop")
     monkeypatch.setattr(sys_mod, "prefix", str(steady))
     assert update._services_refusal() is None
@@ -1817,7 +1836,7 @@ def test_write_source_marker_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     """Temp-and-rename: a reader must never see a partial marker.
 
     ``RuntimeServer.__init__`` reads this file, so a torn write would reach
-    every runtime on the host (serve-reload review round 1, R1-2).
+    every runtime on the host (review round 1, R1-2).
 
     NOT SUFFICIENT ON ITS OWN. A plain ``path.write_text`` leaves no temp file
     either, so this assertion is satisfied by the very implementation it reads
@@ -1842,7 +1861,7 @@ def test_write_source_marker_installs_by_rename_not_by_writing_in_place(
     Inode identity is a fact about how the file got there, so this cannot flake
     the way a race-the-writer test would.
 
-    Verified to discriminate (serve-reload review round 1, R1-1): both the ``write_text``
+    Verified to discriminate (review round 1, R1-1): both the ``write_text``
     and ``copyfile`` mutants keep the inode and fail here.
     """
     marker = tmp_path / ".lop-source"

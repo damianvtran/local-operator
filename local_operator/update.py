@@ -3876,8 +3876,8 @@ def _services_refusal(prefix: Path | None = None) -> str | None:
        outright (serve-reload review round 2, R2-1). A worktree venv once rewrote the
        operator's four live plists to point at itself, and the same reasoning
        applies to signalling the services those plists start.
-    2. **Is this process running this machine's install?** (review rounds 3 and 4,
-       R3-2 then R4-1.) Asking only the first let a pip-installed `lop update` on
+    2. **Is this process running this machine's install?** (serve-reload review rounds 3
+       and 4, R3-2 then R4-1.) Asking only the first let a pip-installed `lop update` on
        a uv-tool machine reload the fleet that install owns: harmless in
        destination, since everything converges on the shared pointer, but not in
        authority, and a spurious reload cuts the app's relay for nothing.
@@ -3914,7 +3914,14 @@ def _services_refusal(prefix: Path | None = None) -> str | None:
     # measured ACCEPT for a non-existent, non-install path under the store while
     # the calling process was a uv tool, because the kind question was still asked
     # about the CALLER).
-    kind = install_kind(mine)
+    # KEYWORD, because `install_kind` is keyword-only: calling it positionally is a
+    # TypeError, and that is what shipped in the previous revision of this line
+    # (serve-reload review round 6, R6-1). It escaped 145 passing tests because the
+    # guard short-circuits on `EDITABLE` in this venv before reaching it, and
+    # because every test double was written `lambda *a, **k` — a WIDER signature
+    # than the real function, so no double could see the mistake. The doubles now
+    # mirror the real signature; see `_install_kind_double` in the tests.
+    kind = install_kind(prefix=mine)
     if kind is not InstallKind.UV_TOOL:
         return f"this install's kind is {kind.value}"
     generations = (stable_root() / "generations").resolve()

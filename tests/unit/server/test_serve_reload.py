@@ -236,7 +236,8 @@ def test_exec_hands_over_the_fd_the_new_interpreter_and_a_safe_path(
     plan = _watch(_app(fd=13)).plan()
     serve_reload._exec(plan)
     # The fd is made inheritable for the exec and put BACK afterwards, because a
-    # stubbed exec leaves this process serving (review round 1's `set_inheritable` nit).
+    # stubbed exec leaves this process serving (serve-reload review round 1's
+    # `set_inheritable` nit).
     assert seen["inherit"] == [(13, True), (13, False)]
     assert seen["path"] == str(plan.interpreter)
     assert seen["argv"] == [
@@ -272,7 +273,7 @@ async def test_install_arms_the_handler_and_the_signal_sets_the_flag(
 def test_exec_ignores_the_signal_across_the_replace(
     install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R1-1: the successor must be DEAF until it is ready to listen.
+    """serve-reload R1-1: the successor must be DEAF until it is ready to listen.
 
     For the successor's whole boot the last published record is still live and
     still advertising ``reloadable``, while the process it names has not reached
@@ -304,7 +305,7 @@ def test_exec_ignores_the_signal_across_the_replace(
 def test_a_build_that_cannot_import_refuses_the_reload(
     install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R1-5: the one refusal that has to happen BEFORE the exec to be worth anything.
+    """serve-reload R1-5: the one refusal that has to happen BEFORE the exec to be worth anything.
 
     Every other refusal keeps the daemon serving what it loaded. An exec into a
     build that cannot start leaves a dead daemon, a dead port and no process left
@@ -341,7 +342,7 @@ def test_a_smoke_check_that_could_not_run_proceeds(
 
 
 def test_an_adopted_listener_keeps_its_address_family() -> None:
-    """R1-3: ``fromfd`` needs the right family or it misreads the address bytes.
+    """serve-reload R1-3: ``fromfd`` needs the right family or it misreads the address bytes.
 
     A hardcoded ``AF_INET`` reinterprets an IPv6 listener's bytes as IPv4 — the
     daemon still serves, which is exactly why review found it by reading log
@@ -377,7 +378,7 @@ def test_an_adopted_listener_keeps_its_address_family() -> None:
 def test_a_spawn_that_arrives_during_the_smoke_is_still_waited_for(
     install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R3-1: the drain does not cover the off-loop smoke, so it is re-asked.
+    """serve-reload R3-1: the drain does not cover the off-loop smoke, so it is re-asked.
 
     Moving the smoke to a thread made the pre-exec phase longer than the wait that
     guards it, and the term the wait exists for — a runtime being SPAWNED, whose
