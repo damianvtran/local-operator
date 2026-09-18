@@ -2211,9 +2211,9 @@ def _log_classification_cost(recommendation: Any) -> None:
     decision call through it would suppress that rebuild, quietly dropping the
     restored history's dollars from a resumed session's total. The cost is
     therefore logged here in the vendor's own units, and the accounting path is
-    left to the slice that owns it; the contract's ``Recommendation`` carries no
-    model id or token counts, so those fields print ``-`` unless the seam adds
-    them.
+    left to the slice that owns it. ``Recommendation`` carries the vendor's token
+    counts as of the 2026-09-18 cost change, so the line reports the real per-call
+    figures; a field this seam does not publish still prints ``-``.
     """
     vendor = getattr(recommendation, "vendor", None)
     if not vendor:
@@ -2231,12 +2231,28 @@ def _log_classification_cost(recommendation: Any) -> None:
         "classification: vendor=%s model=%s tokens=%s/%s cost=%s latency=%.3fs resources=%d",
         vendor,
         getattr(recommendation, "model", "-"),
-        getattr(recommendation, "input_tokens", "-"),
-        getattr(recommendation, "output_tokens", "-"),
+        _token_count(getattr(recommendation, "input_tokens", None)),
+        _token_count(getattr(recommendation, "output_tokens", None)),
         f"${cost:.6f}" if isinstance(cost, (int, float)) else "-",
         float(latency) if isinstance(latency, (int, float)) else 0.0,
         len(getattr(recommendation, "resources", ()) or ()),
     )
+
+
+def _token_count(value: Any) -> str:
+    """One token figure for the cost line: the count, or ``-`` when there is no figure.
+
+    ``-`` covers three shapes that all mean "nothing to report": a seam that
+    publishes no counts, a field set to ``None`` (a cache hit, which spent
+    nothing, and a 200 whose vendor omitted ``usage``), and a non-integer.
+    Printing ``None`` would read as a figure. Printing ``0`` would be worse: a
+    vendor CAN report zero — the Radient route bills with output tokens zero — so
+    a real zero has to stay distinguishable from an absent one. That distinction
+    is made in ``vendors._count`` (absent → ``None``), not here.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "-"
+    return str(value)
 
 
 async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: Any) -> bool:

@@ -648,8 +648,8 @@ def _parse_response(
         vendor=vendor,
         model=str(payload.get("model") or model),
         answers=answers,
-        input_tokens=_int(usage_map.get("input_tokens")),
-        output_tokens=_int(usage_map.get("output_tokens")),
+        input_tokens=_count(usage_map.get("input_tokens")),
+        output_tokens=_count(usage_map.get("output_tokens")),
         # Absent cost stays absent. The contract's alternative — derive it from
         # a configured price row — has no row to read for a decision model in
         # this repo, and inventing a number would put a fabricated figure in the
@@ -659,9 +659,21 @@ def _parse_response(
     )
 
 
-def _int(value: Any) -> int:
+def _count(value: Any) -> int | None:
+    """A reported token count, or ``None`` when the vendor did not send one.
+
+    ``None`` rather than ``0`` because the two are different facts and only one
+    of them is true of an absent key: ``usage`` is optional on this wire (the
+    route answers 200 with no ``usage`` block), and ``0`` is a real figure the
+    Radient route is documented to send for output tokens. Collapsing them would
+    put a fabricated ``0`` on the operator's cost line beside a genuine cost —
+    the reader cannot tell "the vendor said zero" from "nobody said anything".
+
+    A non-numeric value is also ``None``: a vendor sending ``"n/a"`` has told us
+    nothing countable, which is not the same as telling us zero.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0
+        return None
     return int(value)
 
 
