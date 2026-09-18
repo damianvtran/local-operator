@@ -191,8 +191,8 @@ class Recommendation:
     block: str = ""                 # "" means "inject nothing"
     vendor: str | None = None
     cost_usd: float | None = None
-    input_tokens: int | None = None    # the vendor's own counts, carried so the harness's
-    output_tokens: int | None = None   # cost line can print them; None on a cache hit
+    input_tokens: int | None = None    # None = no figure (a cache hit, a skipped pass,
+    output_tokens: int | None = None   # or a 200 with no usage) -- never a fabricated 0
     latency_s: float = 0.0
     skipped: str | None = None      # "disabled" | "no-vendor" | "empty-roster" | "timeout" | "error" | "circuit-open"
     late_urls: tuple[str, ...] = ()  # the resource_url values on this view that a CALLER's
