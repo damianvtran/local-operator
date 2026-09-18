@@ -510,22 +510,41 @@ def live_scan_found_nothing(error: str) -> bool:
     return "no live session matches" in error
 
 
-def session_id_unknown(error: str) -> bool:
-    """True only for the live resolver's "no session has that id" refusal.
+def session_id_unowned(error: str) -> bool:
+    """True when the live resolver's answer about an exact session id means
+    NOTHING OWNS THAT SESSION — the state the stored-exact send exists for.
 
-    The exact-``session`` half of the cold lookup runs on this predicate and
-    NOTHING looser, for the same reason :func:`live_scan_found_nothing` gates
-    the substring half. An id that MATCHED a live record is answered by the live
-    resolver — the unengaged refusal, or :func:`_not_dialable` for a wedged one
-    — and that answer has to stand: re-asking the store for the same id turns a
-    refusal about a session the call did reach into a cold delivery, which
-    spools a note behind a process that still owns the conversation (the
-    BLOCKER-1/MAJOR-1 class) and hands a live composer's sender the cold
-    sentence (QA round 3, Q8). Only this form means the live scan does not know
-    the id at all, so the store is a NEW question rather than a second try at a
-    refused one.
+    Two forms qualify, because they are the two states in which no process is
+    behind the conversation at all:
+
+    * the id is UNKNOWN to the scan (``no session found with session id …``):
+      nothing published a record, so the store is a NEW question;
+    * the record the scan found is STALE (``… is stale (its pid no longer
+      exists)``): the process is gone and the sweep is about to reap the
+      record, so the conversation is exactly as unowned as the first form, and
+      the note must still be spooled for the next runtime that opens it
+      (review round 4, MINOR-1 — refusing there turned a one-line cold send
+      into "refuse now, retry after the reap").
+
+    Every OTHER form keeps standing as a refusal, and the difference is what
+    each one says about the session:
+
+    * WEDGED (``has not reported for …``) — a live pid that did not answer, so
+      re-asking the store would spool a note behind the process that still owns
+      the conversation (MAJOR-1);
+    * the UNENGAGED refusal — a live session that is deliberately not a
+      recipient yet, so a cold delivery would route around the gate
+      (BLOCKER-1);
+    * a CONFLICTING ``target``+selector pair — the caller never named one
+      session unambiguously, so there is nothing to look up: the id in
+      ``session`` is half of an address that was refused, and spooling to it
+      would deliver to a recipient the call did not name (BLOCKER-1's class,
+      review round 4 NIT-4).
     """
-    return "no session found with session id" in error
+    return (
+        "no session found with session id" in error
+        or "is stale (its pid no longer exists)" in error
+    )
 
 
 def resolve_stored_target(
@@ -746,12 +765,14 @@ async def deliver_peer_message(
     # refused before any file is touched.
     if not session_has_durable_history(session_id):
         # ``cold=True``: the caller reached this raise with no DIALABLE record
-        # for the id — either nothing published one, or the live resolver
-        # refused it (an exact ``--session`` naming a wedged-and-unengaged
-        # record answers as not dialable, and the send path no longer re-asks
-        # the store for that id — see ``session_id_unknown``). Either way there
-        # is no window to send into, so the remedy is stated for a session that
-        # has to be opened and used (D5).
+        # for the id, and after the Q8 gate that means one thing from the send
+        # paths — either nothing published a record at all, or the live scan
+        # did not know the id (both accepted by ``session_id_unowned``). Every
+        # refusal the live resolver CAN make — wedged, unengaged, conflicting
+        # selector pair — returns before this call, so this raise is not how
+        # those surface (review round 4, NIT-1). There is no window to send
+        # into, so the remedy is stated for a session that has to be opened and
+        # used (D5).
         raise RuntimeError(unengaged_refusal(unengaged_label(session_id=session_id), cold=True))
 
     if not wake and mode == "mailbox":

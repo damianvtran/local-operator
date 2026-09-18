@@ -769,3 +769,30 @@ async def test_an_exact_session_naming_a_live_composer_is_refused_live_not_cold(
     assert "its owner has to send a first message" in result.text, result.text
     assert "once someone opens it" not in result.text, result.text
     assert not (session_dir / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_target_with_a_selector_never_spools_to_the_selector(monkeypatch, tmp_path) -> None:
+    """NIT-4 (review round 4): the predicate closes BLOCKER-1's class here too.
+
+    ``target`` plus ``session=`` names two things, so the resolver refuses. The
+    Q8 gate is what stopped the tool then asking the store for ``session`` and
+    spooling the note to it — a delivery to a recipient the call did not
+    unambiguously name. The store holds that id WITH history, so a regressed
+    predicate writes a file and is caught.
+    """
+    sid = "conflict0001"
+    session_dir = _plant_stored_session(monkeypatch, tmp_path, sid, "credential work")
+
+    result = await execute_send(
+        "t17",
+        {"target": "somebody", "session": sid, "message": "hi", "wake": False},
+        None,
+        None,
+        _context(),
+    )
+
+    assert result.is_error is True
+    assert "not both" in result.text, result.text
+    assert "held for the next runtime" not in result.text, result.text
+    assert not (session_dir / "inbox.jsonl").exists()

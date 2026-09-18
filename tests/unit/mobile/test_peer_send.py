@@ -1210,3 +1210,32 @@ def test_a_record_without_the_started_key_reads_as_started() -> None:
         }
     )
     assert explicit.started is False
+
+
+def test_the_cold_gate_accepts_only_forms_where_nothing_owns_the_session() -> None:
+    """The exact-``session`` cold gate answers one question — may the store be
+    asked again? (review round 4, MINOR-1 and NIT-4).
+
+    Two forms qualify, because in both no process is behind the conversation:
+    an id the scan never knew, and a record whose pid is gone. The other three
+    are answers ABOUT a session, and re-asking the store would deliver around
+    the answer the caller just received: a wedged pid still owns the session, an
+    unengaged one is deliberately not a recipient, and a refused target+selector
+    pair never named one session at all.
+    """
+    accepted = [
+        "no session found with session id 'abc'",
+        "target session abc is stale (its pid no longer exists), so nothing can read it",
+    ]
+    refused = [
+        "session 'abc' has not been engaged yet (no user message has been sent in it), "
+        "so it cannot receive peer messages — its owner has to send a first message",
+        "pid 42 has not reported for 4m, so a plain send will not dial it; it may report "
+        "again on its own",
+        "pass either a target substring or an exact pid/session, not both",
+        "no live session matches 'abc'",
+    ]
+    for error in accepted:
+        assert peer_send.session_id_unowned(error) is True, error
+    for error in refused:
+        assert peer_send.session_id_unowned(error) is False, error

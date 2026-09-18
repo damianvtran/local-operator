@@ -1037,3 +1037,80 @@ def test_an_exact_session_the_live_scan_never_knew_still_spools(
 
     assert SPOOL_RECEIPT_NOTE in out, out
     assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()
+
+
+def test_an_exact_session_naming_a_stale_record_still_spools(monkeypatch, tmp_path, capsys) -> None:
+    """MINOR-1 (review round 4): a STALE record means nothing owns the session.
+
+    The scan can still hold a record whose pid has died for one sweep — the
+    same sweep reaps it — and base spooled the note for exactly that id. The
+    first cut of the Q8 gate answered the stale form with a refusal, so the
+    first send after a session's process exited was refused and the identical
+    retry, post-reap, spooled. Both are "nothing is running", which is the case
+    the stored-exact send exists for, so both fall through to the store.
+
+    The store holds the id WITH history, so a regressed predicate refuses and
+    writes nothing rather than passing quietly.
+    """
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "stale0000002"
+    _engaged(tmp_path, sid)
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_send_mod, "config_dir", lambda: tmp_path)
+
+    record = _Record(4545)
+    record.session_id = sid
+    record.heartbeat_at = time.time() - 240
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [(record, "stale")])
+    monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
+    monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
+
+    rc = send_command(_parse_send(["--session", sid, "note to a dead session"]))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    assert SPOOL_RECEIPT_NOTE in out, out
+    assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()
+
+
+def test_a_live_composer_still_refuses_when_the_store_has_no_history(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """MINOR-1's counterpart, and the wording half of Q8.
+
+    The other composer pin plants a store that HAS history, so with the gate
+    removed the run succeeds and nothing checks which sentence was printed
+    (review round 4, NIT-3). Here the store directory exists with NO durable
+    history, so a regressed gate reaches the cold delivery and prints the cold
+    sentence ("… once someone opens it …") — which is what this asserts must
+    NOT happen for a live composer.
+    """
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "composer0003"
+    # The directory exists — a `/new` abandoned before anyone typed — and holds
+    # no transcript, so the cold path would refuse with the COLD tail.
+    (tmp_path / "sessions" / sid).mkdir(parents=True)
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_send_mod, "config_dir", lambda: tmp_path)
+
+    record = _Record(4646)
+    record.session_id = sid
+    record.started = False
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [(record, "live")])
+    monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
+    monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
+
+    rc = send_command(_parse_send(["--session", sid, "note to a live composer"]))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"session '{sid}' has not been engaged yet" in err, err
+    assert "its owner has to send a first message" in err, err
+    assert "once someone opens it" not in err, err
+    assert "could not deliver" not in err, err
