@@ -279,6 +279,28 @@ SERVE_RUN_DIRNAME = "run/serve"
 #: same rule applied to a session record).
 HOST_RUN_DIRNAME = "run/host"
 
+#: The ``-m`` target of a session runtime process — THE SPAWN CONTRACT, and the
+#: one thing an external census may match a runtime on.
+#:
+#: ONE HOME, because the two halves of this contract live in different modules
+#: and nothing used to tie them together: three spawners write this string into
+#: an argv (``session/runtime/launch.py``, ``mobile/daemon.py``) and the
+#: residency sweep matches it (``session/runtime/reclaim.py``, which reads it
+#: from here). A drift between them is SILENT and one-directional — the sweep's
+#: census matches nothing, every root reads as having no runtimes, and the
+#: feature goes inert with no failing test anywhere. It sits here rather than in
+#: ``reclaim`` because ``launch`` must not import the sweep to write an argv:
+#: ``reclaim`` pulls in ``registry`` and ``viewers``, and this module is the
+#: runtime's shared vocabulary with no local imports of its own.
+#:
+#: Matched as a WHOLE ARGV WORD after a ``-m``, never as a substring, by the
+#: census that consumes it: a person running ``grep
+#: local_operator.session.runtime.process`` would otherwise be listed as a
+#: runtime, which is the single misidentification that could make a sweep signal
+#: a stranger.
+RUNTIME_MODULE = "local_operator.session.runtime.process"
+
+
 # SESSIONS_DIRNAME (imported above) is the name of the directory holding one
 # directory per conversation, and session_dir() names the join once for the
 # stop marker's writer and reader, so neither re-derives the layout.

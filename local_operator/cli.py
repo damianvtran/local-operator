@@ -726,13 +726,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     reclaim_parser.add_argument(
         "--confirm-s",
-        type=_non_negative_int,
+        type=_confirm_window,
         default=None,
         metavar="SECONDS",
         help=(
-            "how long to watch before signalling (default: 60). The window is the "
-            "safety property: a runtime that gains a record, an attach or CPU "
-            "inside it is dropped from the pass"
+            "how long to watch before signalling (default: 60, minimum: 50). The "
+            "window is the safety property: a runtime that gains a record, an attach "
+            "or CPU inside it is dropped from the pass, and a window too short to "
+            "measure CPU would drop one of the four refusals"
         ),
     )
     reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
@@ -3143,6 +3144,32 @@ def _non_negative_int(text: str) -> int:
     value = int(text)
     if value < 0:
         raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _confirm_window(text: str) -> int:
+    """argparse type for ``sessions reclaim --confirm-s``: seconds, with a floor.
+
+    A SHORTER WINDOW IS A SWEEP WITH NO CPU RUNG, not a faster sweep: the CPU
+    budget is ``max(BUSY_CPU_FLOOR_S, BUSY_CPU_FRACTION * elapsed)``, so below
+    ``MIN_ACTIONABLE_CONFIRM_S`` the floor dominates and no measurement can
+    exceed it. ``0`` was the worst case and it was reachable — ``--confirm-s 0``
+    parsed (the type was a non-negative int) and skipped the watch entirely, and
+    QA round 1 (Q2) measured a process with 90.4 s of cumulative CPU being
+    admitted and SIGTERMed at that window, having been correctly refused at the
+    default one (6.30 s spent per 60 s against a 1.2 s budget). The floor is
+    derived from those two constants rather than restated, so it moves with them.
+    ``--dry-run`` remains available for looking without a window at all.
+    """
+    from local_operator.session.runtime.reclaim import MIN_ACTIONABLE_CONFIRM_S
+
+    value = int(text)
+    if value < MIN_ACTIONABLE_CONFIRM_S:
+        raise argparse.ArgumentTypeError(
+            f"the confirm window must be at least {MIN_ACTIONABLE_CONFIRM_S:.0f}s, "
+            f"got {value}: a shorter window cannot measure CPU, so the sweep would "
+            "act on two sightings with no separation and no CPU refusal in between"
+        )
     return value
 
 

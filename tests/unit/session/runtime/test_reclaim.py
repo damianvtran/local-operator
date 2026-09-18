@@ -20,6 +20,7 @@ Three layers are pinned separately, because they are separately wrong-able:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import signal
@@ -33,11 +34,14 @@ from local_operator.session.runtime import reclaim
 from local_operator.session.runtime.reclaim import (
     BUSY_CPU_FLOOR_S,
     CONFIRM_S,
+    MIN_ACTIONABLE_CONFIRM_S,
     REFUSAL_BUSY_CPU,
+    REFUSAL_CHANGED,
     REFUSAL_FOREIGN_ROOT,
     REFUSAL_OBSERVED,
     REFUSAL_RECORD_PRESENT,
     REFUSAL_SELF,
+    REFUSAL_SOCKETS_UNKNOWN,
     REFUSAL_UNATTRIBUTABLE,
     REFUSAL_UNCONFIRMED,
     REFUSAL_YOUNG,
@@ -48,13 +52,15 @@ from local_operator.session.runtime.reclaim import (
     ancestor_pids,
     config_root_of,
     etime_seconds,
+    process_row,
     reclaim_runtimes,
+    record_file,
     runtime_processes,
     session_id_of,
     socket_evidence,
     verdict,
 )
-from local_operator.session.runtime.types import SessionRecord
+from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
 
 NOW = 1_800_000_000.0
 
@@ -103,17 +109,37 @@ def fleet(
     viewers=(),
     sockets: SocketEvidence | None = None,
     own=(),
-    states=None,
 ) -> Fleet:
+    # ``available=True`` BY DEFAULT, and it is the caller's job to say otherwise.
+    # A fleet with no socket evidence is no longer a weaker verdict — it is a
+    # REFUSAL (``REFUSAL_SOCKETS_UNKNOWN``), because a sweep that acts while its
+    # strongest refusal is unevaluated is the posture QA round 1 (Q5) measured. The
+    # default here therefore means "the table was read and nothing is attached"; a
+    # test that means "lsof failed" passes ``SocketEvidence()`` explicitly.
     return Fleet(
         root=root,
         records={item.pid: item for item in records},
         boots={int(item["pid"]): item for item in boots},
         viewers=list(viewers),
-        sockets=sockets if sockets is not None else SocketEvidence(),
-        states=states or {},
+        sockets=sockets if sockets is not None else SocketEvidence(available=True),
         own_pids=frozenset(own),
     )
+
+
+def reread(pid: int, *, age_s: float = 3600.0, cpu_s: float = 0.0, root: str | Path = ""):
+    """The SIGNAL-TIME re-read's seam: one row, with the environment ``-Eww`` adds.
+
+    ``reclaim_runtimes`` re-reads the candidate's single row immediately before
+    signalling it, in one ``ps -Eww`` fork that carries the process's own
+    environment, and refuses on any change. A test that drives a synthetic census
+    must answer for that read too, which is what this is: ``runtime_processes``'
+    row shape, with ``LOCAL_OPERATOR_CONFIG_DIR`` appended the way ``ps -Eww``
+    appends it.
+    """
+    command = f"/usr/bin/python3 -P -m {reclaim.RUNTIME_MODULE}"
+    if root:
+        command += f" LOCAL_OPERATOR_CONFIG_DIR={root}"
+    return RuntimeProcess(pid=pid, parent_pid=1, age_s=age_s, cpu_s=cpu_s, command=command)
 
 
 def env_text(root: str, *, session: str = "", home: str | None = None) -> str:
@@ -277,7 +303,7 @@ def test_a_published_record_is_a_refusal_whatever_its_heartbeat_says(tmp_path: P
     # a frozen process AND a healthy one starved by a long turn (measured false
     # positives: 105.8 s and 205.8 s) — which is why `wedged_runtime` refuses to end
     # a runtime on that evidence and so does this.
-    view = fleet(tmp_path, records=[record()], states={4242: "wedged"})
+    view = fleet(tmp_path, records=[record()])
     item = verdict(proc(), view, env_of=_recordless_env(tmp_path))
     assert item.refusal == REFUSAL_RECORD_PRESENT
     assert item.detail == "discovery record published"
@@ -292,6 +318,28 @@ def test_a_viewer_showing_the_session_is_a_refusal(tmp_path: Path) -> None:
     item = verdict(proc(), view, env_of=_recordless_env(tmp_path))
     assert item.refusal == REFUSAL_OBSERVED
     assert "77" in item.detail
+
+
+def test_a_recordless_runtime_the_socket_table_cannot_vouch_for_is_refused(tmp_path: Path) -> None:
+    # FAIL-CLOSED ON MISSING EVIDENCE. Everything above this rung is evidence that
+    # something IS there; this is the absence of the evidence that something is
+    # ATTACHED, on the one rung whose job is to notice an attached client. QA round 1
+    # (Q5) measured two identical record-less candidates each holding a live client on
+    # the control port, differing only in whether the pass could read the socket
+    # table: the readable one was ``observed`` and left alive, the unreadable one was
+    # admitted and SIGTERMed. The failure mode must be refusal, not permission.
+    item = verdict(
+        proc(), fleet(tmp_path, sockets=SocketEvidence()), env_of=_recordless_env(tmp_path)
+    )
+    assert item.refusal == REFUSAL_SOCKETS_UNKNOWN
+    assert item.may_end() is False
+    # AND THE LADDER'S ORDER IS UNCHANGED: a stronger refusal still wins, so a
+    # machine without ``lsof`` reports a recorded runtime as ``record-present``
+    # rather than burying it under the weaker token.
+    recorded = fleet(tmp_path, records=[record()], sockets=SocketEvidence())
+    assert verdict(proc(), recorded, env_of=_recordless_env(tmp_path)).refusal == (
+        REFUSAL_RECORD_PRESENT
+    )
 
 
 def test_an_established_connection_on_its_control_port_is_a_refusal(tmp_path: Path) -> None:
@@ -327,12 +375,19 @@ def test_first_look_never_signals_and_second_confirms(tmp_path: Path) -> None:
         sightings=sightings,
         processes=[proc()],
         env_of=env_of,
+        row_of=lambda pid: reread(pid, root=tmp_path),
         fleet=view,
         kill=lambda pid, sig: kill.append((pid, sig)),
         now=NOW,
     )
     assert first.reclaimed == []
-    assert [item.refusal for item in first.refused] == [REFUSAL_UNCONFIRMED]
+    # DEFERRED, NOT REFUSED: the ladder admitted it and the window is what holds it,
+    # so it is reported once, in ``pending``, with the token saying why (a candidate
+    # in both halves of one report was review round 1's nit 8).
+    assert [item.refusal for item in first.pending] == [REFUSAL_UNCONFIRMED]
+    assert first.refused == []
+    assert first.refusals() == {}
+    assert first.deferrals() == {REFUSAL_UNCONFIRMED: 1}
     assert kill == []
     # THE SECOND LOOK IS THE DECISION. Same memory, the window elapsed: now the
     # signal goes out, and it is SIGTERM — never SIGKILL, which has no handler and
@@ -343,6 +398,7 @@ def test_first_look_never_signals_and_second_confirms(tmp_path: Path) -> None:
         sightings=sightings,
         processes=[proc()],
         env_of=env_of,
+        row_of=lambda pid: reread(pid, root=tmp_path),
         fleet=view,
         kill=lambda pid, sig: kill.append((pid, sig)),
         now=NOW + CONFIRM_S,
@@ -350,6 +406,67 @@ def test_first_look_never_signals_and_second_confirms(tmp_path: Path) -> None:
     assert [item.process.pid for item in second.signalled] == [4242]
     assert kill == [(4242, signal.SIGTERM)]
     assert "1 reclaimed" in second.summary()
+
+
+def test_a_pass_confirms_every_candidate_and_not_just_the_first(tmp_path: Path) -> None:
+    """THREE candidates through the two production passes, on the PRODUCTION shape.
+
+    The regression test for the blocker both rounds found independently: a census of
+    more than one candidate, on the two call shapes production actually uses —
+    ``scope=None`` (no ``roots=``), which is what both the wake supervisor and
+    ``lop sessions reclaim`` pass — and ``forget`` called with the GENERATOR
+    ``reclaim_runtimes`` builds. Before the fix, ``Sightings.forget`` re-materialised
+    that one-shot iterable inside its loop, so from the second iteration on it
+    compared against an empty set and dropped every remaining entry: the first
+    candidate in census order was the only one that could ever reach the window, and
+    the other two were re-armed as ``unconfirmed`` on every pass forever (measured:
+    1 of 3 signalled here, 1 of 6 at the CLI, on a real fleet 1 of 59 admitted).
+
+    Three properties, because each one on its own was already covered by a test that
+    could not see this: multiple candidates, MORE THAN ONE pass, and no ``roots=``
+    (a named scope skips the ``forget`` call entirely, which is why the only existing
+    multi-candidate multi-pass test passed while this shipped).
+    """
+    pids = [11, 22, 33]
+    view = fleet(tmp_path)
+    kill: list[tuple[int, int]] = []
+    sightings = Sightings()
+    for now in (NOW, NOW + CONFIRM_S):
+        report = reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc(pid=pid) for pid in pids],
+            env_of=_recordless_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=view,
+            kill=lambda pid, sig: kill.append((pid, sig)),
+            now=now,
+        )
+    assert [pid for pid, _sig in kill] == pids
+    assert [item.process.pid for item in report.signalled] == pids
+    assert "3 reclaimed" in report.summary()
+
+
+def test_forget_tolerates_a_one_shot_iterable() -> None:
+    # The mechanism, isolated, on the three iterables a caller could hand it. The
+    # parameter is typed ``Iterable``, so the generator is a LEGAL call — and it is
+    # the one production makes, which is why the fix belongs here rather than at the
+    # call site: the next caller would hand it a one-shot iterable too.
+    for payload in (list(range(1, 4)), tuple(range(1, 4)), (item for item in range(1, 4))):
+        sightings = Sightings()
+        for pid in (1, 2, 3):
+            sightings.confirm(reclaim.Verdict(process=proc(pid=pid), config_root="/tmp/x"), now=NOW)
+        sightings.forget(payload)
+        assert sorted(sightings._seen) == [1, 2, 3], payload
+
+
+def test_forget_still_drops_the_pids_that_left_the_census() -> None:
+    sightings = Sightings()
+    for pid in (1, 2, 3):
+        sightings.confirm(reclaim.Verdict(process=proc(pid=pid), config_root="/tmp/x"), now=NOW)
+    sightings.forget(pid for pid in (1, 3))
+    assert sorted(sightings._seen) == [1, 3]
 
 
 def test_a_dry_run_decides_but_never_signals(tmp_path: Path) -> None:
@@ -388,7 +505,10 @@ def test_a_candidate_that_spends_cpu_inside_the_window_is_refused_again(tmp_path
             kill=lambda pid, sig: kill.append((pid, sig)),
             now=now,
         )
-    assert [item.refusal for item in report.refused] == [REFUSAL_BUSY_CPU]
+    # The token is on the PENDING row: the candidate is deferred to another window,
+    # not refused by the ladder (see the ``pending`` field's comment).
+    assert [item.refusal for item in report.pending] == [REFUSAL_BUSY_CPU]
+    assert report.refused == []
     assert report.reclaimed == []
     assert kill == []
 
@@ -405,6 +525,7 @@ def test_a_quiet_runtime_over_a_short_window_is_confirmed(tmp_path: Path) -> Non
             sightings=sightings,
             processes=[process],
             env_of=_recordless_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
             fleet=fleet(tmp_path),
             confirm_s=5.0,
             kill=lambda pid, sig: None,
@@ -452,6 +573,7 @@ def test_named_roots_narrow_the_pass_to_exactly_those(tmp_path: Path) -> None:
             sightings=sightings,
             processes=[proc(pid=1), proc(pid=2)],
             env_of=env_of,
+            row_of=lambda pid: reread(pid, root=inside if pid == 1 else outside),
             fleet=fleet(tmp_path),
             roots=[inside],
             kill=lambda pid, sig: kill.append((pid, sig)),
@@ -471,6 +593,7 @@ def test_a_signalled_runtime_that_leaves_is_reported_gone(tmp_path: Path, monkey
             sightings=sightings,
             processes=[proc()],
             env_of=_recordless_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
             fleet=view,
             kill=lambda pid, sig: None,
             now=now,
@@ -485,6 +608,7 @@ def test_a_signalled_runtime_that_leaves_is_reported_gone(tmp_path: Path, monkey
         sightings=sightings,
         processes=[proc()],
         env_of=_recordless_env(tmp_path),
+        row_of=lambda pid: reread(pid, root=tmp_path),
         fleet=view,
         kill=lambda pid, sig: None,
         now=NOW + 2 * CONFIRM_S,
@@ -493,6 +617,113 @@ def test_a_signalled_runtime_that_leaves_is_reported_gone(tmp_path: Path, monkey
     )
     assert len(report.signalled) == 1
     assert report.exited == report.signalled
+
+
+def test_a_signal_is_withheld_when_the_target_is_no_longer_the_one_measured(
+    tmp_path: Path,
+) -> None:
+    """THE SNAPSHOT AGES: the row is re-read immediately before the signal.
+
+    The census and the fleet are read once at the top of a pass and the signal goes
+    out later — measured on this host's real census at 19 ms for the first SIGTERM
+    and 1161 ms for the last — so every rung that admitted a candidate was evaluated
+    against a picture that is stale by the time ``os.kill`` runs. Four ways the
+    target can stop being the process the pass decided about, each one a signal
+    withheld rather than a stranger signalled: the pid is gone, it was recycled by
+    something whose argv is not the spawn contract, it moved to another config root
+    (the attribution the verdict rests on), or it published a record in the interval.
+    """
+
+    def pass_once(row_of) -> tuple[list[tuple[int, int]], reclaim.ReclaimReport]:
+        kill: list[tuple[int, int]] = []
+        sightings = Sightings()
+        report = None
+        for now in (NOW, NOW + CONFIRM_S):
+            report = reclaim_runtimes(
+                tmp_path,
+                apply=True,
+                sightings=sightings,
+                processes=[proc()],
+                env_of=_recordless_env(tmp_path),
+                row_of=row_of,
+                fleet=fleet(tmp_path),
+                kill=lambda pid, sig: kill.append((pid, sig)),
+                now=now,
+            )
+        assert report is not None
+        return kill, report
+
+    # (1) THE PID IS GONE by the time the signal would go out.
+    kill, report = pass_once(lambda pid: None)
+    assert kill == []
+    assert report.refusals() == {REFUSAL_CHANGED: 1}
+
+    # (2) RECYCLED by something that is not a runtime. ``process_row`` returns None
+    # for it (its argv does not carry ``-m <module>``), which covers both this and
+    # (1) — the point is that neither is a signal.
+    kill, report = pass_once(
+        lambda pid: RuntimeProcess(
+            pid=pid, parent_pid=1, age_s=9000.0, cpu_s=0.0, command="/bin/zsh -c make -j8"
+        )
+    )
+    assert kill == []
+    assert report.refusals() == {REFUSAL_CHANGED: 1}
+
+    # (3) A RUNTIME TOO YOUNG TO BE THE ONE MEASURED: the pid was recycled by
+    # another runtime, whose argv passes and whose root matches, so only the age
+    # separates them. The window is 60 s and this one is 3 s old.
+    kill, report = pass_once(lambda pid: reread(pid, age_s=3.0, root=tmp_path))
+    assert kill == []
+    assert report.refusals() == {REFUSAL_CHANGED: 1}
+
+    # (4) A DIFFERENT ROOT — the same pid, but no longer the candidate the verdict
+    # attributed to this store.
+    other = tmp_path / "other"
+    other.mkdir()
+    kill, report = pass_once(lambda pid: reread(pid, root=other))
+    assert kill == []
+    assert report.refusals() == {REFUSAL_CHANGED: 1}
+
+    # (5) AND THE UNCHANGED CASE STILL SIGNALS: the check is a veto on a moved
+    # target, not a second verdict that can refuse a candidate the ladder admitted.
+    kill, report = pass_once(lambda pid: reread(pid, root=tmp_path))
+    assert [pid for pid, _sig in kill] == [4242]
+    assert report.refusals() == {}
+
+
+def test_a_record_that_appears_between_the_window_and_the_signal_is_a_refusal(
+    tmp_path: Path,
+) -> None:
+    """The other half of the race: the record comes back INSIDE the pass.
+
+    A candidate whose record was deleted re-publishes on its next heartbeat
+    (``SessionRecordWriter.heartbeat`` -> ``registry.publish``), which makes it
+    reachable again — the exact race the 60 s confirm window exists to prevent, just
+    moved inside the pass. The fleet a pass holds is a SNAPSHOT, so the ladder has
+    already run by then; only the signal-time re-read of the record path can see it.
+    """
+    sightings = Sightings()
+    kill: list[tuple[int, int]] = []
+    report = None
+    for index, now in enumerate((NOW, NOW + CONFIRM_S), start=1):
+        if index == 2:
+            published = tmp_path / RUN_DIRNAME
+            published.mkdir(parents=True, exist_ok=True)
+            (published / "4242.json").write_text(json.dumps(record(pid=4242).to_json()))
+        report = reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_recordless_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=lambda pid, sig: kill.append((pid, sig)),
+            now=now,
+        )
+    assert kill == []
+    assert report is not None
+    assert report.refusals() == {REFUSAL_RECORD_PRESENT: 1}
 
 
 def test_sightings_stay_bounded_to_the_live_census() -> None:
@@ -537,7 +768,13 @@ def test_read_fleet_reads_three_namespaces_and_reaps_nothing(tmp_path: Path) -> 
 
     view = reclaim.read_fleet(tmp_path, sockets=SocketEvidence(available=False))
     assert set(view.records) == {4242, 999999}
-    assert view.states[999999] == "stale"
+    # THE DEAD RECORD IS STILL A ROW. ``reap=False`` is the reader's read, so the
+    # record of a pid that is gone comes back as evidence rather than being moved
+    # aside: it is what a later "why did this die" question is answered from. (The
+    # fleet used to carry ``registry.scan``'s per-record ``live|wedged|stale`` beside
+    # it; the roster derives that itself now, from ``registry.classify`` with the
+    # batched zombie answer supplied — one liveness rule per row instead of two.)
+    assert 999999 in view.records
     assert 4242 in view.boots
     assert [item.current_session for item in view.viewers] == ["live"]
     assert (tmp_path / "run" / "mobile" / "999999.json").exists()
@@ -600,3 +837,120 @@ def test_the_batch_env_reader_is_one_fork_and_keys_by_pid() -> None:
     assert set(envs) == {4242, 4243}
     assert config_root_of(envs[4242]) == "/tmp/one"
     assert config_root_of(envs[4243]) == ""
+
+
+# ---------------------------------------------------------------------------
+# The signal-time re-read, and the window's floor
+# ---------------------------------------------------------------------------
+
+
+def test_process_row_reads_one_pid_and_its_environment_in_one_fork() -> None:
+    # ONE FORK, for two of the four facts the re-identification rests on: ``-Eww``
+    # appends the process's own environment to the ``command`` column, so the same
+    # call that says "this pid is still a runtime, this old" also carries the config
+    # root the verdict attributed it to. The alternative costs a second fork per
+    # candidate on the one path that must not be slow enough to widen the window it
+    # is closing.
+    calls: list[list[str]] = []
+
+    def run(command, timeout_s):
+        calls.append(list(command))
+        return (
+            " 4242      1     05:00  0:00.02 /usr/bin/python3 -P -m "
+            "local_operator.session.runtime.process LOCAL_OPERATOR_CONFIG_DIR=/tmp/one "
+            "HOME=/tmp/one-home\n"
+        )
+
+    row = process_row(4242, run=run)
+    assert len(calls) == 1
+    assert calls[0][:3] == ["ps", "-Eww", "-p"]
+    assert calls[0][3] == "4242"
+    assert row is not None
+    assert row.pid == 4242
+    assert row.age_s == pytest.approx(300.0)
+    assert config_root_of(row.command) == "/tmp/one"
+
+
+def test_process_row_does_not_recognise_a_stranger_or_an_absent_pid() -> None:
+    # THE TWO SHAPES OF "the target moved", and neither may be signalled:
+    # a pid recycled by something that is not a runtime (no ``-m <module>``), and a
+    # pid ``ps`` does not report at all (gone between the census and the signal).
+    stranger = lambda command, timeout_s: (  # noqa: E731 — a one-line seam
+        " 4242      1     05:00  0:00.02 /bin/zsh -c make -j8\n"
+    )
+    assert process_row(4242, run=stranger) is None
+    assert process_row(4242, run=lambda command, timeout_s: "") is None
+
+
+def test_the_record_re_read_names_the_file_without_creating_the_directory(
+    tmp_path: Path,
+) -> None:
+    # ``registry.record_path`` would mkdir the run directory on the way to the same
+    # path, and this reader may not: the candidate's own root can be a path that is
+    # GONE (the class this sweep exists for), and conjuring it back would be the
+    # sweep inventing the very store the runtime could then publish into.
+    root = tmp_path / "gone-store"
+    assert record_file(root, 9) == root / RUN_DIRNAME / "9.json"
+    assert record_file(root, 9).is_file() is False
+    assert not root.exists()
+
+
+def test_the_pass_refuses_when_the_socket_table_could_not_be_read(tmp_path: Path) -> None:
+    """FAIL-CLOSED, END TO END: no socket table means no signal, on the real pass.
+
+    QA round 1 (Q5) drove two identical record-less candidates with a live client on
+    each control port through the pass, varying only whether the socket table could
+    be read: the readable one was ``observed`` and left alive, the unreadable one was
+    admitted and SIGTERMed. The failure of the strongest refusal must be a refusal.
+    """
+    kill: list[tuple[int, int]] = []
+    sightings = Sightings()
+    for now in (NOW, NOW + CONFIRM_S):
+        report = reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_recordless_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path, sockets=SocketEvidence()),
+            kill=lambda pid, sig: kill.append((pid, sig)),
+            now=now,
+        )
+    assert kill == []
+    assert report.sockets_available is False
+    assert report.refusals() == {REFUSAL_SOCKETS_UNKNOWN: 1}
+    assert "socket table unavailable" in report.summary()
+
+
+def test_the_confirm_window_cannot_be_asked_for_shorter_than_the_cpu_rung(
+    tmp_path: Path,
+) -> None:
+    """``--confirm-s`` has a floor, because a shorter window has no CPU rung.
+
+    QA round 1 (Q2) measured the end-to-end consequence: at ``--confirm-s 0`` — which
+    the flag accepted, and which skipped the watch entirely — a process that had
+    burned 90.4 s of cumulative CPU (6.30 s per 60 s against a 1.2 s budget at the
+    default window) was admitted and SIGTERMed. The floor is derived from the CPU
+    rung's own two constants, so it cannot drift from them, and this asserts it
+    through the REAL parser rather than through the helper alone.
+    """
+    from local_operator.cli import _confirm_window, build_cli_parser
+
+    assert MIN_ACTIONABLE_CONFIRM_S == BUSY_CPU_FLOOR_S / reclaim.BUSY_CPU_FRACTION
+    with pytest.raises(argparse.ArgumentTypeError):
+        _confirm_window("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _confirm_window(str(int(MIN_ACTIONABLE_CONFIRM_S) - 1))
+    assert _confirm_window(str(int(MIN_ACTIONABLE_CONFIRM_S))) == int(MIN_ACTIONABLE_CONFIRM_S)
+    assert _confirm_window("120") == 120
+
+    parser = build_cli_parser()
+    for bad in ("0", "5", "-1"):
+        with pytest.raises(SystemExit) as raised:
+            parser.parse_args(["sessions", "reclaim", "--confirm-s", bad])
+        assert raised.value.code == 2, bad
+    # An omitted flag keeps the default (``None``), resolved to ``CONFIRM_S`` by the
+    # command itself: the window this pass documents as its safety property.
+    assert parser.parse_args(["sessions", "reclaim"]).confirm_s is None
+    assert parser.parse_args(["sessions", "reclaim", "--confirm-s", "90"]).confirm_s == 90

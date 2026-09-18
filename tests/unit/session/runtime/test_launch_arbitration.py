@@ -822,6 +822,8 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     """
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch as launch_module
+    from local_operator.session.runtime.reclaim import runtime_processes
+    from local_operator.session.runtime.types import RUNTIME_MODULE
 
     recorded: dict[str, Any] = {}
 
@@ -859,7 +861,20 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     assert argv.index(SAFE_PATH_FLAG) < argv.index(
         "-m"
     ), f"the flag must precede -m or the interpreter ignores it; argv={argv}"
-    assert argv[2:] == ["-m", "local_operator.session.runtime.process"], argv
+    assert argv[2:] == ["-m", RUNTIME_MODULE], argv
+    # AND THE OTHER HALF OF THE SAME CONTRACT: the residency sweep recognises a
+    # runtime by exactly this ``-m <module>`` word in an argv (``reclaim``
+    # .runtime_processes), so the census is fed THIS argv — the one the real spawn
+    # just built — and must report it as a runtime. Before the constant had one home
+    # the two literals could drift, and the drift is silent and one-directional: the
+    # census matches nothing, every store reads as having no runtimes, and the
+    # residency bound goes inert with no failing test anywhere. This is that failing
+    # test, and it goes red if the spawn stops writing ``-m <RUNTIME_MODULE>`` or
+    # writes it anywhere else in the argv.
+    row = f"  4242      1     05:00  0:00.02 {' '.join(argv)}\n"
+    assert [item.pid for item in runtime_processes(run=lambda command, timeout_s: row)] == [4242]
+    elsewhere = f"  4242      1     05:00  0:00.02 {' '.join([*argv[:3], 'some.other.module'])}\n"
+    assert runtime_processes(run=lambda command, timeout_s: elsewhere) == []
     # Still no `cwd=`: if one is ever added the flag stops being the thing that
     # protects the import, and this assertion should be revisited deliberately.
     assert recorded["cwd"] is _MISSING, f"spawn grew a cwd= kwarg: {recorded['cwd']!r}"

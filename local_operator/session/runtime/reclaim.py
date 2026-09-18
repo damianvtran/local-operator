@@ -65,7 +65,15 @@ depending on that runtime right now:
   burning is refused for another window. This test can only ever REFUSE — a quiet
   runtime may still be waiting on a model API call, so low CPU proves nothing —
   and it exists so the one candidate class the sweep ends is never a runtime that
-  is visibly doing work.
+  is visibly doing work. It needs a window long enough to mean anything, which is
+  :data:`MIN_ACTIONABLE_CONFIRM_S`: below it the floor dominates the fraction and
+  the rung cannot fire whatever the runtime does, so a caller may not ask for one.
+* **It is still the process the pass decided about.** The census and the fleet are
+  read once at the top of a pass and the signal goes out later — measured on this
+  host, 19 ms to 1161 ms later across a real 74-row census — so the candidate's own
+  row is re-read immediately before ``os.kill`` and the signal is withheld if the
+  pid was recycled, changed its argv, moved to another root or published a record
+  in the interval (:func:`target_changed`).
 
 **PARENTAGE IS NOT EVIDENCE, IN EITHER DIRECTION.** A session runtime is spawned
 detached (``start_new_session=True``), so ``ppid=1`` is the NORMAL state of a
@@ -79,6 +87,17 @@ touches a record — reading is all it does to ``run/mobile`` and ``run/host``
 (``reap=False`` throughout), because a sweep that reaped evidence while deciding
 would destroy the answer to "why did this die". And it never ends a runtime it
 cannot attribute to a root.
+
+**AND IT DOES NOTHING WHEN ITS EVIDENCE IS INCOMPLETE.** If the machine's socket
+table cannot be read — no ``lsof``, or it timed out — then the refusal that lives
+only there (a client attached to a record-less runtime's control port) cannot be
+evaluated, and the pass refuses the candidates it would otherwise admit
+(:data:`REFUSAL_SOCKETS_UNKNOWN`) rather than signalling through the gap. The
+consequence is that the sweep reclaims NOTHING on such a machine, which is the
+posture this module's own test file states: a sweep that ends one runtime it
+should not have is worse than a sweep that reclaims nothing. The report carries
+``sockets_available=False``, the CLI prints it and the roster's ``socket_table``
+says so, so the reason is never a mystery.
 
 The module is stdlib-only and off the model-facing path by the same contract as
 ``registry`` and ``viewers``: the wake supervisor imports it, and the supervisor's
@@ -101,16 +120,23 @@ from typing import Any
 
 from local_operator.paths import CONFIG_DIR_ENV, DEFAULT_CONFIG_DIRNAME, config_dir
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.types import HOST_RUN_DIRNAME, RUN_DIRNAME
+from local_operator.session.runtime.types import (
+    HOST_RUN_DIRNAME,
+    RUN_DIRNAME,
+    RUNTIME_MODULE,
+)
 from local_operator.session.runtime.viewers import scan_viewers
 
 logger = logging.getLogger(__name__)
 
-#: The ``-m`` target of a session runtime process, and therefore the only thing a
-#: census may match on. Matched as a whole argv word, never as a substring: a
-#: human running ``grep local_operator.session.runtime.process`` (or this module's
-#: own tests) would otherwise appear in the census as a runtime.
-RUNTIME_MODULE = "local_operator.session.runtime.process"
+# ``RUNTIME_MODULE`` — the ``-m`` target of a session runtime process, and
+# therefore the only thing a census may match on — is imported above from
+# ``types``, which is where THE SPAWN CONTRACT lives: this module matches the
+# string that ``launch`` and ``mobile.daemon`` write into an argv, so the two
+# halves cannot drift into a census that silently matches nothing. It is
+# matched as a whole argv word after a ``-m``, never as a substring: a human
+# running ``grep local_operator.session.runtime.process`` (or this module's own
+# tests) would otherwise appear in the census as a runtime.
 
 #: How old a record-less runtime must be before a sweep may consider it. Sized
 #: against the spread of the spawn path rather than against its median: the
@@ -140,6 +166,22 @@ BUSY_CPU_FRACTION = 0.02
 #: Floor on the CPU budget, so a window shortened by a caller (a test, or a pass
 #: that ran back-to-back) cannot make the test fire on a single scheduler tick.
 BUSY_CPU_FLOOR_S = 1.0
+
+#: The shortest confirm window in which the CPU rung can still fire at all, and
+#: therefore the shortest window a caller may ASK FOR.
+#:
+#: Derived rather than restated, because the two constants above are what make a
+#: window meaningful: the budget is ``max(BUSY_CPU_FLOOR_S, BUSY_CPU_FRACTION *
+#: elapsed)``, so below ``BUSY_CPU_FLOOR_S / BUSY_CPU_FRACTION`` the floor
+#: dominates and the measured fraction can never reach it whatever the runtime
+#: does. QA round 1 (Q2) measured the consequence end to end: at
+#: ``--confirm-s 0`` a process that had burned 90.4 s of CPU (6.30 s per 60 s
+#: against a 1.2 s budget at the default window) was admitted and SIGTERMed,
+#: because the window it was judged over was too short for the test to see it.
+#: A window shorter than this is not a faster sweep — it is a sweep with no CPU
+#: rung, which is one of the four rungs the safety argument is built from, so the
+#: CLI refuses it rather than quietly dropping it (``cli._confirm_window``).
+MIN_ACTIONABLE_CONFIRM_S = BUSY_CPU_FLOOR_S / BUSY_CPU_FRACTION
 
 #: How long each external tool may take before the pass gives up on it. The
 #: census and the socket table are read on a supervisor's slice, next to wakes
@@ -190,11 +232,13 @@ class SocketEvidence:
     """The machine's TCP table, reduced to the two facts a verdict needs.
 
     ``available`` is False when ``lsof`` is missing, refused or timed out — the
-    normal state on a machine without it — in which case every verdict falls back
-    to the record-and-viewer evidence and :func:`reclaim_runtimes` reports that the
-    socket half was unknown rather than reading "no connections" into it. There is
-    no third possibility: a fleet with no control sockets and an unread socket
-    table look identical, so the ambiguity is named, never resolved by guessing.
+    normal state on a machine without it — in which case :func:`verdict` REFUSES
+    every candidate whose only remaining rung is this one
+    (:data:`REFUSAL_SOCKETS_UNKNOWN`) and :func:`reclaim_runtimes` reports that the
+    socket half was unknown. There is no third possibility: a fleet with no
+    control sockets and an unread socket table look identical, and the ambiguity is
+    named, never resolved by guessing — a guess here is a signal sent through
+    missing evidence.
     """
 
     ports: Mapping[int, int] = field(default_factory=dict)
@@ -235,11 +279,40 @@ REFUSAL_RECORD_PRESENT = "record-present"
 REFUSAL_OBSERVED = "observed"
 REFUSAL_UNCONFIRMED = "unconfirmed"
 REFUSAL_BUSY_CPU = "busy-cpu"
+#: The target stopped being the process the pass decided about. Every other token
+#: names a reason the LADDER refused a candidate, evaluated against the snapshot
+#: the pass was handed; this one is produced at SIGNAL time, from the re-read that
+#: closes the window between the snapshot and ``os.kill`` (see
+#: :func:`target_changed`). It means the pid is gone, was recycled by something
+#: whose argv is not the runtime's, reports a different config root, or is younger
+#: than the row the pass measured — and it is a REFUSAL in every one of those
+#: cases, because a candidate that cannot be re-identified is not a candidate this
+#: pass may signal.
+REFUSAL_CHANGED = "changed"
+#: The socket table could not be read, so the strongest refusal — a client holding
+#: a record-less runtime's control port — cannot be evaluated. FAIL-CLOSED, and
+#: deliberately so: the alternative is the posture QA round 1 (Q5) measured, where
+#: a candidate with a live client on its control port was admitted and SIGTERMed
+#: when ``lsof`` failed and correctly left alone when it did not. A sweep that ends
+#: one runtime it should not have is worse than a sweep that reclaims nothing (see
+#: this module's test file), so an unreadable table ends the pass instead of
+#: relaxing it. The report carries ``sockets_available=False`` and the roster shows
+#: ``socket_table: false``, so the reason is visible wherever the consequence is.
+REFUSAL_SOCKETS_UNKNOWN = "sockets-unknown"
 #: The ROSTER'S token, never this module's verdict: a row whose process is not
 #: running. The sweep cannot produce it because its candidate list IS the process
 #: table — a record whose pid is gone is a row to report, not a candidate — so this
 #: exists only so the roster never answers "not reclaimable" with no reason at all.
 REFUSAL_GONE = "gone"
+#: The ROSTER'S second token, never this module's verdict: the pid IS running but
+#: the process table has no row for it, so the sweep's ladder never judged it and
+#: "gone" would be a lie about a process a client is talking to. Two ways to reach
+#: it, and the same answer covers both: the pid is not one the census RECOGNISES
+#: (its argv is not the spawn contract), or the census itself could not be read
+#: (``ps`` timed out at :data:`CENSUS_TIMEOUT_S`, in which case EVERY row lands
+#: here). Review round 1 (R1-3) measured a live, answering runtime reported as
+#: ``reclaim_refusal: gone`` for exactly this reason.
+REFUSAL_NO_CENSUS = "no-census-row"
 
 
 def _run_command(command: Sequence[str], timeout_s: float) -> str:
@@ -285,6 +358,51 @@ def etime_seconds(text: str) -> float:
     return days * 86400.0 + values[0] * 3600.0 + values[1] * 60.0 + values[2]
 
 
+def parse_process_row(line: str) -> RuntimeProcess | None:
+    """One ``ps`` row in this module's census format, or ``None`` if it is not a
+    live session runtime.
+
+    ONE HOME for the row shape, because two readers must agree about what a
+    runtime IS: the whole-fleet census that a pass decides from, and the
+    single-pid re-read that decides whether the thing about to be signalled is
+    still the thing the pass measured (:func:`process_row`). A second copy of
+    the argv match could drift, and the drift would be the dangerous direction —
+    the re-read would stop recognising the target and every pass would refuse.
+
+    The columns are read positionally from a fixed format string, and a row that
+    does not parse is skipped rather than guessed at.
+    """
+    fields = line.split(None, 4)
+    if len(fields) < 5:
+        return None
+    pid_text, ppid_text, age_text, cpu_text, command = fields
+    # THE MATCH IS THE SPAWN CONTRACT, not a substring. ``launch`` starts a
+    # runtime as ``<interpreter> -P -m local_operator.session.runtime.process``,
+    # so the ``-m`` immediately before the module name is what identifies one.
+    # Matching the module name alone would also match a person running
+    # ``grep local_operator.session.runtime.process`` (and this module's own
+    # tests), i.e. a census that reports the searcher as a runtime — the
+    # single misidentification that would make a sweep signal a stranger.
+    words = command.split()
+    if not any(
+        words[index] == "-m" and words[index + 1] == RUNTIME_MODULE
+        for index in range(len(words) - 1)
+    ):
+        return None
+    try:
+        pid = int(pid_text)
+        parent_pid = int(ppid_text)
+    except ValueError:
+        return None
+    return RuntimeProcess(
+        pid=pid,
+        parent_pid=parent_pid,
+        age_s=etime_seconds(age_text),
+        cpu_s=etime_seconds(cpu_text),
+        command=command,
+    )
+
+
 def runtime_processes(
     *,
     run: Callable[[Sequence[str], float], str] = _run_command,
@@ -294,45 +412,119 @@ def runtime_processes(
 
     ONE fork for the whole census, with no ``per-pid`` probe: at 57 runtimes a
     per-pid ``ps`` (3.9 ms each) would cost 220 ms of the supervisor's slice for
-    data the process table already prints in a single call. The columns are read
-    positionally from a fixed format string, and a row that does not parse is
-    skipped rather than guessed at.
+    data the process table already prints in a single call.
     """
     output = run(["ps", "-eo", "pid=,ppid=,etime=,time=,command="], timeout_s)
     found: list[RuntimeProcess] = []
     for line in output.splitlines():
-        fields = line.split(None, 4)
-        if len(fields) < 5:
-            continue
-        pid_text, ppid_text, age_text, cpu_text, command = fields
-        # THE MATCH IS THE SPAWN CONTRACT, not a substring. ``launch`` starts a
-        # runtime as ``<interpreter> -P -m local_operator.session.runtime.process``,
-        # so the ``-m`` immediately before the module name is what identifies one.
-        # Matching the module name alone would also match a person running
-        # ``grep local_operator.session.runtime.process`` (and this module's own
-        # tests), i.e. a census that reports the searcher as a runtime — the
-        # single misidentification that would make a sweep signal a stranger.
-        words = command.split()
-        if not any(
-            words[index] == "-m" and words[index + 1] == RUNTIME_MODULE
-            for index in range(len(words) - 1)
-        ):
-            continue
-        try:
-            pid = int(pid_text)
-            parent_pid = int(ppid_text)
-        except ValueError:
-            continue
-        found.append(
-            RuntimeProcess(
-                pid=pid,
-                parent_pid=parent_pid,
-                age_s=etime_seconds(age_text),
-                cpu_s=etime_seconds(cpu_text),
-                command=command,
-            )
-        )
+        row = parse_process_row(line)
+        if row is not None:
+            found.append(row)
     return found
+
+
+def process_row(
+    pid: int,
+    *,
+    run: Callable[[Sequence[str], float], str] = _run_command,
+    timeout_s: float = CENSUS_TIMEOUT_S,
+) -> RuntimeProcess | None:
+    """ONE pid's census row AND the environment it reports, in ONE ``ps`` fork.
+
+    THE SIGNAL-TIME RE-READ (see :func:`target_changed`). ``-Eww`` appends the
+    process's own environment to the ``command`` column, so the same fork that
+    says "this pid is still a runtime, this old, this much CPU" also carries the
+    config root the verdict attributed the candidate to — two of the four facts
+    the re-identification rests on, at the cost of the single per-candidate fork
+    the pass already pays for ``env_of``.
+
+    ``None`` means the pid is not a live session runtime NOW: gone, or a
+    different process wearing the pid. Both are refusals at signal time.
+    """
+    output = run(
+        ["ps", "-Eww", "-p", str(pid), "-o", "pid=,ppid=,etime=,time=,command="],
+        timeout_s,
+    )
+    for line in output.splitlines():
+        row = parse_process_row(line)
+        if row is not None and row.pid == pid:
+            return row
+    return None
+
+
+def record_file(root: Path, pid: int) -> Path:
+    """Where a runtime's discovery record WOULD be, creating nothing.
+
+    ``registry.record_path`` is the owner of the ``<pid>.json`` spelling, but it
+    goes through ``registry.run_dir``, which CREATES the directory it names — and
+    a re-read at signal time may not. The candidate's own root can be a path that
+    is GONE (the class this sweep exists for), and conjuring it back would be the
+    sweep inventing the very store the runtime could then publish into, i.e.
+    manufacturing the reachability it was checking for. Note the same reasoning
+    in ``roster``, which refuses to scan a sibling root that is not a directory
+    right now for the same reason.
+    """
+    return Path(root) / RUN_DIRNAME / f"{pid}.json"
+
+
+#: How much YOUNGER than the row the pass measured a re-read row may be before it
+#: is a different process. ``ps``'s ``etime`` has one-second resolution and only
+#: ever counts up, so a recycled pid (whose life starts at zero) is separated from
+#: its predecessor by the whole confirm window — 60 s by default — and the slack is
+#: there for the rounding, not for the discrimination.
+_AGE_SLACK_S = 2.0
+
+
+def target_changed(
+    item: Verdict,
+    *,
+    row_of: Callable[[int], RuntimeProcess | None] = process_row,
+    roots: Sequence[Path] = (),
+    age_slack_s: float = _AGE_SLACK_S,
+) -> str:
+    """``""`` when the candidate is still the process the pass decided about.
+
+    **THE DECISION IS A SNAPSHOT AND THE SIGNAL IS NOT.** The census and the
+    fleet are read once at the top of a pass, and ``os.kill`` fires later from
+    that snapshot — measured on this host's real 74-row census: first SIGTERM
+    19 ms after the pass began, last one **1161 ms** after. Two things can change
+    inside that window and neither is visible to the ladder, because the ladder
+    has already run:
+
+    * **(a) the pid is recycled.** It exits and the kernel reuses the number; the
+      signal then lands on a stranger. Nothing in the ladder can see the
+      substitution — the ``young``/``foreign``/``self`` rungs were all evaluated
+      against the EARLIER census. A runtime reusing the pid would be refused as
+      ``young`` if it were re-read, but the hazard that survives is any OTHER
+      process: a build, a test runner, a daemon, receiving SIGTERM.
+    * **(b) a record appears.** A candidate whose record was deleted re-publishes
+      on its next heartbeat, which makes it reachable — the exact race the
+      confirm window exists to prevent, moved inside the pass. This one is
+      contained by the runtime's work-aware SIGTERM drain, but it should not need
+      to be.
+
+    Both are closed here, by re-reading the ONE row immediately before the signal
+    and refusing on any change: the pid must still exist and still be a runtime by
+    its argv (:func:`process_row` returns ``None`` otherwise), it must not be
+    YOUNGER than the row the pass measured (a recycled pid starts its life at
+    zero), it must report the same config root (the attribution the verdict rests
+    on), and there must be no discovery record for it now in any of ``roots``.
+
+    Refusal, never a correction: this is not a second verdict and it can neither
+    admit a candidate the ladder turned away nor rescue one it did not judge —
+    only withhold a signal the snapshot authorised.
+    """
+    pid = item.process.pid
+    row = row_of(pid)
+    if row is None:
+        return REFUSAL_CHANGED
+    if row.age_s < item.process.age_s - age_slack_s:
+        return REFUSAL_CHANGED
+    if config_root_of(row.command) != item.config_root:
+        return REFUSAL_CHANGED
+    if any(record_file(root, pid).is_file() for root in roots):
+        return REFUSAL_RECORD_PRESENT
+    return ""
 
 
 def socket_evidence(
@@ -508,11 +700,6 @@ class Fleet:
     boots: Mapping[int, Any]
     viewers: Sequence[Any]
     sockets: SocketEvidence
-    #: ``pid -> live|wedged|stale``, from the same scan that produced ``records``.
-    #: Kept because a reader (the roster) has to report WHICH verdict a record drew
-    #: while a decider (the sweep) only needs its existence — and re-deriving it
-    #: would be a second implementation of ``registry.classify``'s rule.
-    states: Mapping[int, str] = field(default_factory=dict)
     own_pids: frozenset[int] = frozenset()
     #: The roots this pass may act in, when a caller NAMED them. ``None`` is the
     #: production rule in the module docstring — the swept root, plus any root that
@@ -541,7 +728,6 @@ def read_fleet(root: Path | None = None, *, sockets: SocketEvidence | None = Non
     config_root = Path(root) if root is not None else config_dir()
     scanned = registry.scan(config_root, RUN_DIRNAME, SessionRecord.from_json, reap=False)
     records = {record.pid: record for record, _state in scanned}
-    states = {record.pid: state for record, state in scanned}
     boots: dict[int, Any] = {}
     host_dir = config_root / HOST_RUN_DIRNAME
     try:
@@ -562,7 +748,6 @@ def read_fleet(root: Path | None = None, *, sockets: SocketEvidence | None = Non
         boots=boots,
         viewers=scan_viewers(config_root, reap=False),
         sockets=sockets if sockets is not None else SocketEvidence(),
-        states=states,
         own_pids=ancestor_pids(),
     )
 
@@ -601,6 +786,11 @@ def verdict(
        this.
     6. ``observed`` — a live viewer lease names its session, or its control port
        has an ESTABLISHED peer. Something is looking at it.
+    7. ``sockets-unknown`` — the machine's socket table could not be read at all,
+       so the half of rung 6 that lives ONLY there cannot be evaluated. Placed
+       last because every stronger refusal has already had its say, and it fires
+       only for a candidate that would otherwise be ADMITTED: losing the strongest
+       refusal must not become a permission (see :data:`REFUSAL_SOCKETS_UNKNOWN`).
     """
     if process.pid in fleet.own_pids:
         return Verdict(process=process, config_root="", refusal=REFUSAL_SELF)
@@ -664,6 +854,26 @@ def verdict(
             refusal=REFUSAL_OBSERVED,
             detail=f"connection established on control port {port}",
         )
+    # FAIL-CLOSED ON MISSING EVIDENCE. Everything above is evidence that something
+    # IS there; this is the absence of the evidence that something is ATTACHED, and
+    # absence-of-evidence must never be read as permission on the rung whose only
+    # job is to notice an attached client: QA round 1 (Q5) measured two identical
+    # record-less candidates with a live client on the control port — the one whose
+    # pass could read the socket table was correctly ``observed`` and left alive,
+    # the one whose ``lsof`` failed was admitted and SIGTERMed. Refusing here costs
+    # the whole software-reclaim class on a machine without ``lsof`` (the module's
+    # docstring says so), which is the trade this module's own test file states:
+    # a sweep that ends one runtime it should not have is worse than a sweep that
+    # reclaims nothing.
+    if not fleet.sockets.available:
+        return Verdict(
+            process=process,
+            config_root=config_root,
+            session_id=session_id,
+            port=port,
+            refusal=REFUSAL_SOCKETS_UNKNOWN,
+            detail="the socket table could not be read, so an attach cannot be ruled out",
+        )
     return Verdict(process=process, config_root=config_root, session_id=session_id, port=port)
 
 
@@ -717,9 +927,24 @@ class Sightings:
         return ""
 
     def forget(self, pids: Iterable[int]) -> None:
-        """Drop pids that are no longer candidates, so the memory stays bounded."""
+        """Drop pids that are no longer candidates, so the memory stays bounded.
+
+        THE ITERABLE IS MATERIALISED ONCE, and that is not a micro-optimisation:
+        the only production caller passes a GENERATOR (``reclaim_runtimes``
+        calls ``seen.forget(process.pid for process in census)``), and a
+        ``set(pids)`` written INSIDE the loop re-evaluates it — first iteration
+        drains the generator, every later iteration compares against an EMPTY
+        set and drops the entry. The result was a sweep that could confirm
+        exactly one runtime per pass (the first in census order, the same one
+        every time) and read every other candidate as ``unconfirmed`` forever,
+        on the two paths the feature exists for: the wake supervisor's pass and
+        ``lop sessions reclaim``. The whole-fleet fix for 34-40 unreachable
+        runtimes was one process. The parameter is typed ``Iterable``, so the
+        one-shot form is a legal call and this is where it must be handled.
+        """
+        keep = set(pids)
         for pid in list(self._seen):
-            if pid not in set(pids):
+            if pid not in keep:
                 self._seen.pop(pid, None)
 
 
@@ -732,7 +957,13 @@ class ReclaimReport:
     census: int = 0
     #: Candidates the verdict admitted (no refusal) AND the confirm window cleared.
     reclaimed: list[Verdict] = field(default_factory=list)
-    #: Candidates the verdict admitted, still inside the confirm window.
+    #: Candidates the verdict admitted that the confirm window has NOT cleared,
+    #: carrying the token that deferred them (``unconfirmed``/``busy-cpu``). One
+    #: candidate appears in exactly one of these lists: they used to be appended to
+    #: ``refused`` as well, so one summary line reported the same 59 rows on both
+    #: halves of itself and :meth:`refusals` counted rows the pass had not refused —
+    #: the roster read "59 awaiting the window, refused [unconfirmed 59]" as two
+    #: facts about two populations (review round 1, NIT 8).
     pending: list[Verdict] = field(default_factory=list)
     #: Every runtime the sweep declined to end, with its token. Counted by token in
     #: :meth:`summary` so a pass over a healthy machine reads as "nothing but
@@ -756,14 +987,31 @@ class ReclaimReport:
             counts[item.refusal] = counts.get(item.refusal, 0) + 1
         return counts
 
+    def deferrals(self) -> dict[str, int]:
+        """Why the pending candidates are waiting, by token.
+
+        The counterpart of :meth:`refusals`, and separate from it because a
+        candidate awaiting the window is not a refusal: the ladder admitted it and
+        the next pass may well end it. Reported with the same tokens so one
+        operator reading either line is reading the same vocabulary.
+        """
+        counts: dict[str, int] = {}
+        for item in self.pending:
+            counts[item.refusal] = counts.get(item.refusal, 0) + 1
+        return counts
+
     def summary(self) -> str:
         """One operator-grade line: the census, the verdicts, and what was ended."""
         mode = "reclaimed" if self.applied else "would reclaim (dry run)"
         refused = ", ".join(f"{token} {count}" for token, count in sorted(self.refusals().items()))
+        deferred = ", ".join(
+            f"{token} {count}" for token, count in sorted(self.deferrals().items())
+        )
         return (
             f"runtime residency: {self.census} live session runtimes, "
             f"{len(self.reclaimed)} {mode}, {len(self.pending)} awaiting the "
             f"{self.confirm_s:.0f}s confirm window"
+            + (f" [{deferred}]" if deferred else "")
             + (f", refused [{refused}]" if refused else "")
             + (
                 ""
@@ -799,6 +1047,24 @@ class ReclaimReport:
         }
 
 
+def _record_roots(view: Fleet, item: Verdict) -> list[Path]:
+    """The roots whose record directory could hold this candidate's record NOW.
+
+    TWO, because attribution and publication are different questions: the pass
+    judged the candidate against the SWEPT root's records (``verdict``'s rung 5),
+    while a runtime publishes its record into ITS OWN root — which is how a root
+    that no longer exists is in scope at all. A record appearing in either place
+    makes the candidate reachable, and reachability is the whole of what this
+    sweep must not race, so both are checked at signal time rather than the one a
+    single ``Fleet`` happens to have been read from.
+    """
+    roots = [view.root]
+    own = Path(item.config_root) if item.config_root else None
+    if own is not None and own != view.root:
+        roots.append(own)
+    return roots
+
+
 def reclaim_runtimes(
     root: Path | None = None,
     *,
@@ -810,6 +1076,7 @@ def reclaim_runtimes(
     processes: Sequence[RuntimeProcess] | None = None,
     sockets: SocketEvidence | None = None,
     env_of: Callable[[int], str] = process_env,
+    row_of: Callable[[int], RuntimeProcess | None] = process_row,
     fleet: Fleet | None = None,
     kill: Callable[[int, int], None] = os.kill,
     wait_s: float = 0.0,
@@ -827,6 +1094,14 @@ def reclaim_runtimes(
     ``apply=False`` is the default for every caller that has not been asked to
     act — the pass still does the full census and the full verdict and reports what
     it WOULD end, which is what makes a dry run evidence rather than a promise.
+
+    ``row_of`` is the SIGNAL-TIME reader (:func:`process_row`, one fork for one
+    pid), and it is injected for the same reason ``env_of`` is: it is the only
+    place this pass touches the process table a second time, and a test that
+    drives a synthetic census has to be able to answer for it. It is used only
+    when ``apply`` is set, and only for a candidate the window has just cleared —
+    see :func:`target_changed` for why the snapshot a decision came from is not
+    authoritative by the time the signal goes out.
     """
     moment = time.time() if now is None else now
     # THE SOCKET TABLE IS READ HERE, NOT LEFT TO THE CALLER. It is one of the two
@@ -870,7 +1145,11 @@ def reclaim_runtimes(
             continue
         refusal = seen.confirm(item, now=moment, confirm_s=confirm_s)
         if refusal:
-            report.refused.append(
+            # DEFERRED, NOT REFUSED, and reported ONCE: ``pending`` carries the
+            # token that deferred it, so nothing is counted in two places (see the
+            # field's comment). A ``busy-cpu`` candidate lands here too — it is a
+            # candidate the next window may end, and the CLI lists it as one.
+            report.pending.append(
                 Verdict(
                     process=item.process,
                     config_root=item.config_root,
@@ -880,8 +1159,26 @@ def reclaim_runtimes(
                     detail=f"cpu {item.process.cpu_s:.1f}s",
                 )
             )
-            report.pending.append(item)
             continue
+        if apply:
+            # THE SNAPSHOT IS NOT AUTHORITATIVE BY THE TIME THE SIGNAL GOES OUT.
+            # See ``target_changed``: the row is re-read here, one fork, and a
+            # candidate that cannot be re-identified is refused rather than
+            # signalled. Absent for a dry run, whose whole output is the decision
+            # itself and which signals nothing for the race to endanger.
+            changed = target_changed(item, row_of=row_of, roots=_record_roots(view, item))
+            if changed:
+                report.refused.append(
+                    Verdict(
+                        process=item.process,
+                        config_root=item.config_root,
+                        session_id=item.session_id,
+                        port=item.port,
+                        refusal=changed,
+                        detail="the target changed between the decision and the signal",
+                    )
+                )
+                continue
         report.reclaimed.append(item)
         if not apply:
             continue

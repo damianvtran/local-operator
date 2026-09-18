@@ -2143,6 +2143,7 @@ class MobileDaemon:
         # `sys.executable` on Linux (see `procname.spawn_identity`).
         from local_operator import procname
         from local_operator.interpreter import SAFE_PATH_FLAG
+        from local_operator.session.runtime.types import RUNTIME_MODULE
 
         argv0, executable = procname.spawn_identity(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
@@ -2161,7 +2162,10 @@ class MobileDaemon:
             argv0,
             SAFE_PATH_FLAG,
             "-m",
-            "local_operator.session.runtime.process",
+            # THE SPAWN CONTRACT, from its one home: the residency sweep's census
+            # matches this module by this exact argv word, so a literal here could
+            # drift from ``session/runtime/launch.py``'s without anything failing.
+            RUNTIME_MODULE,
             executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;

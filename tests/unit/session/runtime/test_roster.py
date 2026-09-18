@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.session.runtime import reclaim
+from local_operator.session.runtime import reclaim, roster
 from local_operator.session.runtime.reclaim import Fleet, RuntimeProcess, SocketEvidence
 from local_operator.session.runtime.roster import (
     REACHABLE_GONE,
@@ -71,14 +71,17 @@ def record(pid: int, *, session_id: str = "s1", port: int | None = 5000, **extra
 
 
 def view(root: Path, **kwargs) -> Fleet:
-    kwargs.setdefault("sockets", SocketEvidence(available=False))
+    # ``available=True`` by default: a fleet read WITH the socket table that found
+    # nothing attached. A caller that means "``lsof`` failed" passes
+    # ``SocketEvidence()``, and the pass then refuses rather than acting
+    # (``REFUSAL_SOCKETS_UNKNOWN``) — see the module docstring of ``reclaim``.
+    kwargs.setdefault("sockets", SocketEvidence(available=True))
     return Fleet(
         root=root,
         records={item.pid: item for item in kwargs.pop("records", ())},
         boots={int(item["pid"]): item for item in kwargs.pop("boots", ())},
         viewers=list(kwargs.pop("viewers", ())),
         sockets=kwargs.pop("sockets"),
-        states=kwargs.pop("states", {}),
         own_pids=frozenset(),
     )
 
@@ -98,7 +101,7 @@ def test_a_recorded_runtime_reports_its_record_and_answers(tmp_path: Path) -> No
     rows = build(
         tmp_path,
         processes=[proc()],
-        fleet=view(tmp_path, records=[record(MINE)], states={MINE: "live"}),
+        fleet=view(tmp_path, records=[record(MINE)]),
     )
     assert len(rows) == 1
     row = rows[0]
@@ -185,9 +188,7 @@ def test_a_dead_pid_is_gone_and_is_never_dialled(tmp_path: Path) -> None:
     rows = build(
         tmp_path,
         processes=[],
-        fleet=view(
-            tmp_path, records=[record(GONE_PID, session_id="dead")], states={GONE_PID: "stale"}
-        ),
+        fleet=view(tmp_path, records=[record(GONE_PID, session_id="dead")]),
         connect=connect,
     )
     assert len(rows) == 1
@@ -209,7 +210,7 @@ def test_a_wedged_runtime_that_does_not_answer_reads_unreachable(tmp_path: Path)
     rows = build(
         tmp_path,
         processes=[proc()],
-        fleet=view(tmp_path, records=[stale], states={MINE: "wedged"}),
+        fleet=view(tmp_path, records=[stale]),
         connect=lambda port, timeout: False,
     )
     row = rows[0]
@@ -235,7 +236,7 @@ def test_a_wedged_runtime_does_not_spend_the_whole_budget(
     rows = build(
         tmp_path,
         processes=slow_rows,
-        fleet=view(tmp_path, records=stale, states={}),
+        fleet=view(tmp_path, records=stale),
         budget_s=0.001,
         connect=connect,
     )
@@ -357,3 +358,113 @@ def test_the_row_json_carries_every_required_field(tmp_path: Path) -> None:
         "reachability",
     } <= set(payload)
     assert json.dumps(payload)  # JSON-safe: no dataclass or Path leaks onto the wire
+
+
+# ---------------------------------------------------------------------------
+# One liveness answer per row (review round 1, R1-3 / QA Q4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_zombie_is_never_dialled_and_never_reported_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measured row: ``reachability=live`` beside ``state=stale``, on a zombie.
+
+    The registry's derived zombie policy spends its probe only where the heartbeat
+    has already gone quiet, so a corpse whose beat is still inside the timeout read
+    ``live`` in BOTH fields — while a bare signal-0 in this module called the same
+    pid alive and dialled its port, which by then belonged to whoever had taken the
+    pid. The answer here is one liveness answer per row: ``classify`` with the
+    BATCHED zombie answer handed to it, and ``reachability`` derived from the same
+    verdict rather than from a second rule.
+    """
+    dialled: list[int] = []
+
+    def connect(port: int, timeout: float) -> bool:
+        dialled.append(port)
+        return True
+
+    # A FRESH heartbeat, deliberately: this is the harder of the two zombie rows,
+    # and the one the derived policy was leaving as ``live``.
+    monkeypatch.setattr(roster, "zombie_states", lambda pids: {MINE: True})
+    rows = build(
+        tmp_path,
+        processes=[proc()],
+        fleet=view(
+            tmp_path,
+            records=[record(MINE)],
+            sockets=SocketEvidence(ports={MINE: 5000}, available=True),
+        ),
+        connect=connect,
+    )
+    row = rows[0]
+    assert row.state == "stale"
+    assert row.reachability == REACHABLE_GONE
+    assert dialled == []
+
+
+def test_a_running_runtime_the_census_cannot_match_is_not_reported_gone(
+    tmp_path: Path,
+) -> None:
+    """The other half of R1-3: ``reclaim_refusal=gone`` about a process that IS there.
+
+    The census matches only ``-m <the spawn contract>``, so a live, listening runtime
+    whose argv the census does not recognise — or EVERY row, when the census ``ps``
+    times out at ``CENSUS_TIMEOUT_S`` — has no ladder verdict at all. That is not
+    "the pid is not running", and the roster now says which of the two it is.
+    """
+    rows = build(
+        tmp_path,
+        processes=[],
+        fleet=view(
+            tmp_path,
+            records=[record(MINE)],
+            sockets=SocketEvidence(ports={MINE: 5000}, available=True),
+        ),
+    )
+    row = rows[0]
+    assert row.reachability == REACHABLE_LIVE  # it answered the dial
+    assert row.reclaimable is False
+    assert row.reclaim_refusal == reclaim.REFUSAL_NO_CENSUS
+    assert row.state == "live"
+
+
+def test_a_dead_pid_with_no_census_row_still_reads_gone(tmp_path: Path) -> None:
+    # The two tokens must stay distinguishable in BOTH directions: a pid that is not
+    # there is ``gone``, and the new token is not a synonym for it.
+    rows = build(
+        tmp_path,
+        processes=[],
+        fleet=view(tmp_path, records=[record(GONE_PID)], sockets=SocketEvidence(available=True)),
+        connect=lambda port, timeout: pytest.fail("dialled a corpse"),
+    )
+    assert rows[0].reachability == REACHABLE_GONE
+    assert rows[0].reclaim_refusal == reclaim.REFUSAL_GONE
+
+
+def test_the_probe_budget_is_a_deadline_and_not_a_hope() -> None:
+    """The pool must not join its QUEUE: 64 probes, 8 workers, a 0.1 s budget.
+
+    ``with ThreadPoolExecutor(...)`` calls ``shutdown(wait=True)``, which waits for
+    queued work as well as running work, so the response cost
+    ``ceil(rows / PROBE_WORKERS) x timeout`` however small ``budget_s`` was — the
+    review's micro-repro of the exact shape measured 2.04 s, and QA measured 1.69 s
+    at the endpoint (review round 1, R1-4). The probe pool is now shut down WITHOUT
+    waiting and its queue is cancelled, so the budget is the deadline it is
+    documented to be.
+    """
+    from local_operator.session.runtime.roster import PROBE_TIMEOUT_S, _probe_ports
+
+    started = time.monotonic()
+    answered = _probe_ports(
+        {pid: 9000 + pid for pid in range(64)},
+        budget_s=0.1,
+        workers=8,
+        timeout_s=PROBE_TIMEOUT_S,
+        connect=lambda port, timeout: time.sleep(0.25) or True,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.6, elapsed
+    # The rows that never got to run are ABSENT, not False: "not measured" and
+    # "did not answer" are different answers, and only one of them is evidence.
+    assert answered == {}

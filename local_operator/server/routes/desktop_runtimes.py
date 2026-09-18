@@ -18,12 +18,18 @@ that may run on the event loop: this daemon serves every other desktop request o
 the same loop, and a wedged runtime that makes a connect block would turn one
 roster poll into a stall for every session in the product.
 
-**Why it is bounded, and what the bound returns.** The budget is enforced as a
-deadline, not as a hope: a row whose probe did not complete inside it reports
-``reachability: "unknown"``. The failure this rules out is the one an operator
-would actually hit — one runtime that is alive and not answering, holding the
-whole response open. A dead pid is never dialled: ``pid_alive`` (signal-0) answers
-first and the row reads ``gone``.
+**Why it is bounded, and what the bound returns.** The two things that grow with
+the machine — the connects — run inside one wall deadline, enforced rather than
+hoped for: the probe pool is shut down without waiting on its queue, and a row
+whose probe did not complete inside the budget reports ``reachability:
+"unknown"``. The failure this rules out is the one an operator would actually
+hit — one runtime that is alive and not answering, holding the whole response
+open, or a roster of forty rows spending ``ceil(rows / PROBE_WORKERS)`` times the
+connect timeout however small the budget was (review round 1, R1-4). What the
+budget does NOT cover is stated in ``roster``'s docstring: the ``ps`` and ``lsof``
+reads in front of the probes have their own timeouts and are not part of it, so
+the response's ceiling is their sum, not ``budget_s``. A dead pid is never
+dialled: ``pid_alive`` (signal-0) answers first and the row reads ``gone``.
 
 **It is a READER, and it changes nothing.** Records and boot records are read with
 ``reap=False``, the process table and the socket table are external read-only

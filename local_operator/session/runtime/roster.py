@@ -33,14 +33,27 @@ external calls, and the only mutation any of it performs is the TCP connect of a
 health probe.
 
 **BOUNDED BY CONSTRUCTION.** The cost is O(live runtimes), one process-table fork
-plus one socket-table call plus one bounded connect per row that names a port. The
-whole composition runs on a worker thread (the route hands it to ``asyncio.
-to_thread``), the probes run in a small fixed pool with a short per-connect
-timeout, and the caller's budget is enforced as a deadline: a row whose probe did
-not complete inside the budget is reported as ``unknown`` rather than waited for.
-A dead pid is never dialled at all — ``pid_alive`` (signal-0) answers first, and
-the row reads ``gone`` — so no wedged or crashed runtime can make this endpoint
-hang.
+plus one batched zombie probe plus one socket-table call plus one bounded connect
+per row that names a port. The whole composition runs on a worker thread (the
+route hands it to ``asyncio.to_thread``), the probes run in a small fixed pool
+with a short per-connect timeout, and the caller's budget is enforced as a
+deadline: a row whose probe did not complete inside the budget is reported as
+``unknown`` rather than waited for. A dead pid is never dialled at all —
+``pid_alive`` (signal-0) answers first, and the row reads ``gone`` — so no wedged
+or crashed runtime can make this endpoint hang.
+
+**WHAT THE BUDGET DOES AND DOES NOT COVER.** ``budget_s`` bounds the PROBES — one
+batch of loopback connects, abandoned when the deadline passes — and nothing else.
+The response's real ceiling is ``budget_s + CENSUS_TIMEOUT_S +
+SOCKET_TIMEOUT_S`` (2.5 s + 5 s + 3 s in the worst case, i.e. both external reads
+wedged at their own timeouts, which is a machine whose process table and socket
+table are both unresponsive). A small ``budget_s`` does not make the response
+small: measured at ``budget_s=0.1`` the probe batch is abandoned at 0.1 s but the
+``ps`` and ``lsof`` reads in front of it still cost what they cost (~0.14 s +
+~0.26 s idle on the reference host, seconds when real load is present), and the
+budget bounds only the part of this route that scales with the ROW COUNT — which
+is the part that grows. Review round 1 (R1-4) measured the docstrings promising a
+bound the code did not keep; this paragraph is the honest version.
 """
 
 from __future__ import annotations
@@ -53,9 +66,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.procstate import zombie_states
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.reclaim import (
     REFUSAL_GONE,
+    REFUSAL_NO_CENSUS,
     Fleet,
     RuntimeProcess,
     config_root_of,
@@ -136,7 +151,12 @@ class RosterRow:
     heartbeat_age_s: float | None
     reachability: str
     #: The registry's verdict for a recorded runtime (``live``/``wedged``/``stale``),
-    #: ``None`` for a record-less one.
+    #: ``None`` for a record-less one. Derived ONCE per row, in
+    #: :func:`~local_operator.session.runtime.registry.classify`, from the same
+    #: pid-liveness answer ``reachability`` is derived from — a row that reported
+    #: ``state: stale`` beside ``reachability: live`` was the defect review round 1
+    #: (R1-3) measured, one surface disagreeing with itself about whether a process
+    #: exists.
     state: str | None
     has_record: bool
     #: The config root whose record supplied this row's facts, or ``""`` when no
@@ -157,7 +177,10 @@ class RosterRow:
     #: Whether the residency sweep would end this runtime, and the token saying why
     #: not when it would not. The SAME verdict the sweep acts on, computed from the
     #: same function, so the roster can never describe a runtime differently from
-    #: the way the sweep treats it.
+    #: the way the sweep treats it. When there is no census row to judge there is no
+    #: verdict either, and the token distinguishes the two reasons for that: the pid
+    #: is ``gone``, or it is running and the process table simply did not match it
+    #: (``no-census-row``).
     reclaimable: bool
     reclaim_refusal: str
     reclaim_detail: str
@@ -213,26 +236,42 @@ def _probe_ports(
     connect: Callable[[int, float], bool] = _connect_ok,
     now: Callable[[], float] = time.monotonic,
 ) -> dict[int, bool]:
-    """Probe many ports inside one wall budget. Missing pids mean "not answered"."""
+    """Probe many ports inside one wall budget. Missing pids mean "not answered".
+
+    THE POOL IS SHUT DOWN WITHOUT WAITING, and that is the whole of the budget's
+    enforcement. ``with ThreadPoolExecutor(...)`` calls ``shutdown(wait=True)``,
+    which joins the QUEUED work items as well as the running ones — so a deadline
+    that abandoned the waiting loop still blocked here for
+    ``ceil(rows / PROBE_WORKERS) x timeout_s``, i.e. the budget was a hope on a
+    roster bigger than the pool. Measured before the fix: ``budget_s=0.1``
+    returned after 1.69 s at the endpoint and 2.04 s on a 64-row micro-repro
+    (review round 1, R1-4 / QA Q4). ``cancel_futures`` drops the ones that never started, and the
+    ones already inside the kernel are left to finish on their own thread — bounded
+    by ``timeout_s``, off the caller's path, and the reason the futures are
+    abandoned rather than joined.
+    """
     if not ports:
         return {}
     deadline = now() + budget_s
     answered: dict[int, bool] = {}
-    with ThreadPoolExecutor(max_workers=min(workers, len(ports))) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(ports)))
+    try:
         futures = {pid: pool.submit(connect, port, timeout_s) for pid, port in ports.items()}
         for pid, future in futures.items():
             remaining = deadline - now()
             if remaining <= 0:
                 # BUDGET SPENT, so the rest are UNKNOWN rather than false: a probe
                 # that never ran must not be reported as a runtime that did not
-                # answer. The futures are abandoned, not cancelled — a connect
-                # already in the kernel would keep the executor's thread alive and
-                # cancelling it does not unspend the socket.
+                # answer.
                 break
             try:
                 answered[pid] = future.result(timeout=remaining)
             except Exception:  # noqa: BLE001 — a probe's failure is a verdict, never an error
                 continue
+    finally:
+        # An already-running connect cannot be cancelled and does not need to be:
+        # it holds a socket for at most ``timeout_s`` and no caller is waiting.
+        pool.shutdown(wait=False, cancel_futures=True)
     return answered
 
 
@@ -338,7 +377,7 @@ def build_roster(
 
     # FOREIGN ROOTS: one bounded scan each, for the runtimes this store cannot
     # describe. See FOREIGN_ROOT_LIMIT for the cap and why it exists.
-    foreign: dict[int, tuple[Any, str]] = {}
+    foreign: dict[int, Any] = {}
     needed = sorted(
         {
             roots[pid]
@@ -365,14 +404,60 @@ def build_roster(
             scanned = registry.scan(sibling, RUN_DIRNAME, SessionRecord.from_json, reap=False)
         except (OSError, ValueError):
             continue
-        for record, state in scanned:
-            foreign.setdefault(record.pid, (record, state))
+        for record, _state in scanned:
+            foreign.setdefault(record.pid, record)
+
+    # ONE LIVENESS ANSWER PER ROW, AND ONE ZOMBIE PROBE FOR THE WHOLE ROSTER.
+    #
+    # Every row's ``state``, ``reachability`` and dial decision come from the answer
+    # computed here, because two answers is the defect: review round 1 (R1-3)
+    # measured a zombie pid DIALED and reported ``reachability=live`` on a row whose
+    # own ``state`` said ``stale`` (the port it dialled belonged to whoever had taken
+    # the pid), while a live, answering runtime whose pid the census could not match
+    # read ``reclaim_refusal=gone`` — a surface reporting a machine that is not
+    # there. There were three rules before (a bare signal-0 in this function,
+    # ``registry.scan``'s derived policy behind ``state``, and ``REFUSAL_GONE`` for a
+    # pid with no census row) and there is one now:
+    #
+    #   * ``registry.classify`` owns live/wedged/stale, and it is asked with the
+    #     ZOMBIE ANSWER SUPPLIED (the ``zombie`` keyword exists for exactly this:
+    #     the policy decides when to SPEND the probe, a caller holding the answer
+    #     supplies it), so ``state`` is the registry's verdict under the true
+    #     liveness; a record whose owner is a zombie is ``stale`` whatever its
+    #     heartbeat says — which is what ``pid_alive(check_zombie=True)`` would
+    #     answer too.
+    #   * ``reachability`` follows from that same verdict (``stale`` is ``gone``),
+    #     so it cannot contradict ``state``.
+    #   * a row with NO record has no state to derive from and asks signal-0, plus
+    #     the same batched zombie answer.
+    #
+    # ONE FORK: ``zombie_states`` is a single ``ps`` over a pid LIST (and no fork at
+    # all on Linux, where it reads /proc). The list is FILTERED BY SIGNAL-0 first,
+    # exactly as ``registry.scan``'s derived path filters its own batch before
+    # spending the probe: a pid that is not there is ``stale`` whatever ``ps``
+    # would have said, and a store full of dead records is the case that costs
+    # nothing. The alternative — ``pid_alive(pid, check_zombie=True)`` per row — is
+    # a ``ps`` fork per row, measured at 3.9 ms each, i.e. the ~150 ms this roster
+    # cannot spend on the 36 record-less rows it exists to name.
+    zombies = zombie_states([pid for pid in pids if registry.pid_alive(pid)])
+    states: dict[int, str] = {}
+    alive: dict[int, bool] = {}
+    for pid in pids:
+        # ``classify`` wants the RECORD, and either store's will do: the swept
+        # store's first (its row is this roster's own), else the sibling's.
+        here = view.records.get(pid)
+        source = here if here is not None else foreign.get(pid)
+        zombie = bool(zombies.get(pid, False))
+        if source is not None:
+            states[pid] = registry.classify(source, now=moment, zombie=zombie).state
+            alive[pid] = states[pid] != "stale"
+        else:
+            alive[pid] = registry.pid_alive(pid) and not zombie
 
     if probe:
-        alive_ports: dict[int, int] = {}
-        for pid, port in ports.items():
-            if registry.pid_alive(pid):
-                alive_ports[pid] = port
+        alive_ports: dict[int, int] = {
+            pid: port for pid, port in ports.items() if alive.get(pid, False)
+        }
         # Resolved through the module attribute rather than as a default bound at
         # definition time, so a caller (or a test) that replaces the connect sees its
         # replacement used.
@@ -390,15 +475,18 @@ def build_roster(
         # The facts of a SIBLING store's runtime come from ITS record: this store
         # cannot describe it, and a row that lists the pid and says nothing else is
         # the state the roster exists to end.
-        elsewhere, elsewhere_state = foreign.get(pid, (None, ""))
+        elsewhere = foreign.get(pid)
         if record is None and elsewhere is not None:
             if port is None:
                 sibling_port = int(getattr(elsewhere, "control_port", 0) or 0)
                 port = sibling_port or None
             session_id = session_id or str(getattr(elsewhere, "session_id", "") or "")
             builds.setdefault(pid, str(getattr(elsewhere, "version", "") or ""))
-        alive = registry.pid_alive(pid)
-        if not alive:
+        # THE ROW'S LIVENESS IS DERIVED ONCE, above: ``reachability`` follows the
+        # same answer ``state`` was classified with, so a row can no longer report a
+        # connected runtime beside a stale one, and a zombie is never dialled.
+        alive_now = alive.get(pid, False)
+        if not alive_now:
             reachability = REACHABLE_GONE
         elif port is None:
             reachability = REACHABLE_UNKNOWN
@@ -407,14 +495,13 @@ def build_roster(
         else:
             reachability = REACHABLE_UNKNOWN
         heartbeat = None
-        state = None
+        state = states.get(pid)
         busy = None
         leaving = ""
         has_record = record is not None
         if record is not None or elsewhere is not None:
             source = record if record is not None else elsewhere
             heartbeat = max(0.0, moment - float(getattr(source, "heartbeat_at", 0.0) or 0.0))
-            state = view.states.get(pid) if record is not None else elsewhere_state
             busy = bool(getattr(source, "busy", False))
             leaving = str(getattr(source, "leaving", "") or "")
         elif isinstance(boot, dict) and boot.get("started_at"):
@@ -471,11 +558,20 @@ def build_roster(
                 age_s=process.age_s if process is not None else None,
                 cpu_s=process.cpu_s if process is not None else None,
                 reclaimable=bool(item is not None and item.may_end()),
-                # ``REFUSAL_GONE`` when there is no process to judge: a record whose
-                # pid is gone has no row in the census, so the sweep's ladder never
-                # runs for it, and an empty reason would read as "the sweep found
-                # nothing wrong" rather than "there is nothing there".
-                reclaim_refusal=(item.refusal if item is not None else REFUSAL_GONE),
+                # NO CENSUS ROW, NO VERDICT — and TWO reasons for that, which the
+                # roster used to report with one token. ``REFUSAL_GONE`` ("the pid is
+                # not running") is only true when the pid really is not there; a pid
+                # that IS running but that the census could not match — an argv
+                # outside the spawn contract, or a ``ps`` that timed out, which lands
+                # EVERY row here — is a different fact and reads ``no-census-row``.
+                # Review round 1 (R1-3) measured a live, answering runtime reported as
+                # ``gone``; the answer to "why is this not reclaimable" has to be
+                # true (see ``REFUSAL_NO_CENSUS``).
+                reclaim_refusal=(
+                    item.refusal
+                    if item is not None
+                    else (REFUSAL_GONE if not alive_now else REFUSAL_NO_CENSUS)
+                ),
                 reclaim_detail=item.detail if item is not None else "",
             )
         )
