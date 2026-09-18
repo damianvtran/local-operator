@@ -154,4 +154,23 @@ def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
     return source == "local" and gate_is_here
 
 
-__all__ = ["ApprovalGate", "ask_approval", "loosening_is_authorised"]
+#: The ONE sentence both hosts print when a write tried to loosen a live gate
+#: without being authorised to (see :func:`loosening_is_authorised`).
+#:
+#: Lives here for the same reason :data:`GATE_TIMEOUT_CUSTOM_TYPE` does: two
+#: layers emit it and neither may import the other — the runtime
+#: (``session/runtime/serving.py``) as a ``NoticeEvent``, the embedded TUI
+#: (``tui/app.py``) into its own transcript — and a second copy is a second
+#: chance for one surface to describe the rule differently from the other. The
+#: wording is also load-bearing rather than decorative: it names the RULE ("a
+#: write from outside this session") rather than the author, because the
+#: emitting process cannot know who wrote the file, and in the attached-pane
+#: case the person reading it is the one who just clicked the row (design round
+#: 1, D3). ``/approvals auto`` is the route that does loosen the gate.
+LOOSENING_REFUSED_NOTICE = (
+    "keeping tool approvals: ask — config.yml now says auto, but a write from outside "
+    "this session cannot loosen it; /approvals auto loosens it here"
+)
+
+
+__all__ = ["ApprovalGate", "LOOSENING_REFUSED_NOTICE", "ask_approval", "loosening_is_authorised"]

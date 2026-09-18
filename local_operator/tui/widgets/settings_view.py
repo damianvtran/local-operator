@@ -798,6 +798,16 @@ class SettingsView(Vertical):
         #: said "you did something wrong" about a press the footer advertises
         #: (UX round 2, U16).
         self._notice = ""
+        #: A message that answers an action which did NOT take effect for the
+        #: thing the user aimed it at — today exactly one case: a loosening
+        #: written from this page while an attached runtime holds the gate, so
+        #: the file changed and the running session did not (UX round 1, U1).
+        #: Its OWN slot rather than a rung on `_notice` because `_notice`'s ink is
+        #: `faint` (1.97:1 — the page's watermark rung, right for "r resets one
+        #: setting", wrong for the only sentence that says the user's action did
+        #: not land); and because the lifetime differs — this one is consumed by
+        #: the write that produced it and dies on the next cursor move.
+        self._notice_alert = ""
         #: Caret position INSIDE the buffer. The editor owns left/right/home/end
         #: while it is open (UX round 1, U2): unhandled they fell through to the
         #: page bindings and switched the read-only side pane mid-typing, and
@@ -2002,10 +2012,41 @@ class SettingsView(Vertical):
 
     def _write(self, setting: Setting, value: Any) -> None:
         """Store ``value`` and report it, or hold the reason it was refused."""
+        # Cleared BEFORE the write: a write this page makes can be refused by the
+        # gate of a process it is not (`_take_gate_kept_notice`), and the record
+        # is read after the save because `_save` clears this slot on success.
+        self._notice_alert = ""
         if not self._save(lambda: settings_io.write_setting(self._manager, setting, value)):
             return
         self.post_message(SettingsChanged(setting.key, value))
+        self._notice_alert = self._take_gate_kept_notice(setting.key)
         self._repaint()
+
+    def _take_gate_kept_notice(self, key: str) -> str:
+        """Ask the app whether THIS write was refused by a gate it does not own.
+
+        A LIVE key can be refused by the process holding the gate — `/approvals`
+        on an attached pane is the runtime's, a process away — and the sentence
+        the runtime prints lands in the transcript this page has HIDDEN while it
+        is open (`OperatorApp._open_settings_view`), so the page that took the
+        action would otherwise report a bare success (UX round 1, U1). The fact
+        is known synchronously (the write goes through ``settings_io``, whose
+        in-process fast path runs the app's own config listener on this call
+        stack), but it is ASKED FOR here rather than pushed, because `_save`
+        clears this slot on the way out — anything set during the write would be
+        wiped by the line that reports the save.
+
+        ``getattr`` rather than a typed call: this widget is mounted by test
+        hosts that are not an ``OperatorApp``, and in those nothing is refused.
+        """
+        take = getattr(self.app, "_take_page_kept_loosening", None)
+        if not callable(take):
+            return ""
+        answer = take(key)
+        # `getattr` hands back an untyped callable, so the result is narrowed
+        # rather than assumed: this is a display path, and a non-string would
+        # otherwise reach the painter.
+        return answer if isinstance(answer, str) else ""
 
     # -- hotkey capture -----------------------------------------------------
     def _begin_capture(self, setting: Setting) -> None:
@@ -2306,7 +2347,11 @@ class SettingsView(Vertical):
         # The notice answered a keypress on THIS row, so it stops being true
         # the moment the cursor leaves it — the same lifetime `_error` has.
         # Set again below when the discard itself is what needs announcing.
+        # The ALERT message goes with it: it answers the same keypress, and a
+        # "your write did not land" line left standing over an unrelated row
+        # invites the reader to apply it to that row.
         self._notice = ""
+        self._notice_alert = ""
         # NOT the expansion. A choice group is left by the cursor travelling
         # OUT of it, which only the mover knows about — collapsing here would
         # close the group on the arrow that browses within it, which is the one
@@ -4094,6 +4139,13 @@ class SettingsView(Vertical):
         # and the only statement of the way out (design round 1, D3).
         dim = Style(color=theme_mod.semantic_color("dim"))
         error = Style(color=theme_mod.semantic_color("danger"))
+        # The rung for a message answering an action that did NOT take effect for
+        # what it was aimed at (`_notice_alert`): the transcript gives the same
+        # fact its `warning` ink, and the page's copy of it cannot be quieter
+        # than the receipt it stands in for. `faint` (1.97:1) is the watermark
+        # rung and `dim` (4.55:1) is the one design round 1's D2 moved this class
+        # of sentence off.
+        alert = Style(color=theme_mod.semantic_color("warning"))
         text = Text(no_wrap=True, overflow="ellipsis")
         row = self._current()
         question, contract = self._confirm_parts()
@@ -4227,6 +4279,12 @@ class SettingsView(Vertical):
             text.append(self._CONFIRM_MARKER, style=error + Style(bold=True))
             text.append(question, style=error + Style(bold=True))
             text.append(f"  {contract}", style=error)
+        elif self._notice_alert:
+            # The answer to an action that did not land (UX round 1, U1), above
+            # the ordinary notice because it is the row's more important
+            # statement, and below the confirm/delete ask because that one is
+            # about to DESTROY something and nothing outranks it.
+            text.append(self._notice_alert, style=alert)
         elif self._notice:
             # An informational message is NOT an error. It used to route
             # through `self._error` and inherit the danger ink, so telling a
@@ -5560,9 +5618,12 @@ class SettingsView(Vertical):
 
         Separate from :attr:`error_text` because the two are inked differently
         and a test that could not tell them apart is how an informational
-        message ended up in the danger colour (UX round 2, U16).
+        message ended up in the danger colour (UX round 2, U16). The ALERT
+        message is reported here too — it is what the row is painting — because
+        a caller asserting "the page said something" must not have to know which
+        of the two slots carried it.
         """
-        return self._notice
+        return self._notice_alert or self._notice
 
     # -- suggestion accessors (assertable state) ----------------------------
     def suggestion_labels_for_test(self) -> list[str]:

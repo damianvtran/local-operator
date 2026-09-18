@@ -26,6 +26,7 @@ import pytest
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests, process_watcher
+from local_operator.harness.approval import LOOSENING_REFUSED_NOTICE
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.unit.session.runtime.test_serving import FakeSession
 
@@ -129,6 +130,9 @@ async def test_a_disk_write_cannot_loosen_the_gate_at_the_next_decision(tmp_path
     texts = [getattr(e, "text", "") for e in emitted]
     assert any("keeping tool approvals: ask" in t and "/approvals auto" in t for t in texts), texts
     assert not any("tool approvals: auto" in t for t in texts), texts
+    # The sentence is the SHARED constant, so the runtime and the embedded pane
+    # cannot describe one refusal two ways (UX round 1, U5's class).
+    assert LOOSENING_REFUSED_NOTICE in texts, texts
     await handle.dispose()
 
 
@@ -383,6 +387,11 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     text = getattr(reported, "text", "")
     assert "tool approvals: ask (this session)" in text, text
     assert "config.yml says auto" in text, text
+    # ...and the remedy is named, in the direction that MATCHES the file (UX
+    # round 1, U3): the runtime's report used to stop at the divergence, leaving
+    # the one surface whose job is "what is in effect and why" to describe a
+    # problem without its answer.
+    assert "/approvals auto adopts it in this session" in text, text
     await handle.dispose()
 
 

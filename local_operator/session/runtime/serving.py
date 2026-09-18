@@ -39,6 +39,9 @@ from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
 from local_operator.harness.approval import (
+    LOOSENING_REFUSED_NOTICE as _LOOSENING_REFUSED_NOTICE,
+)
+from local_operator.harness.approval import (
     loosening_is_authorised as _loosening_is_authorised,
 )
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
@@ -853,7 +856,18 @@ class ServingSessionHandle(SessionHandle):
             self._emit_notice(
                 "keeping tool approvals: ask — set with /approvals in this session; "
                 "config.yml now says auto, /approvals auto adopts it",
-                "info",
+                # `warning`, one rung above the routine `config.yml changed:`
+                # receipt's `info`: this sentence is the whole user-visible trace
+                # of a refused policy change, and `info` renders `dim` — the same
+                # ink as the routine receipt it must be told apart from (design
+                # round 1, D2). `note` would be the designer's preferred rung and
+                # is NOT available to a runtime notice: `NoticeEvent.kind` is
+                # ``Literal["info", "warning", "error"]``, so a `note` refusal
+                # would be representable only in the embedded topology — and in
+                # production (`lop` always attaches) the sentence below is the
+                # one the user actually reads. Both keep notices carry the same
+                # rung so the two refusal reasons cannot look like two events.
+                "warning",
                 headline="Approvals unchanged",
             )
             return
@@ -868,6 +882,15 @@ class ServingSessionHandle(SessionHandle):
             # human's own typed ``ask`` is what refused the file; here nobody
             # in this session asked for anything.
             #
+            # The sentence names the RULE and not the author (design round 1,
+            # D3): this process cannot know who wrote the file, and in the
+            # attached-pane case the person reading it is the one who just
+            # clicked the row — an earlier revision said "without an operator
+            # write in this session", which was simply false to them. "From
+            # outside this session" is true of an editor, of ``lop config
+            # edit``, of a model-run shell command and of that same operator's
+            # click a process away.
+            #
             # Checked AFTER the explicit-`ask` branch so that branch keeps
             # meaning "the human typed ask" and so the more specific reason is
             # the one printed. Refusing means exactly one thing: ``_auto_approve``
@@ -876,9 +899,9 @@ class ServingSessionHandle(SessionHandle):
             # facade today (`/approvals auto` here sets the flag directly), so
             # in practice every file-originated loosening is refused here.
             self._emit_notice(
-                "keeping tool approvals: ask — config.yml now says auto without an "
-                "operator write in this session; /approvals auto loosens it here",
-                "info",
+                _LOOSENING_REFUSED_NOTICE,
+                # `warning` for the reason the sibling keep notice documents.
+                "warning",
                 headline="Approvals unchanged",
             )
             return
@@ -5065,11 +5088,20 @@ class ServingSessionHandle(SessionHandle):
             # asks reports a matched pair while the two genuinely disagree.
             on_disk = self._configured_approval_mode()
             if on_disk is not None and on_disk != live:
+                # The remedy is named (UX round 1, U3): this is the surface whose
+                # job is "what is in effect and why", and a divergence it
+                # discloses without naming the command that resolves it leaves
+                # the user to work out the direction themselves. `/approvals
+                # {on_disk}` is the one that MATCHES the file, so it is right in
+                # both directions — `/approvals auto` for the divergence this
+                # change makes common (a live `ask` over a file that says
+                # `auto`), and `/approvals ask` for the mirror case.
                 return SlashResult(
                     kind="notice",
                     text=(
                         f"tool approvals: {live} (this session) — {effect}; "
-                        f"config.yml says {on_disk}"
+                        f"config.yml says {on_disk} — /approvals {on_disk} adopts it in "
+                        "this session"
                     ),
                     style="warning" if self._auto_approve else "info",
                 )
@@ -5096,12 +5128,18 @@ class ServingSessionHandle(SessionHandle):
         # hardening a file loosening must not revoke.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._notify()
+        # "(this session)" on the LIVE half, matching the app's own receipt word
+        # for word (UX round 1, U5): the two hosts answer the same gesture, and
+        # two sentences for it read as two different facts, one of which is
+        # always the wrong half — this half governs THIS session, whatever
+        # config.yml says about the next one.
         return SlashResult(
             kind="notice",
             text=(
-                "tool approvals: auto — every tool runs without asking"
+                "tool approvals: auto — every tool runs without asking (this session)"
                 if wanted_auto
-                else "tool approvals: ask — write and command tools prompt before running"
+                else "tool approvals: ask — write and command tools prompt before running "
+                "(this session)"
             ),
             style="warning" if wanted_auto else "info",
         )
