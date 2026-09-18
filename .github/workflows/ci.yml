@@ -190,7 +190,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Two commits is all the diff below needs, but the checkout is the
           # `refs/pull/N/merge` commit, so HEAD^1 (the base side) and HEAD^2
