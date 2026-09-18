@@ -97,11 +97,14 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             catalog = (await client.get("/v1/desktop/commands")).json()["result"]["commands"]
             # The catalogue is the registry MINUS the entries deliberately not
             # offered on the desktop (no `desktop_destination`): `/mobile`,
-            # whose provisioning has no desktop proxy, and `/links`, whose whole
+            # whose provisioning has no desktop proxy; `/links`, whose whole
             # reason for existing is that a TERMINAL cannot open the hyperlink it
             # paints — a desktop browser renders the same markdown with real,
-            # clickable links, so there is nothing for a proxy to add. `/info`
-            # used to be the
+            # clickable links, so there is nothing for a proxy to add; and
+            # `/notifications`, whose affordance on the desktop is the sidebar's
+            # OWN control, and a destination the renderer has no adapter for is a
+            # row that is offered and then dead-ends (the `/mobile` lesson).
+            # `/info` used to be the
             # other one — its every field describes the PROCESS AND HOST it
             # runs in (install prefix, resolved import path, pid, control port,
             # this machine's session registry) — and it is now OFFERED instead,
@@ -119,7 +122,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # A literal, and updating it is the review prompt: a command that
             # lands in this set without a decision to withhold it is a command
             # silently missing from the desktop.
-            assert withheld == {"links", "mobile"}
+            assert withheld == {"links", "mobile", "notifications"}
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
             # catalogue's `aliases` are copied straight off `spec.aliases`

@@ -130,6 +130,12 @@ PREFIXES_TEXT_POLICY = {
     # A key NAME, with the secret entered in the masked form.
     "credential": False,
     "mobile": False,
+    # FALSE, like `/usage` and `/stop`: the argument is a SELECTOR word (`read`)
+    # rather than free text, and a sentence after the word must stay a message —
+    # `/notifications seems broken` is prose a user is entitled to send, while
+    # the single token `read` is the control. The shape below is what draws that
+    # line; this flag would erase it.
+    "notifications": False,
 }
 
 
@@ -163,6 +169,14 @@ ARGUMENT_SHAPE_POLICY = {
     "analytics": ArgumentShape.WORD,
     # The same target vocabulary `/stop <target>` takes.
     "stop": ArgumentShape.WORD,
+    # WORD rather than NONE, and the criterion is worth spelling out because the
+    # desktop does NOT run this command (no `desktop_destination`, so
+    # `POST /commands` answers 422 "Unknown command"). What the shape decides
+    # here is the MESSAGES endpoint: `/notifications read` is a control and must
+    # never become a paid model turn, while `/notifications seems broken` is a
+    # sentence. An empty vocabulary is exactly what makes one token the control
+    # and two the message.
+    "notifications": ArgumentShape.WORD,
     # NONE, and the criterion is why: a shape is published only where the
     # desktop's command PATH uses the trailing text, and this one DROPS it —
     # `_slash_result` calls `_context_slash_result(SlashResult)` with no args and

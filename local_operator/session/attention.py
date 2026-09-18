@@ -13,6 +13,16 @@ but must never be conflated: notifying is cheap and reversible, marking-read is
 destructive, and ``docs/SESSION_SIDEBAR.md`` pins the rule that routing a
 notification never marks anything read. A session can be delivered-and-unread
 forever, which is correct — the sidebar's checkmark stays until it is opened.
+
+BULK ACKNOWLEDGEMENT IS TOKEN-BOUND, NEVER A SWEEP (:meth:`AttentionStore.
+acknowledge_many`). A surface may acknowledge the completions it can ENUMERATE,
+each by the token it actually rendered; a completion published after that render
+is not in the batch and stays unread. The tempting shortcut — advance every
+conversation's watermark to its own ``MAX(sequence)`` — clears a completion the
+operator never saw, the exact hazard this mechanism exists to prevent, and it is
+deliberately not offered (``docs/ATTENTION.md``, rule R10). No automatic path may
+acknowledge anything either: a read receipt is a user gesture on a rendered
+result, never a timer, a poll or a focus change.
 """
 
 from __future__ import annotations
@@ -23,7 +33,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -1431,6 +1441,108 @@ class AttentionStore:
                 (conversation, row[0]),
             )
             return self._state(conn, conversation)
+
+    def acknowledge_many(self, items: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
+        """Acknowledge several completions in ONE transaction, verdicts per item.
+
+        The bulk half of :meth:`acknowledge`, and the SAME decision per item --
+        it exists because a gesture that means "these" (the desktop sidebar's
+        clear-all, the TUI's ``/notifications read``) cannot be honest as a
+        watermark sweep. See the module docstring for the rule and
+        ``docs/ATTENTION.md`` R10 for the one deliberate relaxation: a user may
+        acknowledge the completions a surface ENUMERATES, token-bound.
+
+        Returns one entry per input item, IN INPUT ORDER::
+
+            {"conversation_id": str, "completion_token": str,
+             "status": "read" | "superseded" | "unknown",
+             "state": dict | None}   # post-write state iff status == "read"
+
+        * ``read`` -- this token is the conversation's current completion, or
+          the conversation is already read. The receipt moves to
+          ``MAX(existing, sequence)`` and ``state`` is computed in the same
+          snapshot. Already-read items report ``read`` and move nothing, so a
+          repeated batch is idempotent and does not bump :meth:`revision`.
+        * ``superseded`` -- a real completion of that conversation that is no
+          longer current while the conversation is still unseen. Nothing is
+          written and no state is returned, for the reason :meth:`acknowledge`
+          documents at length: the settling state is the caller's, and a copy
+          computed here would be stale before it rendered.
+        * ``unknown`` -- no ``completions`` row for that pair, including a store
+          file that does not exist. Nothing is written, and this call never
+          MATERIALISES the database (the read-only tolerance :meth:`state_many`
+          and :meth:`claim_delivery` share): a refused receipt must not create
+          the store it could not find.
+
+        ONE TRANSACTION, and each half of that is load-bearing. A per-item
+        transaction would expose a half-applied batch to every poller and take N
+        write-lock acquisitions; one ``BEGIN IMMEDIATE`` gives atomic visibility
+        (an observer sees all of the batch or none of it), one snapshot for every
+        verdict (so a concurrent :meth:`publish` cannot advance a sequence
+        underneath a comparison), and a whole-batch rollback on failure -- a
+        ``sqlite3.Error`` here leaves no receipt moved, which is what lets the
+        route answer through the shared store-failure ladder while claiming
+        nothing. Item verdicts are
+        NOT errors, so ``superseded``/``unknown`` items never roll the batch back.
+
+        Touches ``receipts`` ONLY. ``deliveries`` is a different fact (somebody
+        was told, and notifying is not reading), ``supersede_log``/``mutations``
+        record heals rather than reads, and no ``completions`` row is inserted or
+        renumbered -- so nothing can be resurrected as unread by clearing a pile.
+
+        DUPLICATES ARE LEGAL AND EVALUATED IN ORDER: ``[{a, T1}, {a, T2}]``
+        yields exactly one ``read`` and one verdict for the other,
+        deterministically. Deliberately no dedupe -- one policy site, and a
+        caller that sends a pair twice gets the same answer the single-item walk
+        would give it.
+        """
+        results = [
+            {
+                "conversation_id": conversation,
+                "completion_token": token,
+                "status": "unknown",
+                "state": None,
+            }
+            for conversation, token in items
+        ]
+        if not results:
+            return results
+        # The missing-store case answers before `_connect()`, which creates the
+        # file and its schema: an arbitration read that found nothing must not
+        # leave a database behind.
+        if not self.path.exists():
+            return results
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for result in results:
+                token = result["completion_token"]
+                if not isinstance(token, str) or len(token) != 36:
+                    continue
+                conversation = result["conversation_id"]
+                row = conn.execute(
+                    "SELECT sequence FROM completions WHERE conversation=? AND token=?",
+                    (conversation, token),
+                ).fetchone()
+                if row is None:
+                    continue
+                current = conn.execute(
+                    "SELECT COALESCE(MAX(sequence),0), "
+                    "COALESCE((SELECT acknowledged FROM receipts WHERE conversation=?),0)"
+                    " FROM completions WHERE conversation=?",
+                    (conversation, conversation),
+                ).fetchone()
+                if row[0] != current[0] and current[1] < current[0]:
+                    result["status"] = "superseded"
+                    continue
+                conn.execute(
+                    "INSERT INTO receipts(conversation,acknowledged) VALUES(?,?) "
+                    "ON CONFLICT(conversation) DO UPDATE SET acknowledged="
+                    "MAX(receipts.acknowledged,excluded.acknowledged)",
+                    (conversation, row[0]),
+                )
+                result["status"] = "read"
+                result["state"] = self._state(conn, conversation)
+        return results
 
     def claim_delivery(self, conversation: str, token: str, backend: str) -> bool:
         """True iff THIS caller may notify about ``token``. Exactly one ever wins.

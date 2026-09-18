@@ -125,6 +125,11 @@ ECHO_POLICY = {
     # attach notice is the receipt, and a message is sent as a real user
     # turn by `_submit_prompt`, which already writes the row.
     "agent": False,
+    # A receipt in both forms: the listing names the completions, and the clear
+    # reports what it cleared. Both are printed by the handler, so the typed
+    # word above them would only restate the row underneath it — and the word
+    # `read` is an ACTION, not something the model is ever told.
+    "notifications": False,
 }
 
 
@@ -199,6 +204,10 @@ PROMPT_POLICY = {
     # The request after the name is a prompt the manager / persona is given.
     "team": True,
     "agent": True,
+    # An ACTION word (`read`), not a message: an inline engage splices-and-runs
+    # like `/usage` rather than reassembling to the front and handing the model
+    # the rest of the draft.
+    "notifications": False,
 }
 
 
