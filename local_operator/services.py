@@ -574,21 +574,33 @@ def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
     """
     if not daemons:
         return []
+    if stamp is None:
+        # A POINTER, OR NOTHING (design review D16, code round 12 R12-1). The first
+        # version of this fallback was not stamp-gated, so on a checkout — which is
+        # what `disk_build()` returns None for by design, so it is the DEFAULT
+        # developer render — it called the fleet "the stale ones" and prescribed a HAND
+        # restart, while the install line two lines above said the comparison was
+        # impossible. No daemon in that render was labelled STALE:, so the line had no
+        # evidence for its own noun, and the action it prescribed is the destructive
+        # one: a hand restart drops the runtimes the in-place reload exists to keep. It
+        # now says only what it knows, about the half it is about.
+        return ["no build to compare against, so no serve daemon can be moved automatically"]
     stale = [r for r in daemons if not _serves_current_build(r, stamp)]
     if not stale:
         return []
     movable = [r for r in stale if getattr(r, "reloadable", False)]
-    if stamp is None or not movable:
-        # ``stamp is None`` refuses the whole half in ``reload_serve_daemons`` ("no
-        # service can be moved onto it"), so nothing may be advised there either.
+    if not movable:
         # Written to the budget like every other line here — the first version of this
         # sentence was 86 columns, over the budget it was added to protect.
         return ["the stale ones cannot be moved by `lop services restart`; restart them by hand"]
     if len(movable) == len(stale):
         return ["run `lop services restart` to move the stale ones onto the current build"]
+    # ``need`` agrees with its count (code round 12, R12-3): the first version said
+    # "1 need restarting by hand" at one, which is right at two and wrong at one.
+    needs = len(stale) - len(movable)
     return [
         f"run `lop services restart` for the {len(movable)} it can move; "
-        f"{len(stale) - len(movable)} need restarting by hand"
+        f"{needs} need{'s' if needs == 1 else ''} restarting by hand"
     ]
 
 

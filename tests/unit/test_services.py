@@ -483,7 +483,7 @@ def test_the_fleet_advice_counts_the_two_kinds_apart(
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
-    assert "run `lop services restart` for the 1 it can move; 1 need restarting by hand" in lines
+    assert "run `lop services restart` for the 1 it can move; 1 needs restarting by hand" in lines
 
 
 def test_a_guard_that_refuses_silences_every_promise(
@@ -547,6 +547,72 @@ def test_no_line_exceeds_the_budget_with_a_long_authority(
         lines = services.status_lines()
         longest = max(len(line) for line in lines)
         assert longest <= 80, f"{host}: {longest} columns: {max(lines, key=len)!r}"
+
+
+def test_the_predicate_body_is_the_guard_and_only_the_guard(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Code round 12, R12-4: the other tests replace this wholesale, so its BODY was
+    untested — reverting it to a stamp-only check would leave them all green.
+
+    It must be exactly the repair guard's question: a durable install that is not the
+    one the plists run is refused (question 2), and an unanswerable guard is not
+    permission.
+    """
+    from local_operator import update
+
+    monkeypatch.setattr(update, "_repair_refusal", lambda: None)
+    assert services._install_may_repoint_daemons() is True
+
+    monkeypatch.setattr(update, "_repair_refusal", lambda: "a second tool env")
+    assert services._install_may_repoint_daemons() is False
+
+    def _explode() -> str | None:
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(update, "_repair_refusal", _explode)
+    assert services._install_may_repoint_daemons() is False
+
+
+def test_no_pointer_never_calls_the_fleet_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design review D16: the fallback classified the fleet on no evidence.
+
+    On a checkout — `disk_build()` is None by design, so this is the DEFAULT developer
+    render — the line called the daemons "the stale ones" and prescribed a HAND restart
+    while the install line said the comparison was impossible. Nothing in that render
+    was labelled STALE:, and the action prescribed is the destructive one: a hand
+    restart drops the runtimes the in-place reload exists to keep.
+    """
+    monkeypatch.setattr("local_operator.update.disk_build", lambda *a, **k: None)
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record()])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    lines = services.status_lines()
+    assert "no build to compare against, so no serve daemon can be moved automatically" in lines
+    joined = " ".join(lines)
+    assert "the stale ones" not in joined
+    assert "restart them by hand" not in joined
+
+
+def test_the_hand_restart_count_agrees_with_itself(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Code round 12, R12-3: `1 need restarting by hand` is right at two, wrong at one."""
+    pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
+    monkeypatch.setattr(
+        services,
+        "live_serve_daemons",
+        lambda: [
+            _record(source_ref="a"),
+            _record(pid=4, source_ref="b", reloadable=False),
+        ],
+    )
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    assert (
+        "run `lop services restart` for the 1 it can move; 1 needs restarting by hand"
+        in services.status_lines()
+    )
 
 
 def test_status_lines_says_so_when_there_are_no_daemons(

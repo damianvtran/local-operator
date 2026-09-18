@@ -1048,11 +1048,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # touched; everything else that serves this machine can be brought along.
         description=(
             "Everything local_operator runs for this machine that is not a conversation. "
-            "A 'service' is a `lop serve` daemon or a supervised daemon (the mobile "
-            "relay, the browser bridge, the tunnel and the wakes agent, installed as "
-            "com.local-operator.* LaunchAgents). Runtimes — the processes holding your "
-            "conversations — are never stopped: 'restart' reloads a serve daemon in "
-            "place, keeping its pid and socket."
+            "A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the "
+            "mobile relay, the browser bridge, the tunnel and the wakes agent. "
+            "Runtimes — the processes holding your conversations — are never stopped: "
+            "'restart' reloads a serve daemon in place, keeping its pid and socket."
         ),
         parents=[parent_parser],
     )
