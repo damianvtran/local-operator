@@ -285,6 +285,14 @@ def test_the_click_rungs_do_not_hand_a_child_the_marker(
         "Popen",
         lambda argv, **kwargs: launched.append(dict(kwargs.get("env") or {})) or _Process(),
     )
+    # A CONFIGURED launcher, so the rung has a candidate on every platform. Without
+    # it the ladder asks `shutil.which("local-operator-ui")`, which finds the
+    # maintainer's install on macOS and nothing on the ubuntu runner — where the
+    # rung returns False and this assertion went red in CI (round 7, M2's
+    # neighbour). The rung's own discovery order is `tests/unit/test_resume_click.py`'s.
+    monkeypatch.setattr(
+        resume_click, "_configured_launch_command", lambda: ["/usr/bin/env", "true"]
+    )
     assert resume_click._launch_desktop("a1b2c3d4e5f6") is True
 
     assert backend.envs, "the terminal rung must have handed a backend an env"
@@ -352,22 +360,39 @@ def test_the_fork_window_drops_the_marker() -> None:
     # rebinding after the first, could mark a name stripped while the spawn
     # received the raw environment. Conjunction rather than last-wins: a name
     # bound to anything else, anywhere, is not trusted at the spawn.
-    helper_values: dict[str, bool] = {}
+    #
+    # EVERY BINDING FORM, too (round 7, M2): `with … as name`, `name |= …`,
+    # `for name in …` and `(name := …)` all bind a name that reaches the spawn,
+    # and none of them binds it to the helper.
+    bound_to_helper: dict[str, bool] = {}
+
+    def bind(target: ast.expr, value_from_helper: bool) -> None:
+        names = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+        for name in names:
+            if isinstance(name, ast.Name):
+                prior = bound_to_helper.get(name.id, True)
+                bound_to_helper[name.id] = prior and value_from_helper
+
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-            targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
-            for target in targets:
-                names = target.elts if isinstance(target, ast.Tuple) else [target]
-                for name in names:
-                    if isinstance(name, ast.Name):
-                        prior = helper_values.get(name.id, True)
-                        helper_values[name.id] = prior and strips_the_marker(node.value)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                bind(target, strips_the_marker(node.value))
+        elif isinstance(node, ast.AnnAssign):
+            bind(node.target, strips_the_marker(node.value))
+        elif isinstance(node, ast.AugAssign):
+            bind(node.target, False)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            bind(node.optional_vars, False)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            bind(node.target, False)
+        elif isinstance(node, ast.NamedExpr):
+            bind(node.target, False)
 
     def drops_the_marker(env: ast.expr) -> bool:
         """The environment the spawn is handed is stripped, inline or via a name."""
         if strips_the_marker(env):
             return True
-        return isinstance(env, ast.Name) and helper_values.get(env.id, False)
+        return isinstance(env, ast.Name) and bound_to_helper.get(env.id, False)
 
     # Both shapes a spawn can take: the threaded dispatch, and a direct
     # `backend.spawn(launch, env)` — the environment is the LAST argument each way.
