@@ -403,9 +403,10 @@ def test_a_stored_row_with_no_durable_history_is_skipped(monkeypatch, tmp_path, 
     cold send would be refused only one layer later.
 
     Both directions are pinned: the unengaged row is skipped while an engaged
-    namesake still resolves, and a match on an unengaged row ALONE is the
-    ordinary no-match answer (so the caller prints its usual refusal rather than
-    a candidate list nobody can use).
+    namesake still resolves, and a match on an unengaged row ALONE comes back as
+    a REFUSAL naming it rather than as an empty no-match — the row DOES answer
+    to the name, so "no session matches" would be a false statement about a
+    session the user can see on the picker (review round 1, F-4).
     """
     fake_scan([])
     _stored(
@@ -423,6 +424,28 @@ def test_a_stored_row_with_no_durable_history_is_skipped(monkeypatch, tmp_path, 
         root=tmp_path,
         unengaged={"dead0001"},
     )
+    session_id, candidates, error = peer_send.resolve_stored_target("brand new")
+    assert session_id is None
+    assert candidates == []
+    assert "the only stored match for 'brand new' (session 'dead0001')" in error, error
+    assert "has not been engaged yet" in error, error
+
+    # TWO withheld rows name the count instead of a single id, and neither form
+    # may read as the no-match the callers compose for a store that answered
+    # nothing.
+    _stored(
+        monkeypatch,
+        [_StoredRow("dead0001", "brand new"), _StoredRow("dead0002", "brand new")],
+        root=tmp_path,
+        unengaged={"dead0001", "dead0002"},
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target("brand new")
+    assert (session_id, candidates) == (None, [])
+    assert "every stored match for 'brand new' (2 of them)" in error, error
+
+    # A TRUE no-match is still the silent empty answer the callers compose their
+    # own "searched live and stored sessions" sentence over.
+    _stored(monkeypatch, [_StoredRow("other0001", "something else")], root=tmp_path)
     assert peer_send.resolve_stored_target("brand new") == (None, [], "")
 
 

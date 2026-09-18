@@ -620,6 +620,46 @@ def test_send_to_a_stored_session_by_name_spools(monkeypatch, tmp_path, capsys) 
     assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()
 
 
+def test_a_withheld_stored_match_is_named_rather_than_denied(monkeypatch, tmp_path, capsys) -> None:
+    """F-4: a stored row that ANSWERED to the name but was withheld for never
+    having been engaged must not come back as "no session matches …". A session
+    does answer to that name and the user can see it on the picker; the refusal
+    has to name it and say why, or it reads as a typo that is not there."""
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "dead0001beef"
+    # The session directory exists with NO transcript: the state a `/new`
+    # abandoned before anyone typed leaves behind.
+    (tmp_path / "sessions" / sid).mkdir(parents=True)
+
+    class _Row:
+        id = sid
+        name = "Improve /credential skill"
+        mtime = 0.0
+
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows", lambda directory, limit=None: [_Row()]
+    )
+    with (
+        patch(
+            "local_operator.cli._resolve_peer_target",
+            return_value=(None, [], "no live session matches"),
+        ),
+        patch("local_operator.mobile.peer_send._record_for_pid", lambda pid: None),
+        patch("local_operator.mobile.peer_send._parent_pid", lambda pid: None),
+    ):
+        rc = send_command(_parse_send(["credential", "rebased and green"]))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "has not been engaged yet" in err, err
+    assert f"session '{sid}'" in err, err
+    assert "no session matches" not in err, err
+    # And nothing was written for it on the way to that answer.
+    assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists()
+
+
 def test_no_match_now_names_both_live_and_stored(capsys, tmp_path, monkeypatch) -> None:
     """When the stored fallback also finds nothing the error says so."""
     monkeypatch.setattr("sys.stdin", _FakeTtyStdin())

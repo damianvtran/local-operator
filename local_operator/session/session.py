@@ -5589,15 +5589,18 @@ class Session:
     async def _drain_spooled_peer_inbox(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
-        Called at the top of ``_run_turn_pipeline`` (see the call site for
-        why the first real turn is the right moment). The session usually
-        never has spool: the runtime child's boot drain consumed it before
-        the socket even listened, and live deliveries dial instead of
-        spooling. This drain exists for the rows that bypass both — a sender
-        on an older binary, or a race that left the record unreadable — so
-        the flag is what keeps it off the steady-state turn path: after the
-        first attempt it is never tried again, and the cold-open drain
-        remains the owner of anything written later.
+        Called by ``_run_turn_pipeline`` AFTER the turn's own messages are
+        durable and before the model is asked anything (see the call site for
+        why that position — not merely the moment — is the guarantee). The
+        session usually never has a spool: the runtime child's boot drain
+        consumed it before the socket even listened, and live deliveries dial
+        instead of spooling. This drain exists for the rows that bypass both —
+        a sender on an older binary, or a race that left the record
+        unreadable, or a session that has not been engaged yet (whose spool
+        ``process._drain_inbox_into`` deliberately preserves) — so the flag is
+        what keeps it off the steady-state turn path: after the first attempt
+        it is never tried again, and the cold-open drain remains the owner of
+        anything written later.
 
         Best-effort per row, mirroring ``process._drain_inbox_into``: one
         malformed or rejected row must not stop the rest, and none of it may
@@ -7890,19 +7893,6 @@ class Session:
         opened the run, so the TUI's supersede guard still pairs them.
         """
         await self._refresh_context_metadata()
-        # Belt-and-braces for peer delivery: consume any inbox rows spooled
-        # for this session BEFORE the first real turn runs. The primary inbox
-        # consumer is the runtime child's boot drain (``process.amain``),
-        # which a session that opened some other way — or that was sent a
-        # spool by an older sender that had no live record for it — never
-        # passes through; without this drain those rows would sit unread
-        # until some future process cold-opens the session. Delivered in the
-        # quiet mailbox shape so the drain itself can never drive a turn.
-        # Runs BEFORE the started-flip below so the spooled notes are durable
-        # and visible even if this turn then fails; under the already-held
-        # ``_turn_lock`` their live-context append parks and rejoins at this
-        # very turn's first injection boundary (``_drain_steering``).
-        await self._drain_spooled_peer_inbox()
         # Flip the discovery record's ``started`` bit the first time a REAL
         # turn runs. This is the single choke point every spawn path funnels
         # through — the user's ``prompt()``, wake deliveries
@@ -8138,6 +8128,42 @@ class Session:
                     and message.text != _CONTINUATION_PROMPT
                 ):
                     await self._emit(MessageStartEvent(message=message))
+
+            # Belt-and-braces for peer delivery: consume any inbox rows spooled
+            # for this session, ONCE, at the first real turn. The primary inbox
+            # consumer is the runtime child's boot drain (``process.amain``),
+            # which a session that opened some other way — or that was sent a
+            # spool by an older sender that had no live record for it, or by one
+            # on an older build — never passes through; without this drain those
+            # rows would sit unread until some future process cold-opens the
+            # session. Delivered in the quiet mailbox shape so the drain itself
+            # can never drive a turn.
+            #
+            # HERE, AFTER this turn's own messages are durable, and that
+            # position is the guarantee rather than a convenience: a peer row
+            # lands in the transcript at the moment it is delivered, so draining
+            # before the append loop wrote the note ABOVE the owner's opening
+            # prompt — the peer message became the first row of a conversation
+            # its owner had just started, which is the reported symptom in the
+            # one corner the unengaged gate cannot cover (a spool written by a
+            # build that predates the gate).
+            #
+            # What the move does NOT cost, measured rather than assumed: the
+            # rows' visibility to the model is identical in both positions. The
+            # live append parks (the turn lock is held), and the loop drains
+            # steering only from its SECOND inner iteration onward
+            # (``harness/loop.py``: ``if not first_inner``), so a spooled row was
+            # never in this turn's FIRST request either way — it lands in live
+            # context at the continuation/yield boundary and is carried by the
+            # next model call. Do not re-describe this as "visible in the same
+            # turn's first request": that was never true.
+            #
+            # And nothing is consumed before the turn can deliver it — the
+            # once-per-lifetime flag is set inside the drain, so a turn dropped
+            # as pre-aborted, or a turn that fails before its own rows are
+            # written, leaves the spool whole for the next real turn instead of
+            # discarding rows it never showed anyone.
+            await self._drain_spooled_peer_inbox()
 
             # Inventory changes deferred from a `web_*.enabled` edit land HERE,
             # before the tool context and the loop config are built for this

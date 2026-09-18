@@ -105,15 +105,19 @@ def session_has_durable_history(session_id: str, *, root: "Path | None" = None) 
     return _session_has_durable_history(session_id, root=config_dir() if root is None else root)
 
 
-def delivery_label(record: "Any | None", session_id: str) -> str:
-    """How a delivery refusal names its target: ``pid 12345`` when we have the
-    live record (the form the sender typed), else the session id.
+def unengaged_label(*, session_id: str, pid: "int | None" = None) -> str:
+    """How a refusal NAMES its target: the address the caller actually used.
 
-    Shared with the receive-side gate's label shape so one refusal reads the
-    same wherever it is raised.
+    ``pid 12345`` when the address was a pid — a live record resolved from one,
+    or a dial that arrived at a receiver's control port, which is addressed by
+    pid — and ``session 'abc'`` when a session id was typed. One grammar for all
+    four refusal sites (the resolver's three exact branches, delivery, and the
+    receive-side gate), so the target a refusal names is the one that was
+    addressed rather than whichever identifier the receiving layer happens to
+    hold.
     """
-    if record is not None:
-        return f"pid {record.pid}"
+    if pid is not None:
+        return f"pid {pid}"
     return f"session {session_id!r}"
 
 
@@ -227,7 +231,11 @@ def resolve_peer_target(
                 if state not in eligible:
                     return None, [], _not_dialable(f"target pid {pid}", rec, state)
                 if require_started and not getattr(rec, "started", True):
-                    return None, [], unengaged_refusal(f"pid {pid}")
+                    return (
+                        None,
+                        [],
+                        unengaged_refusal(unengaged_label(pid=pid, session_id=rec.session_id)),
+                    )
                 return rec, [], ""
         return None, [], f"no session found with pid {pid}"
 
@@ -237,7 +245,10 @@ def resolve_peer_target(
                 if state not in eligible:
                     return None, [], _not_dialable(f"target session {session}", rec, state)
                 if require_started and not getattr(rec, "started", True):
-                    return None, [], unengaged_refusal(f"session {session!r}")
+                    # The label is the SESSION ID here, because that is the
+                    # address this branch answers: an exact `--session` send
+                    # named an id, not a pid.
+                    return None, [], unengaged_refusal(unengaged_label(session_id=session))
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
 
@@ -463,13 +474,19 @@ def resolve_stored_target(
 
     Returns ``(session_id, candidates, error)`` shaped like
     :func:`resolve_peer_target`'s triple for symmetry, with one deliberate
-    difference: ``error`` is ALWAYS empty. A plain no-match is not this
-    function's fact to report — the caller just watched the live scan miss,
-    so the refusal it owes the user names BOTH searches ("searched live and
-    stored sessions"), a sentence only the caller can say. The first or the
-    second element is meaningful, never both; the resolved id feeds the
-    EXISTING :func:`resolve_cold_session` / :func:`deliver_peer_message`
-    path — this function decides WHO, never HOW a message is delivered.
+    difference: a plain no-match still leaves ``error`` empty. A plain no-match
+    is not this function's fact to report — the caller just watched the live
+    scan miss, so the refusal it owes the user names BOTH searches ("searched
+    live and stored sessions"), a sentence only the caller can say. What is this
+    function's fact to report is the OTHER empty answer: rows that DID match and
+    were withheld for being unengaged (review round 1, F-4). The caller's
+    "no session matches '<needle>'" sentence would be false there — a session
+    does answer to that name, it is merely not a recipient yet — so the refusal
+    names the withheld row and says why, and the callers pass it through instead
+    of composing their own miss. The first or the second element is meaningful,
+    never both; the resolved id feeds the EXISTING :func:`resolve_cold_session`
+    / :func:`deliver_peer_message` path — this function decides WHO, never HOW a
+    message is delivered.
     """
     from local_operator.resume import recent_session_rows
 
@@ -483,6 +500,11 @@ def resolve_stored_target(
         return None, [], ""
     excluded = live_ids or set()
     matches: list[StoredCandidate] = []
+    # Rows that answered to the needle and were held back ONLY for being
+    # unengaged. Kept so the refusal below can name them: this is not a
+    # no-match, and reporting it as one would be a false statement about a
+    # session the user can see on the picker.
+    withheld: list[StoredCandidate] = []
     for row in rows:
         if row.id in excluded:
             continue
@@ -495,9 +517,21 @@ def resolve_stored_target(
             # a row that already matched, so the scan stays one bounded name
             # read per row for everything that does not match.
             if not session_has_durable_history(row.id, root=directory):
+                withheld.append(candidate)
                 continue
             matches.append(candidate)
     if not matches:
+        if withheld:
+            # Named in the same grammar the live substring branch uses, with the
+            # session id the user would retype rather than a pid a stored
+            # session cannot satisfy.
+            if len(withheld) == 1:
+                label = (
+                    f"the only stored match for {needle!r} " f"(session {withheld[0].session_id!r})"
+                )
+            else:
+                label = f"every stored match for {needle!r} ({len(withheld)} of them)"
+            return None, [], unengaged_refusal(label)
         return None, [], ""
     if len(matches) > 1:
         return None, matches, ""
@@ -604,7 +638,9 @@ async def deliver_peer_message(
             # RECEIVE side also gates: an older SENDER resolves such a record
             # and dials it, and only the receiver can refuse (see
             # ``session.runtime.server``'s ``peer_message`` op).
-            raise RuntimeError(unengaged_refusal(delivery_label(record, session_id)))
+            raise RuntimeError(
+                unengaged_refusal(unengaged_label(pid=record.pid, session_id=session_id))
+            )
         return await _dial_or_explain(record, text=text, mode=mode, wake=wake, sender=sender)
 
     # Cold target: the ONLY signal of engagement is the session's own durable
@@ -615,7 +651,7 @@ async def deliver_peer_message(
     # ``wake`` would OPEN A TURN in a session whose owner is not there. Both are
     # refused before any file is touched.
     if not session_has_durable_history(session_id):
-        raise RuntimeError(unengaged_refusal(delivery_label(None, session_id)))
+        raise RuntimeError(unengaged_refusal(unengaged_label(session_id=session_id)))
 
     if not wake and mode == "mailbox":
         return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)

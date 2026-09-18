@@ -1192,14 +1192,34 @@ class RuntimeServer:
         # broadcasts and degrading peer wakes to quiet notes until the owner
         # typed once). Seeded from the session's own durable transcript — the
         # same signal ``TuiSessionHandle.rebind`` uses — so a true ``/new``
-        # (no message rows) still boots as the composer window. Probed off
-        # ``handle._session`` because only the owned-handle shape carries its
-        # Session there; a handle without one (the TUI's, a reduced test
-        # host) keeps the conservative False a first real turn immediately
-        # corrects. Direct field writes, not ``set_record_started``: nothing
-        # is published yet, and this is a derivation at birth, not the
+        # (no message rows) still boots as the composer window.
+        #
+        # ``_session`` IS AN ATTRIBUTE ON SOME HANDLES AND A METHOD ON OTHERS,
+        # and the difference is load-bearing rather than cosmetic. The owned
+        # shapes (``ServingSessionHandle``, the exec handle) assign the Session
+        # once, so ``getattr`` returns it; ``TuiSessionHandle._session`` is a
+        # METHOD — the phone has to follow a ``/new``/``/resume`` swap, so the
+        # TUI reads it per call. Probing only the attribute therefore bound a
+        # function, read ``transcript_path`` off it, got ``None`` and reported
+        # ``False`` for EVERY TUI window, including the very case this seed
+        # exists for: a TUI booted on an existing conversation
+        # (``lop --resume <sid>``, whose first session is adopted before any
+        # ``rebind``) published ``started=false`` over hundreds of transcript
+        # rows, and the peer gate then refused a send to it with a sentence
+        # that was false about it (review round 1, F-1). Calling it is
+        # GUARDED because a TUI whose session has not been bound yet raises
+        # ``RuntimeError("session is still starting")``, and a runtime whose
+        # handle cannot answer yet keeps the conservative False that its first
+        # real turn corrects — the same direction as a reduced test host with
+        # no session at all. Direct field writes, not ``set_record_started``:
+        # nothing is published yet, and this is a derivation at birth, not the
         # per-turn signal.
         owned_session = getattr(handle, "_session", None)
+        if callable(owned_session):
+            try:
+                owned_session = owned_session()
+            except Exception:  # noqa: BLE001 — a boot that cannot answer yet is not an error
+                owned_session = None
         if owned_session is not None and has_durable_history(owned_session):
             self._started = True
             self._record.started = True
@@ -3520,11 +3540,22 @@ class RuntimeServer:
             # ``lop sessions`` reports as an unengaged composer window. The
             # import is in-function and INSIDE the refusal branch: this module
             # keeps its import weight off the happy path, and peer_send is only
-            # needed to name the refusal.
+            # needed to name the refusal. The label follows the ADDRESS — a
+            # dial arrives at this runtime's PID, so the pid is what the sender
+            # typed (or what ``lop sessions`` showed it), not the session id it
+            # never named; both come from ``unengaged_label`` so all four
+            # refusal sites share one grammar.
             if not self._started:
-                from local_operator.mobile.peer_send import unengaged_refusal
+                from local_operator.mobile.peer_send import (
+                    unengaged_label,
+                    unengaged_refusal,
+                )
 
-                raise ValueError(unengaged_refusal(f"session {self._record.session_id!r}"))
+                raise ValueError(
+                    unengaged_refusal(
+                        unengaged_label(pid=self._record.pid, session_id=self._record.session_id)
+                    )
+                )
             # Cross-session `lop send` delivery. Optional capability — an owner
             # host that predates peer messaging (or a non-interactive exec host
             # that never wired it) answers with a clear error, which the sender

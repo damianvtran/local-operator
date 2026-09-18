@@ -701,6 +701,10 @@ async def test_peer_message_to_an_unengaged_session_is_refused() -> None:
         assert "has not been engaged yet" in err["message"]
         assert "no user message has been sent in it" in err["message"]
         assert "no live session" not in err["message"]
+        # The label follows the ADDRESS the sender used: a dial arrives at this
+        # runtime's pid, so the refusal names the pid rather than a session id
+        # the sender never typed (review round 1, F-5).
+        assert f"pid {record.pid} has not been engaged yet" in err["message"], err["message"]
         assert handle.calls == [], "nothing may reach the handle for an unengaged session"
 
         # And the SAME frame is delivered the moment the session runs a turn,
@@ -1601,6 +1605,81 @@ class TestLiveStateReachesTheRecord:
         handle = FakeHandle()
         handle._session = SimpleNamespace(transcript_path=path)  # type: ignore[attr-defined]
         return handle
+
+    def _tui_handle_over_transcript(self, tmp_path, name: str, rows: list[str]) -> Any:
+        """A TUI-SHAPED handle: ``_session`` is a METHOD, as ``TuiSessionHandle``'s is.
+
+        The shape the seed used to be blind to (review round 1, F-1):
+        ``getattr`` bound the function, ``has_durable_history`` read
+        ``transcript_path`` off it, got ``None`` and answered False — for EVERY
+        TUI window, including a ``lop --resume <sid>`` boot over a conversation
+        with hundreds of rows. The phone must follow a ``/new``/``/resume``
+        swap, which is why the TUI reads its session per call instead of
+        storing it, so the two shapes are both real and the seed has to answer
+        for both.
+        """
+        from types import SimpleNamespace
+
+        path = tmp_path / name / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(row + "\n" for row in rows))
+        session = SimpleNamespace(transcript_path=path)
+
+        class _TuiShaped(FakeHandle):
+            def _session(self) -> Any:  # noqa: ANN401 — the handle's own shape
+                return session
+
+        return _TuiShaped()
+
+    @pytest.mark.asyncio
+    async def test_a_tui_shaped_handle_seeds_started_from_durable_history(self, tmp_path) -> None:
+        """F-1, the direction that was broken: a TUI-shaped handle over a
+        conversation that has run turns publishes ``started=True`` from its
+        FIRST publish.
+
+        ``lop --resume <sid>`` is exactly this shape — the TUI's first session
+        is adopted before any ``rebind`` — so before the fix its record said
+        ``started=false`` over a live conversation and the peer gate refused
+        sends to it with a sentence that was false about it.
+        """
+        handle = self._tui_handle_over_transcript(
+            tmp_path,
+            "tui-resumed",
+            [
+                '{"id":"m1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+                '{"id":"m2","ts":2,"type":"message","payload":{"role":"user"}}',
+            ],
+        )
+        server = RuntimeServer(handle, kind="tui")
+        assert server._started is True
+        assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_a_tui_shaped_handle_over_a_fresh_session_boots_unstarted(self, tmp_path) -> None:
+        """The other direction on the same shape: a true ``/new`` still boots
+        ``started=False``, because the whole peer gate rests on that bit."""
+        bookkeeping_only = self._tui_handle_over_transcript(
+            tmp_path,
+            "tui-fresh",
+            ['{"id":"t1","ts":1,"type":"custom","payload":{"custom_type":"title"}}'],
+        )
+        server = RuntimeServer(bookkeeping_only, kind="tui")
+        assert server._started is False
+        assert server._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_a_tui_shaped_handle_that_cannot_answer_boots_unstarted(self) -> None:
+        """``TuiSessionHandle._session()`` RAISES before the app binds one
+        (``RuntimeError("session is still starting")``). A boot must not fail
+        over a seed, so the probe swallows it and keeps the conservative False
+        the first real turn corrects."""
+
+        class _StillStarting(FakeHandle):
+            def _session(self) -> Any:  # noqa: ANN401 — the raising shape
+                raise RuntimeError("session is still starting")
+
+        server = RuntimeServer(_StillStarting(), kind="tui")
+        assert server._started is False
 
     @pytest.mark.asyncio
     async def test_a_resumed_boot_seeds_started_from_durable_history(self, tmp_path) -> None:

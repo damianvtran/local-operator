@@ -3007,10 +3007,13 @@ def send_command(args: argparse.Namespace) -> int:
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, _stored_error = resolve_stored_target(target)
-        # ``_stored_error`` is deliberately unread: a no-match returns "" by
-        # contract and the refusal the user sees is composed in the final
-        # block below, where the live miss is known to have happened too.
+        stored_id, stored_candidates, stored_error = resolve_stored_target(target)
+        # ``stored_error`` is read here, unlike a plain no-match (which returns
+        # "" by contract): a row that ANSWERED to the name but was withheld for
+        # never having been engaged comes back as its own refusal, and printing
+        # "no session matches" over it would be a false statement about a
+        # session the user can see on the picker (review round 1, F-4). The
+        # composed miss below still applies to a true no-match.
         if stored_candidates:
             print(
                 f"{len(stored_candidates)} stored sessions match; replace the "
@@ -3022,6 +3025,8 @@ def send_command(args: argparse.Namespace) -> int:
             return 1
         if stored_id:
             cold_session_id = stored_id
+        elif stored_error:
+            error = stored_error
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH
