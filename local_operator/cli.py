@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
+from local_operator.agent_shell import nested_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
@@ -7737,6 +7738,19 @@ def main() -> int:
                     return 1
                 print(json.dumps(state, ensure_ascii=False))
                 return 0
+            # A `lop` command an agent ran may not open a session of its own.
+            # What it would start is a TOP-LEVEL conversation: the operator's
+            # session list, desktop sidebar and phone history list it as a chat
+            # they opened, and it runs outside this session's job manager, so
+            # nothing here can see, steer, cancel or account for it (see
+            # `agent_shell.py` for the incident this answers). `--status`
+            # returned above, so the read-only form stays reachable, and the
+            # documented escape for QA runs is `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`
+            # (docs/EXEC.md) — deliberately not named to the model in the text.
+            refusal = nested_session_refusal()
+            if refusal is not None:
+                print(f"exec failed: {refusal}", file=sys.stderr)
+                return 1
             exec_args = ExecArgs(
                 background=args.background,
                 json_mode=args.json_mode,
@@ -7851,6 +7865,20 @@ def main() -> int:
                     # This case should logically not happen
                     print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
                     return 1
+
+        # The interactive path is the fall-through — every subcommand returned
+        # above — so this ONE check covers `lop`, `lop --resume ID`, `--tui` and
+        # every future interactive flag together. Refused with no escape, unlike
+        # the exec path: a terminal is what the operator opens, and a session
+        # that reaches here is opening one on their behalf. A session restarting
+        # its OWN front end is not that case; `reexec.replace_self` drops the
+        # marker before it re-execs, which is where that distinction lives.
+        refusal = nested_session_refusal()
+        if refusal is not None:
+            from local_operator.cli_style import ERROR, paint
+
+            print(paint(f"Error: {refusal}", ERROR), file=sys.stderr)
+            return 1
 
         # Legacy behavior: the auto-save config value persists interactive
         # sessions via the registry's autosave agent (exec is excluded —

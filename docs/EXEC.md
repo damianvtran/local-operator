@@ -54,6 +54,45 @@ a profile does not remove the team's roster. Stored loop progress remains
 visible, but restarting or resuming never automatically replays iterations.
 Pass a new loop option explicitly to start another loop.
 
+## What may not start a session: an agent's shell
+
+A `lop` invocation that descends from an agent's `bash` tool call
+(`LOCAL_OPERATOR_AGENT_SHELL`, set by that tool on every command it runs) may
+not open a session. Both entry points refuse it — `exec`, and the interactive
+path (`lop`, `lop --resume ID`, `--tui`) — because what such a run starts is a
+TOP-LEVEL conversation: an ordinary session directory with no `origin.json`, so
+`is_user_session` reports that the operator opened it, and the session list, the
+desktop sidebar and the phone's history all offer it as their own work.
+
+```
+exec failed: a `lop` invocation from inside an agent session cannot open one —
+the session it would start is a top-level conversation the operator never
+opened, listed in their session list and desktop sidebar as if they had, and
+running outside the job manager that lets this session see, steer, cancel and
+account for delegated work.
+Launch delegated work with the `task` tool instead. A session without it — a
+role that does not delegate runs one level deep and loses `task`/`wait`/`wake` —
+asks the session that delegated to it, with `hub`, to launch the child; the
+brief travels in the message. Work that must happen later belongs in `wake`.
+```
+
+The incident this answers (2026-09-18): a subagent owed a review round on a PR,
+held no `task` tool to run it with, and reached for `lop exec --profile reviewer
+--background`. Two sessions — `lo-1281-review` and `lo-1281-qa`, 7 ms apart —
+appeared in the operator's sidebar as chats they had opened. `lop exec --status`
+starts nothing and is unaffected.
+
+**The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
+waives the refusal for one invocation. It exists because testing evidence here
+comes from exercising the REAL CLI, which a QA run of exec itself cannot do
+through the guard, and it is deliberately NOT named in the refusal text — that
+text is model-facing and its job is to route the reader to `task`/`hub`/`wake`.
+It is not a silent equivalent either: a session opened under it is stamped
+`origin.json` = `agent-shell`, so it stays out of the `/resume` picker, the
+desktop sidebar and the phone's list. Isolating the run
+(`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a test off the
+operator's own store; the stamp is the seatbelt for the run that forgets.
+
 ## Divergence from `/goal`
 
 The TUI's `/goal <text>` sets the objective **and** submits that text as an
