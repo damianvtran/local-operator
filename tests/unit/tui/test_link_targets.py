@@ -262,6 +262,50 @@ def test_a_markdown_label_does_not_swallow_its_target() -> None:
     assert extract_links("https://[2001:db8::1]/path") == ["https://[2001:db8::1]/path"]
 
 
+def test_a_bracket_wrapped_around_the_url_is_not_part_of_it() -> None:
+    """A citation's closing bracket is prose, and the URL it wrapped is whole.
+
+    The seam rule above covers the ``]`` that closes a markdown LABEL. It does
+    not cover the ``]`` a reader put AROUND the URL, and the two shapes it
+    leaves are ones a model writes: a bracketed citation (``[Source: <url>]``)
+    and a wiki link (``[[<url>]]``). Every one of them came back with the
+    bracket still on the end — ``https://a.test/x]`` — which begins
+    ``https://``, so :func:`is_openable` cannot refuse it: the card painted it
+    under ``❯`` and ``enter`` handed it to the browser as a 404. The same
+    silently-wrong-target class as the seam, on a third shape. QA round 3 (Q1)
+    and review round 4 (MINOR-1) found it independently on the same head.
+
+    The rule is that ``[`` and ``]`` are a PAIR like ``(`` and ``)``, so a
+    ``]`` closing nothing ends the body. Both cheaper fixes are wrong:
+    ``]`` in :data:`_BODY_STOP` cuts the IPv6 authority (the last assertion
+    below, which is the specimen both rounds pinned), and a trimmer cannot
+    tell a closing ``]`` from the specimen's own — the balance is what knows.
+
+    The last two assertions are the residual cost, recorded rather than
+    implied: a raw ``]`` inside a query or fragment now ends the body, which
+    RFC 3986 requires percent-encoded anyway and is the trade the depth-0
+    ``)`` rule already makes. The seam's precedence over this rule is pinned
+    by the third-to-last assertion: ``https://[2001:db8::1](x)`` keeps the
+    seam's cut, because that rule was settled in round 3 and this one is
+    additive to it.
+    """
+    assert extract_links("See [https://a.test/x] for docs.") == ["https://a.test/x"]
+    assert extract_links("[[https://a.test/x]]") == ["https://a.test/x"]
+    assert extract_links("[Source: https://a.test/x]") == ["https://a.test/x"]
+    assert extract_links("[Source: https://a.test/wiki/Foo_(bar)]") == [
+        "https://a.test/wiki/Foo_(bar)"
+    ]
+    assert extract_links("see https://[::1]] more") == ["https://[::1]"]
+    # A `]` the body's OWN `[` opened is URL text, so it stays.
+    assert extract_links("https://[2001:db8::1] end") == ["https://[2001:db8::1]"]
+    assert extract_links("https://a.test/x[a]") == ["https://a.test/x[a]"]
+    assert extract_links("https://[2001:db8::1]/path") == ["https://[2001:db8::1]/path"]
+    # The seam is settled and keeps precedence: a `](` still cuts here.
+    assert extract_links("https://[2001:db8::1](x)") == ["https://[2001:db8::1"]
+    assert extract_links("https://a.test/x]?q=1") == ["https://a.test/x"]
+    assert extract_links("https://a.test/x?q=]") == ["https://a.test/x?q="]
+
+
 #: The hang guard's probe. It is run by that test in a CHILD process, because a
 #: hang inside pytest is reported by the JOB's timeout with no test name on it;
 #: see the test's docstring. The text arrives as ``argv[1]`` so the shape stays

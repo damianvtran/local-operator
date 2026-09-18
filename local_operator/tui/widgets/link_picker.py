@@ -78,6 +78,17 @@ CURSOR_CELLS = 2
 #: untouched. One row, no ground of its own.
 TOO_SMALL_NOTICE = "terminal too small for /links · esc"
 
+#: The same notice for a terminal too NARROW to hold the full one. `esc` is the
+#: actionable half and it is what a truncation sheds first, leaving
+#: `terminal too small for` — the command named, the way out gone, on a screen
+#: where the notice is the only thing painted (design round 1, D1). `copy_picker`
+#: keeps the two spellings for exactly this case and chooses on the width the
+#: screen actually resolved; this is the same discipline rather than a second
+#: one. Measured on the dark ramp, the long form needs 35 content cells, i.e. 37
+#: terminal columns, so 36x8 and below is where it used to clip and 38x8 — the
+#: narrowest size that draws the card at all — is where it is whole.
+TOO_SMALL_NOTICE_SHORT = "too small · esc"
+
 #: Footer hints, in the order the app's other cards list them: movement, the
 #: action, the way out — `session_picker`'s and `move_picker`'s order, so a user
 #: meets the same three clauses in the same sequence on every card.
@@ -135,6 +146,12 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         #: user is on.
         self._offset = 0
         self._body: Static | None = None
+        #: List index under the pointer, or ``None`` when it is not over a row.
+        #: The card answers a click by opening a URL, so the highlight is the
+        #: only thing that says a row is clickable and which one a click will
+        #: hit — `copy_picker` calls that pair "the ENTIRE affordance for the
+        #: mouse", and this card had neither half of it (design round 1, D3).
+        self._hovered: int | None = None
 
     # -- geometry ------------------------------------------------------------
 
@@ -328,6 +345,34 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
             self._selected = index
             self._dismiss_result(rows[index])
 
+    def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Highlight the row under the pointer, and hold up the hand there.
+
+        `move_picker.on_mouse_move`'s shape, deliberately: same hit-test (the
+        one :meth:`on_click` already uses, so the highlight and the click
+        cannot disagree about where a row is), same repaint-on-change, and the
+        hand only over a row. The pointer shape is set on every move rather
+        than only on a change — it is cheap, and the property's own observer
+        no-ops when the shape did not move, which is what keeps the hand from
+        sticking to a row the pointer has left.
+        """
+        index = self._index_at(event)
+        if index != self._hovered:
+            self._hovered = index
+            self._repaint()
+        self.styles.pointer = "pointer" if index is not None else "default"
+
+    def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
+        """The hand and the highlight both end at the card's edge.
+
+        A shape that never resets is a cursor the user stops trusting, which
+        is `test_pointer_shapes`' rule for every picker here.
+        """
+        if self._hovered is not None:
+            self._hovered = None
+            self._repaint()
+        self.styles.pointer = "default"
+
     def _index_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
         """List index under a mouse event, or ``None`` anywhere else.
 
@@ -389,6 +434,27 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         notice = getattr(self, "_too_small", None)
         if notice is not None and notice.is_mounted:
             notice.display = not drawable
+            if not drawable:
+                notice.update(self._too_small_text(notice))
+
+    def _too_small_text(self, notice: Static) -> str:
+        """The notice, in the widest form the screen actually resolved.
+
+        `copy_picker`'s rule, and it is taken from the NARROWEST width any
+        resolved source reports rather than the screen's own: the card is
+        measured inside `Screen { padding: 1 }`, so a width read from the
+        terminal alone can be two cells larger than the box the notice is
+        painted in — and an uncertain measurement must not select the form
+        that can clip. Nothing resolved (not yet laid out) prefers the short
+        one, which fits everywhere the long one does.
+        """
+        candidates = [
+            size.width
+            for size in (getattr(notice, "size", None), getattr(self, "size", None))
+            if size is not None and size.width
+        ]
+        columns = min(candidates) if candidates else 0
+        return TOO_SMALL_NOTICE if cell_len(TOO_SMALL_NOTICE) <= columns else TOO_SMALL_NOTICE_SHORT
 
     def render_lines_for_test(self) -> list[str]:
         """The card as plain strings — what a user reads.
@@ -415,7 +481,13 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         out.append("\n")
 
         window = rows[self._offset : self._offset + self._row_budget()]
-        for index, line in enumerate(self._row_lines(window, width)):
+        for index, line in enumerate(
+            self._row_lines(
+                window,
+                width,
+                None if self._hovered is None else self._hovered - self._offset,
+            )
+        ):
             if index:
                 out.append("\n")
             out.append_text(line)
@@ -426,12 +498,20 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         # `/usage` cards' grammar. The counter is emitted only while the list
         # scrolls: an empty line in its place would leave two blank rows and
         # push the keys away from the block they belong to.
+        #
+        # EVERY WORD HERE IS AT LEAST `dim`, the step `session_picker` took on
+        # this same ground and for the reason it records there: the card's
+        # ground is `$lo-overlay`, and `faint` on it measures 1.49:1 — an
+        # overlay lifts the ground without lifting the text with it. That put
+        # the two words telling a user how to act and how to leave among the
+        # faintest pixels on the screen. Only the ` · ` SEPARATORS stay
+        # `faint`, which is what "meta separator" names (design round 1, D2).
         out.append("\n\n")
         if len(rows) > len(window):
             last = self._offset + len(window)
-            out.append("showing ", style=faint)
+            out.append("showing ", style=dim)
             out.append(f"{self._offset + 1}–{last}", style=dim)
-            out.append(" of ", style=faint)
+            out.append(" of ", style=dim)
             out.append(f"{len(rows)}", style=dim)
             out.append("\n")
         for index, (key, what) in enumerate(_footer_hints(width)):
@@ -439,10 +519,12 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
                 out.append(" · ", style=faint)
             out.append(key, style=dim)
             if what:
-                out.append(f" {what}", style=faint)
+                out.append(f" {what}", style=dim)
         return out
 
-    def _row_lines(self, window: list[LinkTarget], width: int) -> list[Text]:
+    def _row_lines(
+        self, window: list[LinkTarget], width: int, hovered: int | None = None
+    ) -> list[Text]:
         """One line per link: cursor, URL, and which side it came from.
 
         The URL is truncated from the RIGHT and the sender hint is dropped
@@ -452,6 +534,13 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
         only the reason a row is offered, so on a narrow card it is what the
         user can spare. The same two rules ``move_picker.render_rows`` applies
         to a path and its note.
+
+        ``hovered`` is the window-relative row under the pointer, and the
+        highlight is `raised` on it — the ground `move_picker` and
+        `session_picker` use, and NOT the selection's `tint-select`: hover is a
+        pointer cue and the cursor is the selection, so the two must not be
+        confusable. The selected row is skipped because it already carries the
+        ground (and the `❯` that says which row ``enter`` takes).
         """
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
@@ -476,7 +565,13 @@ class LinkPickerScreen(ModalScreen[LinkTarget | None]):
                 pad = room - cell_len(target.url) - cell_len(hint)
                 if pad > 0:
                     line.append(" " * pad)
-                line.append(hint, style=faint)
+                # The sender is `dim`, the step the `move` and `session`
+                # cards' identity notes take on this ground: at `faint` it
+                # measured 1.49:1 on the card and read as a smudge rather
+                # than as part of the row it belongs to (design round 1, D2).
+                line.append(hint, style=dim)
+            if hovered is not None and index == hovered and not is_selected:
+                line.stylize(Style(bgcolor=theme_mod.semantic_color("raised")))
             lines.append(line)
         return lines
 

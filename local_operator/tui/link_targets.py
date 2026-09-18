@@ -97,11 +97,12 @@ _URL_START_RE = re.compile(_SCHEME, re.IGNORECASE)
 #:
 #: ``]`` is deliberately NOT in this set, and adding it would be a bug rather
 #: than a tightening: a ``]`` is legal URL text — the IPv6 literal
-#: ``https://[2001:db8::1]/path`` is whole today — so the one place a ``]`` ends
-#: a body is markdown's ``](`` seam, which :func:`_body_end` looks ahead for as
-#: a PAIR. :data:`_BODY_STOP` is "the characters that are never URL text";
-#: ``](`` is "where a markdown link's label ends", and only one of the two is a
-#: character set.
+#: ``https://[2001:db8::1]/path`` is whole today — so a ``]`` ends a body only
+#: when it is NOT closing a ``[`` the body itself opened. That pairing is
+#: :func:`_body_end`'s, because it is a relation between two characters and
+#: this set can only say "never URL text": markdown's ``](`` seam and a
+#: bracketed citation's closing ``]`` (:data:`_BODY_STOP` plus the two rules
+#: :func:`_body_end` documents).
 _BODY_STOP = frozenset("<>\"'`")
 
 
@@ -141,6 +142,23 @@ def _body_end(text: str, start: int) -> int:
     legal URL text (the IPv6 literal above), while ``](`` is markdown syntax and
     RFC 3986 requires both characters percent-encoded inside a component anyway.
 
+    ``[`` and ``]`` are then tracked as a PAIR, the way ``(`` and ``)`` are, so
+    a ``]`` that closes nothing ends the body where it stands. The seam rule
+    above is the ``]`` that closes a markdown LABEL; this is the ``]`` a reader
+    put AROUND the URL, which is how a citation and a wiki link are written —
+    ``See [https://a.test/x] for docs.`` and ``[[https://a.test/x]]`` both left
+    the bracket on the end of the URL, and the row under the cursor opened
+    ``https://a.test/x]`` (a 404 in the browser). Both are the same failure as
+    MAJOR-1 on a shape the seam rule does not describe: a string that starts
+    ``https://``, so :func:`is_openable` cannot refuse it either, which is why
+    the guard could not see it (QA round 3, Q1; review round 4, MINOR-1). The
+    pairing is the fix rather than a ``]`` in :data:`_BODY_STOP`, for the reason
+    that set's comment gives: the trailing ``]`` of the pinned IPv6 specimen
+    ``https://[2001:db8::1]/path`` is URL text because the body's own ``[``
+    opened it. The residual cost is a raw ``]`` inside a query or fragment —
+    which RFC 3986 requires percent-encoded, exactly as the depth-0 ``)`` rule
+    below trades away an unencoded ``)``.
+
     Shared by both captures, and it has to be: ``[label](…)``'s own terminator
     is a ``)``, so a body that stopped at the FIRST ``)`` truncated the target
     — and because the bare finder then found the correct form at the same
@@ -152,6 +170,10 @@ def _body_end(text: str, start: int) -> int:
     depth = 0
     # Where the outermost still-open ``(`` sits, or -1 when nothing is open.
     unclosed_at = -1
+    # ``[`` the BODY ITSELF opened and has not closed. A ``]`` closes one of
+    # these and is URL text (the IPv6 specimen); a ``]`` with none open closes
+    # prose punctuation the URL was wrapped in, and ends the body here.
+    brackets = 0
     index = start
     limit = len(text)
     while index < limit:
@@ -162,6 +184,12 @@ def _body_end(text: str, start: int) -> int:
         # legal URL text (an IPv6 literal), ``](`` is not.
         if char == "]" and index + 1 < limit and text[index + 1] == "(":
             break
+        if char == "[":
+            brackets += 1
+        elif char == "]":
+            if brackets == 0:
+                break
+            brackets -= 1
         if char == "(":
             if depth == 0:
                 unclosed_at = index
