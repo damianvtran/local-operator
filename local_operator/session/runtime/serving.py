@@ -40,6 +40,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
+from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
@@ -1840,7 +1841,17 @@ class ServingSessionHandle(SessionHandle):
 
         def handler(event: AgentEvent) -> None:
             try:
-                on_event(event.model_dump(mode="json"))
+                # Bounded here rather than in the relay: this is where the
+                # event becomes bytes, so it is the last place a conversation
+                # frame can be elided while the loop's own message objects stay
+                # untouched (``harness/wire.py``). The socket's own 1 MiB fitter
+                # would not have caught it — an ``agent_end`` for a 104-message
+                # turn is 531 KB and passes that cap byte-identical.
+                payload = bound_agent_end_for_wire(
+                    event.model_dump(mode="json"),
+                    session_id=getattr(self._session, "session_id", None),
+                )
+                on_event(payload)
             except Exception:  # noqa: BLE001 — the relay is additive, never a gate
                 logger.debug("runtime event serialization failed", exc_info=True)
 

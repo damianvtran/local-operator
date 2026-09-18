@@ -41,6 +41,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
+from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import (
@@ -399,7 +400,19 @@ class TuiSessionHandle(SessionHandle):
 
         def handler(event: Any) -> None:
             try:
-                on_event(event.model_dump(mode="json"))
+                # Bounded here for the same reason the serving handle bounds: this
+                # is a wire encoder — the OTHER implementation of the handle
+                # capability ``RuntimeServer`` relays (``server.py``
+                # ``_on_connection``), used when the session is owned by a TUI
+                # rather than by the server. An ``agent_end`` carries the whole
+                # turn, so leaving it unbounded here would leave the bound
+                # bypassable by whichever host happens to own the session.
+                on_event(
+                    bound_agent_end_for_wire(
+                        event.model_dump(mode="json"),
+                        session_id=getattr(self._session(), "session_id", None),
+                    )
+                )
             except Exception:  # noqa: BLE001 — relay is additive, never a gate
                 logger.debug("mobile event serialization failed", exc_info=True)
 
