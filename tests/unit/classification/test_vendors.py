@@ -224,7 +224,46 @@ async def test_a_missing_cost_stays_missing(manager) -> None:
     )
     assert response.cost_usd is None
     assert response.input_tokens == 12
-    assert response.output_tokens == 0
+    # The vendor sent a count for input and nothing for output, so output is
+    # "not reported" rather than zero — a distinction the cost line depends on.
+    assert response.output_tokens is None
+
+
+async def test_absent_counts_are_none_while_a_reported_zero_is_zero(manager) -> None:
+    """``usage`` is optional on this wire, and ``0`` is a legal figure in it.
+
+    Both directions matter. A body with no ``usage`` block at all (the shape the
+    live route is free to send, and the one that produced a fabricated
+    ``tokens=0/0`` beside a real cost) must come back as ``None``; and a leg that
+    really did report zero output tokens — Radient's documented billing shape —
+    must come back as ``0``, because collapsing the two would make the operator's
+    cost line unable to say which happened.
+    """
+
+    def no_usage(request: httpx.Request) -> httpx.Response:
+        return json_response({"answers": {}})
+
+    def explicit_zero(request: httpx.Request) -> httpx.Response:
+        return json_response(
+            {
+                "answers": {},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "cost": 0.000021},
+            }
+        )
+
+    absent = await TypeSafeVendor(manager, client=client_for(no_usage)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+    assert absent.input_tokens is None
+    assert absent.output_tokens is None
+    assert absent.cost_usd is None
+
+    reported = await TypeSafeVendor(manager, client=client_for(explicit_zero)).decide(
+        request_of(choice_question()), timeout_s=5.0
+    )
+    assert reported.input_tokens == 0
+    assert reported.output_tokens == 0
+    assert reported.cost_usd == pytest.approx(0.000021)
 
 
 async def test_an_unanswered_question_is_not_a_failure(manager) -> None:

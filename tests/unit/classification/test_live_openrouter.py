@@ -142,7 +142,12 @@ async def test_the_route_answers_a_choice_and_a_score_question_in_our_shape(tmp_
     assert isinstance(offered, dict)
     assert response.answers["recommend_skill"].value in offered
     assert isinstance(response.answers["effort"].value, float)
-    assert response.input_tokens > 0
+    # Both counts are asserted as REPORTED rather than compared to a sentinel:
+    # since absent became ``None``, a comparison alone would not tell a missing
+    # figure from a real zero, which is precisely the distinction the accounting
+    # now keeps.
+    assert response.input_tokens is not None and response.input_tokens > 0
+    assert response.output_tokens is not None and response.output_tokens >= 0
     assert response.cost_usd is not None and response.cost_usd > 0
     assert response.latency_s > 0.0
 
