@@ -250,10 +250,10 @@ THE SAME ROSTER IS BUILT IN THE TEST, and the figures above are that test's own 
 `tests/unit/classification/test_context.py`'s `_catalogue_roster()` builds those 537 rows and both
 budget tests assert EQUALITY against these component figures (3 279 / 3 170 / 449, and 5 336 /
 8 102 at 40 a kind), so a change on either side fails a test rather than drifting quietly. (Three
-review rounds were spent on that: the first cut used toy one-line descriptions with a `<= 3000`
-bound that accepted a 5× regression, the second found the doc and the test quoting different
-rosters, and the third found the test's own roster differing from the one quoted here by a name
-prefix.)
+review rounds moved these numbers: round 1 found toy one-line descriptions and a `<= 3000` bound
+that accepted a 5× regression, round 2 found the doc and the test quoting different rosters, and
+round 3 found the cap-40 test still building the older 530-row roster with the 7 server rows
+missing.)
 
 Non-negotiable: **the transcript is never sent.** Not the history, not the compaction summary,
 not tool results. What goes out is:
@@ -452,10 +452,13 @@ Sequence per user message:
    (`muted`: 7.18:1 on paper, 8.62:1 on the dark ground) is the right ink — it is what
    `tui/session_presentation.py` already chose for a replayed marker — and delivering it that way
    was implemented and then WITHDRAWN: ``NoticeEvent.kind`` is
-   ``Literal["info", "warning", "error"]``, so a real `Session` rejects the event with a pydantic
-   ``ValidationError`` that `_emit_classification_notice`'s own guard swallows as a WARNING while
-   still reporting the notice as delivered — the line never painted on the TUI, CLI or server, and
-   the "last announced" key then suppressed the repeat (agent review round 2, blocker). Adding
+   ``Literal["info", "warning", "error"]``, so the violation lands at the session's notice FLUSH,
+   one hop after delivery is reported: ``Session.queue_notice`` accepts the tuple and
+   ``_emit_classification_notice`` returns True (which is how the "last announced" key came to
+   record a line nobody had seen), and the flush's own guard then catches the pydantic
+   ``ValidationError``, logs ``session queued notice failed to emit`` at WARNING and drops it — so
+   the line never painted on the TUI, CLI or server and the repeat was suppressed (agent review
+   round 2, blocker; the attribution corrected in round 4). Adding
    `note` to the event contract, the server's kind allowlists and the session's annotations is its
    own cross-surface change and does not belong inside a default flip; §12 carries it as an open
    item, and the glyph (`·`) is shared by both kinds so the ink is the only difference.

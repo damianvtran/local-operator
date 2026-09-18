@@ -576,14 +576,22 @@ def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() ->
 
     state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
     plan = build_questions(rows, limit=40)
+    state_chars = serialized_size(state)
     option_chars = option_chars_of(plan)
-    estimated_tokens = (serialized_size(state) + option_chars) // 4
+    # The INSTRUCTIONS are measured here too, not assumed from the default-cap test:
+    # they are byte-identical at both caps today, and that is exactly the kind of
+    # assumption that stops being true silently (agent review round 4, R4-1).
+    instruction_chars = sum(len(question.instructions) for question in plan.questions)
+    estimated_tokens = (state_chars + option_chars + instruction_chars) // 4
 
     # The same 537-row catalogue at 40 a kind: the cap is the lever, and even here the
     # window is not what binds. The figures are §5's, asserted by equality for the
     # reason the default-cap test's docstring gives.
-    print(f"maxCandidates=40: state+options ~{estimated_tokens} tokens")
-    assert (serialized_size(state), option_chars) == (5336, 8102)
+    print(
+        f"maxCandidates=40: state={state_chars} options={option_chars} "
+        f"instructions={instruction_chars} ~{estimated_tokens} tokens"
+    )
+    assert (state_chars, option_chars, instruction_chars) == (5336, 8102, 449)
 
 
 def test_a_zero_cap_keeps_nothing_like_select_candidates() -> None:
