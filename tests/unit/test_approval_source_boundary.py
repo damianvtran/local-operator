@@ -29,7 +29,9 @@ docstring claimed more than the code did, which is worse than a narrower pin):
 * a DYNAMIC reach whose name is a string LITERAL: ``importlib.import_module(
   "local_operator.settings_io")``, ``__import__(...)``, and ``getattr(mod,
   "write_setting")`` / ``hasattr`` — with ``"a" + "b"`` folded, since that is
-  the shape a deliberate obfuscation takes.
+  the shape a deliberate obfuscation takes, and with the four callables tracked
+  through local aliases (``from importlib import import_module as im``;
+  ``im = importlib.import_module``), which round 2 found uncaught.
 
 WHAT IT DOES NOT COVER, stated so that no future reader reads a green run as
 more than it is: a reach through a module OUTSIDE these four trees (an inside
@@ -141,8 +143,34 @@ def _literal_string(node: ast.AST) -> str | None:
 _DYNAMIC_REACH_CALLS = frozenset({"import_module", "__import__", "getattr", "hasattr"})
 
 
+def _dynamic_callee_aliases(tree: ast.AST) -> set[str]:
+    """Local names bound to one of the four callables above (agent review round 2).
+
+    ``from importlib import import_module as im`` and ``im = importlib.import_module``
+    are plain spellings, not obfuscations, and the first revision of this pin
+    matched the callee NAME at the call site only — so ``im("local_operator
+    .settings_io")`` returned no hit while the docstring's "aliased or not" invited
+    the opposite reading. Tracking the binding is one pass over ``ImportFrom`` and
+    ``Assign``.
+    """
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            aliases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in _DYNAMIC_REACH_CALLS
+            )
+        elif isinstance(node, ast.Assign):
+            value = node.value
+            bound = value.attr if isinstance(value, ast.Attribute) else getattr(value, "id", "")
+            if bound in _DYNAMIC_REACH_CALLS:
+                aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return aliases
+
+
 def _dynamic_facade_reach(tree: ast.AST) -> set[str]:
-    """Facade names that this module only ever spells as STRINGS (m2).
+    """Facade names that this module only ever spells as STRINGS.
 
     ``importlib.import_module("local_operator.settings_io")`` followed by
     ``getattr(mod, "write_setting")`` returns no hit from the name walk, while
@@ -150,14 +178,17 @@ def _dynamic_facade_reach(tree: ast.AST) -> set[str]:
     the string is what this collects — and only inside one of those call shapes,
     because a module that merely MENTIONS the facade in prose (``tools/`` has two
     such comments and a section of prose in ``shell_env``) is not a write path.
+    The callables may be reached through a local alias, which is tracked rather
+    than assumed (see :func:`_dynamic_callee_aliases`).
     """
+    callees = _DYNAMIC_REACH_CALLS | _dynamic_callee_aliases(tree)
     reach: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         callee = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if callee not in _DYNAMIC_REACH_CALLS:
+        if callee not in callees:
             continue
         for argument in node.args:
             literal = _literal_string(argument)
@@ -183,6 +214,11 @@ def _dynamic_facade_reach(tree: ast.AST) -> set[str]:
         "mod = __import__('local_operator.settings_io')\n",
         "w = getattr(importlib.import_module('local_operator.settings_io'), 'write_setting')\n",
         "assert not hasattr(mod, 'reset_setting')\n",
+        # The aliased callables, which are plain spellings rather than
+        # obfuscations and which round 2 found uncaught while the docstring
+        # claimed the dynamic forms were covered (agent review round 2, nit).
+        "from importlib import import_module as im\nim('local_operator.settings_io')\n",
+        "import importlib\nim = importlib.import_module\nim('local_operator.settings_io')\n",
     ],
 )
 def test_every_direct_spelling_of_the_reach_is_caught(source: str, tmp_path: Path) -> None:

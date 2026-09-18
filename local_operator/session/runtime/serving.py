@@ -39,6 +39,9 @@ from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
 from local_operator.harness.approval import (
+    LOOSENING_KEPT_BY_ASK_NOTICE as _LOOSENING_KEPT_BY_ASK_NOTICE,
+)
+from local_operator.harness.approval import (
     LOOSENING_REFUSED_NOTICE as _LOOSENING_REFUSED_NOTICE,
 )
 from local_operator.harness.approval import (
@@ -321,6 +324,17 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
         return [phase.model_dump(mode="json") for phase in phases]
     except (OSError, ValueError, TypeError):
         return None
+
+
+#: What a ROUTED approvals change must disclose about the pane's persistent
+#: marker (UX round 2, U6). The marker is fed by the pane's own `_approve_all`
+#: (`tui/app.py`), a routed command cannot move it, and after #1282 a routed
+#: `/approvals auto` is the only route that loosens a running session — so the
+#: one indicator built to survive a scrolling receipt is dark for exactly the
+#: state that route creates. Fixing the MECHANISM is a change of its own
+#: (deferred, with the measurements, on the PR); telling the operator is one
+#: clause, on the surface where the state changes, and that is what this is.
+_GATE_MARKER_CLAUSE = "; the band's ! will not follow this — /approvals re-reports the gate"
 
 
 class ServingSessionHandle(SessionHandle):
@@ -854,8 +868,7 @@ class ServingSessionHandle(SessionHandle):
             # opinion about the same key, but refusing a loosening on its
             # behalf would pin a session to a mode its human never asked for.
             self._emit_notice(
-                "keeping tool approvals: ask — set with /approvals in this session; "
-                "config.yml now says auto, /approvals auto adopts it",
+                _LOOSENING_KEPT_BY_ASK_NOTICE,
                 # `warning`, one rung above the routine `config.yml changed:`
                 # receipt's `info`: this sentence is the whole user-visible trace
                 # of a refused policy change, and `info` renders `dim` — the same
@@ -5105,9 +5118,29 @@ class ServingSessionHandle(SessionHandle):
                     ),
                     style="warning" if self._auto_approve else "info",
                 )
+            # The matched pair, worded as the app words it (UX round 2, U10):
+            # the app-local report has always ended "new sessions open the same
+            # way" here and the runtime's stopped one clause short, which is the
+            # divergence U5 closed for the receipts. The clause is only added
+            # when the FILE was actually read and agrees — with no watcher
+            # snapshot (`None`) the runtime has nothing to say about new
+            # sessions, and inventing it would be the class of claim this whole
+            # change is about.
+            matched = f"tool approvals: {live} — {effect}"
+            if on_disk == live:
+                matched += "; new sessions open the same way"
+            # A DISARMED gate the pane's marker cannot show (UX round 2, U6):
+            # with this change a routed `/approvals auto` is the only route that
+            # loosens a running session, and the routed command cannot move the
+            # pane's `_approve_all`, which is the marker's only input — so the
+            # operator's persistent indicator stays dark and only this sentence
+            # says so. Only for `auto`: a routed tightening leaves the marker
+            # correctly dark, and the clause would be noise there.
+            if live == "auto":
+                matched += _GATE_MARKER_CLAUSE
             return SlashResult(
                 kind="notice",
-                text=f"tool approvals: {live} — {effect}",
+                text=matched,
                 style="warning" if self._auto_approve else "info",
             )
         if argument in ("ask", "on", "prompt"):
@@ -5132,11 +5165,16 @@ class ServingSessionHandle(SessionHandle):
         # for word (UX round 1, U5): the two hosts answer the same gesture, and
         # two sentences for it read as two different facts, one of which is
         # always the wrong half — this half governs THIS session, whatever
-        # config.yml says about the next one.
+        # config.yml says about the next one. The app's ASK receipt said "will
+        # prompt again" until round 2 and this one said "prompt before running"
+        # — one noun apart, which made the "word for word" above untrue for that
+        # direction (agent review round 2, nit); the app now uses this phrase,
+        # the one the reports use for the same state.
         return SlashResult(
             kind="notice",
             text=(
                 "tool approvals: auto — every tool runs without asking (this session)"
+                + _GATE_MARKER_CLAUSE
                 if wanted_auto
                 else "tool approvals: ask — write and command tools prompt before running "
                 "(this session)"

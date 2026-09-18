@@ -396,6 +396,58 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
 
 
 @pytest.mark.asyncio
+async def test_the_routed_receipt_discloses_the_dark_marker(tmp_path, monkeypatch) -> None:
+    """UX round 2, U6 and U10 — what the runtime tells the operator, in two places.
+
+    U6: after #1282 a routed ``/approvals auto`` is the ONLY route that loosens a
+    running session, and a routed command cannot move the pane's own
+    ``_approve_all`` — the marker's only input — so the persistent ``!`` stays
+    dark for exactly the state that route creates. Fixing the marker is a change
+    of its own (deferred on the PR with the measurements); telling the operator is
+    one clause, and the surface where the state changes is this receipt.
+
+    U10: the app-local matched-pair report has always ended "new sessions open the
+    same way" and the runtime's stopped one clause short — the same divergence U5
+    closed for the receipts. Both sentences are asserted verbatim, and the clause
+    that names the FILE is asserted absent when no watcher has read it, because
+    the runtime may not vouch for a file it cannot see.
+    """
+    handle, session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    from local_operator.session.frontend_state import SlashResult
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+
+    receipt = getattr(handle._approvals_slash(session, "auto", SlashResult), "text", "")
+    assert receipt == (
+        "tool approvals: auto — every tool runs without asking (this session); "
+        "the band's ! will not follow this — /approvals re-reports the gate"
+    ), receipt
+
+    report = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
+    assert report == (
+        "tool approvals: auto — every tool runs without asking; new sessions open the "
+        "same way; the band's ! will not follow this — /approvals re-reports the gate"
+    ), report
+
+    # A routed TIGHTENING leaves the marker correctly dark, so the clause would be
+    # noise there — pinned so it cannot spread.
+    tighten = getattr(handle._approvals_slash(session, "ask", SlashResult), "text", "")
+    assert "the band's !" not in tighten, tighten
+
+    # No watcher snapshot: the runtime has not read the file, so it says nothing
+    # about it (the clause is conditional on `on_disk == live`).
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    bare = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
+    assert "new sessions" not in bare, bare
+    assert bare == "tool approvals: ask — write and command tools prompt before running", bare
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_parked_prompt_is_left_for_the_human(tmp_path) -> None:
     """The gate reads the flag when a DECISION is made. A card already on
     screen when the file loosens is neither auto-approved nor dismissed; a
