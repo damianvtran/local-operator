@@ -15,6 +15,7 @@ would put a credential in the transcript, which is the exposure being closed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,12 @@ def _store_policy(config_dir: Path, **values: object) -> None:
     stored = {"mode": "inherit", "inherit": [], "exclude": []}
     stored.update(values)
     ConfigManager(config_dir).set_config_value("shell_environment", stored)
+    # The policy is memoised per config directory for the life of the process
+    # (that memo IS the control — see the module docstring on M2). Tests use a
+    # fresh directory each, but a test that stores twice must be able to see its
+    # second write, so the test-only reset lives here. No production path calls
+    # it: clearing it mid-run is exactly the weakening the memo prevents.
+    shell_env.reset_policy_cache()
 
 
 def _stdout_block(result) -> str:
@@ -427,3 +434,161 @@ def test_child_environment_subtracts_exclude_after_injections() -> None:
     )
 
     assert env == {"PATH": "/usr/bin", "CI": "1"}
+
+
+# ---------------------------------------------------------------------------
+# The policy cannot be LOWERED mid-run (review round 1, M2)
+# ---------------------------------------------------------------------------
+#
+# ``config.yml`` sits in a directory the agent's own shell can write, as the
+# same uid. A policy re-read per command is therefore a policy the constrained
+# party can turn off between two commands: flip the mode back to ``inherit``
+# from the very shell the strict mode was constraining and the next command in
+# the same session gets the provider key back. These tests hold the fix to what
+# it claims — resolved once, and never lowerable by a write during the run —
+# and they use the REAL handlers, because the claim is about what a second
+# command actually receives.
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_of_the_runs_own_config_cannot_lower_the_policy(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    """The reproduced flip: strict, rewrite, and the next command is still strict.
+
+    Written DIRECTLY through ``ConfigManager`` rather than through
+    ``_store_policy``, and that is the point of the test: the helper clears the
+    memo, and clearing the memo is precisely what the model's own shell cannot
+    do.
+    """
+    _store_policy(config_dir, mode="allowlist")
+    context = ToolContext(cwd=str(tmp_path), variables=_session_store())
+
+    first = await builtin.execute_bash(
+        "bash-env", {"command": _env_names_command()}, AbortSignal(), None, context
+    )
+    assert PROVIDER_KEY_NAME not in _child_environment_names(
+        first
+    ), "the strict policy must not hand the key to the first command"
+
+    # The model's own shell rewrites the run's config, the way the review
+    # reproduced it (``sed -i '' 's/mode: allowlist/mode: inherit/'``).
+    ConfigManager(config_dir).set_config_value("shell_environment", {"mode": "inherit"})
+    assert (
+        shell_env.load_policy().mode == shell_env.MODE_ALLOWLIST
+    ), "a write during the run must not lower the resolved policy"
+
+    second = await builtin.execute_bash(
+        "bash-env", {"command": _env_names_command()}, AbortSignal(), None, context
+    )
+    names = _child_environment_names(second)
+    assert PROVIDER_KEY_NAME not in names, (
+        "the SECOND command in the same session must not get the key back: the "
+        "policy is resolved per process, and a rewrite cannot weaken a run in flight"
+    )
+    assert SERVICE_TOKEN_NAME not in names
+
+
+def test_a_missing_config_keeps_the_permissive_default(config_dir: Path) -> None:
+    """No policy file means no policy: the pre-change behaviour, unchanged."""
+    shell_env.reset_policy_cache()
+    assert shell_env.load_policy().mode == shell_env.MODE_DEFAULT
+
+
+def test_an_existing_but_unreadable_config_fails_closed_and_warns(
+    config_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hardened deployment must not lose the protection because of a bad read.
+
+    A half-written or unparseable ``config.yml`` used to fall back to the
+    PERMISSIVE default with a DEBUG line, so a deployment that believed it was
+    hardened silently was not. The asymmetry is now explicit: no file at all is
+    "no opinion" (above), a file that exists and cannot be read is "protect
+    until told otherwise", and the operator's log says so.
+    """
+    (config_dir / "config.yml").write_text(
+        "values: [this is not a mapping: {{{\n", encoding="utf-8"
+    )
+    shell_env.reset_policy_cache()
+    with caplog.at_level(logging.WARNING, logger=shell_env.logger.name):
+        policy = shell_env.load_policy()
+
+    assert (
+        policy.mode == shell_env.MODE_ALLOWLIST
+    ), "an unreadable config must resolve to the strict policy, not to the permissive one"
+    warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any(
+        "shell_environment policy could not be read" in r.getMessage() for r in warnings
+    ), "the operator's log must name the failure; a silent downgrade is the bug"
+
+
+@pytest.mark.asyncio
+async def test_a_strict_run_still_works_after_an_unreadable_config(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    """Failing closed must still run the command: strict, not broken."""
+    (config_dir / "config.yml").write_text("values: [broken\n", encoding="utf-8")
+    shell_env.reset_policy_cache()
+    context = ToolContext(cwd=str(tmp_path), variables=_session_store())
+
+    result = await builtin.execute_bash(
+        "bash-env", {"command": _env_names_command()}, AbortSignal(), None, context
+    )
+
+    names = _child_environment_names(result)
+    assert "PATH" in names, "a command with a strict environment still has to run"
+    assert PROVIDER_KEY_NAME not in names
+
+
+def test_a_denial_name_that_matches_nothing_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A typo in ``exclude`` is a denial that silently is not happening."""
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=shell_env.MODE_ALLOWLIST,
+        exclude=frozenset({"LOP_E2_ABSENT_NAME"}),
+    )
+    with caplog.at_level(logging.WARNING, logger=shell_env.logger.name):
+        shell_env.child_environment(policy, parent={"PATH": "/usr/bin"})
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "exclude" in m and "LOP_E2_ABSENT_NAME" in m for m in messages
+    ), "an exclude name that matched nothing must be reported at WARNING"
+
+
+def test_a_grant_name_that_matches_nothing_is_reported_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The grant side is reported too, but quietly: a missing name is often benign."""
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=shell_env.MODE_ALLOWLIST,
+        inherit=["LOP_E2_ABSENT_GRANT"],
+    )
+    with caplog.at_level(logging.DEBUG, logger=shell_env.logger.name):
+        shell_env.child_environment(policy, parent={"PATH": "/usr/bin"})
+
+    debug_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(
+        "inherit" in m and "LOP_E2_ABSENT_GRANT" in m for m in debug_messages
+    ), "an inherit name that matched nothing must be reported at DEBUG"
+
+
+def test_the_name_machinery_has_no_enforcement_role_in_suppression() -> None:
+    """The markers are insurance, pinned so a reader cannot mistake them.
+
+    Strict-mode suppression comes from NOT GRANTING: an unlisted name is dropped
+    whatever its shape is. This test fixes that reading — a name that is neither
+    credential-shaped nor granted is still absent — so nobody closes a leak by
+    adding a marker to ``CREDENTIAL_NAME_MARKERS`` and believing it filtered
+    something.
+    """
+    policy = shell_env.ShellEnvironmentPolicy(mode=shell_env.MODE_ALLOWLIST)
+    plain_ungranted = "LOP_E2_PLAIN_UNGRANTED"
+
+    assert not shell_env.is_credential_shaped(plain_ungranted)
+    env = shell_env.child_environment(
+        policy, parent={"PATH": "/usr/bin", plain_ungranted: "1", PROVIDER_KEY_NAME: "s"}
+    )
+    assert plain_ungranted not in env
+    assert PROVIDER_KEY_NAME not in env

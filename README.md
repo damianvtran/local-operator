@@ -798,12 +798,37 @@ environment from the session's `shell_environment` policy:
 | `inherit` (default) | a copy of the environment `lop` was started with, so `gh`, `aws`, `npm`, your proxy settings and your locale all keep working |
 | `allowlist` | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`, whatever `shell_environment.inherit` names, and nothing else |
 
-Either mode keeps the harness's own additions: the non-interactive defaults
-(pagers off, `CI=1`, `LOCAL_OPERATOR_AGENT_SHELL=1`, `TERM=dumb`) and any
-credential the session store injected for the agent to *use*. In either mode
-`shell_environment.exclude` removes names outright — including those two
-injections, so it is the way to deny a variable rather than merely not grant
-it.
+**What the strict mode does and does not close.** It closes the *inherited
+copy*: the provider key `lop` was started with is no longer handed to the child,
+and the child's own environment becomes a decision this program makes rather
+than an accident of how it was launched. It does **not** make the key
+unreadable. A command the model writes runs as the same user as `lop`, so it can
+read the parent process's environment in one line — `ps eww -p $PPID` on macOS,
+`cat /proc/$PPID/environ` on Linux. Read `allowlist` as "the commands my agent
+runs no longer carry the credential", not as "the credential cannot be recovered
+from a command". Closing that second half means not holding the provider key in
+the process environment at all (or running the child as another user), which is
+a separate change.
+
+**The mode is resolved once per session.** `config.yml` lives in a directory the
+agent's own shell can write, as the same user, so a policy re-read per command
+is one the model could turn off between two commands. An edit here applies at
+the next launch, and the settings page marks the section accordingly. The
+consequence to know: if a run can rewrite its own config *before* its first
+command, treat the strict mode as a mitigation rather than a guarantee.
+
+The `bash` child keeps the harness's own additions in either mode: the
+non-interactive defaults (pagers off, `CI=1`, `LOCAL_OPERATOR_AGENT_SHELL=1`,
+`TERM=dumb`) and any credential the session store injected for the agent to
+*use*. The `eval` worker keeps neither — it gets its own protocol channel
+instead, so a cell sees no `CI` and no session credential in either mode, and
+any subprocess that cell spawns follows the same policy. In either mode
+`shell_environment.exclude` removes names outright — including those injections,
+so it is the way to deny a variable rather than merely not grant it. It governs
+these two children only: MCP servers (already limited to the SDK's safe set plus
+their own configured `env`) and `lop`'s own processes are unaffected. A name in
+`inherit` or `exclude` that matches nothing is a no-op and is reported — a
+denial at `WARNING`, a grant at debug — so a typo cannot pass for a control.
 
 ```yaml
 values:

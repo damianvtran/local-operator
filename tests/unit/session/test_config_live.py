@@ -201,21 +201,6 @@ def _bash_shell(watcher: ConfigWatcher) -> str:
     return resolve_bash_shell(_configured_bash_shell())
 
 
-def _shell_environment_policy(watcher: ConfigWatcher):
-    """What the `bash` tool and the `eval` worker resolve per spawn.
-
-    Through the SAME reader both use (``tools/shell_env.py``, which reads
-    through ``paths.config_dir()`` — the probe points that at the watcher's
-    directory). Three keys are one policy, so each probe reads the field it is
-    about; observing the stored mapping instead would pass while the reader
-    looked somewhere else, which is the silent-unset failure this key exists to
-    close.
-    """
-    from local_operator.tools.shell_env import load_policy
-
-    return load_policy()
-
-
 def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = None) -> str:
     """The subagent ModelSpec the session resolves for an effort tier.
 
@@ -532,20 +517,9 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.max_attempts": (1, lambda s, w: _fetch_settings(w).max_attempts),
     "web_fetch.blocked_retry": (False, lambda s, w: _fetch_settings(w).blocked_retry),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
-    # The three ``shell_environment`` keys ride the same read-per-use path one
-    # row up, and for a sharper reason: a deployment writes them into the
-    # per-run config.yml BEFORE the session starts, so "live" here means the
-    # next spawn — the bash tool's next command and the eval worker's next
-    # kernel both re-read the policy rather than holding a copy.
-    "shell_environment.mode": ("allowlist", lambda s, w: _shell_environment_policy(w).mode),
-    "shell_environment.inherit": (
-        ["LANG"],
-        lambda s, w: list(_shell_environment_policy(w).inherit),
-    ),
-    "shell_environment.exclude": (
-        ["GH_TOKEN"],
-        lambda s, w: sorted(_shell_environment_policy(w).exclude),
-    ),
+    # ``shell_environment.*`` is deliberately NOT here (review round 1, M2): the
+    # policy is resolved once per process, so it is a NEW-LAUNCH key and the
+    # non-LIVE guard below is what covers it, from the other direction.
     # -- web_tools: the inventory after the next turn boundary -----------------
     # Observed through the SAME reconcile the turn start runs, on a session
     # whose inventory starts with both tools, so a disable is seen as the tool
@@ -814,6 +788,11 @@ def test_the_scope_of_every_reclassified_key_is_the_one_its_consumer_earns() -> 
         assert setting is not None
         assert setting.section == section, key
         assert scope_of[section] is settings_io.Scope.LIVE, key
+    # The agent shell policy is NEW-LAUNCH on purpose, and the reason is a
+    # security one rather than a performance one: config.yml is writable by the
+    # agent's own shell, so a policy re-read per command is a policy the
+    # constrained party can turn OFF between two commands.
+    assert scope_of["shell_environment"] is settings_io.Scope.NEW_LAUNCH
     for key in ("auto_save_conversation", "session.cleanup.enabled"):
         setting = settings_io.resolve_key(key)
         assert setting is not None
