@@ -503,39 +503,48 @@ def status_lines() -> list[str]:
     if not daemons:
         lines.append("serve daemons: none running")
     for record in daemons:
-        lines.append(_daemon_status_line(record, stamp))
+        lines.extend(_daemon_status_lines(record, stamp))
     if stamp is not None and any(not _serves_current_build(record, stamp) for record in daemons):
         # Only when there IS a build to move onto. Advising the command on a machine
-        # whose pointer names nothing would be advice the tool cannot carry out, which
-        # is the same mistake as the tautology below in a different sentence (design
-        # review D1).
+        # whose pointer names nothing is advice the tool cannot carry out (design
+        # review D1 — and D7 for the same clause on the note below).
         lines.append("run `lop services restart` to move the stale ones onto the current build")
     supervised = _supervised_daemon_plists()
     for path in supervised:
         lines.append(f"supervised daemon: {path.stem}")
     if supervised:
         # Their build is NOT knowable here and saying nothing invites the reader to
-        # assume it is current (design review D3): a plist names the stable shim,
-        # which resolves the pointer when the process starts, so the build a
-        # supervised daemon serves is whatever `current` named at its last start.
-        lines.append(
-            "note: a supervised daemon resolves the install when it starts, so its build "
-            "is not in the plist; `lop services restart` puts them on the current build"
-        )
+        # assume it is current (design review D3): a plist names the stable shim, which
+        # resolves the pointer when the process starts, so the build a supervised
+        # daemon serves is whatever `current` named at its last start.
+        lines.append("note: a supervised daemon resolves the install when it starts,")
+        lines.append("      so its build is not in the plist.")
+        if stamp is not None:
+            # GATED, and this is the same mistake the action line above had (design
+            # review D7): `update._repair_refusal` refuses an editable caller, so on a
+            # checkout `lop services restart` moves NONE of these four, and a note
+            # promising otherwise sends the reader to a command that contradicts the
+            # line they just read.
+            lines.append("      `lop services restart` puts them on the current build")
     return lines
 
 
-def _daemon_status_line(record: Any, stamp: Any) -> str:
-    """One daemon's line: where it is, what it serves, and what that means.
+def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
+    """One daemon's lines: where it is, what it serves, and what that means.
 
-    ``reloadable`` is not reader vocabulary (design review D1). It is an internal
-    capability name that decides whether ``restart`` can move this daemon, so it is
-    rendered as the thing the reader can DO about it — and dropped entirely on a
-    daemon that is already current, where it decides nothing.
+    SHORT LINES, AND THE VERDICT LEADS (design review D6). Folding everything onto one
+    line took the old 70-72 columns to **137** — a fix for a reader who could not see
+    both operands, producing a line that soft-wraps mid-word in an 80-column terminal
+    and pushes the action clause, the part that says what to DO, onto the continuation
+    where adjacent daemons' clauses start mid-sentence. So a daemon that needs nothing
+    stays on ONE line, and one that needs something gets its identity on a line of its
+    own followed by INDENTED lines that open with the verdict — the widest anchor the
+    eye has. Exactly one `serve daemon` line per record, so `grep`/`awk` still see a
+    row per daemon.
 
-    The authority is bracketed for an IPv6 host (design review D4): ``::1:56569``
-    is ambiguous and, at 88 columns, ran past the point where the eye finds the
-    boundary between host and port.
+    ``reloadable`` is not reader vocabulary: it is rendered as the action it decides,
+    and omitted where it decides nothing (D1). The authority is bracketed for an IPv6
+    host, where ``::1:56569`` is ambiguous (D4).
     """
     authority = (
         f"[{record.host}]:{record.port}" if ":" in record.host else f"{record.host}:{record.port}"
@@ -543,23 +552,23 @@ def _daemon_status_line(record: Any, stamp: Any) -> str:
     serving = _record_label(record)
     where = f"serve daemon pid {record.pid} on {authority}"
     if stamp is None:
-        # NOT a tautology. With no readable stamp there is nothing to compare against,
-        # and the first version printed "current is the current build" here because
-        # `_label(None)` falls back to a phrase — a sentence that says nothing while
-        # reading like an answer, on the one line whose whole job is to name both
-        # operands (design review D1).
-        return (
-            f"{where} — serving {serving}; this cannot be compared, because the "
-            "install's build is unknown (the pointer names no build)"
-        )
+        # NOT a tautology, and not a 151-column wall of prose either (D6): with no
+        # readable stamp there is nothing to compare against, and `_label(None)` falls
+        # back to a phrase that read like an answer. This is also what a DEVELOPER
+        # sees, because `disk_build()` is None in a checkout.
+        return [where, f"  serving {serving}; cannot be compared: the pointer names no build"]
     if _serves_current_build(record, stamp):
-        return f"{where} — current ({serving})"
+        return [f"{where} — current ({serving})"]
     action = (
         "will move on `lop services restart`"
         if getattr(record, "reloadable", False)
         else "cannot move itself; restart it by hand"
     )
-    return f"{where} — STALE: serving {serving}, current is {_label(stamp)}; {action}"
+    return [
+        where,
+        f"  STALE: serving {serving}, current is {_label(stamp)}",
+        f"  {action}",
+    ]
 
 
 def _record_label(record: Any) -> str:

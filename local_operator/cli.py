@@ -96,6 +96,13 @@ def _positive_seconds(text: str) -> float:
         value = float(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not math.isfinite(value):
+        # ``nan``/``inf``/``1e400`` passed the ``<= 0`` test below, because every
+        # comparison against ``nan`` is False. Measured by review round 10: the
+        # relocation poll never expired against ``nan`` (51 polls, 10.4 s, deadline
+        # never fired), and the echo printed "within nans" — so the validator admitted
+        # exactly the budget it exists to refuse.
+        raise argparse.ArgumentTypeError("must be a finite number of seconds")
     if value <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return value
@@ -1034,6 +1041,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "Bring this machine's non-runtime services (serve daemons and the "
             "supervised daemons) onto the current build, without stopping any "
             "running conversation"
+        ),
+        # A reader who opens this page is asking what a "service" IS, and the verb
+        # group defined nothing (design review D9). The distinction it draws is the
+        # one the whole feature rests on: a RUNTIME is a conversation and is never
+        # touched; everything else that serves this machine can be brought along.
+        description=(
+            "Everything local_operator runs for this machine that is not a conversation. "
+            "A 'service' is a `lop serve` daemon or a supervised daemon "
+            "(com.local-operator.*, e.g. the mobile relay and the browser bridge). "
+            "Runtimes — the processes holding your conversations — are never stopped: "
+            "'restart' reloads a serve daemon in place, keeping its pid and socket."
         ),
         parents=[parent_parser],
     )
@@ -7835,7 +7853,12 @@ def main() -> int:
                 )
                 print_refreshes(refreshes)
                 return 0
-            parser.error("usage: lop services {status|restart}")
+            # Mirror `install`'s dispatch instead of argparse's (design review D8):
+            # `parser.error` dumped the WHOLE program's usage here — 223 columns of
+            # every verb under a second `usage:` prefix — when what the reader mistyped
+            # is a subcommand of this one group. Exit 2 keeps a USAGE error distinct
+            # from a command that ran and failed, which is the 1 `install` returns.
+            print("usage: lop services {status, restart}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:

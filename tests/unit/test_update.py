@@ -874,13 +874,21 @@ def test_main_dispatches_services_restart(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    """A bare ``lop services`` names its verbs instead of doing something."""
+    """A bare ``lop services`` names its verbs instead of doing something.
+
+    It returns 2 rather than raising through ``parser.error`` (design review D8):
+    ``parser.error`` dumped the WHOLE program's usage here — every verb of ``lop``
+    under a second ``usage:`` prefix — when the thing that was mistyped is a
+    subcommand of this one group. 2 keeps a usage error distinct from the 1 the
+    sibling ``install`` group returns for its own, which this deliberately mirrors.
+    """
     from local_operator.cli import main
 
     monkeypatch.setattr("sys.argv", ["lop", "services"])
-    with pytest.raises(SystemExit):
-        main()
-    assert "usage: lop services" in capsys.readouterr().err
+    assert main() == 2
+    err = capsys.readouterr().err
+    assert err.strip() == "usage: lop services {status, restart}"
+    assert "{credential,config,agents" not in err, "the whole program's verb list"
 
 
 @pytest.mark.parametrize(

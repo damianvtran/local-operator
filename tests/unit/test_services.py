@@ -355,18 +355,22 @@ def test_status_lines_name_the_drift_and_the_capability(
     )
     lines = services.status_lines()
     assert "install: 0.59.0@4d3ce1d" in lines, "the build the reader is comparing against"
-    # Stale: what it serves, what current is, and what to DO about it — not the word
-    # "reloadable", which is not reader vocabulary.
-    assert (
-        "serve daemon pid 4242 on 127.0.0.1:1111 — STALE: serving 0.56.14@9f2c1ab, "
-        "current is 0.59.0@4d3ce1d; will move on `lop services restart`" in lines
-    )
+    # Stale: identity, then the verdict leading an indented line, then what to DO about
+    # it — not the word "reloadable", which is not reader vocabulary. Three lines
+    # because folding them into one took the line to 137 columns (D6).
+    at = lines.index("serve daemon pid 4242 on 127.0.0.1:1111")
+    assert lines[at + 1] == "  STALE: serving 0.56.14@9f2c1ab, current is 0.59.0@4d3ce1d"
+    assert lines[at + 2] == "  will move on `lop services restart`"
     assert "serve daemon pid 9 on 127.0.0.1:1111 — current (0.59.0@4d3ce1d)" in lines
     assert "supervised daemon: com.local-operator.mobile" in lines
     # D3: their build is not in the plist, and the reader is told so rather than left
     # to assume it is current.
     assert any("resolves the install when it starts" in line for line in lines)
     assert any("run `lop services restart`" in line for line in lines)
+    # D6: the longest line in the whole output must fit a plain 80-column terminal —
+    # the first version of this fix reached 137 and soft-wrapped mid-word.
+    longest = max(len(line) for line in lines)
+    assert longest <= 80, f"longest line is {longest}: {max(lines, key=len)!r}"
 
 
 def test_status_lines_name_the_true_reason_a_daemon_cannot_move(
@@ -375,8 +379,8 @@ def test_status_lines_name_the_true_reason_a_daemon_cannot_move(
     """A daemon that cannot be asked is told apart from one that can (D1)."""
     monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(reloadable=False)])
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
-    line = next(line for line in services.status_lines() if line.startswith("serve daemon"))
-    assert "cannot move itself; restart it by hand" in line
+    lines = services.status_lines()
+    assert "  cannot move itself; restart it by hand" in lines
 
 
 def test_status_lines_bracket_an_ipv6_authority(
@@ -407,10 +411,37 @@ def test_status_lines_says_it_cannot_compare_when_the_stamp_is_unreadable(
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     lines = services.status_lines()
     assert lines[0] == "install: no build the pointer can name, so nothing can be compared"
-    assert "cannot be compared" in lines[1]
+    assert any("cannot be compared: the pointer names no build" in line for line in lines)
     joined = " ".join(lines)
     assert "current is the current build" not in joined
     assert "run `lop services restart`" not in joined
+    # D7: the supervised note carries the SAME promise as that action line, and it was
+    # the clause left ungated — `update._repair_refusal` refuses an editable caller, so
+    # on a checkout `restart` moves none of these and the note was a lie.
+    assert not any("puts them on the current build" in line for line in lines)
+    monkeypatch.setattr("local_operator.update.disk_build", lambda *a, **k: NEW)
+    monkeypatch.setattr(
+        services,
+        "_supervised_daemon_plists",
+        lambda: [Path("/tmp/com.local-operator.mobile.plist")],
+    )
+    backed = services.status_lines()
+    assert any("puts them on the current build" in line for line in backed)
+
+
+def test_services_defines_what_a_service_is() -> None:
+    """D9: the page a reader opens to find out what a "service" is defined nothing."""
+    from local_operator import cli
+
+    parser = cli.build_cli_parser()
+    subparsers = next(
+        action for action in parser._actions if getattr(action, "dest", None) == "subcommand"
+    )
+    choices: dict[str, Any] = getattr(subparsers, "choices", {})
+    text: str | None = choices["services"].description
+    assert text, "the group must describe itself"
+    assert "not a conversation" in text
+    assert "serve" in text and "runtimes" in text.lower()
 
 
 def test_status_lines_says_so_when_there_are_no_daemons(
