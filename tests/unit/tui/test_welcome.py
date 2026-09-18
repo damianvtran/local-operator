@@ -1337,7 +1337,7 @@ def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
     # were, and the reason for each is recorded in full on the pool itself: those
     # entries teach facts with no second discovery route (a remappable key has no
     # picker, unlike every slash command in the pool, and a layer that ships ON,
-    # spends per message and is silent whenever it has nothing to say stays
+    # spends per new message and is silent whenever it has nothing to say stays
     # invisible to a user who never goes looking for a setting they have not
     # heard of). The dilution argument
     # still governs everything else — a further slash-command tip takes a slot

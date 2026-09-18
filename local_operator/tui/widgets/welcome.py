@@ -314,7 +314,7 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: Seventeen from fifteen — the classification layer's OFF switch and one of
 #: its logins; the pair's own comment on the pool carries the argument and the
 #: width budget. The same class of entry, second instance: the layer ships ON
-#: and spends per message while staying silent when it has nothing to say, so
+#: and spends per NEW message while staying silent when it has nothing to say, so
 #: the one-line way to stop it and the credential a leg needs are commands a
 #: user has to be told, not behaviour they can meet by experiment.
 #:
@@ -432,7 +432,8 @@ TIPS: tuple[str, ...] = (
     # WHY THESE EARN A SLOT, by the test this pool is bounded for ("a further
     # slash-command tip takes a slot rather than adding one"): the layer ships
     # ON (`values.classification.auto`, true since 2026-09-18), it spends money
-    # and reads the roster on every user message, and it stays SILENT in every
+    # and reads the roster on every NEW user message (an identical repeat is a
+    # cache hit and costs nothing), and it stays SILENT in every
     # state where it has nothing to say — no credential, nothing picked, a
     # skipped call are all the ordinary quiet cases. So using the app never
     # teaches a user either fact: the one-line way to stop it, and the login a

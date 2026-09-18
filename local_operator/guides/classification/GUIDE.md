@@ -1,6 +1,6 @@
 ---
 name: classification
-description: Enable and troubleshoot smart agent hints — the decision model that suggests skills, guides and MCP servers per message, plus its cascade, logins, cost and logs.
+description: Turn smart agent hints on or off and troubleshoot them — the decision model that suggests skills, guides and MCP servers per message, plus its cascade, logins, cost and logs.
 ---
 
 # Smart agent hints: the classification layer
