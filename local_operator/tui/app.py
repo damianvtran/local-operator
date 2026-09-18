@@ -14886,6 +14886,7 @@ class OperatorApp(App[None]):
             self._resume_session(fork_id, self._notice, preserve_outgoing=True)
             return
 
+        from local_operator.agent_shell import without_agent_shell_marker
         from local_operator.multiplexer.broadcast import resume_argv, resume_executable
         from local_operator.spawn.fallback import fallback_receipt
         from local_operator.spawn.registry import active_backend
@@ -14913,7 +14914,14 @@ class OperatorApp(App[None]):
             # frozen TUI and, on the deferred path, a stalled parent turn. The
             # environment is copied rather than passed live: it crosses a thread
             # boundary, and `os.environ` is process-global mutable state.
-            opened = await asyncio.to_thread(backend.spawn, launch, dict(os.environ))
+            # The fork is a window for the USER, opened by this session's own
+            # front end — not a command an agent's tool call ran — so the child
+            # must not inherit the agent-shell marker: `cli.main` would refuse
+            # its `lop --resume` and the window would die on that line. See
+            # `agent_shell.without_agent_shell_marker`.
+            opened = await asyncio.to_thread(
+                backend.spawn, launch, without_agent_shell_marker(os.environ)
+            )
         except Exception:
             # A backend must not raise, but this path is the user's fork and not
             # the place to find out that one did.

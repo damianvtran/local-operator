@@ -1208,10 +1208,19 @@ launcher), and `wake` for work that belongs later.
 Delegate with `task`, always. If you think you need a separate live session —
 something a human must steer, or work that must outlive this turn — say so in
 your report instead of starting one. `lop exec --status JOB_ID` still polls a
-job that is already running. Tests and QA runs that must drive the real CLI set
-`LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1` (`docs/EXEC.md`) against an isolated
-`LOCAL_OPERATOR_CONFIG_DIR`; the session they open is stamped `agent-shell`, so
-it cannot be mistaken for one the operator started.
+job that is already running.
+
+**Scripts that drive the real CLI must declare themselves.** A bench, an eval
+driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
+it inherits the marker and every inner run would be refused, which reads as a
+broken product instead of a guard. Call
+`agent_shell.harness_child_env()` for the child's environment: it sets
+`LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1` (named here for a harness that needs it —
+obscurity, not secrecy, and `docs/EXEC.md` documents the limits of the whole
+rule). Use it against an isolated `LOCAL_OPERATOR_CONFIG_DIR`; the session the
+child opens is stamped `agent-shell`, so it cannot be mistaken for one the
+operator started. The same applies to a manual QA run: that escape is for
+driving the real front end, never for opening a peer to hand work to.
 
 ## Who may merge: two tiers
 

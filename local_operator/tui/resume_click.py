@@ -440,7 +440,13 @@ def _launch_desktop(session_id: str) -> bool:
             )
     if not attempts:
         return False
-    env = dict(os.environ)
+    # Same reason as the terminal rung's env: a GUI the user's click opened is
+    # not a command an agent's tool call ran, and everything THIS process later
+    # spawns would otherwise inherit that claim for the app's whole life (the
+    # app is long-lived: it outlives the session that opened it).
+    from local_operator.agent_shell import without_agent_shell_marker
+
+    env = without_agent_shell_marker(os.environ)
     for argv in attempts:
         if _launch_once(argv, env):
             logger.debug("click launched the desktop app: %s", argv[0])
@@ -605,6 +611,7 @@ def _spawn_terminal(session_id: str) -> bool:
     """
     import shutil
 
+    from local_operator.agent_shell import without_agent_shell_marker
     from local_operator.multiplexer.broadcast import resume_argv, resume_executable
     from local_operator.spawn.registry import active_backend
     from local_operator.spawn.types import ForkLaunch, env_or_process
@@ -616,7 +623,11 @@ def _spawn_terminal(session_id: str) -> bool:
     # on PATH is what the user would type themselves.
     executable = shutil.which("lop") or resume_executable()
     argv = tuple(resume_argv(session_id, executable))
-    env = env_or_process(None)
+    # The click is the USER's gesture and the window it opens is theirs, so the
+    # child must not inherit the agent-shell marker: `cli.main` would refuse its
+    # `lop --resume` and the terminal would open on a refusal. See
+    # `agent_shell.without_agent_shell_marker` (review round 1, F1).
+    env = without_agent_shell_marker(env_or_process(None))
 
     # THE SESSION'S OWN DIRECTORY, not this process's. The click is handled by
     # whatever process the notification activated — inheriting its cwd landed
