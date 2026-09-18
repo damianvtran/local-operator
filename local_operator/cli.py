@@ -156,6 +156,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hosting",
         type=str,
+        # A list of CHAT hostings, and `typesafe` (TypeSafe's Jev, the decision
+        # model behind the resource-classification layer) is deliberately not in
+        # it even though the provider registry has a row and a login for it: Jev
+        # rejects `chat/completions` on every host we reach it through, so a
+        # session started on it cannot answer a turn. The registry row carries
+        # `decision_only=True` and four surfaces enforce it — the catalogue, the
+        # /model ranking, the session-model resolver and the failover chain
+        # (`tests/unit/providers/test_decision_only.py`).
         choices=[
             "radient",
             "deepseek",

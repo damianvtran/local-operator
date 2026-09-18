@@ -3790,8 +3790,13 @@ async def test_live_catalogue_without_a_providers_argument_is_unchanged(
     assert "anthropic" in {entry.provider for entry in entries}
     # Every provider reports a status, including the local ones that resolve a
     # base URL and return before any listing call — so ``statuses`` is the
-    # registry, not the subset that made a request.
-    assert set(statuses) == {definition.id for definition in PROVIDER_REGISTRY}
+    # CHAT registry, not the subset that made a request. A decision-only
+    # provider (``typesafe``) is not in it, and that is the flag working: it is
+    # filtered before the enumeration, so it has neither rows nor a status line
+    # in a catalogue it can never appear in.
+    assert set(statuses) == {
+        definition.id for definition in PROVIDER_REGISTRY if not definition.decision_only
+    }
 
 
 @pytest.mark.asyncio

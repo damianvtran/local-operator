@@ -34,10 +34,11 @@ import logging
 import os
 import sys
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator.ansi import sanitize_prompt_line
 
@@ -363,6 +364,40 @@ class HostingUnknownError(HostingNotConfiguredError):
         self.source = source
 
 
+class HostingNotChatError(HostingNotConfiguredError):
+    """Raised when hosting names a provider that serves no chat completions.
+
+    The fourth member of the recoverable family, and a SIBLING of
+    :class:`HostingUnknownError` rather than a reuse of it: ``typesafe`` IS a
+    known provider with a shipped paste-a-key login, so "not a known provider"
+    would be false, and the ``/login`` that message prescribes has already
+    happened — the remedy is `/model`, which is ALSO only reachable from inside
+    the app, which is why this belongs to the family at all. Reported as a bare
+    ``ValueError`` it would land in the red "session failed to start" branch
+    with ``_session`` None, and every provider command would answer "session is
+    still starting...": the terminal state this family exists to remove.
+
+    The condition it names: a provider whose wire rejects ``chat/completions``
+    on every host we reach it through (TypeSafe's Jev —
+    ``ProviderDefinition.decision_only``). Booting a session on one produced a
+    turn that could never be answered, with the failure arriving as a provider
+    error nobody can read as "that hosting was never chattable".
+
+    ``source`` is carried for the same reason its sibling carries it: the
+    in-app repair writes the CONFIG FILE, so it can fix only the config case,
+    and telling a user to run `/model` against a ``--hosting`` value is a loop
+    that cannot terminate.
+    """
+
+    def __init__(self, message: str, hosting: str = "", source: str = "config") -> None:
+        super().__init__(message)
+        #: The decision-only provider id that was selected as a hosting.
+        self.hosting = hosting
+        #: Where the value came from: ``"config"``, ``"flag"`` (``--hosting``)
+        #: or ``"agent"`` (an agent record) — see :attr:`HostingUnknownError.source`.
+        self.source = source
+
+
 class ModelNotConfiguredError(HostingNotConfiguredError):
     """Raised when hosting is a real provider but no model can be resolved for it.
 
@@ -423,6 +458,66 @@ _HOSTING_SOURCE_REMEDY = {
         "the agent's hosting; `local-operator provider` lists the supported ids."
     ),
 }
+
+#: How a user leaves a DECISION-ONLY hosting, per source. The mirror of
+#: :data:`_HOSTING_SOURCE_REMEDY` above, keyed the same way for the same reason:
+#: `/model` writes the config file, so it repairs neither a `--hosting` argument
+#: nor an agent record and promising it there would be a loop.
+_HOSTING_NOT_CHAT_REMEDY = {
+    "config": (
+        "Point it at a chat provider with `/model` (or `local-operator config "
+        "edit hosting <provider>`); the key you stored is still used, by the "
+        "resource-classification layer."
+    ),
+    "flag": (
+        "It came from the --hosting flag, so correct that flag (e.g. --hosting "
+        "openai); `/model` cannot repair an argument."
+    ),
+    "agent": (
+        "It came from the agent's own record, which overrides config, so update "
+        "the agent's hosting instead."
+    ),
+}
+
+
+def _not_chat_hosting_message(hosting: str, source: str = "config") -> str:
+    """Error text for a hosting that can serve no chat completion at all.
+
+    Names what the provider IS (a decision model reached through the
+    classification layer) as well as what it cannot do, because the value is a
+    real, working provider with a shipped login: a bare "unsupported hosting"
+    would read as a typo the user should go and re-check in the console they just
+    pasted a key from.
+    """
+    from local_operator.providers.registry import decision_only_message
+
+    remedy = _HOSTING_NOT_CHAT_REMEDY.get(source, _HOSTING_NOT_CHAT_REMEDY["config"])
+    # The FACT comes from the registry's one sentence (``decision_only_message``),
+    # which ``build_model_spec`` refuses a live switch with too: the two surfaces
+    # explain the same provider, so they must not drift into two spellings of it.
+    # The REMEDY stays local because it is per-surface — this one knows whether the
+    # value came from the config file, a flag, an agent record or a stored row.
+    return f"{decision_only_message(hosting)} {remedy}"
+
+
+def _refuse_decision_only(provider: str, source: str) -> None:
+    """Raise ``HostingNotChatError`` when ``provider`` can serve no chat turn.
+
+    One spelling for a check that now sits at four doors — the resolved config /
+    agent / flag hosting, a resume's ``--hosting``/``--model`` pair, and the
+    desktop pick boundary's own gate — because the failure it reports is the same
+    fact every time and its message is the only place that fact is explained (see
+    :func:`_not_chat_hosting_message`).
+
+    Deliberately a raise rather than a predicate: every caller that needs the
+    answer needs the SAME outcome from it, and a caller that wants to *report*
+    instead of raise (the pick boundary, which answers a 422) does its own check
+    where its own error shape lives.
+    """
+    from local_operator.providers.registry import is_decision_only
+
+    if is_decision_only(provider):
+        raise HostingNotChatError(_not_chat_hosting_message(provider, source), provider, source)
 
 
 def _unknown_hosting_message(hosting: str, source: str = "config") -> str:
@@ -493,8 +588,14 @@ def resolve_hosting_model_with_source(
     # provider client. A removed/invalid default cannot make a valid saved
     # conversation impossible to resume. Bootstrap callers pass resolved pairs
     # too, so their values are not automatically deliberate resume overrides.
-    from local_operator.providers.registry import get_provider_definition
-    from local_operator.session.model_selection import read_model_selection
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_decision_only,
+    )
+    from local_operator.session.model_selection import (
+        read_model_selection,
+        refused_decision_only_selection,
+    )
 
     directory = None
     resume = getattr(args, "resume", None)
@@ -523,10 +624,35 @@ def resolve_hosting_model_with_source(
                 raise HostingUnknownError(
                     _unknown_hosting_message(provider, "flag"), provider, "flag"
                 )
+            # A deliberate override naming a decision model gets the same refusal
+            # as the config path, and it has to be HERE rather than after the
+            # default-model lookup: a decision-only provider has no default model,
+            # so the lookup would report "no model configured" — a message about a
+            # symptom, for a pair that can never run whatever model it names.
+            _refuse_decision_only(provider, "flag")
             if not model:
                 raise ModelNotConfiguredError(_no_model_message(provider), provider)
             return provider, model, "flag"
         return saved.provider, saved.model_id, "resume"
+
+    # NO usable stored selection. Fall back to the birth precedence — but first ask
+    # whether the journal HELD one this build refuses to run as a chat model. The
+    # reader refuses such a row (``model_selection._selection``), so the row never
+    # becomes ``saved`` and this is the only place the refusal can still be
+    # EXPLAINED: silently resuming the conversation on the configured hosting would
+    # hide that its own stored identity was the thing that cannot chat, and the
+    # message here is the one the config path already produces, with the same
+    # recoverable outcome (the app's setup state, where ``/model`` answers it).
+    #
+    # Skipped when the caller named a hosting/model deliberately: a flag is a
+    # statement about this run, and refusing it because the journal is poisoned
+    # would block the very exit the message prescribes.
+    if not (flag_hosting or flag_model):
+        refused = refused_decision_only_selection(directory) if directory is not None else None
+        if refused is not None:
+            raise HostingNotChatError(
+                _not_chat_hosting_message(refused, "resume"), refused, "resume"
+            )
 
     agent_hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
     flag_hosting: str | None = getattr(args, "hosting", None)
@@ -570,6 +696,18 @@ def resolve_hosting_model_with_source(
         raise HostingUnknownError(
             _unknown_hosting_message(hosting, hosting_source), hosting, hosting_source
         )
+    if is_decision_only(hosting):
+        # A KNOWN provider that can never serve a chat completion (TypeSafe's
+        # Jev: every host we reach it through rejects ``chat/completions``).
+        # Refused HERE, at the same preflight as an unknown id, for the same
+        # reason: this is the one point every front end classifies, so the
+        # condition reaches the guided setup state where ``/model`` supplies a
+        # chat provider, instead of booting a session that dies on its first
+        # turn with a provider error nobody can read as "that hosting was never
+        # chattable". NOT ``HostingUnknownError``: saying "not a known provider"
+        # about a provider this build ships a login for would be false, and the
+        # repair it prescribes (``/login``) is already done.
+        _refuse_decision_only(hosting, hosting_source)
     if not model_name:
         # A hosting with no model is not a dead end: every mainstream provider
         # has a reasonable default, so resolve to it rather than raising. Only
@@ -1184,6 +1322,72 @@ def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableSt
     return VariableStore(cwd=cwd, config_values=config_values)
 
 
+#: ``values.classification.maxRecommendations`` as the WIRING needs it when no
+#: seam was built from the package (a test double, or a host that supplied its
+#: own classifier). The package's ``DEFAULT_MAX_RECOMMENDATIONS`` is the
+#: consumer default the settings registry is pinned to; this copy exists so the
+#: request path never has to import the package, and
+#: ``tests/unit/test_session_factory_classification.py`` pins the two together.
+DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS = 3
+
+#: ``values.classification.timeoutMs`` — the CALL's deadline, as the wiring needs it.
+#:
+#: The shipped service enforces the same number itself (``timeout_s``, read from the
+#: same key), and that is the deadline the breaker counts against. The wiring keeps
+#: its own copy for one purpose only — capping the turn's WAIT by it
+#: (:func:`_classification_wait_s`), so a wait budget configured larger than the
+#: call could ever take does not spend itself on nothing. It is NOT a deadline
+#: around the call: killing a call the turn has stopped waiting for would throw away
+#: an answer the next message could have used. Same pinning as above.
+DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
+
+#: ``values.classification.waitMs`` — how long a TURN waits for a recommendation
+#: before it stops waiting and lets the call finish in the background.
+#:
+#: This is the operator's latency budget in one number ("our own overhead under
+#: 100 ms, ideally under 50 ms, per user message"), and it is deliberately NOT the
+#: call's deadline: ``timeoutMs`` says how long the VENDOR may take, and on a real
+#: roster that is ~250 ms median — waiting for it would put the vendor's model time
+#: on the turn's critical path, which the budget explicitly excludes.
+#:
+#: WHAT IT ACTUALLY COSTS, measured on the real path (27-candidate roster, default
+#: settings, ``scripts/classification_latency_probe.py``) and reported as the
+#: DIFFERENCE against the layer being off, so the pre-existing cost of the turn path
+#: is not claimed as ours:
+#:
+#: - a warm message against a VENDOR THAT DOES NOT ANSWER inside the wait costs the
+#:   WAIT: **+50.9 to +52.1 ms median** over four runs (ON 52.75-53.80 ms, OFF
+#:   1.69-2.73 ms). That is the number the budget is about, and it is bounded by
+#:   ``waitMs`` — never by the vendor's ~250 ms answer, which is what puts this key
+#:   between the turn and the model;
+#: - a vendor that answers INSIDE the wait — a cache hit, or a leg that fails at once
+#:   — costs **~0 to +2 ms**, because the turn stops waiting the moment it has an
+#:   answer. Measured with a dead credential the whole steady state reads ~+0.4 ms for
+#:   this reason, so a run must say which arm it measured (the committed script prints
+#:   the service's own cost/skip lines and warns when nothing was delivered);
+#: - a session's FIRST message costs **+22 to +32 ms** more (four runs here, 26.7-31.1
+#:   ms in the reviewer's): one-off setup before the first await, which no wait budget
+#:   can bound. It is NOT the client construction — the paired arms with and without
+#:   ``ClassificationService.warm_up`` (which moves a measured tens-of-milliseconds
+#:   first ``httpx.AsyncClient`` to session build) came out level at 30.7 vs 32.0 ms —
+#:   and ``build_state`` measures 0.05 ms. Open in the contract, not explained here.
+#:
+#: So: an uncached message costs the wait the operator configured (~51 ms, inside the
+#: 100 ms ceiling and AT the 50 ms ideal rather than under it), a message that finds an
+#: answer already in hand costs ~nothing, and a session's first message pays a few tens
+#: of milliseconds once. Anything slower than the wait is delivered by the next message
+#: instead (see ``_harvest_classification``).
+DEFAULT_CLASSIFICATION_WAIT_MS = 50
+
+#: How many background classification calls may be outstanding before the oldest is
+#: abandoned. A session that keeps sending messages into a vendor that never answers
+#: would otherwise accumulate one live task per message: the service's own deadline
+#: normally retires each of them, and the breaker stops new ones after three
+#: failures, so this is the belt for a seam that does neither. Dropping a task is a
+#: cancelled ADVISORY call, never a lost turn.
+_MAX_OUTSTANDING_CLASSIFICATION_CALLS = 4
+
+
 @dataclass
 class _KnowledgeHooks:
     """Session-owned semantic knowledge and progressive-disclosure resolvers.
@@ -1219,6 +1423,128 @@ class _KnowledgeHooks:
     # deferred connection work begins, closing the first-turn race without
     # making connection completion part of the prompt-cache key.
     mcp_catalogue: Callable[[str], str] | None = None
+    #: Names of the configured MCP servers, published by ``_seed_mcp_routing``
+    #: before any connection work. Read by the classification roster, which needs
+    #: the server id for a candidate and never its tools.
+    mcp_server_names: tuple[str, ...] = ()
+    #: The classification seam (docs/design/classification-layer.md §7): an
+    #: object exposing ``async recommend_resources(request) -> Recommendation``
+    #: and ``notice(recommendation) -> str | None``. ``None`` means the layer is
+    #: off, unavailable, or its package failed to import — and that the prompt is
+    #: exactly what it was before this seam existed.
+    #:
+    #: Built ONCE per session by ``_attach_classification`` when
+    #: ``values.classification.auto`` is on, rather than at the first user
+    #: message: the package's cold import is ~1.8 s of cumulative import time
+    #: (``python -X importtime``), and a turn's prompt build must not pay for an
+    #: import. Tests inject a double here and never touch the package.
+    classifier: Any | None = None
+    #: Where the seam's one-line notice goes: the session's own notice event,
+    #: bound by ``create_session`` once the facade exists (see
+    #: :func:`attach_classification_notices`). ``None`` — a provider rendered
+    #: without a session, as the benchmark preflight does — drops the notice
+    #: rather than inventing a second notification channel.
+    notice_sink: Callable[[str, str], Any] | None = None
+    #: The classification roster (one row per candidate resource) and the inputs
+    #: it was derived from. Built ONCE per roster, never per user message: the
+    #: walk and the row allocation are session-shaped work, and re-deriving them
+    #: on every turn is what would push the wiring's added latency toward the
+    #: per-message budget (see :func:`_classification_roster`).
+    classification_roster: tuple[Any, ...] | None = None
+    #: ``(index, row count, mcp server names)`` — the identity of the inputs the
+    #: cached roster was built from. The index OBJECT, not just its size: a
+    #: rebuild replaces it, and its ``skills`` list is never mutated in place.
+    classification_roster_key: tuple[Any, ...] | None = None
+    #: ``values.classification.maxRecommendations`` as read at session build.
+    #: Carried because the REQUEST's own cap field is an upper bound over the
+    #: package's reader (``min(request, settings)``), so leaving it at the
+    #: dataclass default would silently cap a configured 5 at 3.
+    classification_max_recommendations: int = DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS
+    #: ``values.classification.waitMs`` in SECONDS, as read at session build (the
+    #: same NEW_SESSIONS snapshot the service got). The turn waits at most this
+    #: long; see :data:`DEFAULT_CLASSIFICATION_WAIT_MS` for why it is not the
+    #: call's deadline.
+    classification_wait_s: float = DEFAULT_CLASSIFICATION_WAIT_MS / 1000.0
+    #: Calls that are STILL RUNNING after their own turn stopped waiting. Harvested
+    #: on a later user message (never awaited mid-turn): each is a task the turn has
+    #: already given up on, whose answer is worth keeping — a late recommendation is
+    #: still a recommendation for the conversation it was computed against.
+    classification_outstanding: list[Any] = field(default_factory=list)
+    #: The resource urls announced on the PREVIOUS message, so an unchanged set can
+    #: stay quiet rather than printing the same sentence again (design round 1, D7).
+    classification_last_announced: tuple[str, ...] | None = None
+    #: Recommendations that arrived too late for their own turn and have not reached
+    #: a prompt yet, oldest first. Rendered by the NEXT ``_select_knowledge_block``
+    #: (a new user message re-renders block 3, which the harness journals as a
+    #: ``[session-state]`` update) and consumed exactly once there.
+    classification_pending: list[Any] = field(default_factory=list)
+
+
+#: The capability line a configured MCP server contributes when no release-owned
+#: hint covers it. It is the SAME text ``mcp/resources.py``'s
+#: ``render_mcp_suggestions`` uses for a custom server, restated because that
+#: module spells it inline and there is no exported constant to import — and
+#: because the alternative, parsing it back out of the rendered catalogue, would
+#: make the classifier's option text depend on a template.
+_MCP_DEFAULT_CAPABILITY = "Configured MCP server."
+
+#: The advisory block's fixed furniture (§7). The wording is the contract's:
+#: "may help", never imperative, never exclusive, and never a claim that a
+#: recommended resource is authoritative for the turn. A wrong recommendation
+#: must cost a line of context, not a wrong action.
+_RECOMMENDATION_BLOCK_OPEN = "<resource_recommendations>"
+_RECOMMENDATION_BLOCK_PREAMBLE = (
+    "These may help with this request — read the ones that actually fit, ignore the rest:"
+)
+_RECOMMENDATION_BLOCK_CLOSE = "</resource_recommendations>"
+
+
+@dataclass(frozen=True)
+class _ClassificationCandidate:
+    """One row of the roster the classifier is offered.
+
+    Field-for-field the contract's ``Candidate`` (§4), and read by ATTRIBUTE on
+    both sides, so the package's own dataclass is interchangeable with this one.
+    The wiring carries its own row for two reasons that both outlast the
+    implementation detail: the layer is optional, so the turn path must not
+    import the package (the offline path is byte-identical down to its import
+    graph), and the unit tests inject a classifier double that never sees the
+    real types.
+
+    ``description`` is HARNESS-OWNED text only (§6): a skill's or guide's own
+    description as discovered from the local filesystem, or an MCP server's name
+    plus a release-owned capability hint. Config-authored or remote-authored
+    prose here would re-open the prompt-injection surface ``mcp/resources.py``
+    deliberately excludes — the option text is the one part of the request the
+    model reads as a rubric.
+    """
+
+    kind: str
+    name: str
+    description: str
+    resource_url: str
+
+
+@dataclass(frozen=True)
+class _RecommendationRequest:
+    """One classification pass: the user's message, optional context, the roster.
+
+    Structurally the contract's ``RecommendationRequest`` (§4), including the
+    field NAMES the package's service reads (``user_message``, ``context``,
+    ``candidates``, ``max_recommendations``), for the reason
+    :class:`_ClassificationCandidate` records.
+
+    ``context`` is ``None`` here and that is the documented optional case (§5):
+    a short already-redacted representative line would have to come from the
+    transcript, and the hooks do not hold one — the provider does. With nothing
+    to add, the state is the user message plus the roster, which is exactly what
+    the layer says it does when a caller has no context to give.
+    """
+
+    user_message: str
+    context: str | None
+    candidates: tuple[_ClassificationCandidate, ...]
+    max_recommendations: int
 
 
 def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
@@ -1272,6 +1598,12 @@ def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
 
         names = tuple(load_all_mcp_configs(cwd)[0])
         hooks.mcp_catalogue = lambda query: render_mcp_suggestions(names, query)
+        # Published for the classification roster, which needs a server's NAME
+        # (plus the harness-owned capability hint) as a candidate. Set beside the
+        # catalogue closure so both read the same discovery result, and before
+        # any connection work, so a first-turn classification is complete on a
+        # cold cache.
+        hooks.mcp_server_names = names
     except Exception:  # noqa: BLE001 — MCP hints remain optional enrichment
         logger.debug("early MCP name discovery failed", exc_info=True)
 
@@ -1375,6 +1707,589 @@ async def _setup_knowledge(
     return hooks
 
 
+def _classification_section(config_manager: ConfigManager) -> Mapping[str, Any]:
+    """``values.classification`` as it stands at session build.
+
+    A SNAPSHOT, deliberately, and not the live mapping the stream fn holds: the
+    section is scoped NEW_SESSIONS in ``settings_io`` (the service is built per
+    session), so an edit lands on the next session and the page's tag is true.
+    """
+    values = _classification_values(config_manager)
+    section = values.get("classification") if isinstance(values, Mapping) else None
+    return section if isinstance(section, Mapping) else {}
+
+
+def _classification_values(config_manager: ConfigManager) -> dict[str, Any]:
+    """A shallow snapshot of ``config.yml``'s ``values`` for the layer.
+
+    The package reads ``settings.get("classification", {})`` — the same shape
+    ``values.effort.auto`` established (``model/effort_classifier.py``) — so the
+    whole values mapping is what it is handed.
+    """
+    values = getattr(config_manager.get_config(), "values", None)
+    return dict(values) if isinstance(values, Mapping) else {}
+
+
+def _classification_enabled(section: Mapping[str, Any]) -> bool:
+    """Whether ``values.classification.auto`` turns the layer on.
+
+    THE ONE decision the wiring makes for itself, and it is read WITHOUT
+    importing the package: this runs at session build, and ``auto: false`` (the
+    default) must leave the process's import graph exactly as it was before the
+    layer existed. The two values it can return are pinned by
+    ``tests/unit/test_session_factory_classification.py`` to the package's
+    ``DEFAULT_AUTO`` and the registry row's default.
+
+    Read through ``settings_io.strict_bool``, the same reading the service's own
+    ``enabled`` property applies, so a hand-edited ``auto: "false"`` is off here
+    and there — two readings of one toggle is how a switch ends up honoured by
+    one path and ignored by another.
+    """
+    raw = section.get("auto")
+    if raw is None:
+        # The absent case is answered without the settings_io import, which is
+        # the whole point of this function existing separately.
+        return False
+    from local_operator.settings_io import strict_bool
+
+    return strict_bool(raw, False)
+
+
+def _attach_classification(
+    hooks: _KnowledgeHooks,
+    config_manager: ConfigManager,
+    credential_manager: CredentialManager,
+    warnings_out: list[str],
+) -> None:
+    """Build the classification seam when the layer is switched on (§7, §9).
+
+    Built HERE, at session construction, rather than lazily on the first user
+    message — and that ordering is a latency decision, not a style one: the
+    package's cold import measured ~1.8 s of cumulative import time
+    (``python -X importtime`` over ``local_operator.classification``), which must
+    not land inside a turn's prompt build. Session construction already spends
+    seconds on skill discovery and embeddings, so the one-off cost sits where the
+    operator is already waiting. A default install never imports the package at
+    all, because ``auto`` is read first and without it.
+
+    The seam's keep-alive CLIENT is warmed here too, for the same reason and with a
+    number: see ``ClassificationService.warm_up`` (tens of milliseconds of SSL-context
+    setup — 19-81 ms across six fresh-process runs — once per process, otherwise paid by
+    a session's first call; the same docstring records that the first message did not
+    measurably get faster in paired runs).
+
+    Degrades rather than failing the boot, exactly as the sibling knowledge
+    wiring does: a layer that cannot be built is a line in ``warnings_out`` and a
+    ``classifier`` of ``None``, which is byte-for-byte today's prompt.
+    """
+    section = _classification_section(config_manager)
+    if not _classification_enabled(section):
+        return
+    values = _classification_values(config_manager)
+    try:
+        from local_operator.classification import (
+            ClassificationService,
+            max_recommendations,
+            setting_int,
+        )
+
+        hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
+        # …and its keep-alive client is built HERE, not on the first message: tens of
+        # milliseconds of SSL-context setup (19-81 ms across six fresh-process runs),
+        # paid before the call's first await, so no wait budget can bound it. No
+        # connection is opened — the object only — and the paired-run caveat on what
+        # this buys is in ``ClassificationService.warm_up``.
+        #
+        # ``getattr`` and a try of its own: warming is an OPTIMISATION, so a seam that
+        # does not publish it (the seam contract is ``recommend_resources`` +
+        # ``notice``, and the tests inject exactly that) keeps working, and a warm-up
+        # that fails must not cost the layer — the shared handler below would turn
+        # both into ``classifier = None``, i.e. a session with no classification
+        # because a prewarm went wrong.
+        warm_up = getattr(hooks.classifier, "warm_up", None)
+        if callable(warm_up):
+            try:
+                warm_up()
+            except Exception:  # noqa: BLE001 — the layer still works, just colder
+                logger.debug("classification: prewarm failed", exc_info=True)
+        # The REQUEST's own cap field is an upper bound over the service's reader
+        # (``min(request, settings)``), so it has to be the configured value:
+        # left at the dataclass default it would silently cap a configured 5 at
+        # 3. Read through the package's own reader, in the one branch that has
+        # already imported the package.
+        hooks.classification_max_recommendations = max_recommendations(values)
+        # ``waitMs`` through the SAME reader the package uses for its integers
+        # (``setting_int``): a hand-edited ``waitMs: "80"`` is a typo we can read,
+        # ``waitMs: true`` is refused (``True`` is an ``int`` in Python, and a
+        # boolean there would mean a 1 ms wait), and ``0`` means "use the default"
+        # exactly as it does for ``timeoutMs``. This key is the WIRING's own — the
+        # package never reads it — but it is a §8 number and is parsed like one.
+        hooks.classification_wait_s = (
+            setting_int(values, "waitMs", DEFAULT_CLASSIFICATION_WAIT_MS) / 1000.0
+        )
+    except Exception as exc:  # noqa: BLE001 — the layer is optional enrichment
+        warnings_out.append(f"Resource classification unavailable: {exc}")
+        hooks.classifier = None
+
+
+def _classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandidate, ...]:
+    """The candidate roster, cached against the inputs it was derived from.
+
+    ONCE PER ROSTER, never once per user message. The walk below and the row it
+    allocates per resource are session-shaped work; re-deriving them on every
+    turn is exactly the per-message overhead the latency budget forbids, and it
+    buys nothing — the inputs cannot change without the index object or the
+    configured server names changing, which is what the cache key records. A warm
+    turn therefore serializes the user message and nothing else.
+    """
+    index = hooks.index
+    key: tuple[Any, ...] = (
+        index,
+        len(getattr(index, "skills", ()) or ()),
+        hooks.mcp_server_names,
+    )
+    if hooks.classification_roster is not None and hooks.classification_roster_key == key:
+        return hooks.classification_roster
+    roster = _build_classification_roster(hooks)
+    hooks.classification_roster = roster
+    hooks.classification_roster_key = key
+    return roster
+
+
+def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandidate, ...]:
+    """One row per resource the router itself can see (§7 step 1).
+
+    Hidden skills are skipped because the router skips them
+    (``SkillIndex.select`` filters ``hide``) — offering the model a resource the
+    harness will not select would suggest a capability that does not exist. A row
+    without a description is dropped for the same reason the index drops one: the
+    description IS the routing signal, and an unnamed option is a coin flip.
+    """
+    from local_operator.skills.protocol import resource_url
+
+    rows: list[_ClassificationCandidate] = []
+    for resource in getattr(hooks.index, "skills", ()) or ():
+        if getattr(resource, "hide", False):
+            continue
+        kind = str(getattr(resource, "resource_type", "") or "")
+        if kind not in ("skill", "guide"):
+            continue
+        name = str(getattr(resource, "name", "") or "")
+        description = str(getattr(resource, "description", "") or "")
+        if not name or not description:
+            continue
+        rows.append(_ClassificationCandidate(kind, name, description, resource_url(kind, name)))
+    for server in hooks.mcp_server_names:
+        name = str(server or "")
+        if not name:
+            continue
+        rows.append(
+            _ClassificationCandidate(
+                "mcp", name, _mcp_capability_hint(name), resource_url("mcp", name)
+            )
+        )
+    return tuple(rows)
+
+
+def _mcp_capability_hint(server: str) -> str:
+    """The harness-owned capability line for one configured MCP server (§6).
+
+    ``_CAPABILITY_HINTS`` is imported rather than restated: it is release-owned
+    routing authority (``mcp/resources.py``'s module docstring is explicit that
+    neither config nor remote servers may supply this text), and a second copy
+    here would be free to drift from the one the catalogue renders. The private
+    name is the only access there is; adding a public accessor would mean editing
+    a module outside this slice, and the import is what keeps the two readings of
+    "what this server is for" identical.
+    """
+    from local_operator.mcp.resources import _CAPABILITY_HINTS
+
+    return _CAPABILITY_HINTS.get(server.casefold(), _MCP_DEFAULT_CAPABILITY)
+
+
+def _classification_request(hooks: _KnowledgeHooks, query: str) -> _RecommendationRequest:
+    """The request for one user message, over the CACHED roster."""
+    return _RecommendationRequest(
+        user_message=query,
+        context=None,
+        candidates=_classification_roster(hooks),
+        max_recommendations=hooks.classification_max_recommendations,
+    )
+
+
+def _classification_deadline_s(service: Any) -> float:
+    """The harness-side ceiling on one classification CALL, in seconds.
+
+    The shipped service publishes ``timeout_s`` (``values.classification.timeoutMs``)
+    and enforces it internally. The wiring knows the same number for a different
+    reason: it caps the turn's WAIT by it (see :func:`_classification_wait_s`), and
+    it is what a seam that publishes no deadline of its own is taken to honour. A
+    seam that ignores it cannot hold a turn open, because the turn stops waiting at
+    ``waitMs`` — which is the guarantee this layer actually owes a user message.
+    """
+    value = getattr(service, "timeout_s", None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        return float(value)
+    return DEFAULT_CLASSIFICATION_TIMEOUT_MS / 1000.0
+
+
+def _classification_wait_s(hooks: _KnowledgeHooks, service: Any) -> float:
+    """How long THIS turn waits for an answer, in seconds.
+
+    ``values.classification.waitMs``, capped by the call's own deadline: waiting
+    longer than the call could possibly take would spend budget on nothing.
+    """
+    return min(hooks.classification_wait_s, _classification_deadline_s(service))
+
+
+async def _classification_call(service: Any, request: Any) -> Any:
+    """One service call, with its cost logged WHERE IT LANDS.
+
+    A task body rather than an inline await, because on a real roster the vendor's
+    ~250 ms outlives the turn's 50 ms wait: the log line has to be written by
+    whoever finishes the call, not by a turn that has already moved on. There is no
+    error handling here on purpose — ``recommend_resources`` never raises (except
+    cancellation, which propagates), and a foreign seam that raises leaves a task
+    whose exception :func:`_harvest_classification` drops.
+    """
+    recommendation = await service.recommend_resources(request)
+    _log_classification_cost(recommendation)
+    return recommendation
+
+
+def _prune_outstanding(hooks: _KnowledgeHooks) -> None:
+    """Bound the background calls one session may leave running.
+
+    See :data:`_MAX_OUTSTANDING_CLASSIFICATION_CALLS`: the oldest is abandoned
+    (cancelled, never awaited) rather than kept, because it is an advisory call
+    whose turn is long gone and the alternatives are worse — piling one live task
+    per message against a vendor that never answers, or blocking the turn on the
+    answer the budget just said to skip.
+    """
+    while len(hooks.classification_outstanding) > _MAX_OUTSTANDING_CLASSIFICATION_CALLS:
+        abandoned = hooks.classification_outstanding.pop(0)
+        if not abandoned.done():
+            abandoned.cancel()
+
+
+def _task_outcome(task: Any) -> Any | None:
+    """A finished task's result, or ``None`` for anything else it could be.
+
+    ``CancelledError`` included: an abandoned or cancelled call has no outcome to
+    deliver, and reading it must not raise into the turn doing the harvesting.
+    """
+    try:
+        return task.result()
+    except BaseException:  # noqa: BLE001 — cancellation, a seam fault, anything
+        return None
+
+
+def _harvest_classification(hooks: _KnowledgeHooks) -> None:
+    """Move every FINISHED background call into the pending slot. Never blocks.
+
+    Called once per user message, before the block is rendered. ``done()`` is the
+    only test that matters: a turn must never wait for a call it already gave up
+    on, so a call still running stays outstanding and is looked at again next
+    message. A recommendation with no resources is dropped here rather than
+    queued — it has nothing to deliver, and a session whose answers are always
+    empty must append nothing at all.
+    """
+    if not hooks.classification_outstanding:
+        return
+    running: list[Any] = []
+    for task in hooks.classification_outstanding:
+        if not task.done():
+            running.append(task)
+            continue
+        recommendation = _task_outcome(task)
+        if recommendation is not None and getattr(recommendation, "resources", ()):
+            hooks.classification_pending.append(recommendation)
+    hooks.classification_outstanding = running
+
+
+async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> Any | None:
+    """One classification pass for one user message, waited on for ``waitMs``. NEVER raises.
+
+    Runs INSIDE the gather that also runs the embedder selection (see
+    :func:`_select_knowledge_block`), so everything synchronous in it — the
+    roster lookup, the service's state build and its serialization — is paid
+    CONCURRENTLY with the selection rather than before or after it. That is what
+    keeps the added wall-clock to the difference instead of the sum, and it is
+    why the request is built here rather than by the caller.
+
+    THE TURN'S PATIENCE IS NOT THE CALL'S DEADLINE. The turn waits
+    ``values.classification.waitMs`` (50 ms by default); the call is bounded by
+    ``values.classification.timeoutMs``, which the service enforces itself. When
+    the answer misses the wait, the turn does NOT pay the difference: the call is
+    left running (``shield``, so the wait's own cancellation cannot reach it),
+    kept in ``classification_outstanding``, and delivered by a later message. Two
+    properties follow:
+
+    - the added wall-clock per user message is bounded by the wait, whatever the
+      vendor does — measured against a real roster the vendor takes ~250 ms, and
+      the budget explicitly excludes that model time;
+    - the breaker keeps counting the VENDOR's deadline, once per call, inside the
+      service. The outer deadline this replaced started microseconds before the
+      service's own, so when it won, the service's ``_record_failure`` landed
+      after the turn had already been handed its empty block, and the warm-up
+      reported three failures across four messages (QA round 1, Q1).
+
+    A cancelled WAIT is deliberately not a cancelled call: "this turn has waited
+    enough" and "throw that work away" are different statements, and only the
+    second is a user's cancel.
+    """
+    service = hooks.classifier
+    if service is None:
+        return None
+    try:
+        request = _classification_request(hooks, query)
+    except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
+        logger.warning("classification: could not build the request", exc_info=True)
+        return None
+    wait_s = _classification_wait_s(hooks, service)
+    task = asyncio.create_task(_classification_call(service, request))
+    hooks.classification_outstanding.append(task)
+    _prune_outstanding(hooks)
+    try:
+        recommendation = await asyncio.wait_for(asyncio.shield(task), timeout=wait_s)
+    except asyncio.TimeoutError:
+        # NOT a failure and NOT an empty answer: the call is still in flight and
+        # its result is collected by a later user message. The prompt is unchanged
+        # either way (§7), so the only thing worth saying is where the answer went.
+        logger.info(
+            "classification: no recommendation within %.0f ms; the turn continues "
+            "without one and the answer rides the next user message",
+            wait_s * 1000,
+        )
+        return None
+    except asyncio.CancelledError:
+        # A cancelled TURN is a user's cancel, and they mean the WORK is over, not
+        # merely that this turn stopped waiting: the answer would otherwise be
+        # delivered onto the next message, which is how a "stop" quietly produces a
+        # recommendation for the question the user walked away from. (The WAIT's own
+        # timeout is the branch above, and it deliberately does NOT do this — "this
+        # turn has waited enough" and "throw that work away" are different
+        # statements. Review round 2, NIT 1: the comment here used to claim that
+        # distinction while the code left the task running either way.)
+        task.cancel()
+        hooks.classification_outstanding = [
+            outstanding
+            for outstanding in hooks.classification_outstanding
+            if outstanding is not task
+        ]
+        raise
+    except Exception:  # noqa: BLE001 — the layer may never fail a turn (§4)
+        logger.warning("classification: recommendation failed", exc_info=True)
+        return None
+    # Delivered to THIS turn, so the harvest must not deliver it a second time.
+    hooks.classification_outstanding = [
+        outstanding for outstanding in hooks.classification_outstanding if outstanding is not task
+    ]
+    return recommendation
+
+
+def _classification_block(
+    hooks: _KnowledgeHooks,
+    recommendation: Any,
+    *,
+    picked: Sequence[Skill],
+    catalogue: str,
+    already: set[str] | None = None,
+    limit: int | None = None,
+    rendered_urls: list[str] | None = None,
+) -> str:
+    """Render §7's advisory block for ONE recommendation, or ``""``.
+
+    THE WIRING RENDERS THIS, not the package's ``render_block``, and dedupe is
+    the whole reason: dropping what the prompt already contains needs to know
+    what the embedder selected and what the MCP catalogue already advertises, and
+    the wiring is the only layer that knows either. The package keeps its own
+    renderer for callers with nothing to dedupe against.
+
+    Anything already selected is dropped rather than demoted: a line telling the
+    model to read what the skills block has just told it to read immediately is
+    noise that costs context and teaches nothing.
+
+    ``already`` is the SAME test one step further out: resources an earlier
+    section of THIS prompt already carries. One turn can deliver two answers (the
+    one a previous message harvested, then this message's own), and a shared
+    ``limit`` — the per-message cap minus what has already been spent — is what
+    keeps the pair inside ``maxRecommendations`` instead of doubling it.
+
+    ``rendered_urls`` comes back through an OUT-LIST rather than a tuple return, and
+    the reason is outside this module: ``tests/unit/classification/test_block_parity.py``
+    compares this function's return value against the package's ``render_block`` line
+    for line, and that comparison is worth more than a tidier signature. The caller
+    owes the NOTICE an honest account of what was appended — the line it builds from
+    the recommendation names every resource the recommendation carried, which the
+    dedupe or the cap may have dropped — and this is how it learns the difference.
+    """
+    from local_operator.skills.protocol import resource_url
+
+    rendered: set[str] = set(already or ())
+    for resource in picked:
+        kind = str(getattr(resource, "resource_type", "") or "")
+        name = str(getattr(resource, "name", "") or "")
+        if name and kind in ("skill", "guide"):
+            rendered.add(resource_url(kind, name))
+    budget = hooks.classification_max_recommendations if limit is None else limit
+    if budget <= 0:
+        return ""
+    urls: list[str] = []
+    for resource in getattr(recommendation, "resources", ()) or ():
+        url = str(getattr(resource, "resource_url", "") or "")
+        if not url or url in rendered or url in urls:
+            continue
+        # The catalogue advertises at most one server, by exactly this URL, so a
+        # recommendation repeating it would spend a line on something the same
+        # prompt already says.
+        if catalogue and url in catalogue:
+            continue
+        urls.append(url)
+        if len(urls) >= budget:
+            break
+    if not urls:
+        return ""
+    if rendered_urls is not None:
+        rendered_urls.extend(urls)
+    lines = [
+        _RECOMMENDATION_BLOCK_OPEN,
+        _RECOMMENDATION_BLOCK_PREAMBLE,
+        *(f"- {url}" for url in urls),
+        _RECOMMENDATION_BLOCK_CLOSE,
+    ]
+    return "\n".join(lines)
+
+
+def _delivered_view(
+    recommendation: Any, resources: tuple[Any, ...], *, late_urls: tuple[str, ...]
+) -> Any:
+    """The recommendation AS DELIVERED: every resource this prompt gained, and its attribution.
+
+    Handed to the seam's ``notice()`` instead of the original, for two reasons and both
+    are honesty rather than polish:
+
+    - ``resources`` is the UNION of what every answer delivered into THIS prompt
+      contributed, in the order the sections were appended. The original carries only
+      one answer's set (``announced[-1]``), so a prompt that gained a late answer and
+      its own could only ever have been named by half of it (QA round 4, Q1);
+    - ``late_urls`` names the resources that came from an EARLIER message, which the
+      line has to say out loud or it reads as advice about the message it now sits
+      under (design round 1, D2) — and per RESOURCE, because a mixed union has no
+      single true label.
+
+    The base object supplies everything else the line or a caller may read (vendor,
+    cost, latency, and whatever a host's own type carries), so it stays ``announced[-1]``
+    — the newest answer, whose metadata describes the run that produced the fresher half.
+
+    Returned as the original object when this prompt added nothing to it (same resources,
+    nothing late), so a host's own classifier keeps its own type. A seam whose
+    recommendation is not a dataclass keeps the original too: the line may then be
+    optimistic or misattributed by a resource, which is a smaller lie than failing the
+    notice entirely.
+    """
+    if not resources:
+        return recommendation
+    own = tuple(getattr(recommendation, "resources", ()) or ())
+    if not late_urls and own == resources:
+        return recommendation
+    try:
+        return replace(recommendation, resources=resources, late_urls=late_urls)
+    except Exception:  # noqa: BLE001 — a foreign seam's result is not a dataclass
+        return recommendation
+
+
+def _log_classification_cost(recommendation: Any) -> None:
+    """Record what one pass cost, at INFO, on the vendor's own figures.
+
+    NOT accrued into ``Session.accrue_spend``, and that omission is deliberate
+    rather than an oversight. That path is the frontend store's per-CALL
+    accounting: it moves ``last_identity`` (which the status band reads as the
+    model that priced the session), it feeds the turn-end remainder the store
+    reconciles, and ``accrue_spend`` bumps ``_spend_live_calls`` — the flag that
+    CANCELS the one-time ledger rebuild for a pre-ledger session. Writing a
+    decision call through it would suppress that rebuild, quietly dropping the
+    restored history's dollars from a resumed session's total. The cost is
+    therefore logged here in the vendor's own units, and the accounting path is
+    left to the slice that owns it; the contract's ``Recommendation`` carries no
+    model id or token counts, so those fields print ``-`` unless the seam adds
+    them.
+    """
+    vendor = getattr(recommendation, "vendor", None)
+    if not vendor:
+        # No leg answered, so nothing was spent; the skip reason is the useful
+        # line and it is logged at debug because it is the ordinary state of a
+        # machine with no decision credential.
+        logger.debug(
+            "classification: no recommendation (skipped=%s)",
+            getattr(recommendation, "skipped", None),
+        )
+        return
+    cost = getattr(recommendation, "cost_usd", None)
+    latency = getattr(recommendation, "latency_s", 0.0)
+    logger.info(
+        "classification: vendor=%s model=%s tokens=%s/%s cost=%s latency=%.3fs resources=%d",
+        vendor,
+        getattr(recommendation, "model", "-"),
+        getattr(recommendation, "input_tokens", "-"),
+        getattr(recommendation, "output_tokens", "-"),
+        f"${cost:.6f}" if isinstance(cost, (int, float)) else "-",
+        float(latency) if isinstance(latency, (int, float)) else 0.0,
+        len(getattr(recommendation, "resources", ()) or ()),
+    )
+
+
+async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: Any) -> bool:
+    """Emit the seam's one-line notice through the session's own notice event.
+
+    Called once per admitted user message — the same cadence the frozen
+    knowledge block already has, so no separate "once per message" bookkeeping
+    is needed. The GATE is the seam's own: the shipped service applies
+    ``values.classification.notice`` inside ``notice()`` (it returns ``None``
+    when the key is off, or when there is nothing to announce), so the harness
+    does not read that key a second time and cannot disagree with it.
+
+    RETURNS whether a line was actually handed to the sink, and the caller uses
+    that to decide what to remember: the D7 repeat-suppression key may only be
+    updated for a line the user really saw, or a notice suppressed by its own
+    gate (``notice`` off, or a seam that renders nothing) would silence the next
+    message's identical set too — a small version of the failure the harness has
+    already paid for once, where a suppressed paint was recorded as delivered.
+
+    A MISSING SINK IS NOT A FALLBACK POINT: a provider rendered without a
+    session (the benchmark preflight) or a host that never bound one simply gets
+    no notice, which is better than inventing a second notification channel that
+    only some front ends paint.
+    """
+    seam = hooks.classifier
+    sink = hooks.notice_sink
+    notice = getattr(seam, "notice", None)
+    if sink is None or not callable(notice):
+        return False
+    try:
+        line = notice(recommendation)
+        if inspect.isawaitable(line):
+            line = await line
+    except Exception:  # noqa: BLE001 — a notice is never worth a turn
+        logger.debug("classification: notice rendering failed", exc_info=True)
+        return False
+    if not line:
+        return False
+    try:
+        delivered = sink(str(line), "info")
+        if inspect.isawaitable(delivered):
+            await delivered
+    except Exception:  # noqa: BLE001 — a notice is never worth a turn
+        logger.debug("classification: notice delivery failed", exc_info=True)
+        return False
+    return True
+
+
+async def _empty_selection() -> list[Skill]:
+    """The selection leg of the gather when the session has no index at all."""
+    return []
+
+
 async def _select_knowledge_block(
     hooks: _KnowledgeHooks,
     query: str,
@@ -1390,6 +2305,22 @@ async def _select_knowledge_block(
     guidance. Production Session appends changes after history instead of
     changing the system prefix. Legacy callers omitting task_id retain their
     compaction-only selection contract. ``cwd`` supports skill globs.
+
+    The classification layer rides the SAME cadence (docs/design/
+    classification-layer.md §7): this function already runs once per admitted
+    user message per ``task_id`` + ``compaction_id``, which is exactly the
+    once-per-message cadence the layer wants, so it needs no freeze machinery of
+    its own. Its call is gathered with the selection below, its block is appended
+    after the catalogue, and when it is off, unavailable, unanswered or empty the
+    joined block is byte-identical to what this function returned before the
+    layer existed (asserted in ``tests/unit/test_session_factory_classification.py``).
+
+    The turn only WAITS ``values.classification.waitMs`` for the answer. An answer
+    that arrives later is not lost: the next admitted user message re-renders this
+    block (that is what the per-message cadence buys here) and the late answer is
+    appended then, which the harness journals as a ``[session-state]`` update —
+    the existing channel for late host state, so nothing here has to rewrite the
+    cached prefix or invent a second notification path.
     """
     if (
         hooks.frozen_block is not None
@@ -1398,7 +2329,13 @@ async def _select_knowledge_block(
     ):
         return hooks.frozen_block
 
+    # BEFORE the gather, and before anything can return early: a call that finished
+    # while this session was idle belongs to the prompt this turn is about to
+    # build. A ``done()`` check per outstanding call — never a wait.
+    _harvest_classification(hooks)
+
     picked: list[Skill] = []
+    recommendation: Any | None = None
     query = query.strip()
     if query:
         # cwd rides as a keyword ONLY when set: test doubles and alternate
@@ -1406,7 +2343,30 @@ async def _select_knowledge_block(
         # historical signature, and there is no globs matching to do without
         # a cwd anyway.
         select_kwargs: dict[str, Any] = {"cwd": Path(cwd)} if cwd else {}
-        picked = await hooks.index.select(query, **select_kwargs) if hooks.index is not None else []
+        if hooks.classifier is not None:
+            # ONE gather, so the classification's latency is the DIFFERENCE
+            # against the embedder selection rather than the sum (§7 step 2) —
+            # and the request build, which is where the package serializes the
+            # state, happens inside the gathered coroutine for the same reason.
+            #
+            # The classification coroutine bounds ITS own wait and never raises,
+            # so a vendor outage costs the recommendation and nothing else; the
+            # selection leg keeps its existing contract exactly, so its exception
+            # still propagates to the provider's guard. Nothing here wraps the
+            # gather in a deadline of its own: a deadline over the gather would
+            # either wait for the classification (the budget) or abandon the
+            # selection (the prompt).
+            selection = (
+                hooks.index.select(query, **select_kwargs)
+                if hooks.index is not None
+                else _empty_selection()
+            )
+            selected, recommendation = await asyncio.gather(
+                selection, _classification_recommendation(hooks, query)
+            )
+            picked = selected
+        elif hooks.index is not None:
+            picked = await hooks.index.select(query, **select_kwargs)
         if hooks.agent_hint_index is not None:
             matching_agents = await hooks.agent_hint_index.select(query, k=1)
             agents_guide = hooks.guides_by_name.get("agents")
@@ -1424,14 +2384,118 @@ async def _select_knowledge_block(
     from local_operator.skills.api import render_block
 
     sections = [section for section in [render_block(picked)] if section]
+    catalogue = ""
     if hooks.mcp_catalogue is not None:
         catalogue = hooks.mcp_catalogue(query)
         if catalogue:
             sections.append(catalogue)
+    # DELIVERY. Appended LAST, after the skills block and the catalogue, because
+    # this is the weakest claim in the prompt: advisory, deduped against both, and
+    # the one thing a model may ignore in full.
+    #
+    # Late answers go first — they are older, they were computed for an EARLIER
+    # message, and letting this turn's fresh answer take the per-message cap first
+    # would starve them for as long as the vendor keeps missing the wait. The
+    # pending list is consumed here, so an answer reaches a prompt exactly once.
+    #
+    # The BLOCKS are per answer (each is that answer's own text, capped and deduped
+    # in order), but the NOTICE is per MESSAGE: all the resources this prompt gained
+    # are announced on one line, which is what §7's "once per user message" says and
+    # what the previous shape broke — a message that delivered a late answer AND its
+    # own printed two lines (review round 2, MINOR 1). Late first, so the line reads
+    # in the order the sections appear.
+    pending, hooks.classification_pending = hooks.classification_pending, []
+    answers: list[tuple[Any, bool]] = [(answer, True) for answer in pending]
+    if recommendation is not None:
+        answers.append((recommendation, False))
+    carried: set[str] = set()
+    announced: list[Any] = []
+    announced_urls: list[str] = []
+    announced_resources: list[Any] = []
+    announced_late_urls: list[str] = []
+    for answer, late in answers:
+        urls: list[str] = []
+        block = _classification_block(
+            hooks,
+            answer,
+            picked=picked,
+            catalogue=catalogue,
+            already=carried,
+            limit=hooks.classification_max_recommendations - len(carried),
+            rendered_urls=urls,
+        )
+        if not block:
+            # Nothing survived the dedupe or the cap: the prompt already carries
+            # every resource this answer named, so there is nothing to append —
+            # and, one line down, nothing to announce either.
+            continue
+        sections.append(block)
+        carried.update(urls)
+        announced.append(answer)
+        announced_urls.extend(urls)
+        # THE UNION'S OWN RESOURCES, not the last answer's. The notice names what this
+        # prompt gained, and a prompt can gain an earlier message's answer AND its own —
+        # so the object handed to ``notice()`` has to carry both sets' resources, or the
+        # line can only describe one of them (QA round 4, Q1: it named the last answer's
+        # while labelling the whole thing from that answer).
+        #
+        # LATENESS is per RESOURCE for the same reason: one label over a mixed union is
+        # false of half of it, and the label used to come from whichever answer arrived
+        # last.
+        rendered = set(urls)
+        for candidate in getattr(answer, "resources", ()) or ():
+            if str(getattr(candidate, "resource_url", "") or "") in rendered:
+                announced_resources.append(candidate)
+                if late:
+                    announced_late_urls.append(str(candidate.resource_url))
+    if announced and not _already_announced(hooks, announced_urls):
+        # THE NOTICE RIDES DELIVERY, not the call: it is emitted here, once, for the
+        # resources this prompt actually gained. A call that missed the wait is not
+        # announced when it is abandoned (nothing was delivered then) or when it
+        # lands, but when a prompt carries it; and the seam's own gate
+        # (``values.classification.notice``) stays inside ``notice()``. The view is
+        # what keeps the line from naming a resource the dedupe or the cap dropped,
+        # and ``late`` is what stops it reading as an answer to the wrong question.
+        #
+        # Remembered only once the paint really happened: the D7 key means "the set
+        # the user last saw", and a line its own gate suppressed was not seen.
+        if await _emit_classification_notice(
+            hooks,
+            _delivered_view(
+                announced[-1],
+                tuple(announced_resources),
+                late_urls=tuple(announced_late_urls),
+            ),
+        ):
+            hooks.classification_last_announced = tuple(announced_urls)
+    elif announced:
+        logger.debug("classification: the same resources were just announced; staying quiet")
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
     hooks.frozen_task_id = task_id
     return hooks.frozen_block
+
+
+def _already_announced(hooks: _KnowledgeHooks, urls: Sequence[str]) -> bool:
+    """Whether the SAME resource set was announced on the previous message.
+
+    Design round 1, D7: with the money tail gone, four consecutive messages that
+    recommend the same skill printed four byte-identical rows. A repeat of the
+    previous announcement says nothing new — the resource is in this prompt either
+    way, and the block above is what the model reads — so the line is suppressed,
+    not the delivery. Only the IMMEDIATELY preceding set counts: a resource that
+    comes back later in the session is worth its line again, because by then the
+    user has read other things.
+
+    A PREDICATE, and deliberately not the recorder: it answers the question and
+    leaves ``classification_last_announced`` alone, because what that field means is
+    "the set the user last SAW". The caller updates it after the paint succeeds
+    (review round 3, NIT 1) — recording here marked a line as shown even when the
+    seam's own gate or a failed delivery meant nothing was painted, which silenced
+    the next message's identical set as though it had been announced.
+    """
+    signature = tuple(urls)
+    return bool(signature) and signature == hooks.classification_last_announced
 
 
 def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | None]:
@@ -2089,6 +3153,10 @@ async def _prepare(
     # names only from the eventual manager let the knowledge block freeze empty
     # before that background task won the race.
     _seed_mcp_routing(hooks, effective_cwd)
+    # The classification seam, built here because the package's cold import must
+    # not land inside a turn (see ``_attach_classification``). A no-op — not even
+    # an import — unless values.classification.auto is on.
+    _attach_classification(hooks, config_manager, credential_manager, knowledge_warnings)
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
@@ -2694,6 +3762,13 @@ async def wire_mcp_into_session(
     # Once the manager exists, compaction-time reselection sees reloads. The
     # already frozen first-task block remains byte-stable until compaction.
     knowledge_hooks.mcp_catalogue = lambda query: render_mcp_catalogue(manager, query)
+    # Same freshness, for the classification roster. ``_seed_mcp_routing`` fills
+    # the names from the config before any connection work; the manager's own
+    # list is the configured set as it stands NOW, so a reload between the two
+    # cannot leave the catalogue naming a server the roster does not offer. The
+    # roster's cache key includes these names, so the refresh is what rebuilds
+    # it.
+    knowledge_hooks.mcp_server_names = tuple(manager.get_all_server_names())
 
     def on_tools_changed(new_mcp_tools: list[AgentTool]) -> None:
         # Reconnects and tools/list_changed can replace AgentTool objects. Keep
@@ -2834,6 +3909,102 @@ def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | No
             pass
 
     return _hook
+
+
+def attach_classification_notices(session: Session, hooks: "_KnowledgeHooks | None") -> None:
+    """Give the classification seam the session's own notice event.
+
+    The seam may speak only through a channel the front end already paints.
+    ``Session._stream_notice`` emits a ``NoticeEvent`` — the same event the
+    ``auto effort:`` line rides (``model/configure.py``, via the stream fn's
+    notice handler) — so the CLI, TUI, headless and phone sessions all render it
+    with no new surface and no per-host wiring. It is bound HERE, at the
+    composition root, because the facade owns the event stream and is built after
+    the hooks are.
+
+    Deliberately NOT the stream fn's ``set_notice_handler``, which is the same
+    event by a shorter path: that handler is last-writer-wins on a stream fn
+    SHARED with subagents (see the prompt-cache TTL note in ``Session.__init__``),
+    so a child session would take over its parent's notices. The hooks object is
+    per-session, and a child's ``system_blocks_provider`` never runs the
+    classification pass at all, so nothing rebinds a parent's sink.
+
+    ``_stream_notice`` is private, and that is the honest description of the
+    situation: this is the session's own notice path, there is no public
+    equivalent, and the factory already reaches into the facade for exactly this
+    kind of binding (``_transcript``, ``_frontend_state_store``). A missing sink
+    is not fatal — the layer simply gets no notice, which is the pre-layer
+    behaviour — so the lookup is guarded rather than typed onto the protocol.
+    """
+    if hooks is None:
+        return
+    # ``queue_notice`` FIRST, and this ordering is design round 1's D1: the notice
+    # describes the prompt this turn is BUILDING, so emitting it here painted it
+    # between the user's question and the reply — in the answer's slot, in the
+    # dimmest ink on screen, 2-4 rows depending on the width. ``queue_notice`` holds
+    # it until the turn's answer has landed, and the session flushes it there.
+    # ``_stream_notice`` stays the fallback for a facade-shaped double that has no
+    # queue (the TUI pilot's ``FakeSession``, a benchmark preflight, any host that
+    # supplies its own), so a missing queue costs placement rather than the line.
+    sink = getattr(session, "queue_notice", None) or getattr(session, "_stream_notice", None)
+    if callable(sink):
+        hooks.notice_sink = sink
+
+
+def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | None") -> None:
+    """Fold the classification seam's ``aclose()`` into the session's dispose path.
+
+    The shipped service opens ONE keep-alive ``httpx.AsyncClient`` per session
+    (that client is §5a rule 3 — a fresh TCP + TLS handshake per call would spend
+    the whole latency budget before the request left the process) and memoizes the
+    resolved credential and the roster lines for that session's life. Its
+    ``aclose`` is documented as "the session owner calls this on dispose", and
+    this is that owner: the composition root every front end goes through, beside
+    ``attach_auth_dispose`` and ``attach_stream_dispose``, which exist for the
+    same reason. Without it the pool and the memos are pinned once per SESSION,
+    and the server and phone planes keep sessions alive for hours.
+
+    Registered as ``getattr`` rather than typed onto the seam, matching
+    ``attach_classification_notices``: a host's own classifier need not publish an
+    ``aclose``, and an injected test double typically does not. A seam without one
+    is not an error — it simply owns no resource this harness has to release.
+
+    ONE hook, in ONE order, and the order is the point. The calls this session left
+    running are cancelled FIRST, before anything closes the client they are using:
+    with ``waitMs`` at its 50 ms default against a ~250 ms answer, a session disposed
+    right after a message always has one in flight, and closing the keep-alive client
+    under it turned that call into a transport error with a traceback — an answer
+    nobody could use any more, reported as a failure (review round 2, MINOR 2). The
+    service's own ``aclose`` cancels what it still has in flight for the same
+    reason; this half cancels the wiring's wrappers so the session lets go of them
+    too.
+
+    The seam is resolved AT DISPOSE TIME rather than captured here, because it is an
+    injectable attribute (``hooks.classifier``) and a hook that closed the object
+    that happened to be there at REGISTRATION would leave a host's injected seam
+    open. That is not hypothetical: the test that covers this path swaps the seam
+    after ``create_session`` returns, which is the documented way to inject one, and
+    the captured-bound-method version sailed straight past it.
+    """
+    if hooks is None:
+        return
+
+    def _release_the_seam() -> Any:
+        """Cancel what is running, then close the seam. Returns the awaitable."""
+        for task in hooks.classification_outstanding:
+            if not task.done():
+                task.cancel()
+        hooks.classification_outstanding.clear()
+        hooks.classification_pending.clear()
+        # ``getattr`` rather than a typed call, matching
+        # ``attach_classification_notices``: a host's own classifier need not publish
+        # an ``aclose``, and a seam without one simply owns no resource this harness
+        # has to release. The returned value is handed straight back to the dispose
+        # runner, which awaits what it gets (``Session.dispose``).
+        close = getattr(hooks.classifier, "aclose", None)
+        return close() if callable(close) else None
+
+    session.add_dispose_hook(cast("Callable[[], Awaitable[None] | None]", _release_the_seam))
 
 
 def attach_auth_dispose(session: Session, auth_store: AuthStore | None) -> None:
@@ -3121,8 +4292,15 @@ async def create_session(
     # session; fold its close into dispose so every front end releases the
     # file lock on the single ``session.dispose()`` call.
     attach_auth_dispose(session, plan.auth_store)
+    # Classification seam: the layer's one-line notice rides the session's own
+    # notice event (see ``attach_classification_notices``). Bound before the
+    # first turn can run, and a no-op when the layer is off.
+    attach_classification_notices(session, plan.knowledge_hooks)
     # Stream seam: release the session's shared httpx connection pool on
     # dispose (one leaked pool per turn on the server facade otherwise).
+    # The classification seam's client and memos are per SESSION, so the
+    # keep-alive client has to be released with everything else the root owns.
+    attach_classification_dispose(session, plan.knowledge_hooks)
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])
     # Config seam: follow ``config.yml`` while the session lives, so an edit in
     # another pane (or on the page in this one) reaches compaction, retry and

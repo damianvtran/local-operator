@@ -2080,6 +2080,13 @@ async def test_a_preview_that_omits_the_selection_answers_an_explicit_null(draft
 #: ``high``).
 REFUSED_DRAFT_MODELS = [
     (draft_model("nope-provider", "whatever"), "provider_unknown"),
+    # A decision-only provider (TypeSafe's Jev) rejects ``chat/completions`` on
+    # every host we reach it through, so a stored session model of it 400s on the
+    # first turn. It needs its OWN clause rather than falling out of
+    # ``model_unknown``: ``offered_model_ids`` answers ``None`` for it — "cannot
+    # enumerate offline, accept the pair" — which is right for an aggregator and
+    # wrong for a provider whose chat catalogue is empty by construction.
+    (draft_model("typesafe", "jev-1.13"), "provider_decision_only"),
     (draft_model("anthropic", "claude-opus-9"), "model_unknown"),
     (draft_model("deepseek", "deepseek-flash", "turbo"), "effort_unsupported"),
     (draft_model("anthropic", "claude-opus-5", "xhighz"), "effort_unsupported"),
@@ -2125,6 +2132,28 @@ async def test_a_draft_selection_the_engine_could_not_serve_is_refused(
     )
     assert retry.status_code == 200, retry.text
     assert retry.json()["result"]["session_id"]
+
+
+def test_a_stored_draft_marker_naming_a_decision_only_provider_falls_back(tmp_path) -> None:
+    """The marker half of the same door: adopt the DEFAULT, never Jev.
+
+    A marker is written per session and can name anything a previous build accepted.
+    This reader is the third place a stored pair becomes a session model (the journal
+    validator and the pick boundary are the other two), so it refuses the pair here
+    rather than handing the pane a birth model that cannot answer.
+    """
+    import json
+
+    from local_operator.server.utils import desktop_sessions as utils
+
+    session_dir = tmp_path / "sessions" / "draft-1"
+    session_dir.mkdir(parents=True)
+    (session_dir / "desktop.json").write_text(
+        json.dumps({utils.DRAFT_MODEL_KEY: {"provider": "typesafe", "model_id": "jev-1.13"}}),
+        encoding="utf-8",
+    )
+
+    assert utils.draft_birth_selection(tmp_path, "draft-1") is None
 
 
 @pytest.mark.asyncio

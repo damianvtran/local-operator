@@ -31,7 +31,18 @@ WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
 LoginFn = Callable[..., Awaitable[str | dict[str, Any]]]
 RefreshFn = Callable[..., Awaitable[dict[str, Any]]]
 GetApiKeyFn = Callable[[dict[str, Any]], str]
-EnvKeys = str | Callable[[], str | None] | None
+#: How a provider names its API key's environment variable(s).
+#:
+#: THREE forms, and the tuple one is not decoration: TypeSafe publishes its
+#: decision model under ``TYPESAFE_API_KEY`` and its original name
+#: ``JEV_API_KEY``, and an operator who already exported the older spelling must
+#: not have to rename it. Written as a tuple rather than a callable because the
+#: NAMES are data the credential surfaces need (``credential_file_names`` turns
+#: them into the legacy-store rungs the login status reads), whereas a callable
+#: only ever answers with a value. ``resolve_env_key`` reads them in order, which
+#: is what makes "primary first" a property of the registry row rather than of
+#: whichever reader happens to be asking.
+EnvKeys = str | tuple[str, ...] | Callable[[], str | None] | None
 
 #: Attribute a login callable sets on itself to declare "I cannot complete
 #: without reading text from the user". Read by
@@ -44,8 +55,9 @@ PASTE_PROMPT_ATTR = "__lo_requires_paste_prompt__"
 class ProviderDefinition:
     """The whole per-provider auth/routing record.
 
-    - ``env_keys``: env var name OR a zero-arg callable returning the key's
-      value (picking among several vars, feature-flag style).
+    - ``env_keys``: env var name, a TUPLE of names read in order (primary
+      first), or a zero-arg callable returning the key's value (picking among
+      several vars where the choice has to be computed, feature-flag style).
     - ``allows_missing_api_key``: transport needs no bearer (local servers).
     - ``store_credentials_as``: alias the credential row under another
       provider id (xai-oauth ⇒ xai; openai-device ⇒ openai).
@@ -110,6 +122,24 @@ class ProviderDefinition:
     #: providers shipped unloggable-into: the requirement lived in the login
     #: body and nothing carried it out to the hosts.
     requires_paste_prompt: bool = False
+    #: This provider serves DECISION-model calls, never chat completions.
+    #:
+    #: TypeSafe's Jev is the case this exists for: every host we reach it
+    #: through rejects ``chat/completions`` outright, so a user who selected it
+    #: in ``/model`` would get a session that cannot answer a single turn, and
+    #: a fallback chain naming it would route a failing turn onto a provider
+    #: that can only fail again. The flag therefore marks a login-capable,
+    #: selectable-NOWHERE provider: it keeps its ``login`` (the key has to be
+    #: storable) while every surface that offers or resolves a CHAT model must
+    #: ask :func:`is_decision_only` and skip it.
+    #:
+    #: Honoured in four places, kept in step by
+    #: ``tests/unit/providers/test_decision_only.py``: the catalogue
+    #: (``providers.controller``, i.e. discovery/listing for every surface),
+    #: ``/model``'s ranking (``model.ranking``), session model resolution
+    #: (``session_factory.resolve_hosting_model_with_source``) and the failover
+    #: chain (``providers.failover.expand_fallback_targets``).
+    decision_only: bool = False
 
     def __post_init__(self) -> None:
         """Adopt the login callable's own paste requirement.
@@ -564,6 +594,30 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
     ),
     ProviderDefinition(
+        id="typesafe",
+        search_aliases=("jev", "typesafe-jev"),
+        name="TypeSafe (Jev)",
+        # Tuple form, primary first: TypeSafe's own console issues a
+        # ``TYPESAFE_API_KEY`` and the model's original name is ``JEV_API_KEY``,
+        # so the release reads whichever the operator already exported. Two
+        # NAMES rather than a callable because the login-status surfaces read
+        # the names themselves (see ``credential_file_names``).
+        env_keys=("TYPESAFE_API_KEY", "JEV_API_KEY"),
+        login=create_api_key_login(
+            "TypeSafe",
+            "https://typesafe.ai/",
+            "Paste the API key from the TypeSafe console.",
+        ),
+        base_url="https://api.typesafe.ai/v1",
+        # DECISION-ONLY (docs/design/classification-layer.md §9): the
+        # classification layer's second cascade leg reaches Jev through
+        # ``/v1/systemone``, and ``chat/completions`` is rejected on every host.
+        # The login is here because the KEY has to be storable — the provider is
+        # deliberately absent from every surface that offers or resolves a CHAT
+        # model, which is what ``decision_only`` records.
+        decision_only=True,
+    ),
+    ProviderDefinition(
         id="test",
         search_aliases=("mock",),
         name="Test (mock)",
@@ -613,6 +667,57 @@ def list_login_providers() -> list[ProviderDefinition]:
 AGGREGATOR_PROVIDERS = frozenset({"openrouter", "radient", "radient-key"})
 
 
+def is_decision_only(provider_id: str | None) -> bool:
+    """Whether ``provider_id`` serves decision calls and never chat completions.
+
+    ONE exported predicate rather than a ``definition.decision_only`` read at
+    each site, for the reason :func:`local_operator.model.discovery.is_meta_route_id`
+    is one too: an unknown id, an empty string and a legacy alias have to answer
+    the same way everywhere, and a second ``get_provider_definition`` call spelled
+    out per surface is how one of them ends up testing the raw string.
+
+    CASE AND PADDING ARE NORMALISED HERE, which is load-bearing rather than tidy:
+    ``get_provider_definition`` is a plain dict lookup over lowercase ids, so
+    ``TypeSafe``/``TYPESAFE``/`` typeSafe `` used to answer ``False`` — a spelling
+    in a wire frame or a hand-edited ``config.yml`` was enough to put a session on
+    a provider that 400s every turn (review round 3, MAJOR 1, reproduced on a real
+    session). Normalising here fixes every door at once and can only ever refuse
+    MORE, never less: it never turns a ``True`` into a ``False``.
+
+    Alias-aware through :func:`get_provider_definition`, and tolerant of ``None``
+    because every call site here is a filter over data that may carry no provider
+    at all. ``False`` for an unknown provider: "do not offer this" is a claim
+    only a resolved definition may make.
+    """
+    if not provider_id:
+        return False
+    canonical = str(provider_id).strip().lower()
+    definition = get_provider_definition(canonical)
+    return bool(definition is not None and definition.decision_only)
+
+
+def decision_only_message(provider_id: str) -> str:
+    """The ONE sentence for a provider that can serve no chat completion.
+
+    Shared by every door that refuses one, and there are now five: the config /
+    agent / flag hosting preflight and a resume's stored row (``session_factory``),
+    the desktop pick boundary, the draft-marker reader, and ``build_model_spec`` —
+    which is where a LIVE switch lands, since ``/model``, the viewer's slash result
+    and the wire's ``set_model`` all build their spec through it. A second spelling
+    of this fact would be a second chance to tell a user something the other surface
+    does not say, and the message is the only place the reason is explained at all.
+
+    The sentence stops at the fact: each caller appends the remedy that fits its own
+    surface (``/model`` from inside a session, ``local-operator config edit`` from a
+    config file), which is why this is a fragment of a message rather than a whole
+    one.
+    """
+    return (
+        f"Hosting '{provider_id}' serves decision-model calls, not chat completions, "
+        "so no session can run on it."
+    )
+
+
 def credential_provider_id(provider_id: str) -> str:
     """The provider id a credential for ``provider_id`` is actually STORED under.
 
@@ -640,8 +745,9 @@ def credential_provider_id(provider_id: str) -> str:
 def resolve_env_key(provider_id: str) -> str | None:
     """Resolve the provider's API key from the environment.
 
-    Handles both forms of ``env_keys``: a plain variable name, or a callable
-    that picks among several (feature-flag style).
+    Handles all three forms of ``env_keys``: a plain variable name, a tuple of
+    names read PRIMARY FIRST, or a callable that picks among several
+    (feature-flag style).
 
     Alias-aware: a login flavour declares no env var of its own (there is no
     ``XAI_OAUTH_API_KEY``), but it serves the same endpoint as the provider it
@@ -655,29 +761,65 @@ def resolve_env_key(provider_id: str) -> str | None:
         definition = get_provider_definition(credential_provider_id(provider_id))
     if definition is None or definition.env_keys is None:
         return None
-    if callable(definition.env_keys):
-        return definition.env_keys()
-    return os.environ.get(definition.env_keys) or None
+    keys = definition.env_keys
+    if callable(keys):
+        return keys()
+    # The tuple is ordered by the REGISTRY ROW, not by the caller: a host with
+    # both variables set must prefer the one the provider's own login writes,
+    # or an old spelling left in a shell profile silently outranks it.
+    for name in (keys,) if isinstance(keys, str) else keys:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def env_key_names(provider_id: str) -> tuple[str, ...]:
+    """Every env var NAME ``provider_id`` reads, primary first.
+
+    The ONE reader of the tuple form. :func:`env_key_name` (the display name) and
+    :func:`credential_file_names` (the legacy-store rungs the login status and
+    the controller's ``is_usable`` walk) both take their answer from here, so a
+    second variable cannot be honoured by one surface and invisible to another —
+    the asymmetry that made ``lop credential update ANTHROPIC_API_KEY`` leave the
+    phone's model sheet empty while the desktop listed every row.
+
+    Empty for a provider with no name of its own — a callable resolver
+    (:func:`_anthropic_env_key`), an unknown id, or an empty string — so it is
+    safe to call unconditionally and iterate over.
+    """
+    definition = get_provider_definition(provider_id)
+    if definition is None or definition.env_keys is None:
+        return ()
+    keys = definition.env_keys
+    if callable(keys):
+        return ()
+    if isinstance(keys, str):
+        return (keys,) if keys else ()
+    return tuple(name for name in keys if name)
 
 
 def env_key_name(provider_id: str) -> str | None:
-    """The env var NAME for display (None for callable resolvers)."""
-    definition = get_provider_definition(provider_id)
-    if definition is None or definition.env_keys is None or callable(definition.env_keys):
-        return None
-    return definition.env_keys
+    """The PRIMARY env var NAME for display (None for callable resolvers)."""
+    names = env_key_names(provider_id)
+    return names[0] if names else None
 
 
 def credential_file_names(provider_id: str) -> list[str]:
     """The ``CredentialManager`` key names ``provider_id`` can be configured under.
 
-    THE reader for the legacy credential file, for both ``env_keys`` forms.
+    THE reader for the legacy credential file, for every ``env_keys`` form.
     ``env_key_name`` answers only for the plain-string form and returns ``None``
     for the callable one — today exactly ``anthropic`` — so any caller built on
     it alone silently drops the provider whose key the user is most likely to
     have set by hand. That is not hypothetical: it is how an install configured
     with ``lop credential update ANTHROPIC_API_KEY`` came back with an empty
     model sheet on the phone while the desktop listed 18 rows.
+
+    Walks :func:`env_key_names`, not the single-name reader: a provider that reads
+    two variables (``typesafe``: ``TYPESAFE_API_KEY``, else ``JEV_API_KEY``) is
+    configured under EITHER of them, and a rung list carrying only the primary
+    would report an operator who set the second one as not logged in.
 
     ``SupportedHostingProviders.requiredCredentials`` is the right second source
     rather than a hard-coded map here, because it is the same table the CLI, the
@@ -695,9 +837,9 @@ def credential_file_names(provider_id: str) -> list[str]:
 
     names: list[str] = []
     for candidate in (provider_id, credential_provider_id(provider_id)):
-        name = env_key_name(candidate)
-        if name and name not in names:
-            names.append(name)
+        for name in env_key_names(candidate):
+            if name not in names:
+                names.append(name)
         for detail in SupportedHostingProviders:
             if detail.id != candidate:
                 continue

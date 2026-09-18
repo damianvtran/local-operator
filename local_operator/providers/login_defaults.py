@@ -87,6 +87,30 @@ def plan_login_defaults(
        the error it produces recommends this command as the remedy, so
        "already set, leave it alone" would loop one level deeper.
 
+    …and ONE provider is exempt from ALL THREE: a DECISION-ONLY one
+    (``registry.is_decision_only`` — TypeSafe's Jev), whose wire rejects
+    ``chat/completions`` on every host we reach it through. Logging in to it
+    stores a credential the resource-classification layer uses and is not a
+    statement about chat routing at all, so the routing is left exactly as it
+    was and the plan carries a RECEIPT saying so (``hosting=None`` +
+    ``receipt``, the dataclass's own "wrote nothing, but here is why" shape —
+    callers print it instead of the write receipt). Adopting it in case 2 would
+    produce a config whose very next session cannot answer a turn: the same trap
+    the catalogue, the ``/model`` ranking, the session-model resolver and the
+    failover chain each refuse, and login is the fifth door to it. It is
+    deliberately NOT repaired in case 3 either — a hosting that is already
+    broken is not improved by replacing it with one that cannot serve a session.
+
+    The exemption is checked BEFORE case 1, and that ordering is load-bearing
+    rather than incidental: the receipt is the only place a user learns why this
+    login left their routing alone, and case 1 — a working hosting already
+    configured, the most common state there is — returns before any receipt a
+    later branch could produce. Behind it, the note was unreachable exactly when
+    it was most needed (review round 1, Q4).
+
+    The credential is never in question here: storing it is the caller's step
+    and it has already happened by the time this runs.
+
     The model is resolved through ``credential_provider_id`` and, when
     repairing, is always overwritten — cleared if the provider has no known
     default. Both halves of that are load-bearing:
@@ -118,10 +142,6 @@ def plan_login_defaults(
       in ``tests/unit/tui/test_app_pilot.py`` asserts it end to end rather than
       stopping at the config file.
     """
-    if hosting and not is_unusable_hosting(hosting):
-        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
-
-    repairing = is_unusable_hosting(hosting)
     # The credential's storage id is the real hosting: an OAuth flavour stores
     # under the provider it authenticates, and that is what the app must point
     # at. This is also what gives the flavour a default model to inherit.
@@ -134,7 +154,55 @@ def plan_login_defaults(
     # a registry-resolved definition, so this is a belt, not a currently-hit
     # path -- and a no-op plan is the honest answer when there is nothing
     # legitimate to write.
-    if get_provider_definition(resolved) is None:
+    definition = get_provider_definition(resolved)
+    if definition is not None and definition.decision_only:
+        # BEFORE the "hosting already set and usable" case, deliberately: this branch
+        # writes nothing in EVERY configuration, and its receipt is the only place a
+        # user learns why logging in to TypeSafe left their routing alone. Returning
+        # at the early exit below instead made the note unreachable in the MOST COMMON
+        # state of all — a working hosting already configured — which is exactly the
+        # silent-login failure this branch exists to remove (review round 1, Q4).
+        #
+        # The COPY is design round 1's D5 and round 2's D8, and it is deliberately in
+        # the user's terms: the first version named Jev, decision-model calls, chat
+        # completions and resource recommendations (149 characters of the harness's own
+        # vocabulary, never one row at any width) and never said what would actually
+        # serve their chats. What it says instead is the answer to the only question
+        # the person who just pasted a key has — "did this change my model?" — plus the
+        # name of whatever IS serving, which is the fact they can act on.
+        #
+        # The length is a MEASUREMENT, not a preference: the designer read the rendered
+        # row capacity at 100 columns and found it is exactly 90 cells, and the round-2
+        # sentence was 94 ("Nothing changed: this key only adds suggestions, chats keep
+        # running on <hosting>/<model>."), so it still wrapped to two rows. The clause
+        # that went is the one explaining WHY nothing changed — the line above already
+        # says the key was stored, and "nothing changed" is the half the user asked for.
+        #
+        # The capital is part of the sentence (D9): the CLI used to upper-case the first
+        # letter while the TUI rendered the string verbatim, so "set default hosting…"
+        # reached two front ends with two openings. Both now print what the planner
+        # wrote, and the planner writes a sentence — capital, and its own full stop (D6).
+        #
+        # Which sentence depends on the CURRENT routing, and the unusable case is not
+        # the configured one: naming a hosting this build refuses to boot on would be
+        # the opposite of the reassurance being given.
+        if hosting and not is_unusable_hosting(hosting):
+            serving = f"{hosting}/{model_name}" if model_name else str(hosting)
+            receipt = f"Nothing changed — chats keep running on {serving}."
+        else:
+            receipt = "Nothing changed — pick a chat model with /model first."
+        return LoginDefaults(
+            hosting=None,
+            model_name=None,
+            receipt=receipt,
+            repairing=False,
+        )
+
+    if hosting and not is_unusable_hosting(hosting):
+        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
+
+    repairing = is_unusable_hosting(hosting)
+    if definition is None:
         return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
     default_model = default_model_for(resolved) or ""
 
@@ -142,7 +210,7 @@ def plan_login_defaults(
         # Always overwrite: the stored model belonged to the provider being
         # replaced. "" clears it rather than leaving a dead id behind.
         model_to_write: str | None = default_model
-        receipt = f"replaced unusable hosting '{hosting}' with '{resolved}'"
+        receipt = f"Replaced unusable hosting '{hosting}' with '{resolved}'"
         if default_model:
             receipt += f", model to '{default_model}'"
         else:
@@ -153,9 +221,16 @@ def plan_login_defaults(
         # First-run: only fill an EMPTY model, so a user who deliberately chose
         # one keeps it.
         model_to_write = default_model if (default_model and not model_name) else None
-        receipt = f"set default hosting to '{resolved}'"
+        receipt = f"Set default hosting to '{resolved}'"
         if model_to_write:
             receipt += f", model to '{model_to_write}'"
+
+    # The sentence carries its own full stop AND its own capital (design round 1, D6,
+    # D9): the two front ends used to punctuate and capitalise the SAME receipt
+    # differently — the CLI appended a period and upper-cased the first letter, the TUI
+    # did neither — so where it was read decided how it was written. Each of the four
+    # strings above is therefore complete, and neither front end touches it at all.
+    receipt += "."
 
     return LoginDefaults(
         hosting=resolved,
