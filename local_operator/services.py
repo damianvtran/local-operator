@@ -480,6 +480,11 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
 #: 137 columns rendered as ``curre`` / ``nt`` (design review D6).
 _LINE_BUDGET = 80
 
+#: The mobile relay's LaunchAgent label. It is the one supervised daemon that `restart`
+#: bounces even when the repair guard refuses to repoint the others, which is why the
+#: note names it separately and only when its plist is installed.
+_MOBILE_AGENT_LABEL = "com.local-operator.mobile"
+
 
 def _install_may_repoint_daemons() -> bool:
     """May THIS caller rewrite the supervised plists?
@@ -550,11 +555,18 @@ def status_lines() -> list[str]:
         lines.append("      so its build is not in the plist.")
         if _install_may_repoint_daemons():
             lines.append("      `lop services restart` puts them on the current build")
-        else:
+        elif any(path.stem == _MOBILE_AGENT_LABEL for path in supervised):
             # TRUE IN BOTH HALVES, which the blunt gate was not: the bounce happens
-            # whatever this caller is, the repoint does not.
+            # whatever this caller is, the repoint does not. Gated on the mobile plist
+            # being among the installed ones (round 13, R13-1; the design round's D21):
+            # with no mobile plist `refresh_mobile_after_upgrade` returns without
+            # bouncing anything, so promising a bounce would over-warn about a daemon
+            # the reader does not have.
             lines.append("      `lop services restart` still bounces the mobile relay;")
             lines.append("      the rest are repointed only by the install that owns them")
+        else:
+            lines.append("      `lop services restart` repoints them only from the")
+            lines.append("      install that owns them")
     return lines
 
 
@@ -591,7 +603,13 @@ def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
     movable = [r for r in stale if getattr(r, "reloadable", False)]
     if not movable:
         # Written to the budget like every other line here — the first version of this
-        # sentence was 86 columns, over the budget it was added to protect.
+        # sentence was 86 columns, over the budget it was added to protect. And the noun
+        # agrees with its count (round 13, R13-3): "the stale ones" over ONE daemon is
+        # the same defect as "1 need".
+        if len(stale) == 1:
+            return [
+                "the stale daemon cannot be moved by `lop services restart`; restart it by hand"
+            ]
         return ["the stale ones cannot be moved by `lop services restart`; restart them by hand"]
     if len(movable) == len(stale):
         return ["run `lop services restart` to move the stale ones onto the current build"]
