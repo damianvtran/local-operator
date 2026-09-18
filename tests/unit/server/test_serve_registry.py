@@ -96,8 +96,15 @@ def test_publish_is_atomic_and_0600_under_a_0700_directory(tmp_path: Path) -> No
         "heartbeat_at",
         "retiring_from",
         "retiring_to",
+        # The reload capability (``server/reload``). Part of the pinned shape for
+        # the same reason as the two above: a caller decides whether it may send
+        # ``SIGUSR1`` to this daemon from THIS field, and ``SIGUSR1``'s default
+        # disposition is to terminate. A reader that could not find the key would
+        # have to guess, and guessing is what kills the daemon.
+        "reloadable",
     }
     assert (data["retiring_from"], data["retiring_to"]) == ("", "")
+    assert data["reloadable"] is False
 
 
 def test_unpublish_is_best_effort_and_namespace_scoped(tmp_path: Path, monkeypatch) -> None:
