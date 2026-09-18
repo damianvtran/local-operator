@@ -804,20 +804,20 @@ Editor .text-area--credential-armed {
  *
  * A resolvable `@path` token in the composer. It shipped with NO rule at all,
  * so it rendered in the prose colour on the prose ground. Measured on one frame
- * of `/help explain @README.md to me`: `/help` painted #6ea8d8 (signal, 6.81:1
- * on this ground) and ` explain @README.md to me` came back as ONE run of
- * #e9e5db — 13.76:1 against the ground, i.e. the prose ink — leaving the token
- * at **1.00:1 against the prose around it**. No chip, no tint, no weight change,
- * in a composer that already had a vocabulary for "structured token that is not
- * prose" (design round 1, D2).
+ * of `/help explain @README.md to me`: `/help` painted `signal` (6.81:1 on this
+ * ground) and ` explain @README.md to me` came back as ONE run of the prose ink
+ * (`fg`, 13.76:1 against the ground), leaving the token at **1.00:1 against the
+ * prose around it**. No chip, no tint, no weight change, in a composer that
+ * already had a vocabulary for "structured token that is not prose" (design
+ * round 1, D2).
  *
  * `signal` is that vocabulary, and the sheet already argues its use for this
  * object one block up: the attachment chip took `signal` as "the ramp's
  * file/reference hue". Now that the token carries it, the two numbers this rule
  * is judged on are:
  *
- *   token vs the prose beside it (#e9e5db)  1.00:1 -> **2.02:1**
- *   token vs the composer ground (#1e1a14)  13.76:1 -> **6.81:1**
+ *   token vs the prose beside it (`fg`)      1.00:1 -> **2.02:1**
+ *   token vs the composer ground (`surface`) 13.76:1 -> **6.81:1**
  *
  * The first is DISCRIMINATION — the number D2 was filed on, and the one that
  * was total: the token and the words either side of it were the same ink. The
