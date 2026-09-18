@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
+from local_operator.agent_shell import nested_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
@@ -7737,6 +7738,19 @@ def main() -> int:
                     return 1
                 print(json.dumps(state, ensure_ascii=False))
                 return 0
+            # A `lop` command an agent ran may not open a session of its own.
+            # What it would start is a TOP-LEVEL conversation: the operator's
+            # session list, desktop sidebar and phone history list it as a chat
+            # they opened, and it runs outside this session's job manager, so
+            # nothing here can see, steer, cancel or account for it (see
+            # `agent_shell.py` for the incident this answers). `--status`
+            # returned above, so the read-only form stays reachable, and the
+            # documented escape for QA runs is `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`
+            # (docs/EXEC.md) — deliberately not named to the model in the text.
+            refusal = nested_session_refusal()
+            if refusal is not None:
+                print(f"exec failed: {refusal}", file=sys.stderr)
+                return 1
             exec_args = ExecArgs(
                 background=args.background,
                 json_mode=args.json_mode,
@@ -7789,6 +7803,37 @@ def main() -> int:
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
+
+        # The interactive path is the fall-through — every subcommand returned
+        # above — so this ONE check covers `lop`, `lop --resume ID`, `--tui` and
+        # every future interactive flag together, and it sits FIRST so a refused
+        # run has written nothing: no config override, no registry row for an
+        # autosave agent. It honours the SAME escape as the exec path (the rule
+        # is `nested_session_refusal`'s, in one place, on purpose), because a
+        # pty harness drives this front end exactly as a bench drives exec.
+        # What differs between the two paths is only who DROPS the marker: the
+        # places a session opens a conversation for its user — the TUI restart,
+        # `/fork`'s window, and both rungs of a notification click (the terminal
+        # and the desktop app) — pass `agent_shell.without_agent_shell_marker`,
+        # since those are the user's gestures and not an agent's command.
+        refusal = nested_session_refusal()
+        if refusal is not None:
+            from local_operator.cli_style import ERROR, paint
+
+            # The PREFIX carries the colour, the diagnostic does not (design
+            # round 1, D1): the whole 646 bytes painted bold red is nine wrapped
+            # lines of alarm for a message whose content is "you took the wrong
+            # route", and the exec path prints the same bytes with no colour at
+            # all — one sentence must not render two ways depending on which
+            # entry point hit it.
+            #
+            # `stream=sys.stderr` because that is where this text goes (design
+            # round 2, D4): `paint`'s gate reads the stream it is told about, and
+            # with the default it read stdout — so `lop 2> log` with stdout on a
+            # terminal wrote escapes into a file, the one shape the gate exists
+            # to keep plain.
+            print(paint("Error: ", ERROR, stream=sys.stderr) + refusal, file=sys.stderr)
+            return 1
 
         config_manager = ConfigManager(base_dir)
         credential_manager = CredentialManager(base_dir)

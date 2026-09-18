@@ -72,6 +72,13 @@ ORIGIN_NAME = "origin.json"
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
 
+#: ``origin`` value for a session a command from an agent's shell opened under
+#: the escape hatch (:mod:`local_operator.agent_shell`). The FIRST value minted
+#: on the "any non-user origin is hidden" default rather than on a new kind of
+#: hidden, which is the point: the operator's sidebar listed two review sessions
+#: spawned this way because nothing on disk said a machine had started them.
+ORIGIN_AGENT_SHELL = "agent-shell"
+
 #: ``origin`` value for a session ``/fork`` branched off another. Unlike
 #: :data:`ORIGIN_SUBAGENT` this marks the user's OWN work: the marker records
 #: PROVENANCE (which conversation this branched from, in its ``parent`` field),

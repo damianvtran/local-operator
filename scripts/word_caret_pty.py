@@ -18,6 +18,11 @@ from pathlib import Path
 
 WORKTREE = str(Path(__file__).resolve().parent.parent)
 PYTHON = os.path.expanduser("~/local-operator/.venv/bin/python")
+
+sys.path.insert(0, WORKTREE)
+
+from local_operator.agent_shell import harness_child_env  # noqa: E402
+
 SAMPLE = "alpha beta gamma delta"
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[=>]")
 
@@ -39,7 +44,23 @@ def read_for(fd: int, seconds: float) -> bytes:
 
 
 def main() -> int:
-    env = dict(os.environ)
+    # This script drives the real TUI in a pty, so it is a harness: the child
+    # inherits the agent-shell marker from whoever launched this, and without
+    # declaring the harness the TUI would refuse to open at all
+    # (`agent_shell.harness_child_env`).
+    #
+    # It deliberately does NOT isolate `LOCAL_OPERATOR_CONFIG_DIR`, unlike every
+    # other harness here (review round 2, F5): what it reproduces is a chord
+    # arriving at the real terminal's prompt, and an empty store boots into
+    # first-run setup instead of that prompt — the evidence would be of a
+    # different screen. What that costs the operator's store is stated exactly
+    # (round 3, F4): the TUI engages a runtime at MOUNT, before any keystroke
+    # (`tui/app.py:10044`), and a warm engage leaves one lease-only session
+    # directory — `.execution-lease`, `.session.pid`, `origin.json` and no
+    # transcript. The stamp writes that `origin.json`, so the directory stays
+    # out of the operator's picker and sidebar, and no conversation is ever
+    # appended to it.
+    env = harness_child_env()
     env.update(
         {
             "TERM": "xterm-256color",

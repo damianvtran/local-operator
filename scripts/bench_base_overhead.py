@@ -48,6 +48,15 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 
+# The repo root first, as `bench_task_cost.py` does: this script imports the
+# package in its own process (`_child_env`), and under an interpreter whose
+# `local_operator` resolves elsewhere the import would fail before any probe ran
+# — the round-2 F2 finding. The lazy imports further down stay lazy; they are
+# what keep `--help` and the import cells cheap.
+sys.path.insert(0, str(REPO))
+
+from local_operator.agent_shell import harness_child_env  # noqa: E402
+
 #: Modules whose cold import cost is the headline number. ``cli`` is what the
 #: console script pays; ``session_factory`` is what every non-CLI host (server,
 #: scheduler, exec worker) pays.
@@ -216,7 +225,11 @@ def _child_env(config_dir: Path) -> dict[str, str]:
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     env["LO_BENCH_CONFIG_DIR"] = str(config_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
-    return env
+    # Every probe drives the real CLI (`exec`), and this script is a harness, so
+    # it declares itself one: run from an agent's shell the child inherits the
+    # agent-shell marker and each sample would fail instead of being measured
+    # (`agent_shell.harness_child_env`).
+    return harness_child_env(env)
 
 
 def _run_probe(code: str, argv: list[str], env: dict[str, str]) -> dict[str, Any]:
