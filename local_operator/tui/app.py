@@ -40618,14 +40618,50 @@ class OperatorApp(App[None]):
                 # second question, and conflating the two handed a user a half
                 # sentence indistinguishable from a whole answer.
                 block.mark_truncated()
+                # The same classification the mounted-prose branch below makes,
+                # read from this event's OWN two fields rather than inherited
+                # from it: a block survives this branch, so its rail is decided
+                # here too. A truncated PROGRESS message under a following tool
+                # call is still progress — the turn goes on and the answer is
+                # still coming — so it is un-railed like any other narration,
+                # while a truncated ANSWER (no calls follow it) keeps the rail
+                # that says this is all the turn produced.
+                if is_intermediate_narration(
+                    stop_reason=message.stop_reason,
+                    has_tool_calls=message.has_tool_calls,
+                ):
+                    block.mark_narration()
                 block.finalize_text()
             self._refresh_working_activity()
             return
         block = self._ensure_streaming_block()
+        # ONE classification for this event, made BEFORE anything renders and
+        # read by both consumers below: the rail mark, and `display.narration`'s
+        # removal further down. Two separate reads of the same two fields is how
+        # a frame comes to show a message whose rail and whose existence
+        # disagree — this repo has paid for one predicate in two places already
+        # (`narration.py`).
+        narration = is_intermediate_narration(
+            stop_reason=message.stop_reason,
+            has_tool_calls=message.has_tool_calls,
+        )
         # TUI-020: adopt the authoritative text carried by the event.
         block.update_text(message.text)
         block.completion_anchor_id = message.message_id
         block.navigation_anchor_id = message.message_id
+        # MARKED before `finalize_text()`, which is what commits the rows: the
+        # rail marks the ANSWER, so a message that finalized into tool calls
+        # loses it — and losing it HERE, rather than a repaint later, is what
+        # keeps the reader from watching a rail drop off a settled frame.
+        #
+        # The streaming window above kept the rail on purpose. While deltas
+        # arrive nothing knows whether this call ends in tools or in the answer,
+        # so the rail streams as it always did and is dropped at this event — the
+        # same bargain `display.narration` already struck (see
+        # `tui/settings.py`). Marking it the other way round would strip the rail
+        # off the ANSWER while it is being read and add it a frame later.
+        if narration:
+            block.mark_narration()
         block.finalize_text()
         self._streaming_block = None
         # `display.narration` OFF: this call finalized into TOOL CALLS, so the
@@ -40647,10 +40683,7 @@ class OperatorApp(App[None]):
         # The WorkingBlock needs no guarding: it is SPACING_TRANSIENT, and
         # `remove_block` already skips transient blocks when it re-decides the
         # gap on whatever fell into the removed block's place.
-        if self._narration_hidden() and is_intermediate_narration(
-            stop_reason=message.stop_reason,
-            has_tool_calls=message.has_tool_calls,
-        ):
+        if self._narration_hidden() and narration:
             self._transcript_view().remove_block(block)
         # The prose is settled, so "responding…" is over: whatever the turn does
         # next — another model call, a tool batch — the line must stop claiming

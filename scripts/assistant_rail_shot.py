@@ -3,7 +3,7 @@
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/assistant_rail_shot.py OUT.svg [COLSxROWS] [THEME]
+        scripts/assistant_rail_shot.py OUT.svg [COLSxROWS] [THEME] [SURFACE]
 
 The seeded tree is chosen so one frame answers every question the treatment can
 be wrong about, because a frame of an assistant message ALONE cannot show any of
@@ -13,6 +13,14 @@ them:
   and deliberately not its colour, so the two bars have to be visible in one
   frame or "they are still told apart" is an assertion rather than an
   observation;
+* a MID-TURN PROGRESS sentence between that prompt and the answer, with its own
+  settled tool card — the rail marks the ANSWER, so the one frame this capture
+  must contain is a progress sentence and an answer on screen together, or "the
+  rail is on the answer and not on the narration" is again an assertion. It is
+  painted through the REAL event path (``AssistantMessageEnd`` finalized into
+  tool calls) rather than mounted as a settled block: the classification is made
+  from exactly those two fields on arrival, so a hand-built block would capture a
+  state the app never produces;
 * a settled tool card — the ledger spine is the other vertical ink on the
   screen, and a rail that reads as a third spine is a regression in the
   transcript's structure even when it is correct per-block;
@@ -22,6 +30,11 @@ them:
   is which" is checked;
 * a multi-paragraph answer, so the blank separator rows show the rail running
   CONTINUOUSLY rather than breaking into one segment per paragraph.
+
+The tree is ONE turn, and there is deliberately no second prompt/answer pair
+after it: the transcript follows the tail, so a second turn pushed the progress
+sentence off the bottom of a 30-row frame — the two blocks this capture exists to
+compare cannot both be in the frame that way.
 
 ``THEME`` (default ``dark``) selects the palette, because the rail's ``label``
 ink moves per theme and the decision that it stays legible and stays distinct
@@ -34,19 +47,35 @@ off would see without this capture leaving state behind in their config. The
 rail-OFF frame is not decoration: "off restores the pre-rail build" is a claim
 about a rendered frame, and the pair is what lets a reviewer check it.
 
-``SURFACE`` (default ``transcript``) selects WHICH surface is captured.
+``SURFACE`` is the FOURTH POSITIONAL argument (default ``transcript``) and
+selects WHICH surface is captured. It is an argument and NOT an environment
+variable, so it has to be passed after ``THEME``: a caller who writes
+``assistant_rail_shot.py out.svg 100x30 stream`` sends it into the theme and dies
+with ``KeyError: unknown theme: 'stream'`` (design round 2, D3).
+
 ``subagent`` renders the delegated-job page instead, and it is not optional
-coverage: the rail appears there by design, and that page is the one where the
-treatment's value is genuinely in question, because every prose block on it is a
-model response. A marker on all of them may carry no information while still
-spending the inset — which is a judgement to be made from a rendered frame
-rather than argued from the source.
+coverage: the rail appears there, and every prose block on that page is a model
+response — so it is the page where a mark that distinguishes progress from the
+answer is either doing work or just spending the inset. The fixture it folds has
+both kinds (a sentence before a tool batch, then the closing sentence), which is
+what makes the pair checkable from one frame rather than argued from the source.
+
+``stream`` captures the ONE event that moves a progress sentence — the new
+motion this treatment introduces, and the only thing a settled frame cannot
+show. Two frames of the same page, one event apart: ``OUT`` is taken between the
+last delta and the ``message_end`` that finalizes the call into tool calls (the
+rail is still painted, because mid-stream nothing can know which message is the
+answer), and ``OUT`` with ``-finalized`` inserted before its suffix is the same
+page one event later, with the rail retracted. Both hooks sit INSIDE that one
+call, so nothing else on the page differs between the pair and the pair is
+evidence about the event rather than about the turn.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +93,11 @@ import os  # noqa: E402
 
 import local_operator.tui.widgets.assistant as _assistant_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.events import (  # noqa: E402
+    AssistantDelta,
+    AssistantMessageEnd,
+    AssistantMessageStart,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
@@ -97,7 +131,10 @@ ANSWER = (
     "That is the whole loop."
 )
 
-SHORT = "Both deliveries are accounted for, and the manifest is current."
+#: The mid-turn progress sentence: prose a model call streamed before it
+#: finalized into a tool call. Short enough to sit on one row at 100 columns,
+#: which is what puts it in the frame beside the answer instead of above it.
+PROGRESS = "The app quit during that window. Let me check its state and bring it back."
 
 
 def _answer(text: str) -> AssistantBlock:
@@ -118,12 +155,73 @@ def _tool(app: OperatorApp, call_id: str, name: str, args: dict[str, object], re
     card.mark_done(result)
 
 
-def _seed(app: OperatorApp) -> None:
+async def _stream(
+    app: OperatorApp,
+    pilot: Any,
+    text: str,
+    *,
+    stop_reason: str | None,
+    has_tool_calls: bool,
+    before_end: Callable[[], Awaitable[None]] | None = None,
+    after_end: Callable[[], Awaitable[None]] | None = None,
+) -> None:
+    """Paint one model call through the app's own handlers.
+
+    The mount, the finalize and the classification are all owned by these
+    handlers (``on_assistant_delta``/``on_assistant_message_end``), so posting
+    the events is what makes the frame the one the product produces for a call
+    that ends in tool calls — the same sequence ``test_narration_toggle`` drives.
+
+    ``before_end`` and ``after_end`` are AWAITED either side of the finalize
+    event, which is what gives the ``stream`` SURFACE both frames of the retraction
+    from one seeded turn (see the ``stream`` surface in the module docstring).
+    Awaitable rather than plain callables so a hook can take its own pause
+    before exporting: a frame is only evidence if the paint it shows has
+    settled, and the pause that settles it belongs with the capture.
+    """
+    app.post_message(AssistantMessageStart())
+    await pilot.pause()
+    app.post_message(AssistantDelta(text))
+    await pilot.pause()
+    if before_end is not None:
+        await before_end()
+    app.post_message(
+        AssistantMessageEnd(text, stop_reason=stop_reason, has_tool_calls=has_tool_calls)
+    )
+    await pilot.pause()
+    if after_end is not None:
+        await after_end()
+    await pilot.pause()
+
+
+async def _seed(
+    app: OperatorApp,
+    pilot: Any,
+    *,
+    progress_frames: (
+        tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[None]]] | None
+    ) = None,
+) -> None:
+    """The reported turn: prompt, progress sentence, its tool card, the answer.
+
+    ``progress_frames`` is handed to the PROGRESS message's stream as
+    ``(before_end, after_end)`` — see the ``stream`` surface above.
+    """
     app._append_block(UserBlock("how does the ingest path handle a failing source?"))
+    await pilot.pause()
+    before_end, after_end = progress_frames or (None, None)
+    await _stream(
+        app,
+        pilot,
+        PROGRESS,
+        stop_reason="toolUse",
+        has_tool_calls=True,
+        before_end=before_end,
+        after_end=after_end,
+    )
     _tool(app, "t1", "read", {"path": "src/ingest/manifest.py"}, "412 lines")
+    await pilot.pause()
     app._append_block(_answer(ANSWER))
-    app._append_block(UserBlock("and the wake deliveries?"))
-    app._append_block(_answer(SHORT))
 
 
 async def _open_subagent(app: OperatorApp, pilot: Any, job_id: str) -> None:
@@ -192,6 +290,43 @@ async def main() -> None:
             save_capture(app, out)
         return
 
+    if surface == "stream":
+        # The retraction, photographed. `display.narration` and `display.rail`
+        # both stay at their shipped defaults: the subject is the ONE event that
+        # finalizes a progress sentence into tool calls, so anything else moved
+        # into the frame would be a second variable. Both frames come from one
+        # run of the real path, one event apart, with the capture hooks inside
+        # that call (R2, agent review round 1).
+        finalized = out.replace(".svg", "-finalized.svg")
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            if theme is not None:
+                app._apply_theme(theme)
+                await pilot.pause()
+
+            async def mid_stream() -> None:
+                """The last delta has landed and the call has NOT ended."""
+                await pilot.pause()
+                save_capture(app, out)
+
+            async def settled() -> None:
+                """The SAME page one event later, the rail retracted."""
+                await pilot.pause()
+                save_capture(app, finalized)
+
+            await _seed(app, pilot, progress_frames=(mid_stream, settled))
+            await pilot.pause()
+            await settle_status_line(pilot, app)
+            screen = app.screen
+            print(
+                f"size={screen.size} virtual={screen.virtual_size} "
+                f"vscroll={screen.show_vertical_scrollbar} "
+                f"streaming={out} finalized={finalized}",
+                file=sys.stderr,
+            )
+        return
+
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
@@ -204,7 +339,7 @@ async def main() -> None:
             # picker calls, so this frame is the one a user would see.
             app._apply_theme(theme)
             await pilot.pause()
-        _seed(app)
+        await _seed(app, pilot)
         await pilot.pause()
         await pilot.pause()
 

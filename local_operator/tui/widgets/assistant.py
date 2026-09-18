@@ -67,6 +67,13 @@ FALLBACK_WIDTH = 80
 #: that a user message has a line down its side and the model's answer has
 #: nothing, so the answer gets the same delineation.
 #:
+#: **It marks the ANSWER, and only the answer.** The rail was originally painted
+#: on every assistant block, which made a mid-turn progress sentence and the
+#: answer look identical — the exact distinction it exists to draw. A block that
+#: is mid-turn narration (see :meth:`AssistantBlock.mark_narration`) therefore
+#: paints no rail; the prose stays, because dropping it is ``display.narration``'s
+#: separate job.
+#:
 #: ``U+258E`` (quarter block), not the rule's ``U+258C`` (half block), and the
 #: difference is not decorative. Colour alone did not carry the distinction:
 #: ``label`` and ``signal`` are ISOLUMINANT in the shipped ramps — measured
@@ -450,6 +457,18 @@ class AssistantBlock(TranscriptBlock):
         #: block with no rows has no frame to be faithful to, and answering
         #: from the setting is the only defined answer there.
         self._painted_rail_cols: int = -1
+        #: Is this block MID-TURN NARRATION — prose a model call streamed before
+        #: it finalized into tool calls — rather than the answer that ends the
+        #: turn? Set by the two surfaces that make that classification
+        #: (``app.py::on_assistant_message_end``, ``session_presentation.py::
+        #: project_settled_rows``) from the ONE rule in
+        #: ``local_operator/tui/narration.py``, and read by :meth:`_rail_cols`.
+        #:
+        #: A flag rather than a re-derivation here, deliberately: the block does
+        #: not know its own stop reason, and a stop reason or tool-call count
+        #: reached for from inside a widget is exactly the second copy of the
+        #: classification the ``narration`` module exists to prevent.
+        self._narration: bool = False
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -487,8 +506,46 @@ class AssistantBlock(TranscriptBlock):
             self._frozen_epoch = epoch
         self._apply_rows(self._flat_rows(self._flat_width()))
 
+    def mark_narration(self) -> None:
+        """This block is mid-turn narration, so it carries no rail.
+
+        Called by the surface that finalized the message, from the classification
+        in ``local_operator/tui/narration.py`` — the ONE rule the live
+        transcript and a resumed session both read (:func:`is_intermediate_narration`).
+        Named after ``mark_truncated``: both are metadata set from the event that
+        ended the message, at the last moment the fact is knowable.
+
+        Must be called BEFORE the render that commits the message
+        (``finalize_text`` on the live path, ``update_text`` on replay). Every
+        row-producing path reads :meth:`_rail_cols` at paint rate, so a mark set
+        afterwards would leave the committed frame with a rail the next rebuild
+        would drop — a line visibly vanishing off a settled message.
+
+        **The streaming window keeps the rail, and that is the deliberate
+        bargain ``display.narration`` already struck.** While deltas arrive
+        nothing knows whether this call ends in tool calls or in the answer, so
+        the rail streams and is dropped one event later at finalize. The
+        alternative — no rail while streaming, added a frame later — would strip
+        the mark off the ANSWER being streamed, which is the case the rail is
+        for.
+        """
+        self._narration = True
+
+    def is_narration(self) -> bool:
+        """Whether this block is mid-turn narration (see :meth:`mark_narration`)."""
+        return self._narration
+
     def _rail_cols(self) -> int:
-        """:data:`RAIL_COLS` when the rail is on, 0 when it is off.
+        """:data:`RAIL_COLS` when the rail is on, 0 when it is off or unearned.
+
+        Two independent routes to zero, and the second is the rail's MEANING
+        rather than its setting: a narration block (see :meth:`mark_narration`)
+        paints no rail because the rail marks the answer. Both return 0 here
+        rather than being special-cased anywhere else, which is what makes an
+        un-railed narration block behave EXACTLY like a rail-OFF block — the
+        cells are not reserved, the prose folds to the lane's full width, the
+        copy gutter is empty and the selection slice does not compensate —
+        instead of the third state "railed geometry minus a glyph".
 
         The block-level gutter width, read at the same rate as the paint in
         :meth:`_apply_rows` so a flip cannot leave the fold and the paint
@@ -503,6 +560,8 @@ class AssistantBlock(TranscriptBlock):
         :func:`rail_rows` makes about resolving colour at paint time — it is
         what makes a mid-session flip apply to mounted blocks for free.
         """
+        if self._narration:
+            return 0
         return RAIL_COLS if settings_get("display.rail", DEFAULT_RAIL) else 0
 
     def _body_width(self, lane: int) -> int:
@@ -892,12 +951,14 @@ class AssistantBlock(TranscriptBlock):
         return self._full_text
 
     def copy_gutter(self, index: int) -> int:
-        """The rail's columns, on every row — the BLOCK-level constant.
+        """The rail's columns, on every row of a RAILED block — the BLOCK-level
+        constant.
 
         :func:`rail_rows` prefixes the same two cells to every row this block
         paints, blank paragraph rows included, so the count is uniform and needs
         no row bookkeeping — the same argument ``UserBlock.copy_gutter`` makes
-        for its prompt rule.
+        for its prompt rule. Whether this block is railed at all is
+        :meth:`_rail_cols`'s answer, and a narration block is not.
 
         This is only half the answer, and the smaller half.
         :meth:`_furniture_width` is the PER-ROW one on top of it: a quote row
@@ -907,9 +968,11 @@ class AssistantBlock(TranscriptBlock):
         copy path was fixed for — the constant is necessary and nowhere near
         sufficient.
 
-        Zero when the rail was off when these rows were painted: there is no
-        gutter to strip, and reporting two would take two cells of real content
-        off the clipboard.
+        Zero when the rail was off when these rows were painted, and zero for a
+        narration block — which is the same answer, because the block paints its
+        rows through the same gate that decided it: there is no gutter to strip,
+        and reporting two would take two cells of real content off the
+        clipboard.
 
         **Answered from what was PAINTED, not from what the setting says now**
         (review round 2, M1). The paint and the copy happen at different times,
