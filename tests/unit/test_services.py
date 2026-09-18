@@ -355,7 +355,7 @@ def test_status_lines_name_the_drift_and_the_capability(
     )
     # A checkout's own guard refuses the move (`install_kind` is EDITABLE here), so the
     # promise sentences are asserted against a caller the guard WOULD permit.
-    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
     assert "install: 0.59.0@4d3ce1d" in lines, "the build the reader is comparing against"
     # Stale: identity, then the verdict leading an indented line, then what to DO about
@@ -433,7 +433,7 @@ def test_status_lines_says_it_cannot_compare_when_the_stamp_is_unreadable(
         "_supervised_daemon_plists",
         lambda: [Path("/tmp/com.local-operator.mobile.plist")],
     )
-    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     backed = services.status_lines()
     assert any("puts them on the current build" in line for line in backed)
 
@@ -465,12 +465,9 @@ def test_the_fleet_advice_is_not_printed_when_restart_would_skip_them(
     """
     monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(reloadable=False)])
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
-    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
-    assert (
-        "the stale ones cannot be moved by `lop services restart`; restart them by hand"
-        in lines
-    )
+    assert "the stale ones cannot be moved by `lop services restart`; restart them by hand" in lines
     assert not any("run `lop services restart`" in line for line in lines)
 
 
@@ -484,7 +481,7 @@ def test_the_fleet_advice_counts_the_two_kinds_apart(
         lambda: [_record(source_ref="a"), _record(pid=3, source_ref="b", reloadable=False)],
     )
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
-    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     lines = services.status_lines()
     assert "run `lop services restart` for the 1 it can move; 1 need restarting by hand" in lines
 
@@ -504,10 +501,25 @@ def test_a_guard_that_refuses_silences_every_promise(
         "_supervised_daemon_plists",
         lambda: [Path("/tmp/com.local-operator.browser.plist")],
     )
-    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: False)
-    joined = " ".join(services.status_lines())
+    # The guard says NO to the plist repoint. It says nothing about the mobile bounce,
+    # which happens whatever this caller is (measured by bouncing the real daemon from
+    # a checkout), nor about the serve half, which never consults the guard.
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: False)
+    lines = services.status_lines()
+    joined = " ".join(lines)
     assert "puts them on the current build" not in joined
-    assert "run `lop services restart`" not in joined
+    assert any("still bounces the mobile relay" in line for line in lines)
+    assert any("repointed only by the install that owns them" in line for line in lines)
+
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
+    permitted = " ".join(services.status_lines())
+    assert "puts them on the current build" in permitted
+
+    # And the serve-daemon advice is NOT gated on the guard: `reload_serve_daemons`
+    # never asks it, so a durable second install gets correct advice even though the
+    # plist repoint is refused.
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: False)
+    assert any("run `lop services restart`" in line for line in services.status_lines())
 
 
 def test_no_line_exceeds_the_budget_with_a_long_authority(
@@ -531,7 +543,7 @@ def test_no_line_exceeds_the_budget_with_a_long_authority(
             ],
         )
         monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
-        monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+        monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
         lines = services.status_lines()
         longest = max(len(line) for line in lines)
         assert longest <= 80, f"{host}: {longest} columns: {max(lines, key=len)!r}"
