@@ -54,6 +54,32 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # blanking a transcript. The session history keeps the narration either
     # way, so `/resume` re-reads it under the current value.
     "display.narration": True,
+    # A rule down the left edge of the assistant's answer, in the `label`
+    # token. It ECHOES the user prompt's rule rather than matching it: same
+    # column and same role, but deliberately a different glyph and a different
+    # ink (a quarter block in `label` against the prompt's half block in
+    # `signal`), because a rail that looked identical to the prompt's would
+    # remove the distinction it exists to draw.
+    #
+    # Default ON. The rail answers "where does the answer start and stop",
+    # which only bites a reader who cannot already tell — so the people it
+    # helps are exactly the people who would never go looking for the setting.
+    # The asymmetry decides it: a user who dislikes the rail sees a line and
+    # turns it off, while a user who needs it under a default of OFF never
+    # discovers it exists. The cost of the wrong default is recoverable in one
+    # direction and invisible in the other.
+    #
+    # OFF restores pre-rail rendering exactly for a lane of `MIN_BODY` or
+    # wider, which is every ordinary terminal. Below that the pre-rail build
+    # had no floor and this one clamps for containment, so the two differ by
+    # design (see `AssistantBlock._body_width`). It is not merely an unpainted
+    # gutter either way: the fold width, the copy gutter and the selection
+    # slice are all read at the same rate as the paint, so the prose is not
+    # left indented two cells by a rail that is not there. A mid-session flip
+    # DOES reach blocks already on screen — `display.*` runs `retheme`, which
+    # re-enters `_apply_rows`, which is where the rail is painted and where the
+    # flag is read.
+    "display.rail": True,
     # One padding row above and below a tool row and a user prompt
     # (`.comfortable-rows` in the stylesheet). Default ON was changed to OFF
     # by the maintainer.

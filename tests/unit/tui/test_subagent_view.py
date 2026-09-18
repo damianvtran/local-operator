@@ -63,7 +63,11 @@ from local_operator.session.transcript import (
 )
 from local_operator.tui.app import SUBAGENT_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets import subagent_view
-from local_operator.tui.widgets.assistant import FALLBACK_WIDTH, AssistantBlock
+from local_operator.tui.widgets.assistant import (
+    FALLBACK_WIDTH,
+    RAIL_COLS,
+    AssistantBlock,
+)
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.subagent_panel import (
     GLYPH_DONE,
@@ -3972,9 +3976,14 @@ async def test_a_row_folds_at_the_body_width_it_is_mounted_into() -> None:
             # failure names the defect: a fold at 80 is the flash, whatever
             # else the ladder may legitimately report mid-layout.
             assert FALLBACK_WIDTH not in folds, folds
-            assert all(width == body_width for width in folds), folds
+            # The body LESS the rail: an ``AssistantBlock`` paints a
+            # ``RAIL_COLS``-cell gutter and folds its prose into what the
+            # gutter leaves, so the width it reports is the box it is
+            # painted in rather than the body it is mounted into. Still
+            # 'not the fallback', which is the flash this test catches.
+            assert all(width == body_width - RAIL_COLS for width in folds), folds
             block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
-            assert block._built_width == body_width
+            assert block._built_width == body_width - RAIL_COLS
     finally:
         monkeypatch.undo()
 
@@ -4014,7 +4023,10 @@ async def test_a_settled_message_is_committed_in_the_block_it_streamed_into() ->
         assert id(settled) == id(block), "the message was rebuilt to settle it"
         assert settled.is_finalized()
         rows = str(settled.renderable).split("\n")
-        assert any(not row.strip() for row in rows), rows
+        # Blankness past the rail: the block paints its gutter on every
+        # row including the paragraph separator, so ``row.strip()`` is
+        # truthy for every row and this could never fail as written.
+        assert any(not row[RAIL_COLS:].strip() for row in rows), rows
         assert len(rows) == len(streaming.split("\n")) + 1
 
 
@@ -4054,7 +4066,8 @@ async def test_a_finished_message_is_committed_while_the_child_is_still_working(
         for block in live:
             assert block.is_finalized(), "a finished message was left uncommitted"
             rows = str(block.renderable).split("\n")
-            assert any(not row.strip() for row in rows), rows
+            # Blankness past the rail, as above.
+            assert any(not row[RAIL_COLS:].strip() for row in rows), rows
         live_rows = [len(str(block.renderable).split("\n")) for block in live]
 
         # The child stops. The trajectory does not change — only the status —
