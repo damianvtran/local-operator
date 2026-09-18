@@ -50,6 +50,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+# The shared credential-shape table. STDLIB-ONLY and leaf, deliberately: this
+# module sits on the CLI startup path (``tests/unit/test_import_graph.py`` pins
+# that) and the shape pass has to be reachable from the result path without
+# dragging a session or a provider layer in behind it.
+from local_operator.redaction_shapes import ShapeHit, scrub_secrets_with_hits
+
 #: Environment variables only surface to the agent when opted in with this
 #: prefix. Everything else in the process env stays invisible.
 ENV_ALLOW_PREFIX = "LOCAL_OPERATOR_"
@@ -458,5 +464,76 @@ class VariableStore:
         return dropped
 
     def redact(self, text: str) -> str:
-        """Replace every stored credential or registered value with ``[redacted]``."""
-        return redact_secret_values(text, self.redaction_values())
+        """Remove every known credential, then every credential SHAPE, from ``text``.
+
+        **The ONE callable that makes coverage universal.** This is what
+        ``session/session.py`` hands to the harness loop as
+        ``redact_tool_result``, and what ``tools/builtin._redact_tool_text``
+        reads for the live surfaces that run before a result exists (the bash
+        stream, a background job's peek buffer, the abort receipt). Widening it
+        here is therefore what covers every agent, subagent, fork, exec and
+        headless run at once — a per-surface scrubber is one a new surface can
+        forget, which is exactly how a credential printed by ``kubectl exec …
+        env`` reached a transcript in full.
+
+        Two passes, in this order:
+
+        1. values the session KNOWS — session credentials and registered
+           redactions (:meth:`redaction_values`), replaced byte-for-byte;
+        2. credential SHAPES (:mod:`local_operator.redaction_shapes`) — a
+           credential recognised by how it is SPELLED, which is the only thing
+           that can catch a secret this session was never told. A remote host's
+           environment is precisely that set.
+
+        Values the shape pass MATCHES are registered back into (1) —
+        :meth:`_register_shape_hits` — so the same secret is contained for the
+        rest of the session even in a later form the table does not know.
+
+        WHAT THIS STILL DOES NOT GUARANTEE: an opaque value with none of the
+        table's spellings around it (a bare tenant id, a pasted fragment, a
+        secret whose name the table does not recognise) passes through. That
+        residual is stated in the shapes module rather than implied away here.
+        """
+        scrubbed, _ = self.redact_with_hits(text)
+        return scrubbed
+
+    def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
+        """:meth:`redact`, plus the LABELS of the shapes that fired.
+
+        Labels only, never values: the caller of this is the session's incident
+        path, which puts what happened in the transcript, and a notice that
+        carried the credential would be the leak it exists to report.
+
+        Values are registered for containment here rather than by the caller, so
+        every path that masks also contains — including the live-text path that
+        never sees this return value.
+        """
+        scrubbed, hits = scrub_secrets_with_hits(text, self.redaction_values())
+        if not hits:
+            return scrubbed, []
+        self._register_shape_hits(hits)
+        ordered: dict[str, None] = {}
+        for hit in hits:
+            ordered.setdefault(hit.label, None)
+        return scrubbed, list(ordered)
+
+    def _register_shape_hits(self, hits: Sequence[ShapeHit]) -> None:
+        """Register each matched credential as a value to scrub, for this session.
+
+        Containment rather than tidy bookkeeping: the shape pass catches a
+        DSN's password once, and the SAME secret can reappear later in a form
+        the table has no rule for (quoted alone, concatenated into another
+        command's line). Registering it means the exact-value pass — which runs
+        first on every later result — catches that too.
+
+        Only §6 registrations are written, the same sink the broker uses, so a
+        matched value never becomes injectable into a child's environment or
+        readable by ``read_variable``: registering a value for SCRUBBING must
+        never make it readable, which is the distinction ``_credentials`` and
+        ``_redactions`` draw. The floor is the shapes module's — a matched value
+        shorter than that is not registered, because a short value registered
+        process-wide rewrites ordinary text (the measured failure on
+        ``mcp.redaction``'s three-character value).
+        """
+        for hit in hits:
+            self.register_redaction(hit.value)
