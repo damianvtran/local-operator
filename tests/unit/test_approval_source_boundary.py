@@ -19,9 +19,27 @@ Hence a source scan, in the idiom of
 ``tests/unit/test_config.py::test_the_migration_has_exactly_one_caller_and_marking_has_two``
 and of ``tests/unit/test_agent_import_boundary.py``: a behavioural probe can
 only catch a write path someone thought to exercise, and this one fails on the
-IMPORT. The alternative spellings of the same hole are checked together —
-importing the facade, and calling one of its writers through a local alias — so
-the test does not depend on the import being the funnel.
+IMPORT.
+
+WHAT THIS CHECK COVERS, exactly (agent review round 1, m2 — the earlier
+docstring claimed more than the code did, which is worse than a narrower pin):
+
+* a static import of the facade, by any of its three spellings, aliased or not;
+* a static call of one of its writers, including through an import alias;
+* a DYNAMIC reach whose name is a string LITERAL: ``importlib.import_module(
+  "local_operator.settings_io")``, ``__import__(...)``, and ``getattr(mod,
+  "write_setting")`` / ``hasattr`` — with ``"a" + "b"`` folded, since that is
+  the shape a deliberate obfuscation takes.
+
+WHAT IT DOES NOT COVER, stated so that no future reader reads a green run as
+more than it is: a reach through a module OUTSIDE these four trees (an inside
+module importing a helper that imports the facade — the honest form of this
+check is an import closure, which in this codebase would flag every tool that
+transitively touches the CLI or the TUI and is therefore not what is asserted
+here), and a name assembled at RUNTIME (from input, from ``globals()``). The
+pin is a tripwire on the direct, literal reach — the shapes an agent-facing
+write path actually takes — and the tuple of trees is asserted non-empty so a
+rename cannot turn it into a vacuous pass (n1).
 
 The agent-facing trees are named POSITIVELY, so a new directory has to be
 considered rather than silently scanned: ``tools`` and ``harness`` (what a model
@@ -45,6 +63,10 @@ _AGENT_FACING_TREES = (
     "local_operator/mcp",
     "local_operator/browser_bridge",
 )
+
+#: The facade's module name, matched by SUFFIX so ``local_operator.settings_io``
+#: and a bare ``settings_io`` are the same hit.
+_FACADE_MODULE = "settings_io"
 
 #: The facade's writers, public and private. ``_store``/``_delete`` are its
 #: primitives and ``_notify_watcher`` is the call that MAKES a write attributed,
@@ -89,9 +111,110 @@ def _referenced_names(tree: ast.AST) -> set[str]:
 def _facade_reach(module: Path) -> set[str]:
     tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
     names = _referenced_names(tree)
-    reach = {name for name in names if name.endswith("settings_io")}
+    reach = {name for name in names if name.endswith(_FACADE_MODULE)}
     reach |= names & _FACADE_WRITERS
+    reach |= _dynamic_facade_reach(tree)
     return reach
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    """The string this expression evaluates to, when it is built of literals only.
+
+    ``"local_operator." + "settings_io"`` is the shape a dynamic reach takes when
+    it is written to get past a name-matching scan, so the concatenation is folded
+    rather than treated as an unknown.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_string(node.left)
+        right = _literal_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+#: Calls that reach a module or an attribute BY NAME, so a string constant IS the
+#: reach. ``importlib.util.find_spec``/``spec_from_file_location`` are deliberately
+#: not here: they locate a module without importing or calling it, and a pin that
+#: flagged them would fail on reflection code that never touches the facade.
+_DYNAMIC_REACH_CALLS = frozenset({"import_module", "__import__", "getattr", "hasattr"})
+
+
+def _dynamic_facade_reach(tree: ast.AST) -> set[str]:
+    """Facade names that this module only ever spells as STRINGS (m2).
+
+    ``importlib.import_module("local_operator.settings_io")`` followed by
+    ``getattr(mod, "write_setting")`` returns no hit from the name walk, while
+    being the same hole in one more step. The string is what names the target, so
+    the string is what this collects — and only inside one of those call shapes,
+    because a module that merely MENTIONS the facade in prose (``tools/`` has two
+    such comments and a section of prose in ``shell_env``) is not a write path.
+    """
+    reach: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        callee = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if callee not in _DYNAMIC_REACH_CALLS:
+            continue
+        for argument in node.args:
+            literal = _literal_string(argument)
+            if not literal:
+                continue
+            for part in (literal, literal.rpartition(".")[2]):
+                if part == _FACADE_MODULE or part in _FACADE_WRITERS:
+                    reach.add(literal)
+    return reach
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import local_operator.settings_io as sio\nsio.write_setting(m, s, v)\n",
+        "from local_operator import settings_io\nsettings_io.write_setting(m, s, v)\n",
+        "from local_operator.settings_io import write_setting as w\nw(m, s, v)\n",
+        # The dynamic forms agent review round 1 (m2) found UNCAUGHT by the first
+        # revision of this pin, which claimed them. A green run has to mean
+        # something, so each is asserted rather than trusted.
+        "import importlib\nmod = importlib.import_module('local_operator.settings_io')\n",
+        "import importlib\nmod = importlib.import_module('local_operator.' + 'settings_io')\n",
+        "mod = __import__('local_operator.settings_io')\n",
+        "w = getattr(importlib.import_module('local_operator.settings_io'), 'write_setting')\n",
+        "assert not hasattr(mod, 'reset_setting')\n",
+    ],
+)
+def test_every_direct_spelling_of_the_reach_is_caught(source: str, tmp_path: Path) -> None:
+    module = tmp_path / "probe.py"
+    module.write_text(source, encoding="utf-8")
+    assert _facade_reach(module), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Prose is not a write path: `tools/` has comments naming the facade and
+        # `tools/shell_env.py` discusses it deliberately. A scan that flagged
+        # those would be red on the tree it protects.
+        '"""The settings_io row is the one a user edits."""\n',
+        "# `settings_io` would be the wrong module here\n",
+        "import importlib\nimportlib.import_module('local_operator.config_watch')\n",
+        "import importlib\nimportlib.import_module(MODULE_NAME)\n",
+        "STORE = open_store()\n",
+        "def f(manager):\n    return manager._rows\n",
+    ],
+)
+def test_prose_and_unrelated_names_are_not_a_reach(source: str, tmp_path: Path) -> None:
+    """The pin must not fire on the mentions that exist today.
+
+    Without this control, "make the dynamic spelling hit" is satisfiable by
+    matching the bare word anywhere — which would fail on the four trees as they
+    stand, and the fix for that is never a narrower check but a deleted one.
+    """
+    module = tmp_path / "probe.py"
+    module.write_text(source, encoding="utf-8")
+    assert _facade_reach(module) == set(), source
 
 
 @pytest.mark.parametrize("tree", _AGENT_FACING_TREES)
@@ -99,13 +222,23 @@ def test_no_agent_facing_module_can_write_through_the_settings_facade(tree: str)
     """The gate may only loosen on the operator's own writes — enforce the "own".
 
     A hit here is not necessarily a bug on the day it appears (the assertion
-    message says how to qualify a legitimately unrelated ``_store``); it is a
-    hit on the boundary that makes ``source="local"`` trustworthy, and the fix is
-    to route the write through a human-facing surface rather than to widen the
-    gate.
+    message says how to qualify ``getattr``-style reflection that never touches the
+    facade); it is a hit on the boundary that makes ``source="local"``
+    trustworthy, and the fix is to route the write through a human-facing surface
+    rather than to widen the gate.
+
+    The tree is asserted to EXIST with modules in it: a renamed or removed
+    surface used to pass this test with an empty offender set, which reads as
+    coverage for a surface that is no longer being scanned at all (agent review
+    round 1, n1).
     """
+    modules = sorted((_TESTS_ROOT / tree).rglob("*.py"))
+    assert modules, (
+        f"{tree} has no Python modules — the surface moved, was renamed or was deleted, "
+        "and this pin would otherwise report coverage for a tree it never read"
+    )
     offenders: dict[str, set[str]] = {}
-    for module in sorted((_TESTS_ROOT / tree).rglob("*.py")):
+    for module in modules:
         reach = _facade_reach(module)
         if reach:
             offenders[module.relative_to(_TESTS_ROOT).as_posix()] = reach

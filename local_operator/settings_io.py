@@ -390,13 +390,28 @@ SECTIONS: tuple[Section, ...] = (
     # one. ``--yolo`` is an explicit pin that outranks the key. Its own section
     # because ``session`` (autosave + cleanup) is launch-time and scope is
     # uniform per section.
+    #
+    # THE DESCRIPTION BELOW IS THE ONLY APPROVALS CAVEAT THIS REGISTRY CARRIES,
+    # and it has exactly ONE consumer: the desktop settings header
+    # (``server/routes/settings.py`` -> the section header component). The TUI
+    # ``/settings`` page paints the section TITLE and its scope tag, then the
+    # ROW and the row HELP (``Tool approval mode`` / ``tool_approval_mode``'s
+    # own ``help``) — never this sentence — so the row help has to stand on its
+    # own and say the same thing in its own cell budget (58 cells of the 74-cell
+    # detail line, which must still fit its ``· default: ask`` clause; the
+    # measurement is at that row. Design round 1, D1; agent review round 1,
+    # m1). Keep the two in step: both must be TRUE for the embedded
+    # pane (whose own page write IS the gate-holding process's write, and so
+    # does loosen) and for the attached one (where only ``/approvals auto`` in
+    # the session loosens).
     Section(
         "approvals",
         "Approvals",
         Scope.LIVE,
         "Whether write and command tools prompt, in every running session. A config "
-        "write can tighten every running session at once; loosening a running one "
-        "needs /approvals auto in it.",
+        "write tightens every running session at once; loosening one needs a write "
+        "from that session's own process (/approvals auto in it, or its own /settings "
+        "page).",
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript
@@ -1679,8 +1694,26 @@ SETTINGS: tuple[Setting, ...] = (
         label="Tool approval mode",
         kind=Kind.ENUM,
         default="ask",
-        # 74 cells — see the note on `hosting`.
-        help="How every running session treats write and exec tools, from its next call.",
+        # 58 cells, and the number is the LADDER's, not a taste call. The detail
+        # line composes ``<help> · default: <default>`` when the row is off its
+        # default and sheds whole rungs to fit — so the budget that decides
+        # whether this sentence is on the frame at all is 74 cells MINUS the
+        # 15-cell ``· default: ask`` suffix, i.e. 59. Measured on the head with
+        # the real page: the 72-cell sentence I first wrote (design round 1,
+        # D1's recommendation, which was measured against the width with no
+        # clause) painted NOTHING off-default at 80x24 — the ladder fell through
+        # to ``default: ask   tool_approval_mode``, which is exactly the state the
+        # operator is in after the write this change is about. Verified again
+        # after this edit: 80x24 off-default shows the help and the clause, and
+        # only 60 cols ellipsizes (today's string already did).
+        #
+        # The sentence is the SECTION description's rule in the TUI's own words —
+        # one clause, no head — because that description is painted by the desktop
+        # header alone and this is the only approvals copy the TUI page shows
+        # (design round 1, D1; agent review round 1, m1). Both must stay true for
+        # the embedded pane (whose own page write IS the gate-holding process's
+        # write) and for the attached one.
+        help="Loosening needs a write in this session — /approvals auto.",
         choices=(
             Choice("ask", "ask", "prompt before write/exec tools"),
             Choice("auto", "auto", "run them without asking"),

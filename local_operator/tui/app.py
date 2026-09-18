@@ -82,7 +82,10 @@ from local_operator.ansi import strip_control_sequences
 # The approval gate's authorization rule, shared with the runtime host so the two
 # cannot drift on which writes may loosen a live gate (issue #1282). Pure and
 # import-cheap: `harness.approval` pulls in `inspect` and nothing else.
-from local_operator.harness.approval import loosening_is_authorised
+from local_operator.harness.approval import (
+    LOOSENING_REFUSED_NOTICE,
+    loosening_is_authorised,
+)
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     batch_activity,
@@ -1709,6 +1712,15 @@ ORG_CHART_LAYOUT_CLASS = "org-chart"
 #: ``_open_settings_view``/``_close_settings_view``. Named to match its
 #: ``Screen.settings`` tcss block, the sibling of ``Screen.org-chart``.
 SETTINGS_LAYOUT_CLASS = "settings"
+
+#: What the ``/settings`` page says when ITS OWN write could not loosen the gate
+#: (UX round 1, U1). The page's copy of ``LOOSENING_REFUSED_NOTICE``, worded for
+#: a surface that has no transcript on screen: it reports the half that LANDED
+#: (the file) and the half that did not (this session), and names the command.
+#: 61 cells, against the detail line's measured 74 at 80x24 — the page's own
+#: budget, which the row help is also written to (see the ``approvals`` section
+#: in ``settings_io``).
+PAGE_LOOSENING_KEPT_NOTICE = "saved; this session keeps asking — /approvals auto loosens it"
 
 #: Class the SCREEN carries while the `/btw` aside card owns the composer. The
 #: transcript is inert then — Enter goes to the card — so it recedes behind it,
@@ -4498,6 +4510,13 @@ class OperatorApp(App[None]):
         # contract. Held here for the same reason the two above are: the Esc
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
+        #: ``(changed_keys, sentence)`` for a ``/settings`` page write this pane
+        #: could not loosen — the gate belongs to an attached runtime. Read and
+        #: cleared by the page right after its save (`_take_page_kept_loosening`),
+        #: because `SettingsView._save` clears the page's own message slots on
+        #: success and anything pushed during the write would be wiped by the
+        #: line that reports it.
+        self._page_kept_loosening: tuple[str, str] | None = None
         self._settings_focus_restore: Any | None = None
         #: True while a ``/settings`` hotkey row is LISTENING for a key to
         #: bind. :meth:`check_action` reads it and disarms every app binding,
@@ -21375,9 +21394,20 @@ class OperatorApp(App[None]):
                 kind,
             )
         elif wanted_auto:
+            # The save hint is offered only while it is NEW information (UX
+            # round 1, U5): with `config.yml` already saying auto, "saves it for
+            # new sessions" asks the user to do what is done — and that is
+            # exactly the state a `/approvals auto` follows a refusal notice in,
+            # which is now the command's main job. The live half keeps the
+            # runtime's wording word for word: one gesture, one sentence,
+            # whichever host answers it.
+            save_hint = (
+                ""
+                if self._configured_approvals_mode() == "auto"
+                else " — /approvals default auto saves it for new sessions"
+            )
             notice(
-                "tool approvals: auto — every tool runs without asking (this session) — "
-                "/approvals default auto saves it for new sessions",
+                "tool approvals: auto — every tool runs without asking (this session)" + save_hint,
                 "warning",
             )
         else:
@@ -21430,7 +21460,7 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"config.yml says {saved} — /approvals default {live} changes that",
+            f"config.yml says {saved} — /approvals {saved} adopts it in this session",
             "warning" if self._approve_all else "info",
         )
 
@@ -27949,11 +27979,18 @@ class OperatorApp(App[None]):
             # owns the gate, so the runtime's keep notice is the one that speaks;
             # this branch still returns `kept=True` because the local `applied:`
             # list is this process's to correct either way.
+            #
+            # `warning`, the rung the runtime's copy of the sibling refusal now
+            # carries (design round 1, D2): both sentences are one event — a
+            # policy change this session did not follow — and a rung apart, the
+            # one the operator must read first is whichever the palette happens
+            # to weight. See the refusal branch below for why `note` is not
+            # available to either.
             if not self._gate_is_owned_elsewhere():
                 self._system_notice(
                     "keeping tool approvals: ask — set with /approvals in this session; "
                     "config.yml now says auto, /approvals auto adopts it",
-                    "info",
+                    "warning",
                 )
             self._set_approve_all(self._approve_all)
             return _ApprovalsFollow("", True)
@@ -27981,12 +28018,20 @@ class OperatorApp(App[None]):
             # gated on ownership for the reason the branch above documents —
             # with a runtime attached the runtime prints its own refusal and
             # this one would be the same sentence twice.
-            if not self._gate_is_owned_elsewhere():
-                self._system_notice(
-                    "keeping tool approvals: ask — config.yml now says auto without an "
-                    "operator write in this session; /approvals auto loosens it here",
-                    "info",
-                )
+            if self._gate_is_owned_elsewhere():
+                # The engine's gate is a runtime's, and that runtime prints its
+                # own copy of this refusal into the transcript. Right carrier for
+                # a change that arrived from the WATCHER — but a write made from
+                # THIS page (`announce=False`) is the operator's own click, and
+                # `_open_settings_view` hides the transcript while the page is
+                # up, so the sentence would land in a region nobody can see (UX
+                # round 1, U1). Recorded for the page to paint instead; the two
+                # wordings never share a viewport, and the page's is written for
+                # a surface with no transcript on it.
+                if not announce:
+                    self._page_kept_loosening = ("tool_approval_mode", PAGE_LOOSENING_KEPT_NOTICE)
+            else:
+                self._system_notice(LOOSENING_REFUSED_NOTICE, "warning")
             self._set_approve_all(self._approve_all)
             return _ApprovalsFollow("", True)
         if not announce:
@@ -28014,6 +28059,27 @@ class OperatorApp(App[None]):
             if wanted_auto
             else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
+
+    def _take_page_kept_loosening(self, key: str) -> str:
+        """Hand the page the sentence for a loosening THIS page could not make.
+
+        Read-and-clear: the write and the refusal happen on one call stack (the
+        page's ``settings_io.write_setting`` reaches the app's own config
+        listener synchronously), so the record set by
+        :meth:`_follow_configured_approvals` describes the write that just
+        returned — and clearing it here is what keeps a later, unrelated repaint
+        from re-printing it. Keyed by the setting so a record can never be
+        handed to a different row's write.
+
+        ``""`` when nothing was refused, which is every write in the embedded
+        app (it owns its gate, so its own facade writes are authorised) and
+        every write of another key.
+        """
+        held = self._page_kept_loosening
+        self._page_kept_loosening = None
+        if held is None or held[0] != key:
+            return ""
+        return held[1]
 
     def _gate_is_owned_elsewhere(self) -> bool:
         """Whether an attached RUNTIME, not this app, owns the approval gate.
@@ -38570,7 +38636,7 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"config.yml says {saved} — /approvals default {live} changes that",
+                f"config.yml says {saved} — /approvals {saved} adopts it in this session",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:
@@ -38584,10 +38650,18 @@ class OperatorApp(App[None]):
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
         if wanted_auto:
+            # Same rule as `_cmd_approvals`: the save hint is offered only while
+            # it is new information (UX round 1, U5), and the live half is the
+            # runtime's sentence word for word.
+            save_hint = (
+                ""
+                if self._configured_approvals_mode() == "auto"
+                else " — /approvals default auto saves it for new sessions"
+            )
             return SlashResult(
                 kind="notice",
-                text="tool approvals: auto — every tool runs without asking (this session) — "
-                "/approvals default auto saves it for new sessions",
+                text="tool approvals: auto — every tool runs without asking (this session)"
+                + save_hint,
                 style="warning",
             )
         return SlashResult(
