@@ -610,8 +610,16 @@ class RadientClient:
             ) from e
 
     def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get agent details from the Radient Agent Hub by ID.
+        """Get agent details from the Radient Agent Hub by ID.
+
+        The path joins this client's base like every sibling method does — no
+        literal ``/v1`` of its own. A hard-coded version segment here means the
+        base the product actually passes (``env_config.radient_api_base_url``,
+        which already carries ``/v1``) is addressed as ``/v1/v1/agents/{id}``;
+        the 404 that comes back is mapped to ``None`` below, and the only caller,
+        :meth:`AgentRegistry.upload_agent_to_radient`, reads ``None`` as "the
+        agent does not exist" — so a ``push --id`` silently POSTs a new listing
+        instead of overwriting the one it was asked to.
 
         Args:
             agent_id (str): The agent ID to fetch.
@@ -623,7 +631,7 @@ class RadientClient:
         Raises:
             RuntimeError: If the API request fails for reasons other than 404.
         """
-        url = f"{self.base_url}/v1/agents/{agent_id}"
+        url = f"{self.base_url}/agents/{agent_id}"
         # This is a public endpoint, no API key required
         headers = self._get_headers(content_type="application/json", require_api_key=False)
         try:

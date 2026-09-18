@@ -375,6 +375,27 @@ def test_delete_agent_from_marketplace_network_error(radient_client: RadientClie
         assert "Network error" in str(exc_info.value)
 
 
+def test_get_agent_joins_the_base_without_adding_a_version_segment(
+    radient_client: RadientClient, base_url: str
+):
+    """``get_agent`` addresses the same root as its sibling methods.
+
+    The product hands this client a base that already carries ``/v1``
+    (``env_config.radient_api_base_url``), so any version segment written into
+    this method's own path is a second one: the request went to
+    ``/v1/v1/agents/{id}``, 404'd, and ``push --id`` fell through to creating a
+    new listing instead of overwriting the named one.
+    """
+    agent_id = "agent-to-get"
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"id": agent_id}
+    with patch("requests.get", return_value=mock_response) as mock_get:
+        assert radient_client.get_agent(agent_id) == {"id": agent_id}
+    assert mock_get.call_args[0][0] == f"{base_url}/agents/{agent_id}"
+    assert "/v1/v1" not in mock_get.call_args[0][0]
+
+
 # Image Generation Tests
 
 
