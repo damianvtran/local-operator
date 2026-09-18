@@ -1048,10 +1048,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # touched; everything else that serves this machine can be brought along.
         description=(
             "Everything local_operator runs for this machine that is not a conversation. "
-            "A 'service' is a `lop serve` daemon or a supervised daemon "
-            "(com.local-operator.*, e.g. the mobile relay and the browser bridge). "
-            "Runtimes — the processes holding your conversations — are never stopped: "
-            "'restart' reloads a serve daemon in place, keeping its pid and socket."
+            "A 'service' is a `lop serve` daemon or a supervised daemon (the mobile "
+            "relay, the browser bridge, the tunnel and the wakes agent, installed as "
+            "com.local-operator.* LaunchAgents). Runtimes — the processes holding your "
+            "conversations — are never stopped: 'restart' reloads a serve daemon in "
+            "place, keeping its pid and socket."
         ),
         parents=[parent_parser],
     )
@@ -1061,6 +1062,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=(
             "Report each non-runtime service, the build it is serving, and the build "
             "the install is on"
+        ),
+        # D9 put the distinction on the GROUP page; a reader who runs `services status
+        # --help` directly was still shown no prose at all (design review D10).
+        description=(
+            "Read-only. Names the build the install is on and, for each `lop serve` "
+            "daemon, the build it is SERVING — both sides of every comparison, because "
+            "the ordinary drift on this machine is a same-version rebuild where the "
+            "version alone cannot show that a daemon is behind."
         ),
         parents=[parent_parser],
     )
@@ -7856,8 +7865,10 @@ def main() -> int:
             # Mirror `install`'s dispatch instead of argparse's (design review D8):
             # `parser.error` dumped the WHOLE program's usage here — 223 columns of
             # every verb under a second `usage:` prefix — when what the reader mistyped
-            # is a subcommand of this one group. Exit 2 keeps a USAGE error distinct
-            # from a command that ran and failed, which is the 1 `install` returns.
+            # is a subcommand of this one group. It exits 2 where `install` returns 1
+            # for the same situation: 2 is argparse's own usage code and the one this
+            # path already exited with through `parser.error`, so nothing that scripts
+            # the exit status sees a change (round 11 R11-4).
             print("usage: lop services {status, restart}", file=sys.stderr)
             return 2
         elif args.subcommand == "install":

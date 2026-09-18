@@ -353,6 +353,9 @@ def test_status_lines_name_the_drift_and_the_capability(
         "_supervised_daemon_plists",
         lambda: [Path("/tmp/com.local-operator.mobile.plist")],
     )
+    # A checkout's own guard refuses the move (`install_kind` is EDITABLE here), so the
+    # promise sentences are asserted against a caller the guard WOULD permit.
+    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
     lines = services.status_lines()
     assert "install: 0.59.0@4d3ce1d" in lines, "the build the reader is comparing against"
     # Stale: identity, then the verdict leading an indented line, then what to DO about
@@ -360,7 +363,7 @@ def test_status_lines_name_the_drift_and_the_capability(
     # because folding them into one took the line to 137 columns (D6).
     at = lines.index("serve daemon pid 4242 on 127.0.0.1:1111")
     assert lines[at + 1] == "  STALE: serving 0.56.14@9f2c1ab, current is 0.59.0@4d3ce1d"
-    assert lines[at + 2] == "  will move on `lop services restart`"
+    assert lines[at + 2] == "  `lop services restart` will move it"
     assert "serve daemon pid 9 on 127.0.0.1:1111 — current (0.59.0@4d3ce1d)" in lines
     assert "supervised daemon: com.local-operator.mobile" in lines
     # D3: their build is not in the plist, and the reader is told so rather than left
@@ -411,7 +414,12 @@ def test_status_lines_says_it_cannot_compare_when_the_stamp_is_unreadable(
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     lines = services.status_lines()
     assert lines[0] == "install: no build the pointer can name, so nothing can be compared"
-    assert any("cannot be compared: the pointer names no build" in line for line in lines)
+    # D13: the per-daemon line does not restate that reason — it says what the daemon
+    # serves and leaves the WHY to the install line directly above it.
+    assert "  serving 0.56.14" in lines
+    assert not any(
+        "pointer names no build" in line for line in lines[1:]
+    ), "D13: the reason lives on the install line, not restated per daemon"
     joined = " ".join(lines)
     assert "current is the current build" not in joined
     assert "run `lop services restart`" not in joined
@@ -425,6 +433,7 @@ def test_status_lines_says_it_cannot_compare_when_the_stamp_is_unreadable(
         "_supervised_daemon_plists",
         lambda: [Path("/tmp/com.local-operator.mobile.plist")],
     )
+    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
     backed = services.status_lines()
     assert any("puts them on the current build" in line for line in backed)
 
@@ -442,6 +451,90 @@ def test_services_defines_what_a_service_is() -> None:
     assert text, "the group must describe itself"
     assert "not a conversation" in text
     assert "serve" in text and "runtimes" in text.lower()
+
+
+def test_the_fleet_advice_is_not_printed_when_restart_would_skip_them(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The advice must not name a command that skips the daemons it is about.
+
+    ``reloadable`` defaults to False and records written before the capability existed
+    do not carry it, so "every stale daemon is unmovable" is the COMMON case rather
+    than an edge one (design review D11, round 11 R11-2 — the same defect D7 fixed one
+    line over).
+    """
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(reloadable=False)])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+    lines = services.status_lines()
+    assert (
+        "the stale ones cannot be moved by `lop services restart`; restart them by hand"
+        in lines
+    )
+    assert not any("run `lop services restart`" in line for line in lines)
+
+
+def test_the_fleet_advice_counts_the_two_kinds_apart(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mixed fleet is told which half the verb will move and which it will not."""
+    monkeypatch.setattr(
+        services,
+        "live_serve_daemons",
+        lambda: [_record(source_ref="a"), _record(pid=3, source_ref="b", reloadable=False)],
+    )
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+    lines = services.status_lines()
+    assert "run `lop services restart` for the 1 it can move; 1 need restarting by hand" in lines
+
+
+def test_a_guard_that_refuses_silences_every_promise(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 11 R11-3: the guard has TWO questions, and both gate the promises.
+
+    Keying on the stamp alone covered only "is this an installation at all"; a durable
+    install that is not the one the plists run is refused by the second question, and
+    both sentences were still printed there.
+    """
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record()])
+    monkeypatch.setattr(
+        services,
+        "_supervised_daemon_plists",
+        lambda: [Path("/tmp/com.local-operator.browser.plist")],
+    )
+    monkeypatch.setattr(services, "_restart_can_move_anything", lambda: False)
+    joined = " ".join(services.status_lines())
+    assert "puts them on the current build" not in joined
+    assert "run `lop services restart`" not in joined
+
+
+def test_no_line_exceeds_the_budget_with_a_long_authority(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 11 R11-1: the joined `— current` line overflowed on a long IPv6 host.
+
+    A link-local address is 25 characters of authority, which took
+    `serve daemon pid N on [host]:port — current (X@y)` past 80 while every branch
+    D6 measured stayed inside it — and the `longest <= 80` test only covered
+    ``127.0.0.1``, so it could not catch that. The joined form is now width-checked.
+    """
+    pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
+    for host in ("127.0.0.1", "::1", "fe80::1c2d:3e4f:5a6b:7c8d", "2001:db8:85a3::8a2e:370:7334"):
+        monkeypatch.setattr(
+            services,
+            "live_serve_daemons",
+            lambda host=host: [
+                _record(host=host, version="0.59.0", source_ref="4d3ce1d"),
+                _record(pid=5, host=host, version="0.56.14", source_ref="9f2c1ab"),
+            ],
+        )
+        monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+        monkeypatch.setattr(services, "_restart_can_move_anything", lambda: True)
+        lines = services.status_lines()
+        longest = max(len(line) for line in lines)
+        assert longest <= 80, f"{host}: {longest} columns: {max(lines, key=len)!r}"
 
 
 def test_status_lines_says_so_when_there_are_no_daemons(
