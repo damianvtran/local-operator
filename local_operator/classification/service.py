@@ -93,9 +93,11 @@ The next session starts closed, which is the natural retry.
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import hashlib
 import logging
+import random
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -178,6 +180,34 @@ DEFAULT_NOTICE = True
 
 #: Consecutive failures after which the breaker opens for the session (§4).
 CIRCUIT_FAILURE_THRESHOLD = 3
+
+#: How many times the WHOLE leg list is walked before the pass is declared failed.
+#:
+#: A retry pass, not a retry loop inside one leg: the first walk crosses every leg, so
+#: a dead leg still costs one attempt and the next leg is reached immediately — the
+#: failover stays fast, and only a failure that NO leg could answer is reconsidered.
+#: That second pass is what clears a blip (a refused connection, a reset, a 5xx, an
+#: overloaded vendor, a 429 — see :data:`RETRYABLE_KINDS`) instead of losing the
+#: message's recommendation to it. Everything else (a dead credential, a body we
+#: cannot parse) is a property of the leg rather than of the moment, so re-walking
+#: would buy the same answer twice.
+#:
+#: The leg's own deadline still bounds each attempt and the caller's
+#: ``asyncio.timeout`` bounds the whole cascade, so a retry cannot extend a message
+#: past ``timeoutMs``.
+DEFAULT_CASCADE_ATTEMPTS = 2
+
+#: Base delay before that second walk, jittered.
+#:
+#: Short on purpose: it exists to clear a blip, not to wait out an outage. Measured
+#: on the operator's machine (2026-09-18) the vendor answers in 540-1500 ms, so a
+#: 150 ms backoff is noise beside the call it is retrying — and against a vendor that
+#: is simply down, the breaker opens after three failed messages, which is the
+#: mechanism that stops the cost rather than a backoff ladder.
+DEFAULT_RETRY_BACKOFF_S = 0.15
+
+#: The kinds worth a second walk: weather, not identity.
+RETRYABLE_KINDS = frozenset({"transport", "server", "overloaded", "rate-limit"})
 
 #: Cache entries before the oldest is evicted (§4: 64).
 CACHE_SIZE = 64
@@ -487,7 +517,22 @@ class ClassificationService:
             # it neither opens the breaker nor logs a warning.
             return Recommendation(skipped="no-vendor", latency_s=time.monotonic() - started)
         except DecisionVendorError as exc:
-            logger.warning("classification: no leg answered (%s: %s)", exc.kind, exc)
+            # ONE WARNING, AND ONLY WHERE IT MEANS SOMETHING. The caller reaches this
+            # branch only after the cascade ran out of legs, so a provider existed
+            # (``provider_available`` gated the call) and every leg failed: that is the
+            # case the operator asked to be able to see. ``exc`` carries the per-leg
+            # attempt summary, which is what turns "it failed" into "which leg, how
+            # many times, and how". The message repeats at most
+            # :data:`CIRCUIT_FAILURE_THRESHOLD` times per session — the breaker opens on
+            # the third consecutive failure and later messages short-circuit before any
+            # call — so visibility does not become spam.
+            logger.warning(
+                "classification: recommendation failed after %d attempt(s) in %.0f ms (%s: %s)",
+                exc.attempts,
+                (time.monotonic() - started) * 1000,
+                exc.kind,
+                exc,
+            )
             self._record_failure(exc.kind)
             return Recommendation(skipped="error", latency_s=time.monotonic() - started)
         except asyncio.CancelledError:
@@ -543,23 +588,75 @@ class ClassificationService:
         legs = await self._available_legs()
         if not legs:
             raise _NoUsableLeg("no leg has a usable credential")
+        attempts: list[str] = []
         last: DecisionVendorError | None = None
-        for vendor in legs:
-            try:
-                response = await vendor.decide(request, timeout_s=timeout_s)
-            except DecisionSchemaError:
-                raise
-            except DecisionVendorError as exc:
+        for walk in range(DEFAULT_CASCADE_ATTEMPTS):
+            attempts_walk: list[str] = []
+            for vendor in legs:
+                try:
+                    response = await vendor.decide(request, timeout_s=timeout_s)
+                except DecisionSchemaError:
+                    raise
+                except DecisionVendorError as exc:
+                    # A failed leg invalidates the resolved leg set so the next message
+                    # re-resolves credentials: a key revoked or topped up mid-session is
+                    # picked up without restarting the session.
+                    last = exc
+                    attempts.append(f"{vendor.name}:{exc.kind}")
+                    attempts_walk.append(f"{vendor.name}:{exc.kind}")
+                    self._legs = None
+                    self._vendor_name = None
+                    logger.debug(
+                        "classification: leg %s failed (%s), trying next", vendor.name, exc.kind
+                    )
+                    continue
+                self._vendor_name = vendor.name
+                return response
+            if not any(kind.split(":", 1)[1] in RETRYABLE_KINDS for kind in attempts_walk):
+                # Nothing in this walk was weather: re-asking would buy the same answer.
+                break
+            if walk + 1 < DEFAULT_CASCADE_ATTEMPTS:
                 logger.debug(
-                    "classification: leg %s failed (%s), trying next", vendor.name, exc.kind
+                    "classification: every leg failed (%s); walking the cascade once more",
+                    ", ".join(attempts_walk),
                 )
-                last = exc
-                self._legs = None
-                self._vendor_name = None
-                continue
-            self._vendor_name = vendor.name
-            return response
-        raise last if last is not None else DecisionVendorError("no leg answered", kind="transport")
+                await asyncio.sleep(DEFAULT_RETRY_BACKOFF_S * (0.5 + random.random()))
+        if last is None:
+            raise DecisionVendorError("no leg answered", kind="transport")
+        counts = collections.Counter(attempts)
+        summary = ", ".join(f"{name} x{count}" for name, count in counts.items())
+        raise DecisionVendorError(
+            f"no leg answered after {len(attempts)} attempt(s): {summary}",
+            kind=last.kind,
+            attempts=len(attempts),
+        )
+
+    async def provider_available(self) -> bool:
+        """Whether any leg has a usable credential, without calling anything.
+
+        The wiring asks this before it builds a request or waits, so an install with
+        no recommender provider pays neither the wait nor a log line: the probe is a
+        local credential read (``AuthStore``'s sqlite row, cached on the service after
+        the first resolution) and never a network call. It is deliberately NOT the
+        same question as ``vendor_status``: that one is documented to perform no I/O
+        and therefore cannot see a Radient OAuth session, which is the commonest
+        configured provider here — asking it would silently disable the layer for the
+        operator whose login is the credential we want.
+
+        Failure is reported as ``True``: a probe that cannot answer must not decide
+        that there is nothing to ask.
+        """
+        if self._circuit_open:
+            # Nothing will be called this session anyway, but the honest answer here is
+            # "a provider exists" — the breaker is our own state, not the operator's
+            # configuration, and the caller's warning is about the latter.
+            return True
+        try:
+            legs = await self._available_legs()
+        except Exception:  # noqa: BLE001 — a probe must never fail a turn
+            logger.debug("classification: provider probe failed", exc_info=True)
+            return True
+        return bool(legs)
 
     async def _available_legs(self) -> tuple[DecisionVendor, ...]:
         """Resolve the cascade once per session, keeping the instances.
