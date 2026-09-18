@@ -1220,9 +1220,18 @@ class RuntimeServer:
                 owned_session = owned_session()
             except Exception:  # noqa: BLE001 — a boot that cannot answer yet is not an error
                 owned_session = None
-        if owned_session is not None and has_durable_history(owned_session):
-            self._started = True
-            self._record.started = True
+        try:
+            # The DERIVATION is inside the guard too, not just the call. The
+            # reader ends at ``durable_conversation_path``, which catches only
+            # ``OSError``: a handle answering with something that is not a path
+            # would raise ``TypeError`` straight out of this constructor. A
+            # runtime that cannot boot is a far worse failure than one record
+            # starting conservatively false until the owner's first turn.
+            if owned_session is not None and has_durable_history(owned_session):
+                self._started = True
+                self._record.started = True
+        except Exception:  # noqa: BLE001 — a host that cannot answer keeps the conservative False
+            logger.debug("could not read the resumed session's history at boot", exc_info=True)
         self._publisher: RecordPublisher | None = None
         #: The config dir this runtime was STARTED in, captured by ``start`` /
         #: ``start_in_process`` and handed to the publisher. The record path is

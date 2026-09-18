@@ -441,12 +441,123 @@ def test_a_stored_row_with_no_durable_history_is_skipped(monkeypatch, tmp_path, 
     )
     session_id, candidates, error = peer_send.resolve_stored_target("brand new")
     assert (session_id, candidates) == (None, [])
-    assert "every stored match for 'brand new' (2 of them)" in error, error
+    assert "2 stored matches for 'brand new' have not been engaged yet" in error, error
+    # D3: the count is stated ONCE and the tail agrees with it — the form this
+    # replaced (``every stored match for 'x' (2 of them) … so it cannot``) said
+    # the count twice and then spoke about one session.
+    assert "every stored match" not in error and "(2 of them)" not in error, error
+    assert "no user message has been sent in any of them" in error, error
+    assert "so they cannot receive peer messages" in error, error
+    # D5: a stored row has no window anyone can type into, so the remedy is the
+    # conversation being opened, not an owner sending into one that is already
+    # there.
+    assert "they become recipients once someone opens them" in error, error
 
     # A TRUE no-match is still the silent empty answer the callers compose their
     # own "searched live and stored sessions" sentence over.
     _stored(monkeypatch, [_StoredRow("other0001", "something else")], root=tmp_path)
     assert peer_send.resolve_stored_target("brand new") == (None, [], "")
+
+
+def test_a_partly_delivered_broadcast_reports_the_matches_it_skipped(fake_scan) -> None:
+    """D1 (design round 1): a name/substring send that REACHES a recipient may
+    still have passed over matches held back for being unengaged. The sender
+    typed one command believing it reached its needle, so the receipt has to
+    say how many were left out — silence here is what made the GUIDE's "skips
+    such a session and says so" a claim the product did not keep.
+
+    ``skipped`` is the out-parameter the two surfaces read; the wording they
+    append comes from ``skipped_clause`` so both say it the same way.
+    """
+    fake_scan(
+        [
+            (_Record(10, conversation_name="release build", started=False), "live"),
+            (_Record(11, conversation_name="release notes", started=False), "live"),
+            (_Record(20, conversation_name="release cutter", started=True), "live"),
+        ]
+    )
+    skipped: list[Any] = []
+    record, candidates, error = peer_send.resolve_peer_target(target="release", skipped=skipped)
+    assert record is not None and record.pid == 20
+    assert (candidates, error) == ([], "")
+    assert [rec.pid for rec in skipped] == [10, 11]
+    assert peer_send.skipped_clause(skipped) == "; 2 matches skipped (not engaged yet)"
+
+
+def test_the_skipped_clause_is_silent_when_nothing_was_skipped() -> None:
+    """The clause is the empty string for an empty list — that is what lets
+    both receipts append it unconditionally — and it agrees with itself at one.
+    """
+    assert peer_send.skipped_clause([]) == ""
+    assert peer_send.skipped_clause([_Record(10)]) == "; 1 match skipped (not engaged yet)"
+
+
+def test_no_receipt_means_nothing_is_reported_as_skipped(fake_scan) -> None:
+    """Only a DELIVERY prints a receipt, so only a delivery is handed the
+    skipped matches: a refusal and an ambiguity resolve nothing, and a caller
+    that appended a clause there would qualify a line that is already the
+    error."""
+    fake_scan([(_Record(10, conversation_name="release", started=False), "live")])
+    skipped: list[Any] = []
+    record, _c, error = peer_send.resolve_peer_target(target="release", skipped=skipped)
+    assert record is None and "has not been engaged yet" in error
+    assert skipped == []
+
+    fake_scan(
+        [
+            (_Record(20, conversation_name="release a"), "live"),
+            (_Record(21, conversation_name="release b"), "live"),
+        ]
+    )
+    skipped = []
+    record, candidates, _error = peer_send.resolve_peer_target(target="release", skipped=skipped)
+    assert record is None and [c.pid for c in candidates] == [20, 21]
+    assert skipped == []
+
+
+def test_the_kill_switch_never_skips_a_match(fake_scan) -> None:
+    """``require_started=False`` withholds nothing — the whole carve-out is
+    that a composer window RESOLVES for ``/stop`` — so the kill switch's own
+    callers keep working unchanged and never grow a receipt clause."""
+    fresh = _Record(10, session_id="fresh-id", conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    skipped: list[Any] = []
+    record, _c, error = peer_send.resolve_peer_target(
+        target="release", require_started=False, skipped=skipped
+    )
+    assert record is fresh and error == ""
+    assert skipped == []
+
+
+def test_a_batched_refusal_agrees_with_its_own_count(fake_scan) -> None:
+    """D3: a refusal about SEVERAL sessions has to read as a plural. The form
+    this replaced said the count twice (``every … (3 of them)``) and then spoke
+    about a single owner (``so it cannot … its owner``), which a reader can take
+    as one owner's remedy for a batch."""
+    fake_scan(
+        [
+            (_Record(10, conversation_name="release a", started=False), "live"),
+            (_Record(11, conversation_name="release b", started=False), "live"),
+            (_Record(12, conversation_name="release c", started=False), "live"),
+        ]
+    )
+    record, _c, error = peer_send.resolve_peer_target(target="release")
+    assert record is None
+    assert error.startswith("3 live matches for 'release' have not been engaged yet"), error
+    assert "no user message has been sent in any of them" in error, error
+    assert "so they cannot receive peer messages" in error, error
+    assert "their owners have to send a first message" in error, error
+    assert "every live match" not in error and "(3 of them)" not in error, error
+
+
+def test_a_single_match_refusal_still_reads_as_one_session(fake_scan) -> None:
+    """The other half of D3: the singular forms are right and must stay — a
+    pid-addressed refusal names the pid and talks about one owner."""
+    fake_scan([(_Record(10, conversation_name="release", started=False), "live")])
+    _r, _c, error = peer_send.resolve_peer_target(target="release")
+    assert error.startswith("the only live match for 'release' (pid 10) has not been engaged yet")
+    assert "no user message has been sent in it" in error, error
+    assert "its owner has to send a first message" in error, error
 
 
 def test_live_ids_exclude_a_running_session_s_own_stored_row(
@@ -897,6 +1008,9 @@ async def test_an_unstarted_live_session_is_refused_with_no_dial_and_no_spool(
             )
         assert "pid 4242 has not been engaged yet" in str(excinfo.value), str(excinfo.value)
         assert "no user message has been sent in it" in str(excinfo.value)
+        # A LIVE record is not the cold shape: the remedy stays the owner
+        # sending a first message into the window that is already open (D5).
+        assert "its owner has to send a first message" in str(excinfo.value)
 
     assert dialled == []
     # Nothing was written anywhere — no spool row, no session directory at all.
@@ -936,6 +1050,11 @@ async def test_a_cold_target_without_durable_history_is_refused(monkeypatch, tmp
                 sender={"pid": 1},
             )
         assert "session 'cold-fresh' has not been engaged yet" in str(excinfo.value)
+        # D5: no runtime means no window to send into, so the remedy names
+        # opening the conversation rather than typing into it.
+        assert "it becomes a recipient once someone opens it and sends a first message" in str(
+            excinfo.value
+        ), str(excinfo.value)
 
     assert engaged == []
     assert not (tmp_path / "sessions" / "cold-fresh" / "inbox.jsonl").exists()

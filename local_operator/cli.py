@@ -2841,6 +2841,8 @@ def _bind_send_positionals(
 def _resolve_peer_target(
     args: argparse.Namespace,
     target: "str | None",
+    *,
+    skipped: "list[Any] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a ``lop send`` target to one live SessionRecord.
 
@@ -2856,7 +2858,11 @@ def _resolve_peer_target(
     target or the message body; ``args.target`` is the RAW parse and using it
     here would re-introduce the binding bug one layer down. It is required
     rather than defaulted for that reason: a caller that forgets it should fail
-    loudly, not silently resolve as though no target was given."""
+    loudly, not silently resolve as though no target was given.
+
+    ``skipped`` is forwarded to the core for ``lop send`` only: the send path
+    reports how many name-matches were held back for being unengaged, and no
+    other caller (the stop path) has a receipt to qualify."""
     from local_operator.mobile.peer_send import resolve_peer_target
 
     # The flag grammar is passed in so the CLI's user-visible error keeps saying
@@ -2867,6 +2873,7 @@ def _resolve_peer_target(
         session=args.session,
         pid_hint="--pid",
         session_hint="--session",
+        skipped=skipped,
     )
 
 
@@ -2889,6 +2896,7 @@ def send_command(args: argparse.Namespace) -> int:
     from local_operator.mobile.peer_send import (
         candidate_lines,
         deliver_peer_message,
+        skipped_clause,
         validate_peer_body,
     )
 
@@ -2938,7 +2946,12 @@ def send_command(args: argparse.Namespace) -> int:
     # unique match come back, and neither may be converted into a stored send).
     from local_operator.mobile.peer_send import live_scan_found_nothing
 
-    record, candidates, error = _resolve_peer_target(args, target)
+    # Matches the name/substring scan held back for being unengaged. Filled by
+    # the resolver and reported on the receipt below: a sender who typed one
+    # command believing it reached its needle has to learn that part of it went
+    # nowhere (design round 1, D1). Always empty for the exact and stop paths.
+    skipped: list[Any] = []
+    record, candidates, error = _resolve_peer_target(args, target, skipped=skipped)
     if candidates:
         # "REPLACE the target with", not "add --pid": appending the flag to the
         # command the user just typed produces `NAME BODY --pid N`, which the
@@ -3095,9 +3108,9 @@ def send_command(args: argparse.Namespace) -> int:
         return 1
     if record is not None:
         name = record.conversation_name or record.session_id
-        print(f"→ {name} (pid {record.pid}): {detail}")
+        print(f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}")
     else:
-        print(f"→ {cold_session_id} (not running): {detail}")
+        print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
     return 0
 
 

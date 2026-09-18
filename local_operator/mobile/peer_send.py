@@ -24,7 +24,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 from local_operator.info.model import format_duration
 from local_operator.paths import config_dir
@@ -51,7 +51,7 @@ STORED_DISCOVERY_LIMIT = 200
 PEER_MESSAGE_MAX_BYTES = 256 * 1024
 
 
-def unengaged_refusal(label: str) -> str:
+def unengaged_refusal(label: str, *, count: int = 1, cold: bool = False) -> str:
     """The ONE sentence that refuses a peer message to a never-engaged session.
 
     A session that has not run a real turn yet (``SessionRecord.started`` is
@@ -78,11 +78,59 @@ def unengaged_refusal(label: str) -> str:
     read). ``/stop`` never reads this — the kill switch passes
     ``require_started=False``, since a composer window is exactly a session a
     person may need to stop.
+
+    ``count`` pluralises the sentence for a BATCHED refusal: a substring match
+    that reached several unengaged sessions refuses them in one line, and
+    "every … (4 of them)" with a singular tail disagrees with itself
+    (design round 1, D3). ``cold`` swaps the remedy for a target with NO live
+    runtime — a stored session: there, "its owner has to send a first message"
+    presumes a window the sender cannot open, so the cold tail says the
+    conversation has to be opened and used before it becomes a recipient
+    (design round 1, D5). Both default to the single live form, which is what
+    the exact-address sites want.
     """
-    return (
-        f"{label} has not been engaged yet (no user message has been sent in it), "
-        "so it cannot receive peer messages — its owner has to send a first message"
+    plural = count != 1
+    sent = (
+        "no user message has been sent in any of them"
+        if plural
+        else "no user message has been sent in it"
     )
+    if cold:
+        remedy = (
+            "they become recipients once someone opens them and sends a first message"
+            if plural
+            else "it becomes a recipient once someone opens it and sends a first message"
+        )
+    else:
+        remedy = (
+            "their owners have to send a first message"
+            if plural
+            else "its owner has to send a first message"
+        )
+    return (
+        f"{label} {'have' if plural else 'has'} not been engaged yet ({sent}), "
+        f"so {'they' if plural else 'it'} cannot receive peer messages — {remedy}"
+    )
+
+
+def skipped_clause(skipped: "Sequence[Any]") -> str:
+    """The receipt's tail when a name/substring send left matches behind.
+
+    A substring match that found a recipient may still have HELD BACK other
+    matches for being unengaged, and the sender typed one command believing it
+    reached its needle — so the delivery line says so instead of reporting a
+    bare success (design round 1, D1). Returns ``""`` for nothing skipped, so a
+    caller appends it unconditionally.
+
+    The wording lives HERE, next to :func:`unengaged_refusal`, because both the
+    CLI's print and the ``send`` tool's result text append it: a sender reading
+    one surface and then the other must not meet two spellings of the same
+    fact, the argument that already keeps the refusal one sentence.
+    """
+    count = len(skipped)
+    if not count:
+        return ""
+    return f"; {count} match{'es' if count != 1 else ''} skipped (not engaged yet)"
 
 
 def session_has_durable_history(session_id: str, *, root: "Path | None" = None) -> bool:
@@ -110,11 +158,15 @@ def unengaged_label(*, session_id: str, pid: "int | None" = None) -> str:
 
     ``pid 12345`` when the address was a pid — a live record resolved from one,
     or a dial that arrived at a receiver's control port, which is addressed by
-    pid — and ``session 'abc'`` when a session id was typed. One grammar for all
-    four refusal sites (the resolver's three exact branches, delivery, and the
-    receive-side gate), so the target a refusal names is the one that was
-    addressed rather than whichever identifier the receiving layer happens to
-    hold.
+    pid — and ``session 'abc'`` when a session id was typed.
+
+    This is the grammar for the sites that name an ADDRESS: the resolver's
+    exact ``pid`` branch, its exact ``session`` branch, ``deliver_peer_message``
+    (both its live record and its cold raise) and the receive-side gate. The
+    two NEEDLE-shaped refusals — the live substring branch and the stored
+    withholding — compose their own label on purpose: neither answers an
+    address, they answer a name that reached one row (a pid) or one id, and
+    saying ``pid N`` there would hide the needle the sender typed.
     """
     if pid is not None:
         return f"pid {pid}"
@@ -130,6 +182,7 @@ def resolve_peer_target(
     session_hint: str = "a session id",
     include_wedged: bool = False,
     require_started: bool = True,
+    skipped: "list[Any] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
@@ -197,6 +250,17 @@ def resolve_peer_target(
     ``error`` is meaningful; ``candidates`` is populated on an ambiguous substring
     so the caller can list them for disambiguation. The shape is identical for the
     CLI and the tool — only how each SURFACES the outcome differs.
+
+    ``skipped`` is an OUT-PARAMETER, not a fourth tuple element, and it is how a
+    substring match's HELD-BACK records reach the sender's receipt: a name that
+    reached one engaged recipient may have passed over others, and the caller
+    that delivered appends :func:`skipped_clause` so the success line says how
+    many were left behind (design round 1, D1). Passing a list is opt-in on
+    purpose — the three kill-switch callers pass ``require_started=False`` and
+    so never hold anything back, an exact address names one record and can hold
+    nothing back either, and a caller that ignores the list keeps exactly
+    today's behaviour. This is a courtesy to a sender, never a gate: every
+    refusal below fires whether or not anyone is listening.
 
     The conflict wording uses the caller's own ``pid_hint``/``session_hint``
     grammar for the same reason the "no target given" line does. The CLI never
@@ -280,7 +344,8 @@ def resolve_peer_target(
     matches: list[Any] = []
     # Live matches held back ONLY because the session has not been engaged yet.
     # Kept rather than dropped so the refusal below can name what it reached and
-    # keep the stored fallback closed (see the docstring).
+    # keep the stored fallback closed (see the docstring), and so a DELIVERY can
+    # report the held-back count on its receipt through ``skipped``.
     unengaged: list[Any] = []
     for rec, _state in live:
         # A session that has never run a turn is excluded from a
@@ -311,12 +376,13 @@ def resolve_peer_target(
             # NOT the no-match form: ``live_scan_found_nothing`` reads that
             # phrasing as "try the stored store", and a stored namesake would
             # then be spooled to — a recipient this call never named
-            # (BLOCKER-1). The count is stated when there is more than one.
+            # (BLOCKER-1). A batch states its own count in the label so the
+            # sentence's tail can agree with it (design round 1, D3).
             if len(unengaged) == 1:
                 label = f"the only live match for {needle_source!r} (pid {unengaged[0].pid})"
             else:
-                label = f"every live match for {needle_source!r} ({len(unengaged)} of them)"
-            return None, [], unengaged_refusal(label)
+                label = f"{len(unengaged)} live matches for {needle_source!r}"
+            return None, [], unengaged_refusal(label, count=len(unengaged))
         # Distinguish "matched but not live" from "no match at all" so the caller
         # knows whether to wait or to fix the name.
         wedged = [
@@ -342,6 +408,13 @@ def resolve_peer_target(
         return None, [], f"no live session matches {needle_source!r}"
     if len(matches) > 1:
         return None, matches, ""
+    if skipped is not None:
+        # The recipient resolved, so this call is a DELIVERY and the caller is
+        # about to print a receipt: hand it the matches the scan held back so
+        # that receipt can say a peer was left out (design round 1, D1). Only
+        # here — an ambiguous or refused call prints no receipt, so there is
+        # nothing for the clause to qualify.
+        skipped.extend(unengaged)
     return matches[0], [], ""
 
 
@@ -530,8 +603,11 @@ def resolve_stored_target(
                     f"the only stored match for {needle!r} " f"(session {withheld[0].session_id!r})"
                 )
             else:
-                label = f"every stored match for {needle!r} ({len(withheld)} of them)"
-            return None, [], unengaged_refusal(label)
+                label = f"{len(withheld)} stored matches for {needle!r}"
+            # ``cold=True``: a stored row has no runtime anyone can type into,
+            # so the remedy is the conversation being opened and used, not the
+            # owner sending into a window that is already there (D5).
+            return None, [], unengaged_refusal(label, count=len(withheld), cold=True)
         return None, [], ""
     if len(matches) > 1:
         return None, matches, ""
@@ -651,7 +727,9 @@ async def deliver_peer_message(
     # ``wake`` would OPEN A TURN in a session whose owner is not there. Both are
     # refused before any file is touched.
     if not session_has_durable_history(session_id):
-        raise RuntimeError(unengaged_refusal(unengaged_label(session_id=session_id)))
+        # ``cold=True``: no live record means no window to send into, so the
+        # remedy is stated for a session that has to be opened (D5).
+        raise RuntimeError(unengaged_refusal(unengaged_label(session_id=session_id), cold=True))
 
     if not wake and mode == "mailbox":
         return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)

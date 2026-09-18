@@ -1681,6 +1681,86 @@ class TestLiveStateReachesTheRecord:
         server = RuntimeServer(_StillStarting(), kind="tui")
         assert server._started is False
 
+    def _real_tui_handle(self, tmp_path, name: str, rows: list[str]) -> Any:
+        """A REAL ``TuiSessionHandle`` over a stub app (review round 2, F-8).
+
+        The pins above use a ``FakeHandle`` subclass with the right SHAPE
+        (``_session`` as a method); this one binds the class the shape stands
+        in for, which is the shape QA could not reach from outside (round 1,
+        Q3). Cheap to build: the constructor reads the fields a projection
+        carries and wires the ``started`` publisher only when the session has
+        one, so a stub app and a session stub are enough.
+        """
+        from types import SimpleNamespace
+
+        from local_operator.mobile.tui_handle import TuiSessionHandle
+
+        path = tmp_path / name / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(row + "\n" for row in rows))
+        session = SimpleNamespace(
+            session_id=name,
+            transcript_path=path,
+            conversation_name=name,
+            cwd=str(tmp_path),
+        )
+        # The real constructor's parameter is typed ``OperatorApp``; the stub is
+        # deliberate (the handle reads only ``_session`` off the app), so the
+        # ignore documents the double rather than widening the class's type.
+        return TuiSessionHandle(SimpleNamespace(_session=session))  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_real_tui_handle_seeds_started_the_same_way(self, tmp_path) -> None:
+        """F-8: the F-1 fix, on the class rather than on a stand-in for it.
+
+        Both directions, because the enclosing gate (and the refusal that
+        depends on it) rests on the fresh direction staying False.
+        """
+        resumed = RuntimeServer(
+            self._real_tui_handle(
+                tmp_path,
+                "real-tui-resumed",
+                [
+                    '{"id":"t1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+                    '{"id":"m1","ts":2,"type":"message","payload":{"role":"user"}}',
+                ],
+            ),
+            kind="tui",
+        )
+        assert resumed._started is True
+        assert resumed._record.started is True
+
+        fresh = RuntimeServer(
+            self._real_tui_handle(
+                tmp_path,
+                "real-tui-fresh",
+                ['{"id":"t1","ts":1,"type":"custom","payload":{"custom_type":"title"}}'],
+            ),
+            kind="tui",
+        )
+        assert fresh._started is False
+        assert fresh._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_a_handle_answering_with_something_unreadable_boots_unstarted(self) -> None:
+        """F-8, second half: the DERIVATION is inside the guard too.
+
+        The reader ends at ``durable_conversation_path``, which catches only
+        ``OSError`` — so a session answering with something that is not a path
+        used to raise ``TypeError`` out of ``RuntimeServer.__init__``, killing
+        the boot over a seed. A record we cannot read is unengaged: the
+        conservative False, corrected by the owner's first turn.
+        """
+        from types import SimpleNamespace
+
+        class _Odd(FakeHandle):
+            def _session(self) -> Any:  # noqa: ANN401 — an unreadable shape
+                return SimpleNamespace(transcript_path=object())
+
+        server = RuntimeServer(_Odd(), kind="tui")
+        assert server._started is False
+        assert server._record.started is False
+
     @pytest.mark.asyncio
     async def test_a_resumed_boot_seeds_started_from_durable_history(self, tmp_path) -> None:
         """QA Q3: the daemon child behind ``lop --resume <sid>`` builds its
