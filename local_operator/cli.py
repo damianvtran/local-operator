@@ -7804,6 +7804,22 @@ def main() -> int:
                     return key_result
             return run_exec(args.command, exec_args)
 
+        # The interactive path is the fall-through — every subcommand returned
+        # above — so this ONE check covers `lop`, `lop --resume ID`, `--tui` and
+        # every future interactive flag together, and it sits FIRST so a refused
+        # run has written nothing: no config override, no registry row for an
+        # autosave agent. Refused with no escape, unlike the exec path: a
+        # terminal is what the operator opens, and a session that reaches here
+        # is opening one on their behalf. A session restarting its OWN front end
+        # is not that case; `reexec.replace_self` drops the marker before it
+        # re-execs, which is where that distinction lives.
+        refusal = nested_session_refusal()
+        if refusal is not None:
+            from local_operator.cli_style import ERROR, paint
+
+            print(paint(f"Error: {refusal}", ERROR), file=sys.stderr)
+            return 1
+
         config_manager = ConfigManager(base_dir)
         credential_manager = CredentialManager(base_dir)
 
@@ -7865,20 +7881,6 @@ def main() -> int:
                     # This case should logically not happen
                     print("\n\033[1;31mError: Failed to create or retrieve agent.\033[0m")
                     return 1
-
-        # The interactive path is the fall-through — every subcommand returned
-        # above — so this ONE check covers `lop`, `lop --resume ID`, `--tui` and
-        # every future interactive flag together. Refused with no escape, unlike
-        # the exec path: a terminal is what the operator opens, and a session
-        # that reaches here is opening one on their behalf. A session restarting
-        # its OWN front end is not that case; `reexec.replace_self` drops the
-        # marker before it re-execs, which is where that distinction lives.
-        refusal = nested_session_refusal()
-        if refusal is not None:
-            from local_operator.cli_style import ERROR, paint
-
-            print(paint(f"Error: {refusal}", ERROR), file=sys.stderr)
-            return 1
 
         # Legacy behavior: the auto-save config value persists interactive
         # sessions via the registry's autosave agent (exec is excluded —
