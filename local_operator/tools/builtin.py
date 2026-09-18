@@ -119,6 +119,8 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
+from local_operator.redaction_shapes import credential_dump_notice
+from local_operator.redaction_shapes import scrub_secrets as scrub_shape_secrets
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_SCHEME,
@@ -1962,6 +1964,19 @@ class _BashOutput:
         )
 
 
+#: How much undecided text the pipe filter holds before it releases its oldest
+#: bytes anyway (``_PipeRedactor._release_point``).
+#:
+#: A CONSTANT rather than a function of the pattern table, deliberately: a bound
+#: derived from the longest possible match would silently change (or grow
+#: unbounded) the next time a rule is added, and this one has to hold whatever
+#: the table says. 8 KiB is chosen to be comfortably larger than any credential
+#: shape the table spans — the widest is a PEM block, whose 2048-bit body is
+#: under 2 KiB — while staying small enough that a command printing one enormous
+#: line still publishes most of it promptly.
+_PIPE_DEFERRAL_LIMIT = 8192
+
+
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
 
@@ -1974,6 +1989,34 @@ class _PipeRedactor:
     values. The sequence form is what carries §6 registrations — values a child
     fetched through ``lop secret get``, which have a name nowhere in this
     process, so there is no map to put them in.
+
+    **Why the release point moved, and what it costs.** Holding back a fixed
+    window sized from the longest KNOWN value is enough to keep that value whole
+    across a chunk boundary, and it is nothing at all against a SHAPE: a DSN or
+    an ``AWS_SECRET_ACCESS_KEY=`` line that a child prints in two reads was
+    painted live and then never re-read, because the live stream is the one
+    surface no later pass rewrites. So the release point is now the last line
+    terminator in hand, and every complete line goes out with
+    :func:`~local_operator.redaction_shapes.scrub_secrets` over it — values and
+    shapes both. Shapes are line-anchored, so a partial SENTENCE cannot carry a
+    shape across the boundary; a partial LINE can, and no longer does.
+
+    **Bounded, and stated rather than implied.** ``pending`` is capped at
+    :data:`_PIPE_DEFERRAL_LIMIT` bytes: a child that prints 10 MB with no
+    newline (one enormous JSON blob, a progress bar with no terminator) is
+    released in cap-sized pieces rather than accumulating, so memory does not
+    grow with the command's output. The cap is a CONSTANT, not a function of the
+    longest possible match — a bound derived from the pattern table would be
+    wrong the moment a rule was added. The residual is the obvious one: a shape
+    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
+    the cap, is split across two releases and not matched here. Both are
+    contained by the result path, which scrubs the finished text in one piece.
+
+    Trailing partial lines are therefore withheld until they complete. That is
+    a real trade for a line-oriented surface, taken deliberately: a credential
+    painted live is unrecoverable, while a partial line's bytes arrive as soon
+    as its newline does — or at the cap, or at end-of-stream, whichever comes
+    first.
     """
 
     def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
@@ -2002,7 +2045,40 @@ class _PipeRedactor:
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
         text = self.pending + self.decoder.decode(chunk, final=final)
-        cut = len(text) if final else max(len(text) - self.lookbehind, 0)
+        cut = self._release_point(text, final=final)
+        ready, self.pending = text[:cut], text[cut:]
+        return scrub_shape_secrets(ready, self.secrets).encode("utf-8")
+
+    def _release_point(self, text: str, *, final: bool) -> int:
+        """Where the decidable prefix ends: after the last newline, capped."""
+        if final:
+            return len(text)
+        # BOTH terminators: a progress bar rewrites its line with ``\r`` and may
+        # not emit ``\n`` until it is done, and a shape cannot straddle either
+        # one, so releasing at ``\r`` is free and keeps a long build's output
+        # visible while it runs.
+        cut = max(text.rfind("\n"), text.rfind("\r")) + 1
+        # An UNTERMINATED private-key block defers the WHOLE block, not just to
+        # the last newline: a PEM body is the credential and it spans lines, so
+        # releasing up to the last newline would publish the key material and
+        # hold back only the ``-----END`` line. The block is held until its END
+        # arrives (or the cap below forces it through, which is the documented
+        # residual for a block larger than the cap).
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin >= 0:
+            end = text.find("-----END", begin)
+            if end < 0 or end >= cut:
+                cut = begin
+        # The cap is applied LAST and wins over every hold above: bounded memory
+        # is the property that must not depend on what the child prints, so a
+        # command that opens a PEM block and never closes it cannot pin the
+        # buffer forever.
+        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
+            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+        # Never cut through a KNOWN value. The newline rule above already
+        # prevents that for any value without a newline in it, which is every
+        # credential in practice; this keeps the guarantee for the ones with
+        # one, and for the cap-forced cut above.
         while True:
             previous_cut = cut
             for secret in self.secrets:
@@ -2011,10 +2087,7 @@ class _PipeRedactor:
                     cut = start
             if cut == previous_cut:
                 break
-        ready, self.pending = text[:cut], text[cut:]
-        for secret in self.secrets:
-            ready = ready.replace(secret, "[redacted]")
-        return ready.encode("utf-8")
+        return cut
 
 
 def _bash_progress_line(
@@ -2825,6 +2898,17 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    # ONE advisory line when the command is shaped like a credential dump, so the
+    # model learns the safer form at the moment it needs it rather than after the
+    # secret is already in the transcript. It rides the RESULT, not the stream:
+    # the stream is bytes from the child, and this is the harness talking.
+    #
+    # The notice carries no value from the command (see ``credential_dump_notice``)
+    # and is appended here, before the footer, so a spilled transcript's
+    # expansion hints stay at the end where the model looks for them.
+    notice = credential_dump_notice(params.command)
+    if notice:
+        parts.append(notice)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
