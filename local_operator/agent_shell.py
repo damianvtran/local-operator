@@ -112,11 +112,13 @@ def without_agent_shell_marker(env: Mapping[str, str]) -> dict[str, str]:
     """``env`` with the marker removed: a SESSION opening a conversation.
 
     The marker answers one question — "is this process a command an agent's
-    tool call started" — and this codebase has three places where a session,
+    tool call started" — and this codebase has four places where a session,
     not an agent, opens a conversation for its user: the TUI's own restart
     (:func:`local_operator.reexec.replace_self`), ``/fork``'s new window
-    (``tui/app.py``) and a notification click's terminal
-    (``tui/resume_click.py``). Each passes the session's environment to a child
+    (``tui/app.py``) and BOTH rungs of a notification click
+    (``tui/resume_click.py``: the terminal, and the desktop app beside it,
+    which is long-lived and would pass the claim on to everything it later
+    spawns). Each passes the session's environment to a child
     that runs `lop --resume`, and each is a user gesture, so that child must not
     inherit the parent's answer.
 

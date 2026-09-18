@@ -7812,10 +7812,10 @@ def main() -> int:
         # is `nested_session_refusal`'s, in one place, on purpose), because a
         # pty harness drives this front end exactly as a bench drives exec.
         # What differs between the two paths is only who DROPS the marker: the
-        # three places a session opens a conversation for its user — the TUI
-        # restart, `/fork`'s window, a notification click's terminal — pass
-        # `agent_shell.without_agent_shell_marker`, since those are the user's
-        # gestures and not an agent's command.
+        # places a session opens a conversation for its user — the TUI restart,
+        # `/fork`'s window, and both rungs of a notification click (the terminal
+        # and the desktop app) — pass `agent_shell.without_agent_shell_marker`,
+        # since those are the user's gestures and not an agent's command.
         refusal = nested_session_refusal()
         if refusal is not None:
             from local_operator.cli_style import ERROR, paint
