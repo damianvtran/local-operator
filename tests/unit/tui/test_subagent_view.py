@@ -4051,14 +4051,19 @@ async def test_a_row_folds_at_the_body_width_it_is_mounted_into() -> None:
             # failure names the defect: a fold at 80 is the flash, whatever
             # else the ladder may legitimately report mid-layout.
             assert FALLBACK_WIDTH not in folds, folds
-            # The body LESS the rail: an ``AssistantBlock`` paints a
-            # ``RAIL_COLS``-cell gutter and folds its prose into what the
-            # gutter leaves, so the width it reports is the box it is
-            # painted in rather than the body it is mounted into. Still
-            # 'not the fallback', which is the flash this test catches.
-            assert all(width == body_width - RAIL_COLS for width in folds), folds
+            # The body, not the body less the rail: every row in this fixture is
+            # a message the child is STILL writing (a running job, no
+            # ``message_end``), so the page builds it unfinalized, and the rail —
+            # with the two cells it takes off the fold — arrives with the
+            # settle, per ROW (`AssistantBlock._rail_cols`). A fold at
+            # ``body_width - RAIL_COLS`` here would be a row whose geometry had
+            # run ahead of its glyph, which is the state this test's sibling
+            # (`test_a_settled_message_is_committed_in_the_block_it_streamed_into`)
+            # covers on the other side of the settle. Still 'not the fallback',
+            # which is the flash this test catches.
+            assert all(width == body_width for width in folds), folds
             block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
-            assert block._built_width == body_width - RAIL_COLS
+            assert block._built_width == body_width
     finally:
         monkeypatch.undo()
 
@@ -4086,6 +4091,11 @@ async def test_a_settled_message_is_committed_in_the_block_it_streamed_into() ->
         block = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
         streaming = str(block.renderable)
         assert not block.is_finalized()
+        # While the child is still writing it, the row folds at the body it is
+        # mounted into: the rail, and the two cells it takes off the fold,
+        # arrive with the settle below — per ROW, because that is the unit this
+        # page commits in.
+        streaming_width = block._built_width
 
         # The child stops. Note the trajectory does NOT change: the settle is
         # the job's status moving, which is the case a text-only diff misses.
@@ -4097,6 +4107,12 @@ async def test_a_settled_message_is_committed_in_the_block_it_streamed_into() ->
         settled = next(b for b in view._body.blocks() if isinstance(b, AssistantBlock))
         assert id(settled) == id(block), "the message was rebuilt to settle it"
         assert settled.is_finalized()
+        # The settle is what earns the rail, and the rail is what costs the two
+        # cells: the SAME row, the same body, a fold two narrower than it had.
+        assert settled._built_width == streaming_width - RAIL_COLS, (
+            settled._built_width,
+            streaming_width,
+        )
         rows = str(settled.renderable).split("\n")
         # Blankness past the rail: the block paints its gutter on every
         # row including the paragraph separator, so ``row.strip()`` is

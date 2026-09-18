@@ -1809,13 +1809,22 @@ async def test_a_paged_block_is_folded_at_its_destination_width_not_the_fallback
         f"{FALLBACK_WIDTH}-column fallback while the pane was wide: {sorted(set(folds))}"
     )
     # Per block kind, because they no longer fold at ONE number: an
-    # ``AssistantBlock`` paints a ``RAIL_COLS``-cell gutter and folds its prose
-    # into the pane LESS that gutter, while a ``UserBlock`` reports the lane it
-    # was handed. Both are still "the width this block is about to be given",
-    # which is what this assertion is about; collapsing them to ``== pane``
-    # would demand the assistant overhang its own box by two cells.
-    expected = {"AssistantBlock": pane - RAIL_COLS, "UserBlock": pane}
-    assert all(width == expected[kind] for kind, width in folds), (
+    # ``AssistantBlock`` is handed the pane and folds into the body the rail
+    # leaves, and both happen — in that order — for one projected block.
+    # ``project_settled_rows`` gives the block its text and then COMMITS it, and
+    # the rail is a property of the committed frame
+    # (``AssistantBlock._rail_cols``), so the paint before the commit is the full
+    # pane and the one that commits it is the pane less the gutter. A
+    # ``UserBlock`` reports the lane it was handed. Both are still "the width this
+    # block is about to be given", which is what this assertion is about;
+    # collapsing them to ``== pane`` would demand the assistant overhang its own
+    # box by two cells, and admitting the whole pane for a ``UserBlock`` would
+    # stop it failing at all.
+    expected: dict[str, set[int]] = {
+        "AssistantBlock": {pane, pane - RAIL_COLS},
+        "UserBlock": {pane},
+    }
+    assert all(width in expected[kind] for kind, width in folds), (
         sorted(set(folds)),
         expected,
     )
