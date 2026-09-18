@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence, Sized
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
@@ -26294,6 +26294,36 @@ class OperatorApp(App[None]):
         except Exception:
             return [], None
 
+    def _subagent_child_counts(self, jobs: Sequence[Any]) -> dict[str, int]:
+        """Direct-child count per roster row, for the panel's ``⊞N`` mark.
+
+        Read from the SAME graph :meth:`_subagent_roster` walks, so a row's
+        mark and the roster the reader gets by drilling in cannot come from
+        two different trees — the count is a property of the graph, never of
+        the job row (``RowFacts.child_count``).
+
+        Total and silent by design, because this runs from the 1 Hz poll and
+        from every ``Subagent*`` handler: a host with no comms graph, or one
+        whose ``children`` is not callable, answers ``{}`` — i.e. no marks —
+        and a row that cannot be counted answers ``0``, which paints the same
+        nothing a leaf does. The alternative here is not a better mark but an
+        exception in a Textual message handler, for a decoration.
+        """
+        comms = getattr(self._session, "_subagent_comms", None)
+        children = getattr(comms, "children", None)
+        if not callable(children):
+            return {}
+        counts: dict[str, int] = {}
+        for job in jobs:
+            job_id = str(getattr(job, "id", "") or "")
+            if not job_id:
+                continue
+            try:
+                counts[job_id] = len(cast(Sized, children(job_id)))
+            except Exception:  # noqa: BLE001 — a mark may not cost the band
+                counts[job_id] = 0
+        return counts
+
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
 
@@ -26307,6 +26337,10 @@ class OperatorApp(App[None]):
         # ledger cannot change synchronously inside one refresh. Snapshot once
         # so 100-child sessions do not copy and sort the same roster per pass.
         jobs, selected_job = self._subagent_roster()
+        # Beside the roster and for the same reason: the counts are one more
+        # read of the tree the roster was resolved from, so they are snapshotted
+        # once per refresh rather than per settle pass below.
+        children_counts = self._subagent_child_counts(jobs)
         # Three steps, and the order is load-bearing rather than tidy.
         #
         # A panel's own `sync` is what decides whether it is displayed at all
@@ -26341,7 +26375,12 @@ class OperatorApp(App[None]):
         # first frame that does not move.
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
-                self._subagent_panel.sync(session, jobs=jobs, selected_job=selected_job)
+                self._subagent_panel.sync(
+                    session,
+                    jobs=jobs,
+                    selected_job=selected_job,
+                    children_counts=children_counts,
+                )
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:
@@ -26665,7 +26704,14 @@ class OperatorApp(App[None]):
         view.remove()
         if self._subagent_panel is not None:
             scoped_jobs, _ = self._subagent_roster()
-            self._subagent_panel.sync(self._session, jobs=scoped_jobs)
+            # With the counts, like `_refresh_band`: `sync` REPLACES them, so a
+            # re-scope that left them out would drop every `⊞N` from the rows
+            # the reader just returned to, until the next poll re-derived them.
+            self._subagent_panel.sync(
+                self._session,
+                jobs=scoped_jobs,
+                children_counts=self._subagent_child_counts(scoped_jobs),
+            )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
@@ -27216,7 +27262,12 @@ class OperatorApp(App[None]):
         self._point_band_at(job)
         if self._subagent_panel is not None:
             scoped_jobs, selected_job = self._subagent_roster()
-            self._subagent_panel.sync(session, jobs=scoped_jobs, selected_job=selected_job)
+            self._subagent_panel.sync(
+                session,
+                jobs=scoped_jobs,
+                selected_job=selected_job,
+                children_counts=self._subagent_child_counts(scoped_jobs),
+            )
         if self._todo_panel is not None and session is not None:
             self._todo_panel.sync(
                 session,

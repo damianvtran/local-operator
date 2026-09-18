@@ -182,9 +182,11 @@ class Job:
         self.usage = usage
 
 
-def _plain(job: Job, width: int, *, parent: str = PARENT_MODEL, current: bool = False) -> str:
+def _plain(
+    job: Job, width: int, *, parent: str = PARENT_MODEL, current: bool = False, children: int = 0
+) -> str:
     """One row as the string a reader sees, laid out alone at ``width``."""
-    facts = row_facts(job, fallback_id=job.id, current=current)
+    facts = row_facts(job, fallback_id=job.id, current=current, child_count=children)
     stats = job_stats(job, default_model_label=parent)
     rung, column, clock, role_column = panel_layout([(facts, stats)], width)
     return compose_row(
@@ -199,11 +201,16 @@ def _plain(job: Job, width: int, *, parent: str = PARENT_MODEL, current: bool = 
     ).plain
 
 
-def _column(jobs: list[Job], width: int) -> list[str]:
-    """A whole panel's worth of rows, reduced together the way the panel does."""
+def _column(jobs: list[Job], width: int, *, children: dict[str, int] | None = None) -> list[str]:
+    """A whole panel's worth of rows, reduced together the way the panel does.
+
+    ``children`` is the per-job count the panel gets from the app, so a marked
+    label is measured in the shared column exactly as it is in a live dock.
+    """
+    counts = children or {}
     measured = [
         (
-            row_facts(job, fallback_id=job.id, current=False),
+            row_facts(job, fallback_id=job.id, current=False, child_count=counts.get(job.id, 0)),
             job_stats(job, default_model_label=PARENT_MODEL),
         )
         for job in jobs
@@ -408,6 +415,47 @@ def test_the_label_is_the_last_thing_to_yield_and_stops_at_its_floor() -> None:
     assert "MR review agent round 2" in _plain(job, 120)  # whole when there is room
     narrow = _plain(job, 30)
     assert "MR review a" in narrow  # squeezed to the floor, not dropped
+    assert cell_len(narrow) <= 30
+
+
+def test_a_row_says_when_the_child_it_names_has_a_level_under_it() -> None:
+    """The roster lists ONE level, so a row has to say when another exists.
+
+    The dock re-scopes to the direct children of the page you have open, so
+    without the mark a child with a whole level under it and a leaf are the
+    same row — and the only way to tell them apart is to drill into each and
+    compare two lists.
+    """
+    parent = Job("j1", "review-301-r2", progress="auditing merged MRs")
+    assert "review-301-r2 ⊞3" in _plain(parent, 120, children=3)
+    # A leaf, and a count nobody knows, both say nothing.
+    assert "⊞" not in _plain(Job("j2", "docs sweep", progress="auditing merged MRs"), 120)
+    assert "⊞" not in _plain(parent, 120)
+
+
+def test_the_mark_is_the_labels_own_budget_rather_than_a_column_of_its_own() -> None:
+    """It rides the label's truncation, so no unmarked row pays for it.
+
+    Two rows, one with a level under it: the numbers still start in one column
+    (the shared label width measures the MARKED label), and where the label is
+    squeezed it is the count that goes and not the name — the count is
+    re-derivable by opening the page, the name is not.
+    """
+    usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
+    rows = _column(
+        [
+            Job("j1", "review-301-r2", progress="auditing merged MRs", usage=usage),
+            Job("j2", "docs sweep", progress="auditing merged MRs", usage=usage),
+        ],
+        120,
+        children={"j1": 3},
+    )
+    assert "⊞3" in rows[0], rows
+    assert "⊞" not in rows[1], rows
+    assert rows[0].index("$") == rows[1].index("$"), rows
+    narrow = _plain(Job("j1", "review-301-r2", progress="auditing merged MRs"), 30, children=3)
+    assert "review-301" in narrow  # the head of the name survives
+    assert "⊞" not in narrow  # the count at the tail is what yields
     assert cell_len(narrow) <= 30
 
 

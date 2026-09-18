@@ -295,6 +295,31 @@ ACTIVITY_FLOOR = 16
 #: indistinguishable — which is the one thing a list of rows may not do.
 LABEL_FLOOR = 12
 
+#: Marks a row whose child has children of its own, followed by that child's
+#: count: `review-301-r2 ⊞3`. The roster lists ONE level at a time — the rows
+#: are the direct children of the page you have open (``app._subagent_roster``)
+#: — so without this mark a row with a whole level under it and a leaf row are
+#: the same row until the reader drills in and finds a different list. One cell
+#: and one digit, appended to the LABEL rather than given a column of its own:
+#: it is a property of the name (see :func:`_lay_out`), and a second column
+#: would re-solve a layout that already has a ladder for the label.
+CHILDREN_MARKER = "⊞"
+
+#: The widest a SCOPE label may be before the header truncates it with `…`.
+#:
+#: The header names whose children the roster is listing (`Subagents of <label>`,
+#: see ``SubagentPanel._paint_header``), and a label is model-authored text with
+#: no length cap — the same class of input as :data:`ROLE_CEILING` bounds. The
+#: ceiling's job is not the widget's own overflow: `#band` is content-sized
+#: (design: the input shell's centering depends on it), so an unbounded scope
+#: makes the DOCK wider than the rows under it. Twenty-four holds the longest
+#: label this file's own examples use (23 cells, `MR review agent round 1`)
+#: whole and bounds the header at 46 cells — 13 of `Subagents of `, 24 of
+#: scope, and the 9 of `HINT_GAP` + `ctrl+g` — inside the 58-cell dock
+#: :meth:`SubagentPanel._row_width` measured. The head of the label is what
+#: survives: two rounds of one review still read as the same review.
+SCOPE_CEILING = 24
+
 #: The widest a ROLE segment may be before it is truncated with the usual `…`.
 #:
 #: Role names are operator-authored (`agent op=create`) and have no length cap,
@@ -585,9 +610,25 @@ class RowFacts:
     #: whether ``review-301-r2`` is a reviewer or a coder that was asked to
     #: look at a review was a guess.
     agent_role: str = ""
+    #: How many DIRECT children this row's child has — the ``⊞N`` mark
+    #: (:data:`CHILDREN_MARKER`). It is the only signal that another level
+    #: exists below a row: the roster lists one level at a time, so a child
+    #: with children and a leaf paint the same row until the reader drills in
+    #: and finds a different list. Sourced from the comms graph by the app and
+    #: handed down, like ``paused``, so the panel stays a pure renderer of
+    #: facts it is given; ``0`` means "no mark", and that is also what an
+    #: unknown count means.
+    child_count: int = 0
 
 
-def row_facts(job: Any, *, fallback_id: str, current: bool, paused: bool = False) -> RowFacts:
+def row_facts(
+    job: Any,
+    *,
+    fallback_id: str,
+    current: bool,
+    paused: bool = False,
+    child_count: int = 0,
+) -> RowFacts:
     """Read one job into the strings a row paints. Never raises.
 
     Guarded whole, and not merely with ``getattr`` defaults: a default only
@@ -596,10 +637,22 @@ def row_facts(job: Any, *, fallback_id: str, current: bool, paused: bool = False
     hand it properties that raise. This is called from the 1 Hz poll and from
     the ``Subagent*`` handlers, so an exception here is an unhandled Textual
     message-handler exception, i.e. the whole app, for a status row.
+
+    ``child_count`` is handed THROUGH rather than read off the job, for the
+    same reason ``paused`` is: it belongs to the tree, not to the row, and
+    only the app holds the graph (see :attr:`RowFacts.child_count`).
     """
     try:
-        return _read_row(job, fallback_id=fallback_id, current=current, paused=paused)
+        return _read_row(
+            job,
+            fallback_id=fallback_id,
+            current=current,
+            paused=paused,
+            child_count=child_count,
+        )
     except Exception:
+        # The count is NOT part of what just failed: it came from the graph, so
+        # a row whose job cannot be read still says there is a level under it.
         return RowFacts(
             label=fallback_id,
             status="running",
@@ -608,10 +661,18 @@ def row_facts(job: Any, *, fallback_id: str, current: bool, paused: bool = False
             running=False,
             elapsed="0s",
             activity="",
+            child_count=child_count,
         )
 
 
-def _read_row(job: Any, *, fallback_id: str, current: bool, paused: bool = False) -> RowFacts:
+def _read_row(
+    job: Any,
+    *,
+    fallback_id: str,
+    current: bool,
+    paused: bool = False,
+    child_count: int = 0,
+) -> RowFacts:
     """:func:`row_facts` without the net. Everything here may raise."""
     status = str(getattr(job, "status", "running"))
     queued = bool(getattr(job, "queued", False))
@@ -696,6 +757,7 @@ def _read_row(job: Any, *, fallback_id: str, current: bool, paused: bool = False
         activity=activity,
         current=current,
         agent_role=agent_role,
+        child_count=child_count,
     )
 
 
@@ -961,8 +1023,19 @@ def _lay_out(
         # reported no usage at all still prints nothing — it has not spent
         # anything anyone knows of, which is a different fact again.
         cost = "$—" if stats.billed else ""
+    # The lineage mark rides the LABEL's own budget rather than a column of
+    # its own: it is a fact about the name (`review-301-r2 ⊞3`), so it is
+    # appended BEFORE the truncation and yields with the name instead of
+    # adding a column to every row. It sits at the tail, so a squeezed row
+    # keeps the head of the name and loses the count — the number is
+    # re-derivable by opening the page, the name is not.
     label = truncate_cells(
-        facts.label, budget if budget is not None else max(LABEL_FLOOR, width // 3)
+        (
+            f"{facts.label} {CHILDREN_MARKER}{facts.child_count}"
+            if facts.child_count > 0
+            else facts.label
+        ),
+        budget if budget is not None else max(LABEL_FLOOR, width // 3),
     )
     head = (
         _CHROME_CELLS
@@ -1656,7 +1729,19 @@ class SubagentPanel(Container):
         #: so every path that paints a row needs the same lookup — see
         #: :data:`GLYPH_PAUSED`.
         self._paused_ids: set[str] = set()
+        #: How many DIRECT children each row's child has, keyed by job id.
+        #: Handed in by `sync` from the comms graph, exactly like
+        #: `_paused_ids` and for the same reason: the fact lives on the TREE
+        #: and only the app holds it, so every path that paints a row reads the
+        #: same lookup — see :attr:`RowFacts.child_count`. A job id that is not
+        #: in here has no children (or an unknown count): no mark either way.
+        self._children_counts: Mapping[str, int] = {}
         self._selected_job_id = ""
+        #: The open child's LABEL, beside its id. The header says WHOSE
+        #: children the roster is listing (`Subagents of <label>`), and
+        #: `_paint_header` also runs from the spinner tick, which is handed no
+        #: job at all.
+        self._selected_label = ""
         self._spinner_index = 0
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
@@ -1675,6 +1760,12 @@ class SubagentPanel(Container):
         #: overflow, so no affordance row to say it). Same guard purpose as
         #: `_header_compact`: repaint when the hint moves, not per tick.
         self._header_hint: bool = False
+        #: The scope the caption is currently naming, `""` for none. Same
+        #: guard purpose again, and load-bearing here: the scope moves when
+        #: the reader opens or leaves a page, which is not a hint change, so a
+        #: guard on the hint alone would leave the header naming the page the
+        #: reader just left.
+        self._header_scope: str = ""
         #: The ledger moved since the last paint. Set by `sync`, cleared by
         #: the tick that acts on it — the coalescing buffer, one bit wide,
         #: because "something changed" is all a full repaint needs to know.
@@ -2101,6 +2192,7 @@ class SubagentPanel(Container):
                 fallback_id=job_id,
                 current=False,
                 paused=job_id in self._paused_ids,
+                child_count=self._children_counts.get(job_id, 0),
             )
             # `queued` by its own name: the table ranks it explicitly, so
             # there is no longer a substitution here to keep in step.
@@ -2156,13 +2248,26 @@ class SubagentPanel(Container):
 
     # -- sync -------------------------------------------------------------
     def sync(
-        self, session: Any, *, jobs: Sequence[Any] | None = None, selected_job: Any = None
+        self,
+        session: Any,
+        *,
+        jobs: Sequence[Any] | None = None,
+        selected_job: Any = None,
+        children_counts: Mapping[str, int] | None = None,
     ) -> None:
         """Re-read ``session.jobs`` and schedule a repaint.
 
         Called on every Subagent* event (immediate) and on the 1 Hz poll (the
         belt to the events' suspenders — elapsed time moves with no event at
         all). Never raises: this is a status surface.
+
+        ``children_counts`` is the per-child count of direct children that the
+        row labels mark with :data:`CHILDREN_MARKER`, keyed by job id and read
+        from the comms graph by the caller (``app._subagent_child_counts``).
+        It is a parameter rather than a graph read here because the panel
+        renders facts it is handed and never walks the tree itself; ``None``
+        means "no counts known", which paints no marks, so a caller that has
+        no graph — every test that predates the mark — is unchanged.
 
         The rows are NOT painted here. This marks the panel dirty and lets
         :meth:`_tick` do it, so a burst of child events costs one repaint
@@ -2180,6 +2285,14 @@ class SubagentPanel(Container):
         task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
         selected_id = str(getattr(selected_job, "id", "") or "")
         self._selected_job_id = selected_id
+        # Stripped for the same reason a row's label is: this text is
+        # model-authored and reaches a header that is painted as-is.
+        self._selected_label = strip_control_sequences(
+            str(getattr(selected_job, "label", "") or "")
+        )
+        # Set before the empty-roster return below, so a panel whose rows have
+        # all left does not keep the counts of the roster that just went.
+        self._children_counts = children_counts or {}
         if selected_id:
             # The viewed manager is not its own child row, but its status band
             # still needs the same off-thread stats cache as visible children.
@@ -2329,7 +2442,11 @@ class SubagentPanel(Container):
             if job is None:
                 continue
             facts = row_facts(
-                job, fallback_id=job_id, current=row.current, paused=job_id in self._paused_ids
+                job,
+                fallback_id=job_id,
+                current=row.current,
+                paused=job_id in self._paused_ids,
+                child_count=self._children_counts.get(job_id, 0),
             )
             measured.append((job_id, row, facts, self._stats_for(job_id, job, reread_stats)))
         self._rung, self._column, self._clock, self._role_column = panel_layout(
@@ -2490,16 +2607,40 @@ class SubagentPanel(Container):
         # the caption already has the row. With overflow the affordance says
         # it and the caption does not repeat it.
         hint = not self._affordance.display
-        if self._header_shown and not self._header_compact and hint == self._header_hint:
+        # The scope is a SECOND paint-once input beside the hint, and the guard
+        # below needs it: opening or leaving a page moves neither the hint nor
+        # the compact state, so a guard on those alone left the caption naming
+        # the child the reader had just left.
+        scope = truncate_cells(self._selected_label, SCOPE_CEILING) if self._selected_label else ""
+        if (
+            self._header_shown
+            and not self._header_compact
+            and hint == self._header_hint
+            and scope == self._header_scope
+        ):
             return
         self._header_shown = True
         self._header_compact = False
         self._header_hint = hint
+        self._header_scope = scope
         self._summary_key = None
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Subagents", style=muted)
+        if scope:
+            # `Subagents of <child>`: the rows are the DIRECT CHILDREN of the
+            # page you have open (``app._subagent_roster``), so a reader who
+            # drilled in is looking at a different list under the same word.
+            #
+            # ONE space, and in the label's own muted ink: this is the break
+            # WITHIN one sentence. `STATS_SEAM` belongs to counts and
+            # `HINT_GAP` to the `ctrl+g` below, which is a different KIND of
+            # thing from the label (round 1, D3); the scope is neither, so it
+            # borrows neither separator and the header invents no third.
+            # Bounded by :data:`SCOPE_CEILING` before it is painted, because
+            # the label is model-authored text and `#band` is content-sized.
+            header.append(f" of {scope}", style=muted)
         if hint:
             # A GAP, not `STATS_SEAM`. That ` · ` is the separator between
             # counts, so in the summary row the hotkey genuinely is the last
@@ -2705,6 +2846,7 @@ class SubagentPanel(Container):
                             fallback_id=job_id,
                             current=row.current,
                             paused=job_id in self._paused_ids,
+                            child_count=self._children_counts.get(job_id, 0),
                         ),
                         stats=self._stats_for(job_id, job, False),
                         spinner_glyph=glyph,
