@@ -33810,8 +33810,13 @@ class OperatorApp(App[None]):
             self._notice("Nothing unread.", "note")
             return
         # The pile goes up BEFORE the write, so a write that then fails leaves the
-        # user looking at what did not get cleared rather than at nothing.
-        self._append_block(NoticeBlock(_notifications_listing(unread, budget), "note"))
+        # user looking at what did not get cleared rather than at nothing. Painted
+        # in its CLEARING form: same rows and count, no instruction to run the
+        # command that is already running, and no pointer to rows that are about
+        # to stop being unread (UX round 2, U7 / agent review F4).
+        self._append_block(
+            NoticeBlock(_notifications_listing(unread, budget, clearing=True), "note")
+        )
         try:
             results = await asyncio.to_thread(
                 AttentionStore(root / "attention.db").acknowledge_many, items
@@ -42469,20 +42474,32 @@ class _TreeRow(Text):
 NOTIFICATIONS_LISTING_ROWS = 10
 
 
-def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
+def _notifications_listing(
+    entries: Sequence[CatalogEntry], budget: int, *, clearing: bool = False
+) -> str:
     """The unread-completion receipt ``/notifications`` prints.
 
-    THE SAME BLOCK IN BOTH FORMS, including the clearing one: ``/notifications
-    read`` renders the set it is about to write through this function, so the
-    user who typed the space and two Enters has seen the pile (UX round 1, U1 and
-    U4). One composition, because a second one for the clearing form would be
-    free to describe a different set.
+    ONE COMPOSITION FOR BOTH FORMS, because ``/notifications read`` renders the
+    set it is about to write through this function: the user who typed the space
+    and two Enters has seen the pile (UX round 1, U1 and U4), and a second
+    composition would be free to describe a different set.
+
+    ``clearing`` is the ONE difference, and it is about the reader's moment rather
+    than the rows: the listing's closing line is an instruction ("run the other
+    form"), which on the clearing form instructs the user to run the command they
+    just ran, and its ``…N more — ctrl+b`` pointer sends them after rows that are
+    no longer unread (UX round 2, U7 and agent review F4). The rows, the header
+    and the plain bound are identical — the block still reconciles what it paints
+    with what it clears, which is the property U1 is about.
 
     ``entries`` arrives ordered by completion age — the column the rows print —
     and bounded by the caller's read; this function only composes. ``budget`` is
-    the text-column width the notice paints at (``NoticeBlock.body_budget``); a
-    row is truncated to it rather than allowed to wrap, so the count of painted
-    rows is the count of listed rows.
+    the text-column width the notice paints at (``NoticeBlock.body_budget``) and
+    it bounds the ROW, not just the name cell: the name is surrendered first (it
+    is the only variable-width cell), and a budget too small even for the fixed
+    lead and tail truncates the composed row rather than letting it wrap, so the
+    count of painted rows is the count of listed rows (agent review round 1 R4,
+    round 2 F3).
 
     The mark comes from ``COMPLETION_MARKERS`` — the same table the sidebar and
     the picker paint from — so one completion kind cannot gain a second glyph
@@ -42490,6 +42507,8 @@ def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
     statement, and a second colour ramp inside it would be a claim about urgency
     the listing does not make.
     """
+    from rich.cells import cell_len
+
     from local_operator.resume import format_age
     from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS
     from local_operator.tui.widgets.tool_card import truncate_cells
@@ -42505,31 +42524,35 @@ def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
         # the taxonomy: "✓ name —  · 2h" would read as a missing column.
         kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
         tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
-        room = budget - len(lead) - len(tail)
-        # The name is the only variable-width cell, so it absorbs the whole
-        # budget: a row that cannot fit its own name is still a row, and one that
-        # wraps is not. ``max(1, room)`` rather than a ``room > 0`` guard: the
-        # guard was true-or-false over a value that goes NEGATIVE in a narrow
-        # split, and its false arm emitted the untruncated name into a budget too
-        # small for the tail alone — the one outcome the rule above forbids
-        # (agent review round 1, R4). A budget of zero is still "no opinion" and
-        # keeps the untruncated name, exactly as ``/stop all``'s listing does.
         label = entry.row.name or "Untitled conversation"
-        name = truncate_cells(label, max(1, room)) if budget > 0 else label
-        lines.append(f"{lead}{name}{tail}")
+        if budget <= 0:
+            # Zero is "no opinion" (the caller could not measure), which keeps
+            # the untruncated name exactly as ``/stop all``'s listing does.
+            row = f"{lead}{label}{tail}"
+        else:
+            room = budget - cell_len(lead) - cell_len(tail)
+            row = f"{lead}{truncate_cells(label, max(1, room))}{tail}"
+            if cell_len(row) > budget:
+                # The fixed cells alone can overrun a narrow split, where no
+                # amount of name truncation fits the row; the ROW is what the
+                # bound is about, so it is the row that gets truncated.
+                row = truncate_cells(row, budget)
+        lines.append(row)
     if total > NOTIFICATIONS_LISTING_ROWS:
-        # The count AND the route to the rest: the bound is honest about how many
-        # it hides and used to leave the user no way to those rows at all (UX
-        # round 1, U5). The drawer paints the pile this receipt is a page of, so
-        # the pointer goes where the reader already is.
-        lines.append(f"  …{total - NOTIFICATIONS_LISTING_ROWS} more — ctrl+b opens the sidebar")
+        # The count of what is hidden, in BOTH forms: it is what lets the reader
+        # reconcile the rows above with the number the receipt will name.
+        bound = f"  …{total - NOTIFICATIONS_LISTING_ROWS} more"
+        lines.append(bound if clearing else f"{bound} — ctrl+b shows or hides the sidebar")
+    if not clearing:
         # "all N" once the bound bites, "these" only when every row is on screen:
         # at 38 unread the short form named the ten rows above it while the write
         # covered all 38, one Enter away from a permanent clear of rows nobody
         # had seen (design round 1, D2).
-        lines.append(f"/notifications read marks all {total} read")
-    else:
-        lines.append("/notifications read marks these read")
+        if total > NOTIFICATIONS_LISTING_ROWS:
+            lines.append(f"/notifications read marks all {total} read")
+        else:
+            lines.append("/notifications read marks these read")
+    return "\n".join(lines)
     return "\n".join(lines)
 
 
@@ -42579,49 +42602,88 @@ def _notifications_store_failure(
     volume or an unopenable store told the operator to send it again -- the exact
     misreport the desktop ladder was split to end, and both ``SQLITE_FULL`` and
     ``SQLITE_CANTOPEN`` are reachable here because ``AttentionStore._connect``
-    creates its directory and file before any statement runs. The sentences are
-    the shared classifier's own strings, so the two surfaces cannot say different
-    things about the same store.
+    creates its directory and file before any statement runs.
+
+    THE CLASSIFICATION IS SHARED; THE SENTENCE IS NOT (agent review round 2, F1;
+    UX round 2, U8). Round 1's fix shared the desktop's prose as well as its
+    codes, and two of those strings were written for the SEND path: they talk
+    about "the message" that could not be written and tell the reader to send it
+    again, in an op with no message in it -- false about the operation on the
+    listing form, which attempts no write at all. So the codes, the ink split and
+    the store-failure vocabulary are the shared module's, and the sentence is
+    composed here in the receipts' own nouns, per form:
+
+    * ``store_busy`` is the one RETRYABLE condition, and this surface has no
+      second channel to carry the hint the desktop's client gets from the code --
+      so the sentence has to state the remedy, which is to run the form again.
+      "It will catch up on its own" is deliberately NOT reused: true of the
+      store's read state, false of the act the user asked for, and the pile stays
+      until they ask again.
+    * ``store_out_of_space`` names the volume and the remedy that is theirs to
+      take (free space, then ask again).
+    * ``store_unavailable`` says retrying will not help and where to look, and it
+      says "read" rather than "read or written" on the listing form, which never
+      tried to write.
 
     THE VERDICT CLAUSE IS THE OTHER HALF, and it is honesty rather than register:
     a read that failed is not a finding that the pile is empty (UX round 1, U2).
     An operator whose store is unreadable, told "No unread completions.", has
-    been told a falsehood by omission -- so both forms name the fact they do not
-    have, and which of the three conditions they met decides whether retrying is
-    the remedy.
+    been told a falsehood by omission.
 
-    ``None`` means the classifier did not own the exception, or the store answers
-    again by the time it is asked: a sentence with no retry claim and no cause
-    invented for it. The ink follows the same split as the desktop: contention is
-    a warning, everything else is an error.
+    ``None`` means the classifier did not own the exception (a catalogue read
+    raising ``SessionStoreUnavailable`` carries no ``errno``, for instance), or
+    the store answers again by the time it is asked: a sentence that names no
+    cause it cannot establish. The INK follows the shared ``StoreFailure.level``
+    rather than a second table here, so a condition cannot be an error on one
+    surface and a warning on the other.
     """
+    import logging
+
     from local_operator.session.store_failures import (
-        BUSY_MESSAGE,
         STORE_BUSY,
         STORE_OUT_OF_SPACE,
         STORE_UNAVAILABLE,
-        out_of_space_message,
-        unavailable_message,
+        display_root,
     )
 
-    state = "nothing was cleared" if clearing else "nothing was listed"
+    where = display_root(root)
+    action = "run /notifications read again" if clearing else "run /notifications again"
     if failure is None:
-        body = f"The read receipts could not be read, and {state}."
+        # No cause invented: the classifier does not own this, or it did not
+        # reproduce when asked.
+        body = (
+            "The read receipts could not be read"
+            + (" or written" if clearing else "")
+            + ", so nothing was "
+            + ("cleared" if clearing else "listed")
+            + "."
+        )
         kind: NoticeKind = "error"
     else:
         if failure.code == STORE_BUSY:
-            body = failure.message
-            kind = "warning"
+            body = (
+                "Read state is busy right now, so nothing was "
+                + ("cleared" if clearing else "listed")
+                + f". Try again in a moment — {action}."
+            )
         elif failure.code == STORE_OUT_OF_SPACE:
-            body = out_of_space_message(root)
-            kind = "error"
+            body = (
+                "This computer is out of disk space, so nothing was "
+                + ("cleared" if clearing else "listed")
+                + f". Free some space on the volume holding {where}, then {action}."
+            )
         elif failure.code == STORE_UNAVAILABLE:
-            body = unavailable_message(root)
-            kind = "error"
+            body = (
+                "The read receipts could not be read"
+                + (" or written" if clearing else "")
+                + f", so nothing was {'cleared' if clearing else 'listed'}. "
+                + f"Retrying will not help; check {where} and the disk it is on."
+            )
         else:  # pragma: no cover — the classifier names every condition it returns
-            body = failure.message or BUSY_MESSAGE
-            kind = "error"
-        body = f"{body} {state.capitalize()}."
+            body = f"The read receipts could not be read, so nothing was {action}."
+        # The ink IS the shared classification's: contention is the shared
+        # module's WARNING, every other condition its ERROR.
+        kind = "warning" if failure.level < logging.ERROR else "error"
     return f"{body} This is not a verdict about what is unread.", kind
 
 

@@ -26,7 +26,11 @@ import pytest
 
 from local_operator.session.attention import AttentionStore
 from local_operator.tui import session_catalog
-from local_operator.tui.app import OperatorApp, _notifications_listing
+from local_operator.tui.app import (
+    OperatorApp,
+    _notifications_listing,
+    _notifications_store_failure,
+)
 from local_operator.tui.session_interaction import SessionInteraction
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -153,7 +157,7 @@ async def test_the_listing_names_the_count_and_stops_at_ten_rows(config_root: Pa
     lines = text.splitlines()
     assert lines[0] == "13 unread completions:"
     assert len([line for line in lines if "✓" in line]) == 10
-    assert lines[-2] == "  …3 more — ctrl+b opens the sidebar"
+    assert lines[-2] == "  …3 more — ctrl+b shows or hides the sidebar"
     # "all 13" rather than "these": at the bound the short form named the ten
     # rows on screen while the write covered every one of them (design round 1,
     # D2). The short form is what the unbounded case prints, where "these" is
@@ -489,9 +493,13 @@ async def test_an_unreadable_store_is_not_an_empty_pile(config_root: Path) -> No
 
     for text, did in ((listing, "listed"), (clearing, "cleared")):
         assert text != "No unread completions." and text != "Nothing unread."
-        assert "could not be read" in text, text
+        assert "The read receipts could not be read" in text, text
+        # The clearing form says "or written" because it tried to; the listing
+        # form never attempted a write and must not claim one (agent review
+        # round 2, F1).
+        assert (" or written" in text) is (did == "cleared"), text
         assert "Retrying will not help" in text, text
-        assert f"Nothing was {did}." in text, text
+        assert f"nothing was {did}" in text, text
         assert "not a verdict about what is unread" in text, text
     # The store is exactly as unreadable as it was: no schema repair, no write,
     # not even a reread that could have recreated it.
@@ -526,7 +534,11 @@ async def test_the_write_names_the_condition_it_met(
         notices = _notices(app)
 
     assert "Read state is busy right now" in notices[-1]
-    assert "Nothing was cleared." in notices[-1]
+    # The remedy, in the sentence, because this surface has no code to carry it
+    # (UX round 2, U8).
+    assert "Try again in a moment — run /notifications read again." in notices[-1]
+    assert "catch up on its own" not in notices[-1], "a user-initiated clear is not self-healing"
+    assert "nothing was cleared" in notices[-1]
     assert "not a verdict about what is unread" in notices[-1]
     assert notices[-2].splitlines()[0] == "1 unread completion:", notices[-2]
     assert _store(config_root).state("session/00000000000a")["unseen"] is True
@@ -544,6 +556,9 @@ async def test_the_write_names_the_condition_it_met(
     assert "Retrying will not help" in text, text
     assert "busy right now" not in text, "the contention sentence leaked into the other arm"
     assert "not a verdict about what is unread" in text, text
+    # …and it is the TUI's own sentence, not the send path's: no message is in
+    # play in a receipt clear, and nothing is sent (agent review round 2, F1).
+    assert "message" not in text and "send it again" not in text, text
     assert _store(config_root).state("session/00000000000a")["unseen"] is True
 
 
@@ -573,7 +588,7 @@ async def test_a_store_failure_never_echoes_the_exception_text(
 
     assert "attention.db" not in text, text
     assert "Errno" not in text, text
-    assert "and nothing was cleared." in text, text
+    assert "nothing was cleared" in text, text
 
 
 @pytest.mark.asyncio
@@ -677,3 +692,191 @@ async def test_a_pending_line_precedes_the_scan(config_root: Path) -> None:
 
     assert notices[0] == "reading receipts…", notices
     assert notices[-1].startswith("1 unread completion:"), notices[-1]
+
+
+# -- round 2: share the classification, compose the sentence --------------------
+
+
+def test_the_copy_is_composed_per_surface_not_borrowed_from_the_send_path() -> None:
+    """Ruling: share the codes and the ink, compose the sentence here (F1, U8).
+
+    Round 1's fix shared the desktop's PROSE as well as its codes, and two of
+    those strings were written for the send path — "the message could not be
+    written", "send it again" — in an operation with no message in it, false
+    about the listing form's operation in particular (it never writes). This pins
+    the composed sentence for every condition and both forms, including the two
+    properties the reviews asked for by name: contention keeps a remedy, and the
+    two non-retryable conditions say retrying will not help.
+    """
+    import logging
+
+    from local_operator.session.store_failures import (
+        STORE_BUSY,
+        STORE_OUT_OF_SPACE,
+        STORE_UNAVAILABLE,
+        StoreFailure,
+    )
+
+    root = Path("/tmp/lo-copy-pin")
+    cases = {
+        STORE_BUSY: (logging.WARNING, "warning"),
+        STORE_OUT_OF_SPACE: (logging.ERROR, "error"),
+        STORE_UNAVAILABLE: (logging.ERROR, "error"),
+    }
+    for code, (level, ink) in cases.items():
+        for clearing in (False, True):
+            failure = StoreFailure(500, code, "SENTINEL-PROSE-FROM-THE-SHARED-MODULE", level, False)
+            text, kind = _notifications_store_failure(failure, root, clearing=clearing)
+            assert kind == ink, (code, clearing, kind)
+            # The classifier's own message is NOT the notice: the codes are
+            # shared, the prose is this surface's.
+            assert "SENTINEL-PROSE-FROM-THE-SHARED-MODULE" not in text, (code, text)
+            assert "message" not in text and "send it again" not in text, (code, text)
+            assert "not a verdict about what is unread" in text, (code, text)
+            assert ("nothing was cleared" if clearing else "nothing was listed") in text, (
+                code,
+                text,
+            )
+            if code == STORE_BUSY:
+                assert "Try again in a moment" in text, text
+                assert "catch up on its own" not in text, text
+                assert f"run /notifications{' read' if clearing else ''} again" in text, text
+            else:
+                assert "Retrying will not help" in text or "Free some space" in text, (code, text)
+                assert "Try again in a moment" not in text, (code, text)
+    # …and an unclassified failure invents no cause at all.
+    for clearing in (False, True):
+        text, kind = _notifications_store_failure(None, root, clearing=clearing)
+        assert kind == "error"
+        assert "Retrying will not help" not in text and "disk space" not in text, text
+        assert ("nothing was cleared" if clearing else "nothing was listed") in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_full_volume_names_the_disk_and_the_remedy(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: the condition this whole classification exists for, through the app.
+
+    ``SQLITE_FULL`` is the incident the classifier was written for, and this arm
+    had no test — which is why the send path's prose reached a receipts surface
+    unnamed. The sentence must name the disk, the remedy that is the user's to
+    take, and the form to run again, and must never borrow "the message could not
+    be written" from a surface that has a message.
+    """
+    _unread_session(config_root, "00000000000a", "still unread")
+
+    def full(self, items):  # noqa: ANN001
+        raise _sqlite_error("database or disk is full", "SQLITE_FULL")
+
+    monkeypatch.setattr(AttentionStore, "acknowledge_many", full)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        text = _notices(app)[-1]
+
+    assert "out of disk space" in text, text
+    assert "nothing was cleared" in text, text
+    assert "run /notifications read again" in text, text
+    assert "message" not in text and "send it again" not in text, text
+    assert _store(config_root).state("session/00000000000a")["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_catalogue_that_cannot_be_walked_is_not_an_empty_pile(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: the one place ``SessionStoreUnavailable`` is classified on this surface.
+
+    It carries no ``errno``, so the shared classifier answers ``None`` — and the
+    notice must then invent no cause: no retry claim, no disk story, just the fact
+    that the receipts were not read and that this is not a verdict. Pinned because
+    the arm was untested and the answer rests on ``store_failure``'s ``None``
+    contract.
+    """
+    from local_operator.session.errors import SessionStoreUnavailable
+
+    def unavailable(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise SessionStoreUnavailable("the store could not be walked")
+
+    monkeypatch.setattr(session_catalog, "load_catalog", unavailable)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        clearing = _notices(app)[-1]
+        await _run(pilot, app, "/notifications")
+        listing = _notices(app)[-1]
+
+    for text in (clearing, listing):
+        assert "could not be read" in text, text
+        assert (
+            "Retrying will not help" not in text
+        ), "a cause was invented for an unclassified failure"
+        assert "not a verdict about what is unread" in text, text
+    assert "nothing was cleared" in clearing, clearing
+    assert "nothing was listed" in listing, listing
+
+
+@pytest.mark.asyncio
+async def test_the_clearing_form_does_not_instruct_the_user_who_just_ran_it(
+    config_root: Path,
+) -> None:
+    """U7 and F4: the block paints the rows, not the next instruction.
+
+    Sharing one composition is what gives "these" a referent, but the clearing
+    form was also reprinting the listing's call-to-action — the command telling
+    the user to run the command that is running — and its pointer to rows that
+    are about to stop being unread. The rows stay; the instruction and the
+    pointer go.
+    """
+    for index in range(13):
+        _unread_session(config_root, f"{index + 1:012x}", f"conversation {index}")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        # The LISTING form keeps the instruction and the pointer — that is what
+        # the flag switches off, so both arms are read from one app.
+        await _run(pilot, app, "/notifications")
+        listed = _notices(app)[-1]
+        await _run(pilot, app, "/notifications read")
+        block = _notices(app)[-2]
+        receipt = _notices(app)[-1]
+
+    assert "ctrl+b shows or hides the sidebar" in listed, listed
+    assert "/notifications read marks all 13 read" in listed, listed
+    assert block.splitlines()[0] == "13 unread completions:", block
+    assert "  …3 more" in block, block
+    assert "ctrl+b" not in block, block
+    assert "/notifications read marks" not in block, block
+    assert receipt == "Marked 13 completions read."
+    assert set(block.splitlines()[1:-1]) == set(
+        listed.splitlines()[1:-2]
+    ), "the clearing form must paint the same rows the listing did"
+
+
+def test_no_painted_row_exceeds_the_budget() -> None:
+    """F3: the claim is about the ROW, and the fixed cells are cells too.
+
+    At a budget below ``lead + tail`` no amount of name truncation can fit the
+    row, so the clamp that bounded only the name cell left the "cannot wrap" claim
+    false exactly where a narrow split lands. The composed row is bounded now.
+    """
+    from rich.cells import cell_len
+
+    entries = [
+        _entry(f"{index + 1:012x}", "reconcile the desktop attention receipts", 1_700_000_000.0)
+        for index in range(3)
+    ]
+    for budget in (8, 20, 60):
+        text = _notifications_listing(entries, budget)
+        rows = [
+            line
+            for line in text.splitlines()
+            if line.startswith("  ") and not line.lstrip().startswith("…")
+        ]
+        assert len(rows) == 3, (budget, text)
+        for line in rows:
+            assert cell_len(line) <= budget, (budget, line)
+    # Zero is the caller's "could not measure": the row is emitted whole rather
+    # than truncated to a cell, exactly as ``/stop all``'s listing does.
+    assert "reconcile the desktop attention receipts" in _notifications_listing(entries, 0)
