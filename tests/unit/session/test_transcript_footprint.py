@@ -8,7 +8,10 @@ still be the conversation, and ``first_kept_entry_id`` must still resolve.
 
 from __future__ import annotations
 
+import gc
 import json
+import tracemalloc
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -321,3 +324,94 @@ def test_encode_rejects_nothing_it_cannot_rebuild():
     payload = encode_message_payload(message)
     payload["id"] = message.id
     assert Message.model_validate(payload).model_dump() == message.model_dump()
+
+
+# -- the cold-open load path: what compaction can shed, and how the file is read
+
+
+async def test_construction_streams_the_journal_instead_of_materialising_it(tmp_path, monkeypatch):
+    """3.38x the file, gone — asserted as a MECHANISM and as a peak.
+
+    ``Transcript.__init__`` used to build the whole journal twice before parsing
+    the first row (``read_text()``'s single decoded string, then ``splitlines()``'s
+    list of it), measured at 885 MB of traced peak on a 262 MB journal. The
+    mechanism assertion is the half that cannot rot: ``read_text`` is made to
+    raise, so a revert to the eager form fails here rather than merely being
+    slower. The peak bound is the other half, with the measured separation stated
+    so it can be re-derived: on an 8.3 MB synthetic journal of 2 000 rows the
+    eager form peaks at 2.24x the file and the streamed form at 1.24x.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True)
+    path = directory / "transcript.jsonl"
+    with path.open("w", encoding="utf-8") as handle:
+        for index in range(2_000):
+            handle.write(
+                json.dumps(
+                    {
+                        "id": f"{index:032x}",
+                        "ts": 1.0 + index,
+                        "type": "message",
+                        "payload": {
+                            "kind": "message",
+                            "role": "user",
+                            "content": [{"text": f"row {index} " + "x" * 4_000}],
+                        },
+                    }
+                )
+                + "\n"
+            )
+    size = path.stat().st_size
+
+    real_read_text = Path.read_text
+
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> str:
+        # Only the JOURNAL is a tripwire: ``created_at.json`` and the other
+        # sidecars are small and are still read this way.
+        if self == path:
+            raise AssertionError("Transcript.__init__ materialised the journal as one string")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+    gc.collect()
+    tracemalloc.start()
+    try:
+        transcript = Transcript(directory)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(transcript.entries()) == 2_000
+    assert peak < 1.8 * size, f"peak {peak / size:.2f}x the file (eager form was 2.24x)"
+
+
+@pytest.mark.asyncio
+async def test_construction_keeps_order_tolerance_and_a_torn_tail(tmp_path):
+    """The streaming read must not change WHICH rows load, or in what order.
+
+    A blank line, a malformed row and a final row with no trailing newline, in
+    one journal: the first two are dropped individually, and the last one is
+    still a row because the handle yields the unterminated tail.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True)
+    path = directory / "transcript.jsonl"
+    good = json.dumps(
+        {
+            "id": "a" * 32,
+            "ts": 1.0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": "first"}]},
+        }
+    )
+    tail = json.dumps(
+        {
+            "id": "b" * 32,
+            "ts": 2.0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": "torn tail"}]},
+        }
+    )
+    path.write_text(f"{good}\n\n{{not json\n{tail}", encoding="utf-8")
+    transcript = Transcript(directory)
+    assert [entry.id for entry in transcript.entries()] == ["a" * 32, "b" * 32]
+    assert transcript.entries()[-1].payload["content"][0]["text"] == "torn tail"
