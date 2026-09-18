@@ -516,6 +516,23 @@ def _check(installed: str, latest: str | None, behind: bool) -> update_mod.Versi
     return update_mod.VersionCheck(installed=installed, latest=latest, behind=behind)
 
 
+def _check_latest_double(installed: str, latest: str | None, behind: bool):
+    """A stand-in for `check_latest` that mirrors its REAL signature.
+
+    Same rule as `_install_kind_double`, and the reason it exists (serve-reload
+    review round 7, R7-3): the real `check_latest` is keyword-only, so
+    `lambda force=False: ...` accepts a POSITIONAL call it would reject — a double
+    more permissive than the function it replaces, which is a test that cannot fail.
+    It also builds the real `VersionCheck` through `_check` rather than a
+    `SimpleNamespace`, so `update_command` is handed the type it actually reads.
+    """
+
+    def _latest(*, force: bool = False, cache_dir: Any = None, client: Any = None):
+        return _check(installed, latest, behind)
+
+    return _latest
+
+
 def test_update_command_check_behind(capsys: pytest.CaptureFixture[str]) -> None:
     with (
         patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)),
@@ -660,15 +677,13 @@ def test_update_runs_the_services_stage_when_nothing_needs_installing(
     change did nothing. The stage is idempotent (a daemon already on the current
     build is reported and not touched), so it runs on both paths.
     """
-    from types import SimpleNamespace
-
     from local_operator import update
 
     ran: list[str] = []
     monkeypatch.setattr(
         update,
         "check_latest",
-        lambda force=False: SimpleNamespace(installed="0.59.0", latest="0.59.0", behind=False),
+        _check_latest_double("0.59.0", "0.59.0", False),
     )
     monkeypatch.setattr(update, "_services_stage", lambda: ran.append("services"))
     assert update.update_command() == 0
@@ -680,15 +695,13 @@ def test_update_no_services_still_repairs_the_supervised_daemons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--no-services`` is the pre-change behaviour, not "do nothing"."""
-    from types import SimpleNamespace
-
     from local_operator import update
 
     ran: list[str] = []
     monkeypatch.setattr(
         update,
         "check_latest",
-        lambda force=False: SimpleNamespace(installed="0.59.0", latest="0.59.0", behind=False),
+        _check_latest_double("0.59.0", "0.59.0", False),
     )
     monkeypatch.setattr(update, "_services_stage", lambda: ran.append("services"))
     monkeypatch.setattr(
@@ -742,7 +755,6 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
     path that broke has to be the path under test.
     """
     import sys as sys_mod
-    from types import SimpleNamespace
 
     from local_operator import update
     from local_operator.update import InstallKind
@@ -768,7 +780,7 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
     monkeypatch.setattr(
         update,
         "check_latest",
-        lambda force=False: SimpleNamespace(installed="0.2.0", latest="0.2.0", behind=False),
+        _check_latest_double("0.2.0", "0.2.0", False),
     )
     monkeypatch.setattr(
         "local_operator.services.restart_services", lambda **k: ran.append("ran") or []

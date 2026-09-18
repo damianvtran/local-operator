@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,16 @@ import pytest
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
+
+#: This module is about POSIX-signal semantics, so on a platform with no SIGUSR1 it
+#: skips as a whole rather than failing: `RELOAD_SIGNAL` is optional precisely so
+#: `local_operator.server` can be IMPORTED there (serve-reload review round 7, R7-1).
+if serve_reload.RELOAD_SIGNAL is None:  # pragma: no cover - Windows
+    pytest.skip("this platform has no SIGUSR1", allow_module_level=True)
+
+#: Narrowed once for the type checker, which cannot carry the module-level check
+#: above into each test body.
+RELOAD_SIGNAL: signal.Signals = serve_reload.RELOAD_SIGNAL
 
 
 class FakeApp:
@@ -173,6 +184,25 @@ async def test_drain_returns_immediately_when_no_runtime_is_being_started(
 
 
 @pytest.mark.asyncio
+async def test_a_probe_that_answers_with_a_non_string_is_not_a_blocker(
+    install: dict[str, Any],
+) -> None:
+    """serve-reload review round 7, R7-4: the `isinstance` arm, exercised.
+
+    `reload_blocker` returns ``str | None`` everywhere in the tree today, so this arm
+    exists for the version of it that is edited later to return, say, an enum — and
+    untested code that only runs when somebody else changes their mind is code that
+    ships broken. The rule it encodes is the one the absent and raising probes
+    already follow: an UNREADABLE probe may not be the reason a daemon stays on a
+    stale build. A truthy non-string is unreadable, not a blocker.
+    """
+    pool = FakePool(None)
+    pool.reason = 7  # type: ignore[assignment]  # the whole point: not a string
+    await _watch(_app(pool=pool)).drain()
+    assert pool.reads == 1
+
+
+@pytest.mark.asyncio
 async def test_drain_refuses_after_the_budget_and_names_the_term(
     install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -265,7 +295,7 @@ async def test_install_arms_the_handler_and_the_signal_sets_the_flag(
     watch = serve_reload.install(app)  # type: ignore[arg-type]
     assert watch is not None
     assert serve_reload.is_reloadable(app) is True
-    os.kill(os.getpid(), serve_reload.RELOAD_SIGNAL)
+    os.kill(os.getpid(), RELOAD_SIGNAL)
     await asyncio.sleep(0.05)
     assert watch.pending is True
 
@@ -289,17 +319,17 @@ def test_exec_ignores_the_signal_across_the_replace(
     def _capture(path: str, argv: list[str], env: dict[str, str]) -> None:
         # Read INSIDE the exec call: this is the disposition the successor
         # inherits, which is the only place the claim can be checked.
-        seen["disposition"] = signal_mod.getsignal(serve_reload.RELOAD_SIGNAL)
+        seen["disposition"] = signal_mod.getsignal(RELOAD_SIGNAL)
 
     monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
     monkeypatch.setattr(os, "execve", _capture)
-    before = signal_mod.getsignal(serve_reload.RELOAD_SIGNAL)
+    before = signal_mod.getsignal(RELOAD_SIGNAL)
     serve_reload._exec(_watch(_app(fd=17)).plan())
     assert seen["disposition"] == signal_mod.SIG_IGN
     # And this process is NOT left deaf: the exec was stubbed, so it kept
     # serving, and a daemon that ignored the signal forever could never be
     # asked to reload again.
-    assert signal_mod.getsignal(serve_reload.RELOAD_SIGNAL) == before
+    assert signal_mod.getsignal(RELOAD_SIGNAL) == before
 
 
 def test_a_build_that_cannot_import_refuses_the_reload(

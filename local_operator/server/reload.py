@@ -111,7 +111,22 @@ PENDING_ATTR = "serve_reload_pending"
 #: guard against that is the record's ``reloadable`` field: the capability is
 #: published BY the daemon that has it, so a caller that waits for ``reloadable``
 #: can only ever signal a process that installed this handler.
-RELOAD_SIGNAL = signal.SIGUSR1
+#: The signal a reload is requested with, or ``None`` where the platform has none.
+#:
+#: ``getattr`` RATHER THAN ``signal.SIGUSR1``, because reading the attribute at import
+#: time is an ``AttributeError`` on Windows and this module is imported
+#: unconditionally by ``server/app.py`` — so the direct form made
+#: ``local_operator.server`` unimportable there, which is a red
+#: `filesystem-boundaries-windows` job rather than a graceful degradation (serve-reload
+#: review round 7, R7-1; six rounds missed it because the local gates skip that job).
+#:
+#: ``None`` is not a degraded reload, it is the ABSENCE of the capability, and the
+#: whole module is written so that absence is expressible: :func:`install` refuses,
+#: the record publishes ``reloadable: false``, and every caller that would signal
+#: checks that field first. Nothing here falls back to another signal — SIGUSR2 is
+#: somebody else's, and a platform where a process cannot be asked politely is a
+#: platform where it must not be asked at all.
+RELOAD_SIGNAL: signal.Signals | None = getattr(signal, "SIGUSR1", None)
 
 #: How long a requested reload may wait for the narrow drain before giving up.
 #:
@@ -491,8 +506,9 @@ def _exec(plan: ReloadPlan) -> None:
     # it, unlike handlers), so the successor starts deaf and
     # ``add_signal_handler`` then installs the real handler. That closes the
     # window by construction rather than by timing.
-    previous = signal.getsignal(RELOAD_SIGNAL)
-    signal.signal(RELOAD_SIGNAL, signal.SIG_IGN)
+    previous = signal.getsignal(RELOAD_SIGNAL) if RELOAD_SIGNAL is not None else None
+    if RELOAD_SIGNAL is not None:
+        signal.signal(RELOAD_SIGNAL, signal.SIG_IGN)
     argv = [
         str(plan.interpreter),
         SAFE_PATH_FLAG,
@@ -518,7 +534,8 @@ def _exec(plan: ReloadPlan) -> None:
         # every child it later spawns, including the runtime spawns that are its
         # whole purpose.
         try:
-            signal.signal(RELOAD_SIGNAL, previous)
+            if RELOAD_SIGNAL is not None:
+                signal.signal(RELOAD_SIGNAL, previous)
         finally:
             os.set_inheritable(fd, False)
 
@@ -602,11 +619,19 @@ def install(app: "FastAPI", stop: asyncio.Event | None = None) -> ReloadWatch | 
     some other thread reads.
 
     ``None`` is refusal, not failure, and the daemon keeps serving: a ``--reload``
-    child (whose port is its supervisor's), a boot that was never announced, and
-    a platform without ``asyncio`` signal handlers (Windows raises
-    ``NotImplementedError``) all land here. Each is the pre-existing behaviour,
-    which is what makes ``None`` safe to return without a fallback.
+    child (whose port is its supervisor's), a boot that was never announced,
+    a platform without ``SIGUSR1`` at all, and a platform whose ``asyncio`` cannot
+    take signal handlers (Windows raises ``NotImplementedError``) all land here.
+    Each is the pre-existing behaviour, which is what makes ``None`` safe to
+    return without a fallback.
     """
+    if RELOAD_SIGNAL is None:
+        # R7-1's second half: the import no longer fails on such a platform, so the
+        # refusal has to be stated here instead — and it is the same refusal the
+        # rest of the module already understands, because the record's `reloadable`
+        # is `watch is not None`.
+        logger.debug("serve reload not armed: this platform has no SIGUSR1")
+        return None
     if not is_reloadable(app):
         logger.debug("serve reload not armed: this boot has no listener of its own")
         return None
