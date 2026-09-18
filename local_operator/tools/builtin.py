@@ -76,6 +76,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator.agent_shell import AGENT_SHELL_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.subagent import (
@@ -354,7 +355,12 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
     #
     # If this marker is ever dropped the failure is benign and loud (a laptop
     # takes too many workers again), not a silent permanent CI slowdown.
-    "LOCAL_OPERATOR_AGENT_SHELL": "1",
+    #
+    # The NAME lives in ``local_operator.agent_shell`` and this entry is the one
+    # writer: that module reads the same constant back to decide whether a `lop`
+    # invocation may open a session of its own. One name, two consumers — a
+    # second literal here would be the copy that drifts.
+    AGENT_SHELL_ENV: "1",
     # Package manager defaults for unattended execution.
     "npm_config_yes": "true",
     "npm_config_update_notifier": "false",

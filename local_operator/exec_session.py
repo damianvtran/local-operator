@@ -60,8 +60,19 @@ async def _finish_browser_scope(session: Any, outcome: str) -> None:
 
 
 async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
+    from local_operator.agent_shell import stamp_escaped_session
     from local_operator.headless_print import run_print_mode
     from local_operator.session.runtime.exec_control import start_exec_control
+
+    # A run opened under the QA escape hatch (see `agent_shell.py`) is stamped
+    # BEFORE its first turn: the marker has to be on disk before the transcript
+    # it is about starts moving, and the session is in hand here for both exec
+    # shapes — foreground and the detached worker — which is the one place they
+    # meet. NOT on a resume: `--resume` adopts a directory that may be the
+    # operator's own conversation, and hiding one of those from their own
+    # picker would be the mirror-image of the bug this marks against.
+    if not getattr(args, "resume", None):
+        stamp_escaped_session(session)
 
     control = None
     try:
