@@ -430,12 +430,24 @@ async def test_every_movement_on_the_page_clamps_at_the_ends() -> None:
 
         # Paging past the end CLAMPS — and lands on the SAME end the other
         # gestures reach, not on the last section's first row (UX round 1, U3).
+        # Page until the selection STOPS MOVING rather than a fixed number of
+        # times. A fixed budget turned "the page grew by a row" into a failure of
+        # the clamp this test exists to guard: adding a section (shell_environment)
+        # moved the last row, and 20 presses no longer reached it. Pressing until
+        # the selection settles measures the property instead of the row count,
+        # and the generous bound only bounds the loop.
+        def page_to_the_end(delta: int) -> None:
+            previous = None
+            for _ in range(len(view._selectable()) + 5):
+                if view._selected == previous:
+                    return
+                previous = view._selected
+                view.action_section(delta)
+
         view.action_jump(0)
-        for _ in range(20):
-            view.action_section(1)
+        page_to_the_end(1)
         assert view._selected == last, "pagedown stopped short of the last row"
-        for _ in range(20):
-            view.action_section(-1)
+        page_to_the_end(-1)
         assert view._selected == first, "pageup stopped short of the first row"
 
         # The wheel clamps too, at both ends.
