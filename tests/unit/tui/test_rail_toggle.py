@@ -38,6 +38,15 @@ with it off, where the pre-rail build always fit (design round 2, D9). So
 there. ``test_no_row_paints_outside_the_block_at_any_width`` sweeps 6..20 in
 both states and is the pin; the clamp also removes what used to be a documented
 divergence in that range, since folding to the lane is what pre-rail did.
+
+**Narration is the second route to the SAME state, and it is asserted the same
+way.** A block marked as mid-turn progress paints no rail, because the rail marks
+the ANSWER and PR #1229 railed a progress sentence exactly as it railed the
+outcome — the report this change answers. That is not a fourth geometry to keep
+in sync: ``_rail_cols()`` answers 0 for it, so a narration block IS the rail-OFF
+build. ``test_a_narration_block_renders_the_rail_off_build`` compares the two
+directly, which is why the pre-rail export above needs no second invocation with
+a mark on it.
 """
 
 from __future__ import annotations
@@ -138,7 +147,7 @@ async def _rows(text: str, size: tuple[int, int]) -> list[str]:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_rail_on")
 async def test_the_rail_is_painted_when_the_setting_is_on() -> None:
-    """ON is the shipped behaviour: every row carries the rail."""
+    """ON is the shipped behaviour: every row of an ANSWER carries the rail."""
     rows = await _rows(MIXED_CONSTRUCTS, (60, 24))
     missing = [(i, row) for i, row in enumerate(rows) if row.strip() and not row.startswith(RAIL)]
     assert not missing, f"rows without the rail: {missing!r}"
@@ -669,6 +678,169 @@ async def test_flipping_the_setting_repaints_a_mounted_block(
             block._built_width,
             block.fold_width(80),
         )
+
+
+# --------------------------------------------------------------------------
+# Narration — the rail's MEANING, not its setting
+# --------------------------------------------------------------------------
+
+
+def _mutable_rail(monkeypatch: pytest.MonkeyPatch, *, on: bool = True) -> dict[str, bool]:
+    """A ``display.rail`` a test can move mid-frame, patched on the CONSUMER.
+
+    The seam ``_rail_on``/``_rail_off`` use, made mutable. The fixtures are
+    function-scoped, so neither can render the same message twice at one width —
+    and comparing a narration block against the rail-OFF build is exactly a claim
+    about one width, which two apps could not make either.
+    """
+    import local_operator.tui.widgets.assistant as _assistant
+
+    real = _assistant.settings_get
+    state = {"on": on}
+    monkeypatch.setattr(
+        _assistant,
+        "settings_get",
+        lambda key, default=None: (state["on"] if key == "display.rail" else real(key, default)),
+    )
+    return state
+
+
+def _painted_rows(block: AssistantBlock) -> list[str]:
+    """The rows ``block`` is painting right now.
+
+    ``_render()`` rather than a re-render: the claim these tests make is about
+    the FRAME, and the frame is what the block returns this paint.
+    """
+    visual = block._render()
+    assert isinstance(visual, Content)
+    return visual.plain.split("\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (60, 24)])
+@pytest.mark.parametrize("text", [THREE_PARAGRAPHS, MIXED_CONSTRUCTS])
+async def test_a_narration_block_renders_the_rail_off_build(
+    monkeypatch: pytest.MonkeyPatch, text: str, size: tuple[int, int]
+) -> None:
+    """The promise in the other direction: narration IS a rail-OFF block.
+
+    Two builds of the same message at the same width, and they have to be the
+    same frame: the rail ON with the block marked as mid-turn narration, against
+    the rail OFF with no mark. Compared to EACH OTHER rather than to a
+    written-out expectation, because the claim is that the two states are
+    indistinguishable — and ``T2-a`` above already pins OFF to the pre-rail build
+    string for string, which is what makes this a claim about the pre-rail
+    geometry by transitivity instead of a third opinion about it.
+
+    Every site the setting gate has to reach is checked, not just the paint: the
+    rows, the fold width the rows were authored at, the ``copy_gutter`` the
+    clipboard strips, and the selection the drag produces. A gate that only
+    skipped the painting would leave the prose folded two cells narrower than its
+    box with nothing in the space — the narrative the OFF promise already
+    rejected, and the reason this mark is answered from ``_rail_cols()`` rather
+    than from a second read site.
+
+    Faithful revert shape: return ``RAIL_COLS if settings_get(...) else 0`` from
+    ``_rail_cols`` without consulting the mark. The two row lists then differ by
+    two cells of fold on every row — the third state, "railed geometry minus a
+    glyph".
+    """
+    state = _mutable_rail(monkeypatch)
+
+    async def render(pilot, view, *, marked: bool, on: bool) -> tuple[list[str], AssistantBlock]:
+        state["on"] = on
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        if marked:
+            block.mark_narration()
+        block.update_text(text)
+        block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+        return _painted_rows(block), block
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=size) as pilot:
+        view = app.query_one(TranscriptView)
+        narration_rows, narration = await render(pilot, view, marked=True, on=True)
+        off_rows, off = await render(pilot, view, marked=False, on=False)
+
+        # The pair is the interesting one, not two empty frames agreeing.
+        assert sum(1 for row in off_rows if row.strip()) >= 3, off_rows
+        assert RAIL not in "\n".join(off_rows), off_rows
+
+        assert narration_rows == off_rows, (
+            "a narration block must paint the rail-OFF build exactly.\n"
+            f"narration: {narration_rows!r}\n"
+            f"rail off:  {off_rows!r}"
+        )
+        assert narration._rail_cols() == off._rail_cols() == 0
+        assert narration._built_width == off._built_width, (
+            narration._built_width,
+            off._built_width,
+        )
+        lane = narration.fold_width(80)
+        assert narration.authored_width(lane) == off.authored_width(lane)
+        assert narration.copy_gutter(0) == off.copy_gutter(0) == 0
+
+        rows = narration_rows
+        selection = Selection(Offset(0, 0), Offset(len(rows[-1]), len(rows) - 1))
+        copied = narration.get_selection(selection)
+        assert copied is not None
+        assert copied[0] == (off.get_selection(selection) or ("", ""))[0]
+        assert RAIL not in copied[0], copied[0]
+
+
+@pytest.mark.asyncio
+async def test_a_mid_session_flip_leaves_a_narration_block_unrailed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flip reaches mounted blocks — and never turns progress into an answer.
+
+    ``display.rail`` is read at paint rate, so a ``display.*`` change repaints a
+    mounted block through ``retheme``. For a narration block both answers are 0,
+    and the half that matters is the flip TO ON: a mark that only held while the
+    setting was off would raise the rail over the progress sentence the moment a
+    user turned the rail back on — the defect this change removes, restored by a
+    settings toggle.
+
+    The unmarked block beside it is the CONTROL. It has to gain the rail, which
+    is what proves this frame went through the repaint at all, rather than the
+    assertion passing because nothing ran.
+    """
+    state = _mutable_rail(monkeypatch, on=False)
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        progress = AssistantBlock()
+        answer = AssistantBlock()
+        view.append_block(progress)
+        view.append_block(answer)
+        await pilot.pause()
+        progress.mark_narration()
+        for block in (progress, answer):
+            block.update_text(THREE_PARAGRAPHS)
+            block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert all(RAIL not in row for row in _painted_rows(progress))
+        assert all(RAIL not in row for row in _painted_rows(answer))
+
+        state["on"] = True
+        for block in (progress, answer):
+            block.retheme()
+        await pilot.pause()
+
+        after = _painted_rows(progress)
+        assert all(
+            RAIL not in row for row in after
+        ), f"a flip to ON raised the rail over mid-turn progress: {after!r}"
+        control = _painted_rows(answer)
+        assert all(row.startswith(RAIL) for row in control if row.strip()), control
+        assert progress.copy_gutter(0) == 0
+        assert answer.copy_gutter(0) == RAIL_COLS
 
 
 def test_the_registry_default_matches_the_render_edge_constant() -> None:

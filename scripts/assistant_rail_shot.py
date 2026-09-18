@@ -13,6 +13,14 @@ them:
   and deliberately not its colour, so the two bars have to be visible in one
   frame or "they are still told apart" is an assertion rather than an
   observation;
+* a MID-TURN PROGRESS sentence between that prompt and the answer, with its own
+  settled tool card — the rail marks the ANSWER, so the one frame this capture
+  must contain is a progress sentence and an answer on screen together, or "the
+  rail is on the answer and not on the narration" is again an assertion. It is
+  painted through the REAL event path (``AssistantMessageEnd`` finalized into
+  tool calls) rather than mounted as a settled block: the classification is made
+  from exactly those two fields on arrival, so a hand-built block would capture a
+  state the app never produces;
 * a settled tool card — the ledger spine is the other vertical ink on the
   screen, and a rail that reads as a third spine is a regression in the
   transcript's structure even when it is correct per-block;
@@ -22,6 +30,11 @@ them:
   is which" is checked;
 * a multi-paragraph answer, so the blank separator rows show the rail running
   CONTINUOUSLY rather than breaking into one segment per paragraph.
+
+The tree is ONE turn, and there is deliberately no second prompt/answer pair
+after it: the transcript follows the tail, so a second turn pushed the progress
+sentence off the bottom of a 30-row frame — the two blocks this capture exists to
+compare cannot both be in the frame that way.
 
 ``THEME`` (default ``dark``) selects the palette, because the rail's ``label``
 ink moves per theme and the decision that it stays legible and stays distinct
@@ -36,11 +49,11 @@ about a rendered frame, and the pair is what lets a reviewer check it.
 
 ``SURFACE`` (default ``transcript``) selects WHICH surface is captured.
 ``subagent`` renders the delegated-job page instead, and it is not optional
-coverage: the rail appears there by design, and that page is the one where the
-treatment's value is genuinely in question, because every prose block on it is a
-model response. A marker on all of them may carry no information while still
-spending the inset — which is a judgement to be made from a rendered frame
-rather than argued from the source.
+coverage: the rail appears there, and every prose block on that page is a model
+response — so it is the page where a mark that distinguishes progress from the
+answer is either doing work or just spending the inset. The fixture it folds has
+both kinds (a sentence before a tool batch, then the closing sentence), which is
+what makes the pair checkable from one frame rather than argued from the source.
 """
 
 from __future__ import annotations
@@ -64,6 +77,11 @@ import os  # noqa: E402
 
 import local_operator.tui.widgets.assistant as _assistant_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.events import (  # noqa: E402
+    AssistantDelta,
+    AssistantMessageEnd,
+    AssistantMessageStart,
+)
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
@@ -97,7 +115,10 @@ ANSWER = (
     "That is the whole loop."
 )
 
-SHORT = "Both deliveries are accounted for, and the manifest is current."
+#: The mid-turn progress sentence: prose a model call streamed before it
+#: finalized into a tool call. Short enough to sit on one row at 100 columns,
+#: which is what puts it in the frame beside the answer instead of above it.
+PROGRESS = "The app quit during that window. Let me check its state and bring it back."
 
 
 def _answer(text: str) -> AssistantBlock:
@@ -118,12 +139,39 @@ def _tool(app: OperatorApp, call_id: str, name: str, args: dict[str, object], re
     card.mark_done(result)
 
 
-def _seed(app: OperatorApp) -> None:
+async def _stream(
+    app: OperatorApp,
+    pilot: Any,
+    text: str,
+    *,
+    stop_reason: str | None,
+    has_tool_calls: bool,
+) -> None:
+    """Paint one model call through the app's own handlers.
+
+    The mount, the finalize and the classification are all owned by these
+    handlers (``on_assistant_delta``/``on_assistant_message_end``), so posting
+    the events is what makes the frame the one the product produces for a call
+    that ends in tool calls — the same sequence ``test_narration_toggle`` drives.
+    """
+    app.post_message(AssistantMessageStart())
+    await pilot.pause()
+    app.post_message(AssistantDelta(text))
+    await pilot.pause()
+    app.post_message(
+        AssistantMessageEnd(text, stop_reason=stop_reason, has_tool_calls=has_tool_calls)
+    )
+    await pilot.pause()
+
+
+async def _seed(app: OperatorApp, pilot: Any) -> None:
+    """The reported turn: prompt, progress sentence, its tool card, the answer."""
     app._append_block(UserBlock("how does the ingest path handle a failing source?"))
+    await pilot.pause()
+    await _stream(app, pilot, PROGRESS, stop_reason="toolUse", has_tool_calls=True)
     _tool(app, "t1", "read", {"path": "src/ingest/manifest.py"}, "412 lines")
+    await pilot.pause()
     app._append_block(_answer(ANSWER))
-    app._append_block(UserBlock("and the wake deliveries?"))
-    app._append_block(_answer(SHORT))
 
 
 async def _open_subagent(app: OperatorApp, pilot: Any, job_id: str) -> None:
@@ -204,7 +252,7 @@ async def main() -> None:
             # picker calls, so this frame is the one a user would see.
             app._apply_theme(theme)
             await pilot.pause()
-        _seed(app)
+        await _seed(app, pilot)
         await pilot.pause()
         await pilot.pause()
 
