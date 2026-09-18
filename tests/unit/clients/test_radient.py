@@ -289,6 +289,43 @@ def test_upload_agent_to_marketplace_success(
     assert kwargs["files"]["file"][0] == "agent.zip"
 
 
+def test_upload_agent_to_marketplace_reads_the_id_from_the_live_envelope(
+    radient_client: RadientClient, tmp_path: Path
+):
+    """The envelope the LIVE hub answers a created listing with (measured 2026-09-18).
+
+    Returning ``next(iter(data.values()))`` handed the caller ``msg`` — the
+    sentence "Agent imported successfully" — so ``push`` printed that as the new
+    listing's id and the user was left holding a listing they could not name,
+    find or delist.
+    """
+    zip_path = tmp_path / "agent.zip"
+    zip_path.write_bytes(b"dummy zip content")
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.json.return_value = {
+        "msg": "Agent imported successfully",
+        "result": {"agent_id": "ae727e5c-a32e-48f0-9f8e-1f2a3b4c5d6e"},
+    }
+    with patch("requests.post", return_value=mock_response):
+        agent_id = radient_client.upload_agent_to_marketplace(zip_path)
+    assert agent_id == "ae727e5c-a32e-48f0-9f8e-1f2a3b4c5d6e"
+
+
+def test_upload_agent_to_marketplace_refuses_a_payload_with_no_listing_id(
+    radient_client: RadientClient, tmp_path: Path
+):
+    """A message is not an id, and the caller prints whatever this returns."""
+    zip_path = tmp_path / "agent.zip"
+    zip_path.write_bytes(b"dummy zip content")
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.json.return_value = {"msg": "Agent imported successfully"}
+    with patch("requests.post", return_value=mock_response):
+        with pytest.raises(RuntimeError, match="no listing id"):
+            radient_client.upload_agent_to_marketplace(zip_path)
+
+
 def test_overwrite_agent_in_marketplace_success(
     radient_client: RadientClient, base_url: str, tmp_path: Path
 ):

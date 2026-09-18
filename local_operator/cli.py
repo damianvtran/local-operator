@@ -5713,7 +5713,9 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
 def _radient_hub_base_url(config_manager: ConfigManager) -> str:
     """The ONE place the CLI resolves the Radient Agent Hub API root.
 
-    ``config.yml``'s ``radient_base_url`` wins when set;
+    ``config.yml``'s ``values.radient_base_url`` — the NESTED key the config
+    store actually holds; a flat document-root ``radient_base_url`` is dropped by
+    the migration and would be silently ignored — wins when set;
     :func:`~local_operator.env.resolve_radient_api_base_url` supplies the
     ``RADIENT_API_BASE_URL``/canonical default otherwise, version segment
     included. Sharing this helper is the point: ``agents delete``, ``agents
@@ -7477,7 +7479,18 @@ def main() -> int:
                         agent_id = agent_registry.upload_agent_to_radient(
                             radient_client, agent_id_to_overwrite, zip_path
                         )
-                        if agent_id_to_overwrite:
+                        # Report the OUTCOME, never the request. The registry
+                        # returns None when it really overwrote and the hub's new
+                        # id when it created a listing, and branching on the flag
+                        # instead printed "as overwrite" for a listing that had
+                        # just been created — without ever naming it, so the user
+                        # was left holding a duplicate they could not even find to
+                        # delist. `--id` takes a LOCAL id, which nothing aligns
+                        # with a hub listing id (import mints a fresh uuid), so
+                        # that create branch is the ordinary one here, not a
+                        # corner: the hub answers GET /v1/agents/{local id} with a
+                        # 404.
+                        if agent_id is None:
                             print(
                                 f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' as "
                                 f"overwrite to Radient (ID: {agent_id_to_overwrite})\033[0m"

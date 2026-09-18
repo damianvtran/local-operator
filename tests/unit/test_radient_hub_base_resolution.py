@@ -12,6 +12,7 @@ These tests pin the resolution rule itself and the invariant that keeps it
 single, because the failure mode is a fourth literal in a fourth place.
 """
 
+import re
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,7 @@ from local_operator import cli
 from local_operator.cli import agents_delete_command
 from local_operator.env import (
     DEFAULT_RADIENT_API_BASE_URL,
+    get_env_config,
     normalize_radient_api_base_url,
     resolve_radient_api_base_url,
 )
@@ -112,6 +114,43 @@ def test_agents_delete_addresses_the_versioned_hub_path(
     assert mock_delete.call_args[0][0] == f"{DEFAULT_RADIENT_API_BASE_URL}/agents/{agent_id}"
 
 
+def test_the_environment_tier_is_completed_where_it_is_produced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One configuration, ONE destination — including for consumers that never
+    call the resolver.
+
+    The server routes, the desktop transport and the speech/models clients all
+    read ``EnvConfig.radient_api_base_url`` directly, so a bare hand-set env value
+    used to work in the CLI and 404 in the desktop transport. Normalizing at the
+    producer is what makes the two agree; the bare host is the shape that has to
+    agree, not the already-versioned one.
+    """
+    monkeypatch.setenv("RADIENT_API_BASE_URL", "http://hub.example")
+
+    env_config = get_env_config()
+    assert env_config.radient_api_base_url == "http://hub.example/v1"
+    # The CLI's resolver and the raw value the other surfaces consume are the
+    # same string, which is the whole claim.
+    assert resolve_radient_api_base_url() == env_config.radient_api_base_url
+
+
+def test_the_desktop_hub_transport_resolves_the_same_root() -> None:
+    """The desktop transport reaches hub routes through the provider definition.
+
+    That is a third consumer of this host, so the definition quotes the constant
+    instead of spelling it again — checked through the transport's own
+    ``base_url()``, which is what actually builds ``{base}/agents/{id}/…``.
+    """
+    from local_operator.providers.registry import get_provider_definition
+    from local_operator.server.routes import desktop_radient
+
+    definition = get_provider_definition("radient")
+    assert definition is not None
+    assert definition.base_url == DEFAULT_RADIENT_API_BASE_URL
+    assert desktop_radient.base_url() == DEFAULT_RADIENT_API_BASE_URL
+
+
 def test_the_cli_resolves_the_hub_base_in_exactly_one_place() -> None:
     """No call site may answer "which host?" for itself again.
 
@@ -121,6 +160,10 @@ def test_the_cli_resolves_the_hub_base_in_exactly_one_place() -> None:
     rather than any single value.
     """
     source = Path(cli.__file__).read_text()
-    assert "radientlabs.ai" not in source
-    assert "api.radienthq.com" not in source
-    assert source.count('get_config_value("radient_base_url"') == 1
+    # Any URL-shaped Radient host rather than two remembered spellings: the
+    # failure mode is a fourth call site naming a host nobody had listed, which
+    # a literal-by-literal assertion cannot see.
+    assert not re.search(r"https?://[^\"']*radient", source)
+    # One READ of the key, whichever accessor spells it — ``get_value``,
+    # ``get_nested_value`` or a fresh ``get_config_value`` call all count.
+    assert source.count('"radient_base_url"') == 1

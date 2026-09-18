@@ -1975,26 +1975,31 @@ class AgentRegistry:
             Optional[str]: The new agent ID if created, or None if overwritten.
 
         Raises:
-            RuntimeError: If the upload fails.
+            RuntimeError: If the existence probe or the upload fails. A probe
+                that could not answer is NOT an answer of "absent" — see below.
         """
-        # Check if the agent exists using the provided agent_id
+        # A probe that FAILED is not a probe that answered "no". This used to
+        # wrap the existence check in ``except Exception`` and carry on "as if
+        # the agent doesn't exist", so a 500, a timeout or an auth failure on
+        # the check turned an intended overwrite into a SECOND listing under the
+        # same name. The caller reports what this returns, so resolving "I could
+        # not tell" into "create another one" is also what made the CLI claim an
+        # overwrite it had not performed. Only ``get_agent``'s own 404 (``None``)
+        # means the agent is absent; anything else propagates.
         agent_exists = False
         if agent_id:
-            try:
-                existing_agent = radient_client.get_agent(agent_id)
-                if existing_agent:
-                    agent_exists = True
-            except Exception as e:
-                # Log the error but proceed as if the agent doesn't exist or cannot be verified
-                logging.error(f"Failed to check if agent {agent_id} exists on Radient: {str(e)}")
+            existing_agent = radient_client.get_agent(agent_id)
+            if existing_agent:
+                agent_exists = True
 
         # If agent_id was provided and the agent exists, overwrite it
         if agent_id and agent_exists:
             radient_client.overwrite_agent_in_marketplace(agent_id, zip_path)
             return None  # Return None when overwriting
         else:
-            # If no agent_id was provided, or if the agent_id was provided but the agent
-            # doesn't exist (or check failed), upload as a new agent
+            # No agent_id, or one the hub answered 404 for: this is a create, and
+            # the id returned here is the only handle the user has on the new
+            # listing, so the caller has to print it.
             return radient_client.upload_agent_to_marketplace(zip_path)
 
     def download_agent_from_radient(

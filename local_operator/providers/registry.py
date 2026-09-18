@@ -17,6 +17,7 @@ import importlib
 import os
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
+from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
 from local_operator.harness.types import AbortSignal
 from local_operator.providers.local import LOCAL_PRESETS
 
@@ -494,7 +495,13 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         ),
         get_api_key=_oauth_api_key,
         callback_port=54549,
-        base_url="https://api.radienthq.com/v1",
+        # Quoted from the single constant rather than spelled again: the desktop
+        # hub transport derives its hub base from THIS definition
+        # (``server/routes/desktop_radient.py`` ``base_url()``), so a separate
+        # literal here was a third source for a host ``env.py`` calls the one
+        # place it is written — and the one a hand-set bare value has to agree
+        # with on the ``/v1`` segment.
+        base_url=DEFAULT_RADIENT_API_BASE_URL,
     ),
     ProviderDefinition(
         id="radient-key",
@@ -505,7 +512,7 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "Radient", "https://radienthq.com/", "The console calls it a Radient Pass key."
         ),
         store_credentials_as="radient",
-        base_url="https://api.radienthq.com/v1",
+        base_url=DEFAULT_RADIENT_API_BASE_URL,
     ),
     ProviderDefinition(
         id="alibaba",

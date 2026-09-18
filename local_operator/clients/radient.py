@@ -541,11 +541,25 @@ class RadientClient:
             response = requests.post(url, headers=headers, files=files)
             response.raise_for_status()
             data = response.json()
-            # The response is a dict with the new agent ID (e.g., {"id": "new-agent-id"})
+            # The hub answers a created listing with an envelope, not a bare id
+            # (`{"msg": "Agent imported successfully", "result": {"agent_id": …}}`,
+            # HTTP 201, measured against the live hub on 2026-09-18). Returning
+            # `next(iter(data.values()))` took the FIRST value, which is that
+            # message — so the id a caller printed as "New agent ID" was the
+            # sentence "Agent imported successfully", and the user had no handle
+            # on the listing the push had just created. Read the id from where the
+            # hub puts it and refuse to answer with anything that is not one: a
+            # wrong string here is a listing nobody can find to delist.
             if not isinstance(data, dict) or not data:
                 raise RuntimeError("Unexpected response from Radient agent upload")
-            # Return the first value (agent ID)
-            return next(iter(data.values()))
+            nested = data.get("result")
+            listing_id = nested.get("agent_id") if isinstance(nested, dict) else None
+            listing_id = listing_id or data.get("agent_id") or data.get("id")
+            if not isinstance(listing_id, str) or not listing_id:
+                raise RuntimeError(
+                    f"Radient agent upload returned no listing id: keys {sorted(data)}"
+                )
+            return listing_id
         except requests.exceptions.RequestException as e:
             error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
