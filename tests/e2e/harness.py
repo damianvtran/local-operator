@@ -74,6 +74,19 @@ NO_NOTIFY_ENV: dict[str, str] = {
 #: reaching the model registry over the network.
 TEST_MODEL = ModelSpec(provider="test", model_id="e2e-model", context_window=100_000)
 
+#: The spec for a cell that must NOT be on the test hosting.
+#:
+#: A session whose recorded selection is the test hosting is skipped by the
+#: notification surfaces on purpose (a test session is not news anybody can act
+#: on; see ``session.model_selection.session_uses_test_hosting``), so a cell that
+#: pins those surfaces' OWN contract — the frame counts, the dedupe — has to
+#: drive a session that is not test-hosted. ``openai`` is a real provider and
+#: the model id is deliberately one the registry has never heard of: every cell
+#: using this passes its own scripted stream, so no client is ever built for it,
+#: and an unknown model keeps the pricing and discovery paths offline exactly as
+#: ``TEST_MODEL`` does.
+E2E_ORACLE_MODEL = ModelSpec(provider="openai", model_id="e2e-oracle-model", context_window=100_000)
+
 #: How long the pilot may wait for the app to adopt its session before the
 #: test calls it a failure. Generous relative to the real cost (adoption is a
 #: handful of loop turns) because a slow CI runner must not flake; short enough
@@ -141,6 +154,7 @@ def build_session(
     *,
     tools: Iterable[Any] = (),
     cwd: Path | None = None,
+    model: ModelSpec = TEST_MODEL,
 ) -> Session:
     """A REAL session over a real transcript directory.
 
@@ -148,6 +162,10 @@ def build_session(
     with the gate armed every tool call would park waiting for a keypress the
     test is not sending, and the approval surface has its own dedicated unit
     coverage (``tests/unit/tui/test_approvals_ux.py``).
+
+    ``model`` exists for the cells that must NOT look like a test session to the
+    notification surfaces — see ``E2E_ORACLE_MODEL``. It changes nothing else:
+    the stream is scripted either way, so the spec is only ever read as a label.
     """
     # ``variables`` is wired the way ``session_factory`` wires it in
     # production. Without it ``session.variables`` is None, and a test driving
@@ -157,7 +175,7 @@ def build_session(
     from local_operator.variables import VariableStore
 
     return Session(
-        model=TEST_MODEL,
+        model=model,
         stream_fn=stream,
         tools=list(tools),
         transcript=Transcript(directory),
