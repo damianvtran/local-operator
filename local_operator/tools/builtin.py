@@ -1981,9 +1981,10 @@ class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
 
     Redacting each read independently leaks a secret split across reads. Keep
-    enough undecided text for the longest injected credential, and never cut
-    through a complete match. UTF-8 decoding is incremental for the same
-    reason. Retained output and live job tails receive the same safe bytes.
+    enough undecided text that a known credential VALUE cannot be split across
+    two reads, and never cut through a complete match. UTF-8 decoding is
+    incremental for the same reason. Retained output and live job tails receive
+    the same safe bytes.
 
     Accepts a credential MAP (the historic caller) or a plain sequence of
     values. The sequence form is what carries §6 registrations — values a child
