@@ -14,6 +14,7 @@ break:
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import threading
 import time
@@ -450,6 +451,120 @@ def test_footer_names_a_call_that_actually_resolves(
     assert f"line {first_elided}" in expanded.text
     assert f"line {first_elided}" not in body
     assert "Continue with" not in expanded.text, "a suggested page must not re-truncate"
+
+
+# ---------------------------------------------------------------------------
+# single-line payloads: JSON results, and no line space to elide in
+#
+# Every MCP tool result is ONE marshalled JSON string, so the line-based
+# elision above has no line to snap to and no line span to state. What it did
+# with that shape was splice `[-1 of 1 lines elided — they are lines 2-0 of the
+# saved output]` into the middle of the document: a span that cannot exist
+# (``splitlines()`` sees one line), inside a payload a caller parses with
+# ``json.loads``. Observed on Minerva risk-assessment readbacks on 2026-09-17.
+# ---------------------------------------------------------------------------
+
+
+def _json_payload(records: int = 40) -> str:
+    """One marshalled JSON line, the shape every MCP tool result arrives in."""
+    return json.dumps(
+        {
+            "assessment_id": "ra_1",
+            "status": "running",
+            "notes_markdown": "n" * 4000,
+            "tasks": [
+                {
+                    "task_id": f"task_{i:03d}",
+                    "status": "complete",
+                    "evidence_ids": [f"ev_{i:03d}"],
+                    "resolution_comment": "c" * 400,
+                }
+                for i in range(records)
+            ],
+            "evidence_id_index": [
+                {"evidence_id": f"ev_{i:03d}", "title": f"Evidence {i}"} for i in range(records)
+            ],
+        }
+    )
+
+
+def test_single_line_json_result_is_still_parseable(context: ToolContext) -> None:
+    text = _json_payload()
+    assert "\n" not in text, "this test is about the one-line shape"
+
+    body, details = builtin.spill_truncate(text, "get_assessment", context)
+    assert details is not None
+
+    # THE property: a caller can parse the result. raw_decode at the head — the
+    # footer is appended after the document and is the only trailing text.
+    parsed, end = json.JSONDecoder().raw_decode(body)
+    assert end < len(body), "the footer must follow the document, not be spliced into it"
+    assert parsed["assessment_id"] == "ra_1"
+    # Keys survive: which key gets dropped must not be decided by sort order,
+    # because that is how the field a reader wants is the one that goes.
+    assert {"status", "notes_markdown", "tasks", "evidence_id_index"} <= set(parsed)
+
+    # A trim says so in band, in the same `_truncated` shape the Minerva
+    # toolproxy already writes into domain payloads.
+    assert '"_truncated"' in json.dumps(parsed)
+
+    # The lie is gone: no impossible span, and no call that cannot resolve.
+    assert "-1 of" not in body
+    assert "lines 2-0" not in body
+    assert 'range="' not in body, "a one-line payload has no line range to page to"
+    assert details["spill"]["handle"] in body
+    assert "?q=<regex>" in body, "the search form is the route that works here"
+
+
+def test_single_line_non_json_result_gets_no_line_span(context: ToolContext) -> None:
+    body, details = builtin.spill_truncate("x" * 40_000, "fetch_page", context)
+    assert details is not None
+    assert builtin.BASH_TRUNCATION_MARKER.strip() in body
+    assert "-1 of" not in body and "lines 2-0" not in body
+    assert 'range="' not in body
+    assert "?q=<regex>" in body
+
+
+def test_json_elision_shortens_prose_before_it_drops_structure() -> None:
+    value = {
+        "status": "complete",
+        "prose": "p" * 20_000,
+        "tasks": [{"task_id": f"task_{i}", "title": f"T{i}"} for i in range(50)],
+    }
+    out = builtin._elide_json(json.dumps(value), 2_000)
+    assert out is not None
+    parsed = json.loads(out)
+    assert set(parsed) >= {"status", "prose", "tasks"}
+    assert parsed["prose"].endswith("...[truncated]")
+    # Every task that is still listed is listed whole; the drop is counted, and
+    # the count must reconcile with what was kept.
+    kept = parsed["tasks"][:-1]
+    assert all(set(task) == {"task_id", "title"} for task in kept)
+    marker = parsed["tasks"][-1]["_truncated"]
+    assert marker["total_items"] == 50
+    assert marker["omitted_items"] == 50 - len(kept)
+
+
+def test_json_elision_declines_a_payload_it_cannot_fit() -> None:
+    # A document whose leaves are all short has nothing to shorten, so the
+    # caller must fall back rather than emit a payload that is not JSON.
+    assert builtin._elide_json(json.dumps(list(range(5_000))), 16) is None
+    assert builtin._elide_json("not json at all", 16) is None
+    assert builtin._elide_json('"a bare string"', 16) is None
+
+
+def test_elision_span_declines_a_payload_with_no_interior_line() -> None:
+    text = "y" * 40_000
+    head, tail = builtin._clip_head_tail(text, 8_000)
+    assert builtin._elision_span(text, head, tail) is None
+    # ...and still reports a real span when there is one, so the footer's
+    # suggested range keeps meaning what it meant before.
+    lines = _lines(5_000)
+    lhead, ltail = builtin._clip_head_tail(lines, 8_000)
+    span = builtin._elision_span(lines, lhead, ltail)
+    assert span is not None
+    total, first, last = span
+    assert total == 5_000 and first <= last
 
 
 def test_stderr_survives_preferentially_when_the_command_failed() -> None:

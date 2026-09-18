@@ -417,21 +417,40 @@ def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
     return head + BASH_TRUNCATION_MARKER + tail
 
 
-def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int]:
+#: An elision gap, in whichever coordinate space the payload actually has.
+#: ``("lines", first, last)`` is a line range in the spilled copy, which the
+#: model can page to. ``("chars", served, original)`` is a reduction with no
+#: line structure to address — see :func:`_elision_span`.
+ElisionSpan = tuple[str, int, int]
+
+
+def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int] | None:
     """``(total_lines, first_elided_line, last_elided_line)``, all 1-based.
 
     Line numbers are what makes an expansion targeted rather than a blind
     page: the footer can say "lines 58-3970 are elided" and the model can ask
     for 40 of them. Counting is done on the same ``splitlines`` basis the
     store uses to serve a range, so the two agree by construction.
+
+    ``None`` means the payload has no interior line boundary to report in:
+    ``splitlines()`` collapses it to a single line, so ``first`` (head_lines +
+    1) would exceed ``last`` (total - tail_lines) and the span would be a lie.
+    Every MCP tool result is exactly this shape — one marshalled JSON string —
+    and the shape is common enough that the caller must handle it rather than
+    print it, which is what produced ``[-1 of 1 lines elided — they are lines
+    2-0 of the saved output]`` inside risk-assessment payloads on 2026-09-17.
     """
     total = len(text.splitlines())
     head_lines = len(head.splitlines())
     tail_lines = len(tail.splitlines())
-    return total, head_lines + 1, total - tail_lines
+    first = head_lines + 1
+    last = total - tail_lines
+    if first > last:
+        return None
+    return total, first, last
 
 
-def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> str:
+def _spill_footer(meta: SpillMeta, suggested: ElisionSpan | None = None) -> str:
     """The recovery instructions that replace destroyed content.
 
     ONE footer per tool result, appended at the very end, never one per
@@ -448,7 +467,29 @@ def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> 
     knows where to look, a search when it does not.
     """
     handle = meta.handle
-    first, last = suggested if suggested else (1, meta.lines)
+    unit, first, last = suggested if suggested else ("lines", 1, meta.lines)
+    partial = (
+        ""
+        if meta.complete
+        else (
+            f"\n  NOTE: output exceeded the {SPILL_ENTRY_LIMIT_BYTES // (1024 * 1024)} MB "
+            "per-entry store cap; the stored copy is itself head+tail of the original."
+        )
+    )
+    if unit == "chars":
+        # No line coordinate space exists for this payload, so a `range` here
+        # resolves to the whole (already reduced) line and a line span is
+        # unrepresentable. Print only the routes that work — a footer that
+        # prints a call which cannot resolve teaches the model the handle is
+        # useless, which is the failure this function exists to prevent.
+        return (
+            f"\n[Output was {last} chars and is SAVED in full at {handle}; this result "
+            f"shows {first} of them — expand it, do not re-run the command:\n"
+            f'  read(path="{handle}?q=<regex>")  -> find matching lines first, then read '
+            f"around them\n"
+            f'  read(path="{handle}")  -> the stored payload, itself capped at the same '
+            f"budget when it is one unbroken line{partial}]"
+        )
     # Suggest ONE PAGE, not the whole gap. A footer that prints
     # range="462-3596" invites a call whose own answer is truncated at the
     # same budget, so the agent's first obedient follow-up lands it right back
@@ -458,14 +499,6 @@ def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> 
     page_end = min(last, first + SPILL_PAGE_LINES - 1)
     span = f"{first}-{page_end}"
     more = f" (of {first}-{last} elided; page through or search)" if page_end < last else ""
-    partial = (
-        ""
-        if meta.complete
-        else (
-            f"\n  NOTE: output exceeded the {SPILL_ENTRY_LIMIT_BYTES // (1024 * 1024)} MB "
-            "per-entry store cap; the stored copy is itself head+tail of the original."
-        )
-    )
     return (
         f"\n[Full output ({meta.lines} lines) is SAVED at {handle} — expand it, "
         f"do not re-run the command:\n"
@@ -491,31 +524,124 @@ def _spill(text: str, tool_name: str, context: ToolContext | None) -> SpillMeta 
     )
 
 
-def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, tuple[int, int] | None]:
-    """``(head + marker + tail, elided_span)`` with the span named IN the marker.
+#: Compaction rungs for a JSON payload, tried in order until one fits. Each
+#: rung is ``(string_limit, array_limit, object_limit, depth_limit)``; ``None``
+#: for the string limit means "stop shortening strings". Strings go first
+#: because that is where prose lives and where the bytes are, and container
+#: limits come last because dropping an element changes what the document says.
+JSON_ELISION_RUNGS: tuple[tuple[int | None, int, int, int], ...] = (
+    (2000, 200, 200, 12),
+    (800, 60, 80, 8),
+    (300, 20, 40, 6),
+    (120, 8, 24, 5),
+    (60, 4, 12, 4),
+    (None, 3, 8, 3),
+    (None, 0, 4, 2),
+)
 
-    The span is stated where the gap is, rather than only in the trailing
-    footer, so a model scanning a two-stream result can see which lines are
-    missing from WHICH stream. ``offset`` shifts the numbers into the
-    coordinate space of the spilled copy, whose framing may differ from this
-    fragment's (bash stores both streams under their banners in one entry).
+
+def _elide_json(text: str, limit: int) -> str | None:
+    """A budget-fitting copy of a JSON payload that is STILL VALID JSON.
+
+    Why this exists: a model reads a tool result with ``json.loads``. The
+    head+tail elision every other oversized output gets cannot survive that —
+    the marker lands inside a string literal and both joins cut tokens in half
+    — so for a payload that is already JSON the useful degradation is *inside*
+    the structure: shorten strings, then trim containers.
+
+    Object KEYS are kept wherever the budget allows: which keys survive is a
+    decision about meaning, and the arbitrary one (alphabetical order, since Go
+    marshals maps sorted) drops exactly the fields a reader wants. Trim markers
+    reuse the ``_truncated`` shape the Minerva toolproxy already writes into
+    domain payloads, so a model meets one convention rather than two.
+
+    ``None`` means "not JSON, or not fitting at any rung": the caller falls
+    back to the line-based path, which is the only thing it can do.
+    """
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(parsed, (dict, list)):
+        return None
+    for rung in JSON_ELISION_RUNGS:
+        candidate = json.dumps(_elide_json_value(parsed, rung, 0), separators=(",", ":"))
+        if len(candidate) <= limit:
+            return candidate
+    return None
+
+
+def _elide_json_value(value: Any, rung: tuple[int | None, int, int, int], depth: int) -> Any:
+    """``value`` reduced to fit ``rung``, with every reduction marked in band."""
+    string_limit, array_limit, object_limit, depth_limit = rung
+    if depth >= depth_limit:
+        return {"_truncated": {"reason": "max_depth"}}
+    if isinstance(value, dict):
+        keys = list(value)
+        kept = keys[:object_limit] if object_limit < len(keys) else keys
+        out: dict[str, Any] = {key: _elide_json_value(value[key], rung, depth + 1) for key in kept}
+        if len(kept) < len(keys):
+            out["_truncated"] = {"omitted_keys": len(keys) - len(kept), "total_keys": len(keys)}
+        return out
+    if isinstance(value, list):
+        out_list = [_elide_json_value(item, rung, depth + 1) for item in value[:array_limit]]
+        if len(value) > array_limit:
+            dropped = {"omitted_items": len(value) - array_limit, "total_items": len(value)}
+            out_list.append({"_truncated": dropped})
+        return out_list
+    if isinstance(value, str) and string_limit is not None and len(value) > string_limit:
+        return value[:string_limit] + "...[truncated]"
+    return value
+
+
+def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, ElisionSpan | None]:
+    """``(body, elided_span)``: the budget-fitting body and where the gap is.
+
+    For a payload with line structure the span is stated where the gap is as
+    well as in the trailing footer, so a model scanning a two-stream result can
+    see which lines are missing from WHICH stream. ``offset`` shifts the
+    numbers into the coordinate space of the spilled copy, whose framing may
+    differ from this fragment's (bash stores both streams under their banners
+    in one entry).
+
+    For a payload with NO line structure — one marshalled JSON string, i.e.
+    every MCP tool result — there is no line span to state and no line to page
+    to, so the gap is reported in characters and only in the footer. Splicing a
+    line marker into such a payload is what left risk-assessment readbacks
+    unparseable; the JSON branch below avoids the splice entirely.
 
     Returns a ``None`` span when nothing was elided.
     """
     if len(text) <= limit:
         return text, None
+    structured = _elide_json(text, limit)
+    if structured is not None:
+        # Still valid JSON, so the footer has to say "the whole payload" rather
+        # than name a line range; `offset` does not apply to char coordinates.
+        return structured, ("chars", len(structured), len(text))
     # Two passes: build the marker from a first-pass clip to learn its true
     # length, then re-clip against the real budget. Sizing the clip with
     # ``len(BASH_TRUNCATION_MARKER)`` alone would overshoot the limit by the
     # length of the span annotation, and the limit is the whole point.
     head, tail = _clip_head_tail(text, limit - len(BASH_TRUNCATION_MARKER))
-    total, first, last = _elision_span(text, head, tail)
+    span = _elision_span(text, head, tail)
+    if span is None:
+        # One unbroken line that is not JSON: keep head and tail but state the
+        # gap only in the footer. The span-free marker is the shape
+        # :func:`truncate_output` already ships, so nothing here is new to a
+        # renderer, and it cannot mis-number a coordinate space that does not
+        # exist.
+        return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
+    total, first, last = span
     marker = _elision_marker(last - first + 1, total, first + offset, last + offset)
     head, tail = _clip_head_tail(text, limit - len(marker))
-    total, first, last = _elision_span(text, head, tail)
-    span = (first + offset, last + offset)
-    marker = _elision_marker(last - first + 1, total, span[0], span[1])
-    return head + marker + tail, span
+    span = _elision_span(text, head, tail)
+    if span is None:
+        return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
+    total, first, last = span
+    line_span: ElisionSpan = ("lines", first + offset, last + offset)
+    marker = _elision_marker(last - first + 1, total, line_span[1], line_span[2])
+    return head + marker + tail, line_span
 
 
 def _elision_marker(elided: int, total: int, first: int, last: int) -> str:
@@ -551,6 +677,13 @@ def spill_truncate(
         return text, None
     meta = _spill(text, tool_name, context)
     if meta is None:
+        # Degraded path: there is no handle to expand, so the shape here is all
+        # the model gets. A JSON payload still comes back as JSON — otherwise a
+        # store failure would silently reintroduce the unparseable result this
+        # function's structured branch exists to remove.
+        structured = _elide_json(text, limit - len(BASH_TRUNCATION_MARKER))
+        if structured is not None:
+            return structured + BASH_TRUNCATION_MARKER, None
         return truncate_output(text, limit), None
     body, span = _elide_inline(text, limit)
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
@@ -2971,7 +3104,7 @@ def _capped_list_body(
         # Fits the prompt, but the count cap still hid entries. Point at the
         # rest explicitly rather than leaving "(capped at N)" as a dead end.
         hidden_from = len(shown.splitlines()) + 1
-        return shown + _spill_footer(meta, (hidden_from, meta.lines)), {
+        return shown + _spill_footer(meta, ("lines", hidden_from, meta.lines)), {
             "spill": _spill_detail(meta)
         }
     body, span = _elide_inline(shown, TOOL_OUTPUT_LIMIT_CHARS)
