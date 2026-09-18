@@ -14,7 +14,8 @@ everything here exists to falsify that claim from a different direction:
   fixture will not have;
 - the gate tests assert which path RAN (a spy and ``last_aggregate_source``),
   never how long it took — a latency bound here would be a bet on machine load,
-  and the numbers belong in the PR's evidence, never in a test (AGENTS.md §7).
+  and the numbers belong in the PR's evidence, never in a test (AGENTS.md,
+  "Evidence goes on the PR, never into the repository").
 """
 
 from __future__ import annotations

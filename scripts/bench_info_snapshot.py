@@ -124,9 +124,10 @@ def _display_path(path: str | Path) -> str:
     """A path as it goes into the artifact: ``~/...`` under the home directory.
 
     These artifacts travel — published on the PR that cites them, never committed
-    (``AGENTS.md`` §7) — and the repo's convention for anything that travels is a
-    home-relative path. What the artifact has to record is WHICH CHECKOUT was
-    measured — the caller's own layout is not part of the measurement.
+    (``AGENTS.md``, "Evidence goes on the PR, never into the repository") — and the
+    repo's convention for anything that travels is a home-relative path. What the
+    artifact has to record is WHICH CHECKOUT was measured — the caller's own
+    layout is not part of the measurement.
     """
     resolved = Path(path).resolve()
     try:
@@ -1061,9 +1062,14 @@ def main() -> int:
 
     _print_report(report)
     if args.json:
-        Path(args.json).write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        # The store is gitignored, so a fresh clone or worktree has no ``bench/``
+        # at all — git materialises an ignored directory for nobody. Without this
+        # mkdir the write below, the LAST thing a long run does, dies with
+        # FileNotFoundError and the whole measurement is lost. Same shape as
+        # ``bench_session_page.py`` and ``bench_session_switch.py``.
+        json_path = Path(args.json)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"\nwrote {args.json}")
     if _FAILURES:
         print(f"\n{len(_FAILURES)} check(s) failed:", file=sys.stderr)
