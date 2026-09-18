@@ -187,6 +187,33 @@ prevent acknowledgement of a complete result. If a capped result cannot be
 hydrated in full on the phone, it remains unread until a full surface views it;
 this contract does not add a new full-text mobile viewer.
 
+### A gesture may acknowledge what a surface ENUMERATES (R10)
+
+The rule above is per result. Clearing a whole pile is the one place it is
+deliberately relaxed, and the relaxation is narrow enough to state:
+
+**An explicit user gesture may acknowledge the completions a surface
+enumerates, token-bound; no automatic path may acknowledge anything.** The
+surface sends the completions it actually rendered — one `(conversation,
+token)` pair each — and the store compares every pair against that
+conversation's CURRENT completion inside one write transaction. A completion
+published after the render is not in the batch, so it stays unread, and the
+caller learns which items did not clear (`superseded`, `unknown`) rather than a
+success that moved a watermark no surface can see. Clearing is therefore not a
+sweep of "everything unread": it is the same observed-token rule applied to a
+list, and `acknowledge_all()` does not exist on the store for exactly that
+reason.
+
+The explicit half is load-bearing too. A timer, a poll, a subscription or a
+focus change may never reach the batch operation, and nothing here changes the
+per-result rule for the surfaces that acknowledge one at a time. The TUI's
+`/notifications read` lists the completions its own sidebar is painting and
+clears exactly that set; the desktop clears the rows its sidebar holds, and only
+with its window in the foreground (`guardForegroundReceipts` covers the op by
+name). Reading is still not notifying: `deliveries`, the supersede log and the
+completion rows are untouched by a bulk acknowledgement, so an already-delivered
+banner stays delivered and nothing read can be resurrected as unread.
+
 ## Upgrade boundaries
 
 Initial historical bootstrap compares known legacy `mobile-seen.json` stamps

@@ -94,6 +94,17 @@ async def capabilities():
                 # runtime record's capability LIST is a different namespace and
                 # keeps its versioned `completion-ack-v1` string.
                 "completion_ack": 1,
+                # The BULK read receipt: one request clearing the completions a
+                # client RENDERED, token-bound (`POST /v1/desktop/attention/seen`).
+                # Its OWN key rather than a bump of `completion_ack`, because the
+                # per-session ack must keep working against a backend that lacks
+                # the batch route -- the same rule `session_search` and
+                # `draft_preview` above state. A renderer that does not see this
+                # key must neither draw the control nor send the op (a 404 after
+                # a click is a broken control), and nothing else is gated on
+                # `completion_ack`'s version, so no other surface can be hidden
+                # by the addition.
+                "completion_ack_bulk": 1,
                 # The `notification` frame's payload shape. A renderer that
                 # sees this owns every completion banner and must stop toasting
                 # on `agent_end`, or the user gets two for one turn; a renderer
