@@ -2286,6 +2286,28 @@ class McpManager:
         self._rebuild_agent_names()
         self._fire_tools_changed()
 
+    def _is_leaving(self) -> bool:
+        """Whether this manager is tearing down, and so may not spend a grant.
+
+        The predicate every OAuth provider built by this manager consults before
+        it starts a refresh exchange (see ``build_oauth_provider(leaving=...)``).
+
+        WHY IT IS NEEDED AT ALL: ``disconnect_all`` tears the servers down, and
+        the MCP SDK's session-terminate DELETE runs the SAME auth flow as an
+        ordinary request. With the credential store now outliving that teardown
+        (so an in-flight rotation can still be persisted), an ungated teardown
+        would be the one moment this process spends a rotating refresh token
+        while having no way to persist the answer it gets back. Gating on
+        ``_disposed`` — already set FIRST in ``disconnect_all``, before any
+        teardown await — makes the leaving window cover the whole of it, and
+        covers the proactive path in :meth:`_ensure_oauth_fresh` too.
+
+        ``_disposed`` is per-manager, which is the scope that matters: several
+        sessions can share one process (the server facade), and one session's
+        teardown must not silence another's refreshes.
+        """
+        return self._disposed
+
     async def disconnect_all(self) -> None:
         """Tear everything down; bumps the epoch so late reconnects die."""
         self._epoch += 1
@@ -2324,6 +2346,20 @@ class McpManager:
         self._watchers.clear()
         self._tools_by_server.clear()
         self._connections.clear()
+        # DRAIN BEFORE ANY STORE CLOSES. Cancelling the connects above is what
+        # detaches a refresh exchange that was mid-POST (the connect's
+        # cancellation must never abort a request the provider may already have
+        # spent), and that exchange persists its rotation when its answer lands
+        # — seconds after the connect that started it is gone. Closing the store
+        # before it does is the defect this drain exists to remove: the write is
+        # swallowed, the row keeps the SPENT token, and the next boot refuses to
+        # refresh for up to ``UNCONFIRMED_SEND_TTL_S`` and tells the user to
+        # re-authenticate. The wait is bounded and logged on overrun (see
+        # :func:`~local_operator.mcp.auth.drain_refresh_exchanges`), because a
+        # quit must not hang on an authorization server that stopped answering.
+        from local_operator.mcp.auth import drain_refresh_exchanges
+
+        await drain_refresh_exchanges()
         if self._owns_auth_store and self.auth_store is not None:
             try:
                 self.auth_store.close()
@@ -2837,6 +2873,7 @@ class McpManager:
                 store=self._effective_auth_store(),
                 interactive=interactive,
                 endpoints=self._oauth_endpoints.get(url),
+                leaving=self._is_leaving,
             )
         except Exception:
             logger.warning(
@@ -2940,6 +2977,19 @@ class McpManager:
         from local_operator.mcp.auth import server_is_oauth_capable
 
         if not server_is_oauth_capable(cfg, self._effective_auth_store()):
+            return
+        if self._is_leaving():
+            # The teardown gate, on the site the PROVIDER GATE cannot reach: a
+            # connect still in flight while ``disconnect_all`` runs reaches the
+            # proactive refresh before any provider exists, and this exchange
+            # would be one more POST from a process that is leaving. Skipped
+            # rather than refused — the connect is being cancelled anyway, and
+            # the store is left exactly as it was.
+            logger.info(
+                "MCP proactive refresh skipped for %r: this manager is tearing down, so "
+                "no token POST is made [writer: refresh leaving gate]",
+                name,
+            )
             return
         try:
             from local_operator.mcp.auth import ensure_mcp_oauth_fresh

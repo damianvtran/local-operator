@@ -2026,6 +2026,11 @@ class Session:
         # Host-registered teardown (see add_dispose_hook): resources the
         # composition root owns but the session's lifetime governs.
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        #: Teardown that must run after EVERY ordinary hook (see
+        #: :meth:`add_dispose_hook`'s ``last``). Kept in its own list rather than
+        #: appended in place because a late hook is registered EARLY — often
+        #: before the hooks it has to outlive even exist.
+        self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         #: Notices that belong AFTER the running turn's answer (see
         #: :meth:`queue_notice`). A list, not a single slot: a turn can raise more
         #: than one, and their order is the order they were raised in.
@@ -13851,7 +13856,9 @@ class Session:
         except Exception:  # noqa: BLE001 — the inventory is never worth a broken turn
             logger.warning("web tool inventory could not be reconciled", exc_info=True)
 
-    def add_dispose_hook(self, hook: Callable[[], Awaitable[None] | None]) -> None:
+    def add_dispose_hook(
+        self, hook: Callable[[], Awaitable[None] | None], *, last: bool = False
+    ) -> None:
         """Register teardown that runs after the session's own dispose.
 
         The composition root owns resources the session never created — MCP
@@ -13860,8 +13867,25 @@ class Session:
         place to hang them. Hooks run in registration order, and one that
         raises is logged rather than propagated: teardown must never mask the
         dispose that triggered it.
+
+        ``last=True`` defers one hook past ALL the others, whatever order they
+        were registered in, and exists for exactly one kind of resource: one
+        that the other hooks still need while they run. The credential store is
+        that resource — MCP teardown persists a refresh rotation into it, and a
+        refresh exchange detached mid-POST can still be writing seconds later —
+        so its close cannot be expressed as "registered after the MCP hooks":
+        the deferred MCP wiring registers ITS hooks from a background task, long
+        after the store's was registered, and a session disposed before that
+        task finished has no MCP hook at all. A late hook is order-independent,
+        which is the property the store's lifetime actually needs (it was a
+        measured bug, not a hypothetical: the store closed first, the rotation
+        write was swallowed at DEBUG, and the user paid for it with a browser
+        sign-in).
         """
-        self._dispose_hooks.append(hook)
+        if last:
+            self._final_dispose_hooks.append(hook)
+        else:
+            self._dispose_hooks.append(hook)
 
     @property
     def browser_generation(self) -> str:
@@ -14182,6 +14206,17 @@ class Session:
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:
+                try:
+                    outcome = hook()
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                except Exception:
+                    logger.warning("session dispose hook failed", exc_info=True)
+            # ...and the late hooks LAST, after every one of those has had its
+            # turn: they are the resources the ordinary hooks still need (see
+            # ``add_dispose_hook``'s ``last``), so a hook registered to run
+            # after them would defeat the point of the two lists.
+            for hook in self._final_dispose_hooks:
                 try:
                     outcome = hook()
                     if inspect.isawaitable(outcome):
