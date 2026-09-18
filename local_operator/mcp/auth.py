@@ -1160,7 +1160,8 @@ class McpTokenStorage:
         from a success. Turning the drop into its own ``RefreshOutcome`` would
         change what every caller of the exchange switches on — the refusal and
         marker path — which is deliberately out of this change's scope (reviewer
-        round 1, R1-3). Consumers of the return value today: this module's tests.
+        round 1, R1-3). No caller consumes it: the only call site discards it,
+        and this module's tests pin the INFO line rather than the return value.
 
         Caller: :func:`_perform_refresh_exchange`, which holds the refresh lock
         across this call, so the only writers it races are the ones that
@@ -3695,7 +3696,7 @@ async def _perform_refresh_exchange(
     this change claimed more than it delivers (reviewer round 1, R1-2, measured
     on httpx 0.28.1): the arm used to sit before ``httpx.AsyncClient`` was even
     constructed and now sits at the hook. That is SAFETY-NEUTRAL — the marker is
-    never armed LATER than it was before, so no request can go out unmarked — and
+    never armed LATER than the request hook, so no request can go out unmarked — and
     it keeps the arm off the window before any request exists at all (a kill
     between the pre-flight reads and the client is no longer a quarantined
     grant). It does NOT narrow the CONNECT phase, and this docstring used to say
@@ -4288,8 +4289,13 @@ def _make_refresh_coordinating_provider(
         #: INSTANCE below rather than as a class attribute like its siblings
         #: above: a plain function in a class body is a descriptor, so reading it
         #: back through ``self`` would bind it as a method and call it with
-        #: ``self`` — a TypeError inside the auth flow, which httpx reports as a
-        #: connection failure rather than as the bug it is.
+        #: ``self`` — a TypeError inside the auth flow, which httpx2 reports as
+        #: a connection failure rather than as the bug it is. ``httpx2`` is not a
+        #: typo: this is the SDK's auth flow, and the SDK runs its transports and
+        #: its OAuth flow on that own-name distribution (``mcp`` declares
+        #: ``Requires-Dist: httpx2>=2.5.0``), whereas this module's own token POST
+        #: uses the ``httpx`` it imports for itself. See ``_CHATTY_WIRE_CLIENTS``
+        #: in ``local_operator/logger.py``, which pins both for the same reason.
         _refresh_coord_leaving: "Callable[[], bool] | None"
 
         def _is_leaving(self) -> bool:
