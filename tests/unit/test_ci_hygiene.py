@@ -325,7 +325,7 @@ def test_dev_extra_pins_the_same_pyright_the_type_check_job_installs() -> None:
     """
     extras = tomllib.loads(PYPROJECT.read_text())["project"]["optional-dependencies"]["dev"]
     pins = [dep for dep in extras if dep.startswith("pyright")]
-    assert pins == ["pyright==1.1.411"], (
+    assert pins == ["pyright==1.1.414"], (
         f"dev extra pyright pin drifted: {pins!r}. Bump this together "
         "with the exclude-superset guard, not by setting FORCE_VERSION."
     )
