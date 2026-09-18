@@ -1,0 +1,73 @@
+{
+ "root": "/Users/damian/lo-wt/open-links-r3",
+ "body_region": [
+  33,
+  11,
+  33,
+  7
+ ],
+ "rows": [
+  "Open a link",
+  "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+  "\u276f https://one.test/a        agent",
+  "  https://two.test/b        agent",
+  "  https://three.test/c      agent",
+  "",
+  "\u2191\u2193 move \u00b7 enter open \u00b7 esc cancel"
+ ],
+ "pointer_before": "default",
+ "hovered_attr_before": null,
+ "grounds_resting": [
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null
+ ],
+ "resting_settled": true,
+ "pointer_over_row1": "pointer",
+ "hovered_over_row1": 1,
+ "grounds_hover_row1": [
+  null,
+  null,
+  null,
+  "#272219",
+  null,
+  null,
+  null
+ ],
+ "frame_changed_on_hover": true,
+ "resting_sha": "dc342fd28fd8f1da",
+ "moved_sha": "223c061a9ffe665c",
+ "grounds_hover_selected": [
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null
+ ],
+ "hover_selected_sha": "dc342fd28fd8f1da",
+ "hover_selected_differs_from_resting": false,
+ "hover_selected_differs_from_row1_hover": true,
+ "pointer_after_leave": "default",
+ "hovered_after_leave": null,
+ "grounds_after_leave": [
+  null,
+  null,
+  null,
+  null,
+  null,
+  null,
+  null
+ ],
+ "leave_restores_resting_frame": true,
+ "hover_settled": true,
+ "clicked_row1_opened": [
+  "https://two.test/b"
+ ],
+ "screen_after_click": "TranscriptScreen"
+}
