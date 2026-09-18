@@ -239,11 +239,16 @@ because the entire point is to be cheap: a recommendation that costs more than t
 saves is a net loss.
 
 MEASURED AT CATALOGUE SCALE (2026-09-18, this branch, defaults for `maxStateChars` and
-`maxCandidates`, a 537-resource roster — 500 skills, 30 guides, 7 servers — and an 8×-repeated
-user message): state 2 006 chars, question options 1 912 chars, question instructions 449 chars,
-i.e. **4 367 chars ≈ 1 091 tokens ≈ 3.4% of the window**. What bounds this is the candidate cap,
-not the window: at `maxCandidates: 40` the same roster produces 9 473 chars ≈ 2 368 tokens ≈
-7.4%. Hundreds of skills are affordable, and `maxCandidates` is the operator's lever.
+`maxCandidates`, a 537-resource roster — 500 skills, 30 guides, 7 servers — each carrying a
+realistic ~85-character description, and an 8×-repeated user message): state 3 525 chars,
+question options 3 431 chars, question instructions 449 chars, i.e. **7 405 chars ≈ 1 851 tokens
+≈ 5.6% of the 32 768-token window**. What bounds this is the candidate cap, not the window: at
+`maxCandidates: 40` the same roster produces 14 184 chars ≈ 3 546 tokens ≈ 10.8%. Hundreds of
+skills are affordable, and `maxCandidates` is the operator's lever.
+
+(The first cut of these figures used toy one-line descriptions and read ~2x lower; a review round
+caught that the assertions built on them accepted a 5x regression, so the numbers above are the
+DESCRIPTION-REALISTIC ones and the tests assert against them tightly.)
 
 Non-negotiable: **the transcript is never sent.** Not the history, not the compaction summary,
 not tool results. What goes out is:
@@ -430,6 +435,18 @@ Sequence per user message:
    in the harness's cost log. It is delivered after the turn's answer, through the session's own
    post-turn notice queue, so it does not occupy the answer slot. A resource set identical to the
    previous message's is not announced again.
+
+   TWO CONSEQUENCES OF THE LINE ALWAYS PAINTING (design review round 1, 2026-09-18). While the layer
+   shipped off, the notice's ink and height were only ever seen by operators who opted in; on by
+   default they are everybody's. (1) **Ink**: the line is delivered as `note`, not `info`. `info` maps
+   to the theme's `dim` token, measured at 3.77:1 on the light theme — below the 4.5:1 AA floor — and
+   13 of the 16 light builtins sit under it; `note` maps to `muted` (7.18:1 on paper, 8.63:1 on the
+   dark ground) and is the ink the ladder already reserves for a receipt the user is meant to read,
+   which is the same call `tui/session_presentation.py` made for a replayed marker. The glyph is
+   unchanged (`·` for both kinds). (2) **Height**: the row count is a function of
+   `maxRecommendations` (3 by default, so 2 rows at 100 columns and 3 at 80), which is now a default
+   surface rather than an opt-in one — `maxRecommendations` is the lever for that, exposed beside
+   `maxCandidates` in `/settings`.
 
 Rendered block (this is the whole token cost — target ≤ 6 lines):
 

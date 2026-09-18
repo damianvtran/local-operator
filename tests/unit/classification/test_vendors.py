@@ -906,3 +906,47 @@ async def test_every_tier_dead_walks_each_of_them_at_most_once(bare_manager) -> 
     assert "no credential" in str(second.value)
     assert len(requests) == 2
     assert vendor._tier == 1
+
+
+async def test_the_walk_restarts_at_the_preferred_tier_when_the_memo_expires(
+    bare_manager,
+) -> None:
+    """A re-login must revive a RUNNING session, so the fallback is not one-way.
+
+    The tier index advances only on a refusal, so without the memo-expiry reset a
+    session that fell back once would keep using the legacy key for the rest of its
+    life — `lop login` could not bring the preferred tier back without a restart
+    (agent review round 1). The reset rides the expiry that is already happening, so
+    the extra consult costs no request of its own.
+    """
+    now = [0.0]
+    store_login_key(bare_manager, "radient", "first-login-bearer")
+    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    bearers: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bearer = request.headers["Authorization"].replace("Bearer ", "")
+        bearers.append(bearer)
+        if bearer == "first-login-bearer":
+            return httpx.Response(401, json={"error": {"message": "revoked"}})
+        return _answers_choice()
+
+    vendor = RadientVendor(
+        bare_manager,
+        client=client_for(handler),
+        credential_ttl_s=300.0,
+        clock=lambda: now[0],
+    )
+
+    # The login row refuses twice, so the walk falls back inside this call.
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert bearers[-1] == "legacy-static-key"
+    assert vendor._tier == 1
+
+    # The operator logs in again while the session is running, and the memo expires.
+    store_login_key(bare_manager, "radient", "second-login-bearer", replace=True)
+    now[0] = 301.0
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+
+    assert bearers[-1] == "second-login-bearer"
+    assert vendor._tier == 0

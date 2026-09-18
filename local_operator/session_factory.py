@@ -1485,6 +1485,12 @@ class _KnowledgeHooks:
     #: than this per kind rather than sending its first N in discovery order (see the
     #: package's ``shortlist``).
     classification_max_candidates: int = DEFAULT_CLASSIFICATION_MAX_CANDIDATES
+    #: The package's ``shortlist`` callable, captured at attach time. ``None`` when no
+    #: real seam was built (the layer is off, or a host injected its own classifier),
+    #: in which case the message path sends the roster unchanged instead of importing
+    #: the package for one function. Typed as returning a tuple of rows rather than as
+    #: ``Callable[..., Any]`` so the message path needs no cast and no re-wrapping.
+    classification_shortlist: Callable[..., tuple[Any, ...]] | None = None
     #: ``values.classification.waitMs`` in SECONDS, as read at session build (the
     #: same NEW_SESSIONS snapshot the service got). The turn waits at most this
     #: long; see :data:`DEFAULT_CLASSIFICATION_WAIT_MS` for why it is not the
@@ -1830,9 +1836,13 @@ def _attach_classification(
             max_candidates,
             max_recommendations,
             setting_int,
+            shortlist,
         )
 
         hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
+        # The message path's shortlist, captured HERE so that path never imports
+        # the package (see ``_classification_request``).
+        hooks.classification_shortlist = shortlist
         # …and its keep-alive client is built HERE, not on the first message: tens of
         # milliseconds of SSL-context setup (19-81 ms across six fresh-process runs),
         # paid before the call's first await, so no wait budget can bound it. No
@@ -1965,7 +1975,12 @@ def _classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandi
     roster = _build_classification_roster(hooks)
     hooks.classification_roster = roster
     hooks.classification_roster_key = key
-    hooks.skills_fingerprint = fingerprint
+    # Only a REAL fingerprint becomes the baseline. Recording a ``None`` (no roots to
+    # watch) would permanently disarm the freshness check for a session whose roots
+    # appear later — ``_current_skill_resources`` compares against this value, and
+    # ``None`` there means "never rescan" (agent review round 1).
+    if fingerprint is not None:
+        hooks.skills_fingerprint = fingerprint
     return roster
 
 
@@ -2009,20 +2024,35 @@ def _current_skill_resources(hooks: _KnowledgeHooks) -> list[Any]:
     if not discovered:
         return known
     hooks.skills_by_name.update({skill.name: skill for skill in discovered})
-    merged = {skill.name: skill for skill in known}
-    merged.update({skill.name: skill for skill in discovered})
+    # KEYED ON (kind, name), not name alone. The index holds user skills AND the
+    # packaged guides in one list, and a user skill named after a guide (`tunnel`,
+    # `browser`, `mcp`, …) is a real collision: keying on the name alone let the
+    # skill EVICT the guide from the roster, so a resource the router still offers
+    # silently stopped being a candidate (agent review round 1). ``skills_by_name``
+    # above stays name-keyed because that is the resolver's own mapping and both
+    # entries are legitimately readable under their URL protocols.
+    merged: dict[tuple[str, str], Any] = {
+        (_resource_kind(item), str(item.name)): item for item in known
+    }
+    for skill in discovered:
+        merged[(_resource_kind(skill), str(skill.name))] = skill
     # SORTED, matching how ``_setup_knowledge`` sorts the index it builds, so the
     # roster's order is the same before and after a rescan rather than an artefact
     # of which filesystem entry came back first.
     return sorted(
         merged.values(),
         key=lambda item: (
-            str(getattr(item, "resource_type", "")),
+            _resource_kind(item),
             str(item.name).lower(),
             str(item.name),
             str(item.file_path),
         ),
     )
+
+
+def _resource_kind(item: Any) -> str:
+    """The routing kind of a knowledge row (``skill`` / ``guide`` / ``agent_hint``)."""
+    return str(getattr(item, "resource_type", "") or "")
 
 
 def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandidate, ...]:
@@ -2086,13 +2116,26 @@ def _classification_request(hooks: _KnowledgeHooks, query: str) -> _Recommendati
     every kind already fits ``maxCandidates``, so a catalogue that fits pays one
     length check and behaves exactly as it did before the shortlist existed.
     """
-    from local_operator.classification import shortlist
-
     roster = _classification_roster(hooks)
+    # The shortlist arrives on the hooks from ``_attach_classification``, the one
+    # place that has already imported the package: this function runs on the message
+    # path, where the wiring's rule is that a session with the layer OFF never
+    # imports it (agent review round 1). A seam injected by a host or a test carries
+    # no shortlist and gets the roster unchanged, which is the pre-shortlist
+    # behaviour rather than a degraded one.
+    shortlist_fn = hooks.classification_shortlist
+    candidates: tuple[_ClassificationCandidate, ...] = roster
+    if shortlist_fn is not None:
+        # ``tuple(...)`` is identity-preserving for the roster tuple that shortlist
+        # hands back unchanged, so the warm path still carries the cached object.
+        candidates = cast(
+            tuple[_ClassificationCandidate, ...],
+            tuple(shortlist_fn(roster, query, hooks.classification_max_candidates)),
+        )
     return _RecommendationRequest(
         user_message=query,
         context=None,
-        candidates=shortlist(roster, query, hooks.classification_max_candidates),
+        candidates=candidates,
         max_recommendations=hooks.classification_max_recommendations,
     )
 
@@ -2472,7 +2515,7 @@ async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: An
     if not line:
         return False
     try:
-        delivered = sink(str(line), "info")
+        delivered = sink(str(line), "note")
         if inspect.isawaitable(delivered):
             await delivered
     except Exception:  # noqa: BLE001 — a notice is never worth a turn
@@ -2678,8 +2721,12 @@ async def _select_knowledge_block(
     hooks.frozen_task_id = task_id
     # The block is now the truth at THIS fingerprint, so the next tree change is what
     # re-opens it. Recorded after the render, never before: a render that raised must
-    # not claim it captured the new tree.
+    # not claim it captured the new tree. The parked previous render is dropped HERE
+    # for the same reason — once this render exists, a child reading the fallback
+    # would otherwise be handed a superseded directory even when the current one is
+    # legitimately EMPTY (agent review round 1).
     hooks.knowledge_fingerprint = fingerprint
+    hooks.superseded_block = ""
     return hooks.frozen_block
 
 
