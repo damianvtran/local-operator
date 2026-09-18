@@ -5466,7 +5466,7 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     close it and rebind — is a window in which ``connect`` gets refused, which is
     the outage the in-place design was chosen to avoid.
 
-    THE FAMILY COMES FROM ``host``, NOT FROM A CONSTANT (review round 1, R1-3).
+    THE FAMILY COMES FROM ``host``, NOT FROM A CONSTANT (serve-reload review round 1, R1-3).
     ``socket.fromfd`` needs a family to reinterpret the descriptor under, and a
     hardcoded ``AF_INET`` reinterprets an IPv6 listener's address bytes as IPv4:
     measured in review, an adopted ``--host ::1`` daemon logged its peer as

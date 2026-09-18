@@ -239,6 +239,23 @@ def reload_serve_daemons(
     daemons = scan()
     if not daemons:
         return []
+    if serve_reload.RELOAD_SIGNAL is None:
+        # R7-1: on a platform with no SIGUSR1 the import works, the record says
+        # `reloadable: false`, and this is the sentence rather than a crash. A
+        # daemon that could not install the handler never advertises the
+        # capability, so this branch is defensive — but it is the branch a reader
+        # will look for, and "silently skip" is the wrong answer to "I cannot ask
+        # anyone".
+        return [
+            ServiceRefresh(
+                "serve daemons",
+                warnings=(
+                    "warning: this platform has no SIGUSR1, so no serve daemon can be "
+                    "asked to move onto the new build; NOTHING was signalled. "
+                    "Runtimes are unaffected.",
+                ),
+            )
+        ]
     stamp = _current_stamp()
     if stamp is None:
         # NO STAMP MEANS NO PREDICATE (serve-reload review round 2, R2-1). ``_serves_current_build``
@@ -327,7 +344,8 @@ def reload_serve_daemons(
                     )
                 )
                 continue
-            kill(record.pid, serve_reload.RELOAD_SIGNAL)
+            # The family: a mismatch here is silent, which is why it has its own test.
+            kill(record.pid, serve_reload.RELOAD_SIGNAL)  # type: ignore[arg-type]  # guarded above
         except OSError as exc:
             refreshes.append(
                 ServiceRefresh(
