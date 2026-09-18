@@ -421,6 +421,45 @@ async def _until(predicate, timeout_s: float = 3.0) -> None:
     raise AssertionError("the condition never became true")
 
 
+async def _ladder_exhausted(handle: ServingSessionHandle, *, timeout_s: float = 30.0) -> None:
+    """Wait until the announcement ladder has STOPPED, or fail loudly.
+
+    The ladder runs one attempt per task and REPLACES ``handle._completion_task``
+    when it schedules the next rung, so a slot still holding the task that just
+    finished is the ladder's own end-of-ladder signal: no successor was
+    scheduled, and that attempt's handback landed inside the task before it
+    returned. Awaiting those tasks IS awaiting the event R7 is about; a banner
+    CALL COUNT is only a proxy for it, and a wrong one in both directions:
+
+    - ``len(calls) >= 4`` goes true the moment the fourth attempt ENTERS its
+      sink — inside ``detached_notify``, BEFORE that attempt's
+      ``release_delivery`` — so the read lands on the claim the attempt is still
+      holding. Measured on this box: 3 in 30 loaded runs, ``AssertionError: the
+      claim survived a raise``, which is also how CI run 35377466211 died.
+    - A count is still a wall-clock bet even when it is not read too early:
+      ``_until``'s 3 s bound expires before a slowed ladder runs out its rungs,
+      and that is the SAME defect reported as the other signature,
+      ``AssertionError: the condition never became true``.
+
+    ``timeout_s`` is a hang guard, not a bet: a ladder that never exhausts is a
+    real failure and this says so rather than hanging the shard.
+    """
+    guard = asyncio.timeout(timeout_s)
+    try:
+        async with guard:
+            while True:
+                task = handle._completion_task
+                if task is None:
+                    return
+                await task
+                if handle._completion_task is task:
+                    return
+    except TimeoutError as error:
+        if not guard.expired():
+            raise
+        raise AssertionError("the completion ladder never exhausted") from error
+
+
 def _fast_ladder(monkeypatch, *delays: float) -> None:
     """Compress the ladder's DELAYS, never its shape.
 
@@ -570,9 +609,18 @@ async def test_an_exception_after_the_claim_hands_it_back(
         session_id = handle._session_id_for_resume()
         token = _publish("complete", session_id)
         handle._schedule_completion_announce()
-        await _until(lambda: calls)
         # Every attempt fails, so the ladder exhausts and the claim is free.
-        await _until(lambda: len(calls) >= 4)
+        #
+        # Wait for the LADDER, never for a count of banner calls: `len(calls) >= 4`
+        # becomes true as the fourth attempt ENTERS its sink, inside
+        # `detached_notify` and before that attempt hands the claim back, so the
+        # assertion below can read the watermark the attempt is still holding.
+        # Both reported signatures are that one defect — see `_ladder_exhausted`.
+        await _ladder_exhausted(handle)
+        # The raise funnel really ran. With rungs 2/3 eligible the ladder exhausts
+        # having called nobody, and the assertion below would then pass VACUOUSLY:
+        # nothing ever took the claim, so nothing could have survived anything.
+        assert calls, "no delivery was attempted, so nothing took the claim"
         assert _delivered(session_id, token) is False, "the claim survived a raise"
     finally:
         await session.dispose()
