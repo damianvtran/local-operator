@@ -1207,3 +1207,73 @@ async def test_model_saved_in_the_readiness_window_does_not_strand_the_override(
     # the stranded override would have clamped onto its ladder.
     assert level is None, band
     assert "▴ auto" in band
+
+
+class _DecisionOnlyController(EffortProviderController):
+    """A controller whose provider gate ANSWERS for the decision-only id.
+
+    That is the REAL behaviour and the reason this surface needed its own test:
+    ``ProviderController.provider`` is ``get_provider_definition``, and TypeSafe is a
+    shipped definition (it has a login), so `/model typesafe/<id>` passes the
+    unknown-provider gate and the refusal has to come from the spec builder. The
+    catalogue's own filter cannot stand in either — `/model <p>/<id>` is the
+    documented escape hatch past the pickers.
+    """
+
+    def provider(self, pid: str) -> Any:
+        if pid == "typesafe":
+            return _FakeDef("typesafe", "TypeSafe (Jev)", None, ("jev",))
+        return super().provider(pid)
+
+
+def _model(app: OperatorApp) -> tuple[str, str]:
+    """The pair the session would send on its next request."""
+    assert app._session is not None, "the session must be up before reading its spec"
+    return (app._session.model.provider, app._session.model.model_id)
+
+
+@pytest.mark.asyncio
+async def test_the_typed_model_command_cannot_switch_onto_a_decision_only_provider() -> None:
+    """A running session must not land on a provider that 400s every turn.
+
+    Reproduced by the reviewer on a real session before the guard: after this
+    command ``session.model`` was the decision model and the next request carried it,
+    with a receipt confirming the switch. The assertion is on the SPEC the session
+    would send — the app's own band agreeing with its variable is the failure mode
+    this file exists to catch (see the module docstring).
+    """
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=_DecisionOnlyController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        before = _model(app)
+        await _submit(pilot, app, "/model TypeSafe/jev-1.13")
+        after = _model(app)
+        notices = _notices(app)
+    assert after == before, "the session was switched onto a provider that cannot chat"
+    refusal = [n for n in notices if "decision-model calls" in n]
+    assert refusal, notices
+
+
+@pytest.mark.asyncio
+async def test_the_viewer_slash_result_refuses_a_decision_only_provider() -> None:
+    """The routed ``/model`` (any viewer on a runtime-owned session) refuses too.
+
+    It is a second surface with its own gate — it validates the provider itself, and
+    it catches its own resolve errors — so it gets its own assertion rather than the
+    comfort of sharing a code path with the local pane.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=_DecisionOnlyController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        before = _model(app)
+        result = await app._model_slash_result("TYPESAFE/jev-1.13", SlashResult)
+        after = _model(app)
+    assert result.kind == "notice"
+    assert "decision-model calls" in result.text
+    assert after == before

@@ -4303,3 +4303,248 @@ async def test_preload_tools_cannot_surface_a_tool_the_allowlist_excludes(monkey
     await wire_mcp_into_session(session, [builtin], ".")
     assert allowed in session.tools
     assert excluded not in session.tools
+
+
+# Ownership: the seam's resources are the session's to release
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_classification_seam_is_closed_on_dispose(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session's keep-alive client and its memos are released with everything else.
+
+    The shipped service opens ONE ``httpx.AsyncClient`` per session and memoizes the
+    resolved credential and the roster lines for that session's life; its ``aclose``
+    is documented as "the session owner calls this on dispose". Nothing called it —
+    the composition root registered its siblings (``attach_auth_dispose``,
+    ``attach_stream_dispose``) and not this one, so the pool and the memos were pinned
+    once per SESSION on the planes that keep sessions alive for hours (review round
+    1, M2). The service's own ``aclose`` test proves the method works; only this test
+    proves anyone calls it, so it is built through ``create_session`` — the
+    composition root is the claim — with the package's service class swapped for a
+    recorder, so a failure points at the dispose path rather than at the cascade.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    built: list[Any] = []
+
+    class _RecordingService:
+        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+            self.closed = False
+            self.timeout_s = 1.5
+            built.append(self)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("local_operator.classification.ClassificationService", _RecordingService)
+    config = ConfigManager(tmp_config_dir)
+    config.set_config_value("classification", {"auto": True})
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert built, "the layer was on, so the composition root built the seam"
+        assert built[0].closed is False, "dispose has not run yet"
+    finally:
+        await session.dispose()
+
+    assert built[0].closed is True, "dispose must close the seam it created"
+
+
+@pytest.mark.asyncio
+async def test_dispose_abandons_a_classification_call_still_in_flight(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing outlives the session, and the client is not closed under a live call.
+
+    On a real vendor a session disposed right after a message ALWAYS has one call
+    running — the turn waits 50 ms and the answer takes ~250 ms — and the round-1
+    hook closed the keep-alive client out from under it, which turned that call into
+    a transport error with a traceback whose answer nobody could use any more
+    (review round 2, MINOR 2). Cancelling first is the honest order, so this test
+    asserts the three things that order buys: the wrapper is cancelled, the seam is
+    still closed, and nothing logged a failure on the way.
+
+    Built through ``create_session`` with the seam CAPTURED off the real composition
+    root rather than hand-assembled: the claim is about the session's own dispose
+    path, and a double would prove only that a coroutine I wrote does what I wrote.
+    ``hooks.classifier`` is then replaced by a hanging seam — the documented
+    injection point — so the call is in flight on demand instead of when a vendor
+    feels like answering.
+    """
+    import asyncio
+    import contextlib
+    import logging
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    captured: list[Any] = []
+    real_attach = session_factory.attach_classification_dispose
+
+    def _capture(session: Any, hooks: Any) -> None:
+        captured.append(hooks)
+        real_attach(session, hooks)
+
+    monkeypatch.setattr(session_factory, "attach_classification_dispose", _capture)
+    config = ConfigManager(tmp_config_dir)
+    config.set_config_value("classification", {"auto": True, "waitMs": 50})
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert captured, "the composition root registers the seam's dispose hook"
+
+    started = asyncio.Event()
+    closed: list[bool] = []
+
+    class _HangingSeam:
+        """The seam contract, with the vendor holding the line forever."""
+
+        async def recommend_resources(self, request: Any) -> Any:
+            started.set()
+            await asyncio.sleep(30)
+            return None
+
+        def notice(self, recommendation: Any) -> str | None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    captured[0].classifier = _HangingSeam()
+    try:
+        await session_factory._select_knowledge_block(
+            captured[0], "a question about the tunnel", task_id="t1"
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        outstanding = [task for task in captured[0].classification_outstanding if not task.done()]
+        assert outstanding, "the call must still be running for this test to mean anything"
+
+        with caplog.at_level(logging.WARNING):
+            await session.dispose()
+    finally:
+        # ``getattr``: ``create_session`` is typed as returning the protocol, and
+        # ``_disposed`` is the facade's own flag rather than part of it.
+        if not getattr(session, "_disposed", False):
+            await session.dispose()
+
+    for task in outstanding:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    assert all(task.done() for task in outstanding), "the call outlived the session"
+    assert closed == [True], "dispose still closes the seam it opened"
+    assert captured[0].classification_outstanding == []
+    # The failure this replaces: the client closed under a live call logged a
+    # warning with a traceback, from the vendor leg.
+    noisy = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert not noisy, [record.getMessage() for record in noisy]
+
+
+@pytest.mark.asyncio
+async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``warm_up`` runs where the seam is built, and nowhere else.
+
+    WHY A TEST rather than reading the call site: the prewarm only ever SAVES time, so
+    nothing fails when it is dropped — the cost simply arrives on a session's first
+    message instead, which no test notices and only a measurement shows. The
+    enabled-only half is a real constraint, not a detail: a default install must not
+    import the package, build a service or open a client for a feature that is off.
+
+    Counted on the METHOD rather than with a recording subclass, because a subclass
+    would inherit this stub and then prove nothing about the shipped body — which is
+    exactly how the first version of this test passed its own mistake. The shipped body
+    gets the test below it.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.classification import ClassificationService
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    warmed: list[str] = []
+    monkeypatch.setattr(ClassificationService, "warm_up", lambda self: warmed.append("warm"))
+
+    on_dir = tmp_path / "on"
+    on_config = ConfigManager(on_dir)
+    on_config.set_config_value("classification", {"auto": True})
+    on_session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        on_config,
+        CredentialManager(on_dir),
+        AgentRegistry(on_dir),
+    )
+    try:
+        assert warmed == ["warm"], "the composition root must prewarm the seam it builds"
+    finally:
+        await on_session.dispose()
+
+    off_dir = tmp_path / "off"
+    off_session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(off_dir),
+        CredentialManager(off_dir),
+        AgentRegistry(off_dir),
+    )
+    try:
+        assert warmed == ["warm"], "an install with the layer off must not prewarm"
+    finally:
+        await off_session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What ``warm_up`` actually does, on the body the session build calls.
+
+    Two claims, and the second is why this is not a network test: the keep-alive client
+    exists after session build (the object is the whole saving), and NO leg has been
+    built, so no request was made and no credential was read. Unstubbed, deliberately —
+    this is the shipped method, on the real service the composition root builds.
+    """
+    import httpx
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.classification import ClassificationService
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    built: list[Any] = []
+
+    class _Recording(ClassificationService):
+        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+            super().__init__(manager=manager, settings=settings)
+            built.append(self)
+
+    monkeypatch.setattr("local_operator.classification.ClassificationService", _Recording)
+    config = ConfigManager(tmp_path)
+    config.set_config_value("classification", {"auto": True})
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_path),
+        AgentRegistry(tmp_path),
+    )
+    try:
+        assert built, "the layer was on, so a service was built"
+        assert isinstance(
+            getattr(built[0], "_http", None), httpx.AsyncClient
+        ), "session build must build the keep-alive client, or the prewarm is a no-op"
+        assert built[0]._vendors == {}, "no leg may be built — that would be a credential read"
+    finally:
+        await session.dispose()

@@ -671,7 +671,10 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
     """
     from local_operator.model.configure import build_model_spec
     from local_operator.model.discovery import offered_model_ids
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_decision_only,
+    )
 
     provider = model.provider.strip()
     model_id = model.model_id.strip()
@@ -681,6 +684,26 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
             {
                 "code": "provider_unknown",
                 "message": f"'{provider}' is not a known provider.",
+            },
+        )
+    if is_decision_only(provider):
+        # A decision-only provider (TypeSafe's Jev) rejects ``chat/completions`` on
+        # every host we reach it through, so accepting this pick would store a
+        # session model that 400s on its first turn — the failure the model
+        # catalogue and the ranking already refuse to offer. It must be refused HERE,
+        # before the enumeration below, because that check CANNOT catch it:
+        # ``offered_model_ids`` answers ``None`` for a provider whose catalogue is not
+        # enumerable offline, and ``None`` means "we have not looked, accept the
+        # pair" — which is the right reading for an aggregator or a local endpoint
+        # and the wrong one for a provider whose catalogue is empty by construction.
+        raise HTTPException(
+            422,
+            {
+                "code": "provider_decision_only",
+                "message": (
+                    f"'{provider}' serves decision-model calls, not chat completions, "
+                    "so no session can run on it."
+                ),
             },
         )
     served = offered_model_ids(provider)

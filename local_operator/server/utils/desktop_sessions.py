@@ -290,6 +290,16 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     if get_provider_definition(provider) is None:
         logger.info("draft birth model names an unknown provider; using the default")
         return None
+    from local_operator.providers.registry import is_decision_only
+
+    if is_decision_only(provider):
+        # Same door as the pick boundary and the journal validator, for the same
+        # reason: a marker written before this build refused the pair names a model
+        # that rejects ``chat/completions``, so adopting it as the birth model would
+        # open the pane on a session that cannot answer. ``None`` here means "fall
+        # back to the default", which is what every other unusable marker does.
+        logger.info("draft birth model names a decision-only provider; using the default")
+        return None
     from local_operator.model.discovery import offered_model_ids
 
     known = offered_model_ids(provider)

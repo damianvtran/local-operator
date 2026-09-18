@@ -5104,3 +5104,60 @@ def test_the_legacy_escape_hatch_for_a_hand_built_spec_still_works():
     assert revalidated.requires_reasoning_echo is False
     # ...while omitting it is still filled, which is the half that matters.
     assert ModelSpec(provider="deepseek", model_id="deepseek-flash").requires_reasoning_echo is True
+
+
+# ---------------------------------------------------------------------------
+# decision_only: the live switch is the last door (review round 2, MAJOR 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("spelling", ["typesafe", "TypeSafe", "TYPESAFE", " typeSafe "])
+def test_build_model_spec_refuses_a_decision_only_provider(spelling: str) -> None:
+    """The chokepoint every LIVE switch builds through refuses Jev.
+
+    WHY here rather than in each surface: ``/model`` (typed), the viewer's routed
+    ``/model`` and the wire's ``set_model`` op all land in this one function and all
+    send whatever it returns on the next request. Refusing once, at the boundary the
+    value crosses, is the same argument the catalogue, the ranking, the resolver and
+    the failover chain already follow — and unlike those, this door needs no poisoned
+    journal: one typed command was enough (the reviewer reached it on a real session
+    in five calls).
+
+    The sentence is asserted, not just the raise: a refusal nobody can read is a
+    session that looks broken.
+
+    EVERY SPELLING is parametrised, which is the whole point of this test since round
+    3: ``get_provider_definition`` is a dict keyed by lowercase ids, so a mixed-case
+    ``TypeSafe`` used to sail past every decision-only check and put a live session on
+    a provider that 400s every turn (reproduced on a real session). A lowercase-only
+    test cannot see that class — and the wire's ``set_model`` op takes the frame's
+    string verbatim, so the spelling is not the user's alone.
+    """
+    with pytest.raises(ValueError) as refused:
+        build_model_spec(spelling, "jev-1.13")
+    message = str(refused.value)
+    assert "serves decision-model calls, not chat completions" in message
+    # The id is NORMALISED in the message, so a user who typed "TypeSafe" is told
+    # about the provider that exists rather than about their spelling of it.
+    assert "'typesafe'" in message
+    # …and it is NOT the local-spec shortcut answering: a chat provider still builds.
+    assert build_model_spec("deepseek", "deepseek-flash").provider == "deepseek"
+
+
+def test_the_provider_controller_refuses_it_where_both_tui_paths_call_it() -> None:
+    """``ProviderController.resolve_model`` is the exact call the TUI makes.
+
+    ``/model``'s gate checks ``self._providers.provider(provider) is None``, and that
+    lookup is ``get_provider_definition`` — which DOES answer for ``typesafe`` (it is
+    a shipped provider with a shipped login), so the gate cannot stand in for this
+    refusal. This is the call underneath it.
+    """
+    from local_operator.providers.controller import ProviderController
+
+    # ``__new__``: this method is ``build_model_spec`` and nothing else (the
+    # controller's own state never participates), so booting an auth store to reach
+    # it would test the construction rather than the refusal.
+    controller = ProviderController.__new__(ProviderController)
+    with pytest.raises(ValueError) as refused:
+        controller.resolve_model("TypeSafe", "jev-1.13")
+    assert "not chat completions" in str(refused.value)
