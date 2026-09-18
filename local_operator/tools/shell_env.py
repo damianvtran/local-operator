@@ -542,12 +542,16 @@ def child_environment(
     # (a name that only exists in the deployment's own environment), so it is
     # debug. Neither line ever prints a value.
     #
-    # MATCHED IS MEASURED BEFORE THE DENIAL RUNS, and it includes the injections.
-    # ``exclude`` is documented as the way to deny what the harness itself hands
-    # over (``CI``, the session credential), so asking the question AFTER the pop
-    # would report the loudest configured denial — one that WORKED — as one that
-    # matched nothing.
-    matched = set(env)
+    # MATCHED IS MEASURED BEFORE THE DENIAL RUNS, and against the environment the
+    # denial could have applied to — the child's own names PLUS the parent's and the
+    # injections. Both halves are corrections the rounds found by running it:
+    # asking AFTER the pop reported the loudest configured denial — one that
+    # WORKED, ``CI`` or the session credential — as one that matched nothing; and
+    # asking only about the child's own names (which in the strict mode are the
+    # granted few) reported a denial of a name the PARENT defines, e.g. the
+    # ``exclude: [GH_TOKEN]`` in this repo's own README sample, as "this
+    # environment does not define it" — false, and noisy on a correct config.
+    matched = set(env) | set(source)
     unmatched_exclude = sorted(name for name in policy.exclude if name not in matched)
     if unmatched_exclude:
         logger.warning(
