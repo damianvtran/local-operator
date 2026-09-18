@@ -288,17 +288,25 @@ def shortlist(
     """
     cap = limit if limit is not None else DEFAULT_MAX_CANDIDATES
     if cap <= 0:
-        if isinstance(candidates, tuple):
-            return cast(tuple[CandidateT, ...], candidates)
-        return tuple(candidates)
+        # THE SAME RULE as ``select_candidates``: a cap of zero keeps nothing. Two
+        # functions that apply one bound must not disagree about the same number, and
+        # reading 0 as "no cap" here would have made it mean the opposite of what it
+        # means one function over (agent review round 1). The §8 readers refuse a 0
+        # for ``maxCandidates`` anyway, so this is only reachable from a direct call.
+        return ()
     per_kind: dict[str, list[int]] = {}
     for index, candidate in enumerate(candidates):
         per_kind.setdefault(candidate.kind, []).append(index)
     if all(len(rows) <= cap for rows in per_kind.values()):
         # IDENTITY, not a copy: the wiring asserts that a warm message carries the
         # cached roster object, and a fresh tuple per message would churn that for
-        # nothing. A list is normalised because the annotation promises a tuple.
-        return candidates if isinstance(candidates, tuple) else tuple(candidates)
+        # nothing. A list is normalised because the annotation promises a tuple, and
+        # the cast is what lets the caller keep ITS row type through the generic
+        # (``tuple(x)`` is ``x`` itself when x is already a tuple, so no allocation
+        # happens on this path).
+        if isinstance(candidates, tuple):
+            return cast(tuple[CandidateT, ...], candidates)
+        return tuple(candidates)
 
     query_tokens = _tokens(query)
     lowered_query = query.lower()

@@ -560,8 +560,25 @@ class _HttpDecisionVendor:
         """
         if self._key is not None and self._clock() < self._key_expires_at:
             return self._key
+        now = self._clock()
+        if self._key is not None and self._tier:
+            # A MEMO EXPIRY IS THE WALK'S ONLY RESET, and it is what makes the
+            # fallback reversible: the tier index only advances on a refusal, so
+            # without this a session that fell back once would never consult the
+            # preferred login row again — `lop login` could not revive a running
+            # session, and a bare 403 (quota or entitlement rather than a dead
+            # credential) would downgrade the rest of it (agent review round 1).
+            # The TTL is where a re-read is already happening, so the retry is free
+            # of extra requests and still bounded: at most one walk per TTL period.
+            logger.info(
+                "classification: %s credential memo expired; re-starting at the "
+                "preferred tier (%s)",
+                self.name,
+                self.credential_tiers[0],
+            )
+            self._tier = 0
         self._key, self._key_tier = await self._resolve_key(manager)
-        self._key_expires_at = self._clock() + self._credential_ttl_s
+        self._key_expires_at = now + self._credential_ttl_s
         return self._key
 
     def invalidate_credential(self) -> None:
@@ -586,12 +603,21 @@ class _HttpDecisionVendor:
         OAuth row that could not refresh was handed back for the whole session
         and the static key was unreachable in practice.
 
-        The walk is MONOTONE within a service instance: the index only ever moves
-        forward, so a session cannot oscillate between a dead login row and the
-        key behind it, and the number of auth refusals it will pay for is bounded
-        by the number of tiers. Falls back to the CURRENT index when there is no
-        memo to blame (a refusal can only follow a resolved credential, so that
-        arm is unreachable in practice and answered rather than asserted).
+        The walk is MONOTONE within a credential MEMO's lifetime: the index only
+        moves forward, so a session cannot oscillate between a dead login row and
+        the key behind it, and the number of auth refusals it will pay for is
+        bounded by the number of tiers. It is not monotone for the whole session —
+        :meth:`credential` re-starts at the preferred tier when the memo expires, so
+        a re-login does revive a running session instead of waiting for a restart.
+
+        ``403`` advances the walk exactly as ``401`` does: the two are
+        indistinguishable from here without parsing entitlement semantics out of the
+        vendor's body, and the fallback is a downgrade a session recovers from at the
+        next memo expiry rather than a one-way door.
+
+        Falls back to the CURRENT index when there is no memo to blame (a refusal can
+        only follow a resolved credential, so that arm is unreachable in practice and
+        answered rather than asserted).
         """
         blame = self._tier if self._key_tier is None else self._key_tier
         if blame + 1 >= len(self.credential_tiers):

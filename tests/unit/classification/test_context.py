@@ -38,6 +38,22 @@ def size_of(state: dict[str, Any]) -> int:
     return len(json.dumps(state, ensure_ascii=False))
 
 
+#: A description of the length a discovered skill actually carries (the §5 line cap
+#: is 120 chars): the budget numbers move a lot with it, and short toy descriptions
+#: understated the request enough that a 5x drift passed the first version of these
+#: assertions (agent review round 1).
+_REALISTIC_DESCRIPTION = (
+    "Screening and enrichment playbooks for the tenant, with the runbooks an operator needs"
+)
+
+
+def _realistic_roster(count: int) -> list[Candidate]:
+    return [
+        candidate(f"skill-{index:03d}", description=_REALISTIC_DESCRIPTION)
+        for index in range(count)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Settings readers (§8)
 # ---------------------------------------------------------------------------
@@ -476,13 +492,15 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
     (operator's figure, 2026-09-18; §5 of the design doc said 64k, which nothing
     had measured).
 
-    The numbers, so the assertion can be checked by hand: 6 000 chars of state plus
-    12 skills + 12 guides + 12 MCP options at the §5 line cap (120 chars) is
-    ~10.3k chars ≈ 2.6k tokens, i.e. ~8% of the window — and the candidate cap, not
-    the window, is what the operator would move.
+    The numbers, recomputed at head rather than quoted from §5: a realistic
+    description (~85 chars, the shape a discovered skill actually has) at 537
+    resources gives **7 405 chars ≈ 1 851 tokens ≈ 5.6%** of the 32 768-token window
+    at the shipped defaults. The assertion is deliberately tight against that figure
+    so a regression of the kind review round 1 caught (a 5x drift that a `<= 3000`
+    bound accepted) fails here.
     """
-    rows = tuple(roster(count=500)) + tuple(
-        candidate(f"guide-{index}", kind="guide", description="A packaged guide")
+    rows = tuple(_realistic_roster(500)) + tuple(
+        candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
         for index in range(30)
     )
     message = "why can't this tenant run legal searches? " * 8
@@ -505,14 +523,14 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
     print(
         f"500 skills + 30 guides: state={state_chars} chars, "
         f"options={option_chars} chars, instructions={instruction_chars} chars, "
-        f"~{estimated_tokens} tokens of a 32k window"
+        f"~{estimated_tokens} tokens of a 32 768-token window"
     )
-    assert estimated_tokens <= 3_000
+    assert estimated_tokens <= 2_500
 
 
 def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() -> None:
     """The knob's safe range, measured: the window is not what binds at 40 a kind."""
-    rows = tuple(roster(count=500))
+    rows = tuple(_realistic_roster(500))
     message = "deploy core to qa"
 
     state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
@@ -524,5 +542,19 @@ def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() ->
     )
     estimated_tokens = (serialized_size(state) + option_chars) // 4
 
+    # Measured at head: 14 184 chars ≈ 3 546 tokens ≈ 10.8% of the window. The cap is
+    # the lever, and even at 40 per kind the window is not what binds.
     print(f"maxCandidates=40: state+options ~{estimated_tokens} tokens")
-    assert estimated_tokens <= 16_000
+    assert estimated_tokens <= 5_000
+
+
+def test_a_zero_cap_keeps_nothing_like_select_candidates() -> None:
+    """One rule for one bound: 0 keeps nothing in both functions.
+
+    Reading 0 as "no cap" here would have made it mean the opposite of what it means
+    one function over, and the §8 readers refuse a 0 for `maxCandidates` precisely so
+    the two cannot be asked to disagree in production (agent review round 1).
+    """
+    rows = tuple(roster(count=3))
+    assert shortlist(rows, "deploy", 0) == ()
+    assert select_candidates(rows, 0) == ()

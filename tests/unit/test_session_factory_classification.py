@@ -357,7 +357,11 @@ async def test_the_notice_rides_the_session_notice_path_once_per_message() -> No
     first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     # Same task, tool continuation: frozen, so no second call and no second line.
     await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    assert delivered == [("Suggestion added for this message: guide://tunnel", "info")]
+    # "note", not "info": design review round 1 (D1) measured the `info` ink at
+    # 3.77:1 on the light theme (below AA) and moved the line to the ink the
+    # ladder already reserves for a receipt the user is meant to read. The glyph
+    # is unchanged — both kinds use `·`.
+    assert delivered == [("Suggestion added for this message: guide://tunnel", "note")]
     assert "guide://tunnel" in first
 
     # The SAME set on the next message: the prompt still gains the block, the line
@@ -1144,6 +1148,11 @@ def test_a_large_roster_is_shortlisted_by_relevance() -> None:
     rows.append(_skill("flavia-adverse-media", "Adverse media screening for a person."))
     hooks = _hooks(_FakeIndex(rows), classifier=None, servers=())
     hooks.classification_max_candidates = 12
+    # The wiring captures the package's shortlist at attach time so the MESSAGE path
+    # never imports the package; a seam without it sends the roster unchanged.
+    from local_operator.classification import shortlist
+
+    hooks.classification_shortlist = shortlist
 
     request = session_factory._classification_request(
         hooks, "run an adverse media screen for Flavia"
@@ -1152,3 +1161,32 @@ def test_a_large_roster_is_shortlisted_by_relevance() -> None:
     names = [candidate.name for candidate in request.candidates]
     assert "flavia-adverse-media" in names
     assert len(names) == 12
+
+
+def test_a_skill_named_like_a_guide_does_not_evict_the_guide(tmp_path: Path) -> None:
+    """The rescan's union is keyed on (kind, name), not on name alone.
+
+    A user skill named after a packaged guide (`tunnel`, `browser`, `mcp`, …) is a
+    real collision: keying the merge on the name let the skill REPLACE the guide row,
+    so a resource the router still offers silently stopped being a candidate (agent
+    review round 1).
+    """
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha skill.")
+    index = _FakeIndex(
+        [
+            _skill("alpha", "Alpha skill."),
+            _skill("tunnel", "Tunnel guide.", kind="guide"),
+        ]
+    )
+    hooks = _hooks(index, classifier=None, servers=())
+    hooks.skill_roots = [root]
+    hooks.skills_fingerprint = session_factory._skills_fingerprint(hooks)
+
+    # A user skill whose NAME is the guide's, installed after the index was built.
+    _write_skill(root, "tunnel", "A user skill that happens to share the guide's name.")
+
+    rows = [(row.kind, row.name) for row in session_factory._classification_roster(hooks)]
+
+    assert ("guide", "tunnel") in rows
+    assert ("skill", "tunnel") in rows
