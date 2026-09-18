@@ -160,6 +160,20 @@ def parse_scratchpad_url(url: str, root: Path) -> ScratchpadTarget:
     raw = unquote(parts.netloc + parts.path)
     if raw.startswith(("/", "\\")):
         raise ScratchpadPathError(f"Invalid scratchpad URL '{url}': absolute paths are not allowed")
+    if "://" in raw:
+        # A scheme in the REMAINDER is a URL inside a URL: ``scratchpad://notes://x``
+        # would otherwise be accepted and materialise ``<root>/notes:/x`` — a
+        # directory named after a URL that means something other than it spells,
+        # inside the one folder this module promises holds the agent's own files
+        # (round 2, Q6). The unquote above already treats ``%2F`` as a real
+        # segment boundary; this is that rule for the scheme separator, and it is
+        # why the test is on ``://`` and not on ``:`` — a single colon is a legal
+        # POSIX filename character (``a:b.txt`` writes, and a test pins that).
+        nested = raw.split("://", 1)[0].lstrip("/") or raw
+        raise ScratchpadPathError(
+            f"Invalid scratchpad URL '{url}': '{nested}://' is a URL, not a file name; "
+            f"a {SCRATCHPAD_SCHEME} URL takes a plain name or path after the scheme"
+        )
     segments = [segment for segment in raw.split("/") if segment not in ("", ".")]
     if any(segment == ".." for segment in segments):
         raise ScratchpadPathError(f"Invalid scratchpad URL '{url}': '..' segments are not allowed")

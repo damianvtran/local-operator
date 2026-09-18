@@ -1067,10 +1067,13 @@ def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
     return f"run: {_display_target(command)}" if command else ""
 
 
-#: A scheme-shaped target, anchored: `scheme://`. Lower-case and short, because
-#: that is what urlsplit treats as a scheme — and because a PATH is allowed to
-#: contain `://` (`~/x://y`), where the workspace verdict still applies.
-_SCHEME_SHAPED_RE = re.compile(r"^[a-z][a-z0-9+.-]*://")
+#: A scheme-shaped target, anchored: `scheme://`. A PATH is allowed to contain
+#: `://` (`~/x://y`), where the workspace verdict still applies — but the pattern
+#: is CASE-INSENSITIVE, because the tools dispatch on the scheme case-insensitively
+#: (`_has_scratchpad_scheme`) and the parser is where the spelling is corrected.
+#: Matching only lower-case here made `C://tmp/x.txt` and `SCRATCHPAD://x.md`
+#: prompt as an in-workspace PATH that the tool then refuses (round 2, MINOR-1).
+_SCHEME_SHAPED_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 
 def _scratchpad_display_target(url: str, context: ToolContext | None) -> str | None:
@@ -1087,9 +1090,15 @@ def _scratchpad_display_target(url: str, context: ToolContext | None) -> str | N
     if root is None:
         return None
     try:
-        return str(parse_scratchpad_url(url, root).path)
+        target = parse_scratchpad_url(url, root)
     except ScratchpadPathError:
         return None
+    # A DIRECTORY target is refused by every caller of this describer (``write`` and
+    # ``edit`` take a file, and the bare ``scratchpad://`` names the root), so naming
+    # its folder would ask a person to approve a write that cannot happen and touches
+    # nothing. The fallback — the URL alone — is what the "never a guessed path"
+    # contract already promises (round 2, D9).
+    return None if target.directory else str(target.path)
 
 
 def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeFn:
@@ -1101,7 +1110,7 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
     target genuinely differ.
 
     The describer also takes the turn's ``context`` when the host offers it (see
-    ``LocalOperator._approval_summary``), because a ``scratchpad://`` target has
+    ``AgentLoop._approval_summary``), because a ``scratchpad://`` target has
     no path to resolve without the session's root — and a prompt that names only
     the URL is asking the user to authorise a file it will not name (design
     round 1, D5).
@@ -4072,8 +4081,8 @@ async def execute_read(
                 tool_call_id,
                 "read",
                 f"Cannot resolve '{target}': no internal URL resolver is available. "
-                f"read takes a filesystem path, or {SCRATCHPAD_SCHEME}<name> for this "
-                "session's own scratch area.",
+                "read takes a filesystem path, or one of its own internal URLs — "
+                f"{SCRATCHPAD_SCHEME}<name> is this session's own scratch area.",
             )
         content = resolver(target)
         if content is None:
@@ -4081,8 +4090,8 @@ async def execute_read(
                 tool_call_id,
                 "read",
                 f"Cannot resolve '{target}': the resolver does not handle this URL. "
-                f"read takes a filesystem path, or {SCRATCHPAD_SCHEME}<name> for this "
-                "session's own scratch area.",
+                "read takes a filesystem path, or one of its own internal URLs — "
+                f"{SCRATCHPAD_SCHEME}<name> is this session's own scratch area.",
             )
         # Deliberately NO supersede_key here. This path serves internal URLs
         # (skill://, guide://, mcp://), and skill reads are exempt from pruning
@@ -4128,6 +4137,7 @@ def _scheme_refusal(
     raw: str,
     *,
     serves: str | None = None,
+    remedy: str | None = None,
 ) -> ToolResult | None:
     """Refuse a URL scheme THIS tool does not serve, or ``None`` to proceed.
 
@@ -4161,17 +4171,22 @@ def _scheme_refusal(
             f"{serves}<name> (this session's own scratch area); every other "
             "argument is a plain filesystem path.",
         )
-    # This tool serves NO scheme, so the only remedy is a path — and the way to
-    # get one for a file in the session's scratch area is to read it with the
-    # scheme and use the absolute path that result prints.
+    # This tool serves NO scheme, so the remedy is a path — and the way to get one
+    # for a file in the session's scratch area is usually to read it with the scheme
+    # and use the absolute path that result prints. A caller that cannot USE such a
+    # path passes its own remedy instead: ``glob`` searches the working directory
+    # and refuses absolute patterns, so "pass the absolute path" is a dead end
+    # there (round 2, Q7).
+    remedy_text = remedy or (
+        "For a file in this session's scratch area, read it first with "
+        f'read(path="{SCRATCHPAD_SCHEME}<name>") and pass the absolute path that result prints.'
+    )
     return _invalid_arguments(
         tool_call_id,
         tool_name,
         f"{scheme}:// is a URL, and {tool_name} takes only filesystem paths: reading '{raw}' "
         f"as one would walk the relative path '{scheme}:' plus the rest, under the working "
-        "directory, so it is refused and nothing was touched. For a file in this session's "
-        f'scratch area, read it first with read(path="{SCRATCHPAD_SCHEME}<name>") and pass '
-        "the absolute path that result prints.",
+        "directory, so it is refused and nothing was touched. " + remedy_text,
     )
 
 
@@ -6368,7 +6383,21 @@ async def execute_glob(
     # path-taking tools refuse. Found while sweeping for the tools that take a
     # path string (round 1, per-tool refusal).
     if "://" in pattern:
-        refusal = _scheme_refusal(tool_call_id, "glob", pattern)
+        # Its own remedy, not the shared one: this tool's patterns are relative to
+        # the working directory and an absolute pattern is refused below, so
+        # "pass the absolute path read prints" is a route glob cannot take
+        # (round 2, Q7).
+        refusal = _scheme_refusal(
+            tool_call_id,
+            "glob",
+            pattern,
+            remedy=(
+                "glob searches the working directory with a relative pattern, so it cannot be "
+                f'pointed at a scratchpad file at all: read it with read(path="{SCRATCHPAD_SCHEME}'
+                '<name>"), or search inside it with grep(path=<the absolute path that read '
+                "prints>)."
+            ),
+        )
         if refusal is not None:
             return refusal
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:

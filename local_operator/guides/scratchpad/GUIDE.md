@@ -31,10 +31,10 @@ Every kind of text file you would otherwise drop into their tree:
   scratch list of rows you will filter next turn.
 - **A benchmark or perf run** — raw numbers, timings, before/after tables. Keep
   the measurements and re-read them instead of re-running the work.
-- **Wake and scheduled-run bookkeeping** — before a scheduled run, write
-  `scratchpad://wake-log.json` recording which items you have already reported
-  and which must not be repeated; on the next wake, read it first and decide
-  from it instead of re-running the whole check.
+- **Wake and scheduled-run bookkeeping** — before a scheduled run, read
+  `scratchpad://wake-log.json` first and decide from it instead of re-running the
+  whole check; add each item to it as you report it, so the next wake does not
+  repeat it.
 - **A long tool result worth keeping** across turns, when a `spill://` handle is
   not enough because you need to grep, edit or re-read it.
 
@@ -47,9 +47,8 @@ cannot tell apart from output.
   they would expect.
 - Anything that must outlive this conversation → the scratchpad is this
   session's own folder, and it is deleted with the session.
-- Binary files. This store is for text — markdown, JSON, CSV/TSV, TXT, YAML,
-  logs, script sources — so an image, an archive or a model file belongs
-  somewhere else.
+- Binary files (an image, an archive, a model file) → not here: this store is
+  text (markdown, JSON, CSV/TSV, TXT, YAML, logs, script sources).
 
 ## The protocol
 
@@ -85,8 +84,9 @@ gets no tile and no viewer. One file per subject; subdirectories are free
   (they open a query or fragment — percent-encode as `%3F`/`%23`).
 - One directory level per listing, and a listing is bounded, so a wide
   directory cannot flood the transcript. The FOLDER itself is not capped: a
-  single write is not refused for its size, so keep the files to what you need
-  and let the session's cleanup take the whole folder when it goes. Reading a
+  single write is not refused for its size, so keep the files to what you need —
+  the session's cleanup takes the whole folder when the session goes, and only if
+  the cleanup policy is on. Reading a
   very large file comes back truncated with the `read` call that continues it.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.

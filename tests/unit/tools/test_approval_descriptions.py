@@ -604,6 +604,23 @@ def test_a_scratchpad_target_names_the_file_it_will_touch(tmp_path: Path) -> Non
         "write: notes://perf.md"
     )
 
+    # A URL in ANY case is named as a URL, not resolved as an in-workspace PATH:
+    # the pattern is case-insensitive because the tools dispatch that way, and a
+    # prompt that showed `<cwd>/C:/tmp/x.txt` described a path the tool refuses
+    # (round 2, MINOR-1).
+    assert _summary(tool, {"path": "C://tmp/x.txt"}, str(tmp_path), context) == (
+        "write: C://tmp/x.txt"
+    )
+    assert _summary(tool, {"path": "SCRATCHPAD://x.md"}, str(tmp_path), context) == (
+        "write: SCRATCHPAD://x.md"
+    )
+
+    # The bare scheme names the ROOT, which ``write`` then refuses: naming the
+    # resolved folder would ask a person to approve a write that cannot happen
+    # (round 2, D9).
+    bare = _summary(tool, {"path": "scratchpad://"}, str(tmp_path), context)
+    assert bare == "write: scratchpad://"
+
 
 def test_a_screenshot_to_a_scheme_url_names_the_url_not_a_mangled_path(tmp_path: Path) -> None:
     """This tool resolves no scheme, so the call is refused — and a prompt that
