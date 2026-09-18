@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -550,9 +551,9 @@ async def test_the_classification_runs_concurrently_with_the_selection() -> None
     # between two 200 ms sleeps (it passed alone and failed under load).
     assert events[:3] == ["select-start", "classify-start", "select-end"], events
     assert elapsed < 0.4, elapsed
-    for task in [task for task in hooks.classification_outstanding if not task.done()]:
+    for call in [call for call in hooks.classification_outstanding if not call.task.done()]:
         with contextlib.suppress(Exception):
-            await task
+            await call.task
     assert "classify-end" in events, events
 
 
@@ -600,8 +601,8 @@ async def test_a_slow_seam_gets_only_the_wait_and_no_deadline_of_its_own() -> No
     # No task is left behind by either turn's own budget: the slow call is the
     # SAME one, still outstanding, and the harvest will look at it next message.
     assert len(hooks.classification_outstanding) == 1
-    for task in (*first_hooks.classification_outstanding, *hooks.classification_outstanding):
-        task.cancel()  # keep the loop quiet at teardown
+    for call in (*first_hooks.classification_outstanding, *hooks.classification_outstanding):
+        call.task.cancel()  # keep the loop quiet at teardown
     await asyncio.sleep(0)
 
 
@@ -1006,8 +1007,8 @@ async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
     assert max(waits[1:]) < 0.1, waits
     assert waits[0] < 0.5, waits
     assert len(behaviour.calls) == 3, "three consecutive failures open the breaker"
-    for task in hooks.classification_outstanding:
-        task.cancel()
+    for call in hooks.classification_outstanding:
+        call.task.cancel()
     await asyncio.sleep(0)
 
 
@@ -1191,3 +1192,242 @@ def test_a_skill_named_like_a_guide_does_not_evict_the_guide(tmp_path: Path) -> 
 
     assert ("guide", "tunnel") in rows
     assert ("skill", "tunnel") in rows
+
+
+# ---------------------------------------------------------------------------
+# A late answer belongs to ITS OWN message (live defect, 2026-09-18)
+#
+# Measured on the operator's machine: the decision vendor answers in 540-1500 ms
+# against a 50 ms wait, so before this the answer for a message could never reach
+# that message — it rode the NEXT user message instead. That is how a child session
+# whose message asked about a Slack support thread was handed `guide://mcp` (the
+# previous message's answer) while its roster plainly contained `mcp://slack`.
+# ---------------------------------------------------------------------------
+
+
+def _slow_classifier(recommendation: _Recommendation, captured: list[Any]) -> _FakeClassifier:
+    """A seam whose answer outlives the wait, recording the view it is asked to notice."""
+    classifier = _FakeClassifier(recommendation, delay=0.25)
+
+    def _notice(rec: Any) -> str:
+        captured.append(rec)
+        return "Suggestion added for this message: " + ", ".join(
+            str(getattr(resource, "resource_url", "")) for resource in getattr(rec, "resources", ())
+        )
+
+    classifier.notice = _notice  # type: ignore[method-assign]
+    return classifier
+
+
+def _slack_recommendation() -> _Recommendation:
+    return _Recommendation(
+        resources=(_Candidate("mcp", "slack", "Team messages, channels, threads.", "mcp://slack"),),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_misses_the_wait_lands_in_the_same_turn() -> None:
+    """The model must see it on its NEXT STEP of the same turn, not next message."""
+    index = _FakeIndex(picked=[])
+    captured: list[Any] = []
+    classifier = _slow_classifier(_slack_recommendation(), captured)
+    hooks = _hooks(index, classifier=classifier)
+    hooks.classification_wait_s = 0.01
+    delivered: list[tuple[str, str]] = []
+    hooks.notice_sink = lambda text, kind="info": delivered.append((text, kind))
+
+    first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    assert "mcp://slack" not in first, "the turn gave up before the vendor answered"
+
+    await asyncio.sleep(0.3)  # the answer lands while the turn is still running
+
+    second = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    assert "mcp://slack" in second, "the answer must reach its own message"
+    assert (
+        captured and captured[-1].late_urls == ()
+    ), "an answer delivered inside its own turn is not late"
+    assert delivered and "this message" in delivered[-1][0]
+
+    # Delivered once: the following step of the SAME task re-renders the frozen block.
+    third = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    assert "mcp://slack" in third
+    assert len(delivered) == 1, "one notice per user message"
+
+    # And a NEW message does not repeat it: the pending slot was consumed.
+    fourth = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
+    assert "mcp://slack" not in fourth
+    assert len(delivered) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_answer_for_an_older_message_still_rides_the_next_one() -> None:
+    """The old behaviour, kept for the case it exists for: the turn has ENDED.
+
+    A call that is still in flight when its message's turn finishes has no next step
+    to reach, so it is carried — and labelled — as an answer to the previous message.
+    """
+    index = _FakeIndex(picked=[])
+    captured: list[Any] = []
+    classifier = _slow_classifier(_slack_recommendation(), captured)
+    hooks = _hooks(index, classifier=classifier)
+    hooks.classification_wait_s = 0.01
+    delivered: list[tuple[str, str]] = []
+    hooks.notice_sink = lambda text, kind="info": delivered.append((text, kind))
+
+    assert "mcp://slack" not in await session_factory._select_knowledge_block(
+        hooks, OFF_QUERY, task_id="t1"
+    )
+    await asyncio.sleep(0.3)
+
+    later = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
+    assert "mcp://slack" in later
+    assert captured and captured[-1].late_urls == (
+        "mcp://slack",
+    ), "a carried answer must be labelled as the previous message's"
+
+
+@pytest.mark.asyncio
+async def test_a_service_with_no_provider_is_not_waited_on_and_logs_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No recommender provider is a configuration, not an incident: silence and no wait.
+
+    The probe is asked BEFORE the request is built, so an install with nothing logged in
+    pays neither the wait nor a line in the log — which is what the operator asked for,
+    while a provider that IS configured and fails stays loud (``test_service.py``).
+    """
+
+    class _NoProvider(_FakeClassifier):
+        async def provider_available(self) -> bool:
+            self.events.append("probe")
+            return False
+
+    index = _FakeIndex(picked=[])
+    classifier = _NoProvider(_slack_recommendation())
+    hooks = _hooks(index, classifier=classifier)
+    hooks.classification_wait_s = 5.0  # a wait this test would time out on
+    delivered: list[tuple[str, str]] = []
+    hooks.notice_sink = lambda text, kind="info": delivered.append((text, kind))
+
+    started = time.monotonic()
+    with caplog.at_level(logging.INFO, logger="local_operator.session_factory"):
+        block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    elapsed = time.monotonic() - started
+
+    assert classifier.events == ["probe"], "no call was built, let alone waited on"
+    assert classifier.requests == []
+    assert elapsed < 0.5, f"the probe must not be followed by a wait (took {elapsed:.2f}s)"
+    assert [record for record in caplog.records if record.levelno >= logging.INFO] == []
+    assert delivered == []
+    assert block == await _off_block(_FakeIndex(picked=[]))
+
+
+@pytest.mark.asyncio
+async def test_superseding_the_freeze_keeps_what_the_frozen_block_selected() -> None:
+    """The provider hands ``""`` to a render it believes is unchanged — the re-render
+    that must supersede the block has to reuse the query that selected it.
+
+    Reproduced before this existed (review round 1, R1-2) by calling the callee the way
+    the provider does on a model's second step: step 1 carried the selected skill,
+    step 2 (same task, ``query=""``) carried the advisory but the skill was GONE — and
+    children inherit that emptied block. That is a worse outcome than the late answer it
+    was trying to deliver, and it fires on essentially every tool-using turn.
+    """
+    index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
+    captured: list[Any] = []
+    classifier = _slow_classifier(_slack_recommendation(), captured)
+    hooks = _hooks(index, classifier=classifier)
+    hooks.classification_wait_s = 0.01
+
+    first = await session_factory._select_knowledge_block(
+        hooks, "a question about tunnels", task_id="t1"
+    )
+    assert "alpha" in first, "the selection rides the frozen block"
+
+    await asyncio.sleep(0.3)  # the answer arrives mid-turn
+
+    # Exactly what the provider does for an unchanged render: an EMPTY query.
+    second = await session_factory._select_knowledge_block(hooks, "", task_id="t1")
+    assert "mcp://slack" in second, "the in-turn answer must be delivered"
+    assert "alpha" in second, "and it must not cost the block its selection"
+    assert len(index.calls) == 2, "the re-render re-selects with the frozen query"
+    assert len(classifier.requests) == 1, "and never asks a second time for this message"
+
+
+@pytest.mark.asyncio
+async def test_the_provider_probe_is_inside_the_wait_budget() -> None:
+    """Resolution is not free and not always local — it must be bounded by ``waitMs``.
+
+    ``resolve_vendor`` can refresh an expired Radient OAuth grant over the network, so a
+    probe awaited BEFORE the budgeted task would put that I/O outside the one bound the
+    layer promises (review round 1, R1-4). Here the probe alone takes 200x the wait.
+    """
+
+    class _SlowProbe(_FakeClassifier):
+        async def provider_available(self) -> bool:
+            await asyncio.sleep(0.5)
+            self.events.append("probe-done")
+            return True
+
+    classifier = _SlowProbe(_slack_recommendation())
+    hooks = _hooks(_FakeIndex(picked=[]), classifier=classifier)
+    hooks.classification_wait_s = 0.05
+
+    started = time.monotonic()
+    block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2, f"the probe must be bounded by the wait (took {elapsed:.2f}s)"
+    assert block == ""
+    assert len(hooks.classification_outstanding) == 1, "and it is still running, harvestable"
+    await asyncio.sleep(0.6)
+    for call in hooks.classification_outstanding:
+        call.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_an_invalidated_freeze_does_not_ask_for_the_same_message_twice(
+    tmp_path: Path,
+) -> None:
+    """The freeze is not the only thing a later render of a message can have lost.
+
+    A skill installed or edited mid-turn invalidates it — that is what
+    ``_refresh_knowledge_freshness`` exists for — and that render still has this message's
+    answer waiting. Keying the "do not ask again" guard on the freeze alone left that
+    window placing a second vendor call for a message that already had an answer (review
+    round 2, R2-2), which is a real call at a real price for nothing.
+    """
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha skill.")
+    index = _FakeIndex([_skill("alpha", "Alpha skill.")], picked=[_skill("alpha", "Alpha skill.")])
+    captured: list[Any] = []
+    classifier = _slow_classifier(_slack_recommendation(), captured)
+    hooks = _hooks(index, classifier=classifier)
+    hooks.skill_roots = [root]
+    # ``knowledge_fingerprint`` is what the freshness check compares against, and the real
+    # provider records it at session build; without it set, the check cannot tell the tree
+    # changed and no invalidation is possible to exercise.
+    hooks.knowledge_fingerprint = session_factory._skills_fingerprint(hooks)
+    hooks.classification_wait_s = 0.01
+
+    first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    assert "mcp://slack" not in first, "the turn gave up before the vendor answered"
+    assert len(classifier.requests) == 1
+
+    await asyncio.sleep(0.3)  # the answer lands mid-turn
+
+    # A real tree change under the running turn: the freeze is invalidated, for real.
+    _write_skill(root, "beta", "Beta skill, authored mid-turn.")
+
+    # The provider re-derives the query when it sees the invalidation (its own freshness
+    # check runs BEFORE it decides whether to hand one over), so this render is given the
+    # real query — unlike the frozen case, where it is handed ``""``.
+    second = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+
+    # A second selection proves the freeze really was invalidated: a frozen render returns
+    # the cached block without touching the index. (``superseded_block`` is parked and then
+    # dropped BY that render, so it cannot witness this after the fact.)
+    assert len(index.calls) == 2, "the tree change must have forced a real re-render"
+    assert "mcp://slack" in second, "the answer still reaches its own message"
+    assert "alpha" in second
+    assert len(classifier.requests) == 1, "and a message that has an answer is never asked twice"
