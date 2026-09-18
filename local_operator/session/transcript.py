@@ -193,9 +193,12 @@ COMPACT_FILE_THRESHOLD_BYTES = 256 * 1024
 SHRUNK_KEY = "context_shrunk_here"
 
 #: Custom-entry types whose SUPERSEDED copies :meth:`Transcript.compact_file`
-#: drops on disk, keeping only the newest. These are the NEWEST-WINS types: the
-#: session reads them exclusively through :meth:`latest_custom`, so every older
-#: entry is dead weight the moment a newer one lands.
+#: drops on disk, keeping only the newest. These are the NEWEST-WINS types: every
+#: reader of one takes the last entry of that type — through
+#: :meth:`latest_custom`, through a backward scan, or by folding a window and
+#: keeping the final match — so every older entry is dead weight the moment a
+#: newer one lands. A reader that WALKS the type (a parent/child log) is a
+#: different thing and must never be added here.
 #:
 #: ``subagent_roster`` is the reason this exists. Before v0.40.0 the roster
 #: re-appended a full snapshot to the transcript on every roster move, and a
@@ -218,7 +221,30 @@ SHRUNK_KEY = "context_shrunk_here"
 #: row per provider call forever — the failure mode that left
 #: ``frontend_state_checkpoint_v1`` holding 35.1% of all transcript bytes on the
 #: operator's store (design §2.3, §R9).
-_COLLAPSIBLE_CUSTOM_TYPES = frozenset({"subagent_roster", SESSION_SPEND_CUSTOM_TYPE})
+#:
+#: ``frontend_state_checkpoint_v1`` is that failure mode, completed. The writer
+#: appends the FULL frontend state at every turn end
+#: (``frontend_state.checkpoint`` ← ``Session``'s turn end), and every reader is
+#: a NEWEST-WINS reader: ``latest_custom`` / ``read_latest_custom`` on the
+#: cold-open and desktop paths, ``read_replay_suffix(checkpoint_types=…)`` for
+#: the replayed checkpoint, ``PreviewPane.checkpoint`` (which folds its window
+#: and keeps the last match), and the desktop renderer, which lists the type in
+#: ``SILENT_CUSTOM_TYPES`` — bookkeeping, never painted. Measured on the
+#: operator's store: 1,100 rows / 379.8 MB across 216 sessions, of which
+#: 353.5 MB (93.1%) is superseded, and on the 262 MB journal those rows are 75%
+#: of the whole-file parse cost. Collapsing keeps the newest per session and
+#: drops the rest on the next :meth:`Transcript.compact_file`, which the prune
+#: pass in ``Session`` already runs (256 KiB reclaimable threshold).
+#:
+#: The literal is INLINE rather than imported: ``FRONTEND_CHECKPOINT_CUSTOM_TYPE``
+#: lives in ``frontend_state``, whose import graph reaches the TUI, and this
+#: module is a leaf on purpose (see :func:`read_replay_suffix`). Drift is not
+#: left to care — ``tests/unit/session/test_transcript.py`` pins this member
+#: against that module's constant, so a rename shows up as a failing test
+#: rather than as a type that is silently never collapsed.
+_COLLAPSIBLE_CUSTOM_TYPES = frozenset(
+    {"subagent_roster", SESSION_SPEND_CUSTOM_TYPE, "frontend_state_checkpoint_v1"}
+)
 
 
 @dataclass
