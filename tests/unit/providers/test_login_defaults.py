@@ -285,7 +285,15 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
     configured = plan_login_defaults("typesafe", "deepseek", "deepseek-chat")
     assert configured.hosting is None
     assert configured.model_name is None
-    assert configured.receipt is not None and "your hosting is unchanged" in configured.receipt
+    assert configured.receipt is not None
+    # The copy answers the only question the user has ("did this change my model?")
+    # and names what is actually serving — the fact they can act on. Design round 1's
+    # D5 took the harness's vocabulary off it: no "Jev", no "decision-model calls",
+    # no "resource recommendations", and it ends with its own full stop (D6).
+    assert configured.receipt == (
+        "Nothing changed: this key only adds suggestions, chats keep running "
+        "on deepseek/deepseek-chat."
+    )
 
     # Case 2: hosting empty (a fresh config, or `hosting: ""`).
     for empty in ("", None):
@@ -298,9 +306,12 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
         # The receipt is the ONE caller-facing channel, and it has to name both
         # the reason and the provider a user recognises.
         assert plan.receipt is not None
-        assert "TypeSafe (Jev)" in plan.receipt
-        assert "decision-model calls, not chat completions" in plan.receipt
-        assert "hosting is unchanged" in plan.receipt
+        # No routing to name, so the sentence names the way out of that state.
+        assert "no chat model is configured yet" in plan.receipt
+        assert "/model" in plan.receipt
+        # The wire vocabulary the design round took off the default copy.
+        assert "Jev" not in plan.receipt
+        assert "decision-model" not in plan.receipt
 
     # Case 3: hosting set but unusable. A repair must not replace a broken
     # hosting with one that cannot serve a session at all, and it must not write
@@ -349,8 +360,8 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     auth_cli._apply_login_defaults("typesafe")
     printed = capsys.readouterr().out
 
-    assert "TypeSafe (Jev) serves decision-model calls, not chat completions" in printed
-    assert "your hosting is unchanged" in printed
+    assert "Nothing changed: this key only adds suggestions" in printed
+    assert "chats keep running on deepseek/deepseek-chat." in printed
     # ...and the routing is untouched: the configured pair, unchanged.
     assert manager.get_config_value("hosting") == "deepseek"
     assert manager.get_config_value("model_name") == "deepseek-chat"
@@ -359,7 +370,10 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     fresh = tmp_path / "fresh"
     monkeypatch.setenv(CONFIG_DIR_ENV, str(fresh))
     auth_cli._apply_login_defaults("typesafe")
-    assert "your hosting is unchanged" in capsys.readouterr().out
+    fresh_out = capsys.readouterr().out
+    assert "no chat model is configured yet" in fresh_out
+    # One full stop, from the receipt itself — not the CLI's own punctuation (D6).
+    assert fresh_out.count(".") == 1, fresh_out
     reloaded = ConfigManager(fresh)
     assert not reloaded.get_config_value("hosting")
     assert not reloaded.get_config_value("model_name")

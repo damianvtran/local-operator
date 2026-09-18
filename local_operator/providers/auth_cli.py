@@ -554,8 +554,13 @@ def _apply_login_defaults(provider_id: str) -> None:
         # deliberately leaves the routing alone, and explains itself in
         # ``receipt``. Returning before this print — as this did — made that note
         # unreachable, so the login read as having silently done nothing.
+        #
+        # Punctuation is the receipt's own (design round 1, D6): this line used to
+        # append a full stop the TUI did not, so the same sentence ended two ways
+        # depending on which front end printed it. Only the first word is capitalised
+        # here, because a receipt reads as a sentence and the planner writes clauses.
         if plan.receipt:
-            print(f"{plan.receipt[:1].upper()}{plan.receipt[1:]}.")
+            print(f"{plan.receipt[:1].upper()}{plan.receipt[1:]}")
     except Exception as exc:  # noqa: BLE001 — never fail a completed login
         print(f"Note: logged in, but could not set default hosting/model: {exc}")
 

@@ -292,23 +292,39 @@ class ClassificationService:
         circuit open, or a vendor that chose nothing. Those are the states where
         the feature is working as designed (the prompt is unchanged), and a line
         of chrome per user message telling the operator that an advisory feature
-        had no opinion is noise; the failures are logged instead. The line names
-        the vendor, the resources and the spend, because those are the three
-        things an operator watching cost needs.
+        had no opinion is noise; the failures are logged instead.
+
+        The line names the RESOURCES and which message they were asked for. The
+        vendor, the duration and the cost were on it and came off in the design
+        round (D2/D3), each for its own reason:
+
+        - ``$0.000157`` bypassed the repo's one money formatter (``format_usd``,
+          ``tui/costs.py``, whose docstring claims every money surface reads it).
+          This package cannot import that module — it would drag the terminal UI
+          into the server and phone planes — and hand-rolling a second ladder is
+          the failure that docstring warns about. The 18-character tail is also
+          what pushed a 103-character line onto a second row at 100 columns;
+        - a cache hit rendered ``(0.00s)``, a duration for a call that never
+          happened;
+        - ``via <vendor>`` named an implementation leg at a user, and printed
+          ``via unknown vendor`` when no leg answered at all.
+
+        The spend is not lost: the caller records it at INFO
+        (``session_factory._log_classification_cost``), which is the operator's
+        surface for it, and a user's money belongs in ``/usage``.
+
+        ATTRIBUTION is the other half of the design round. ``Recommendation.late``
+        marks an answer that missed its own turn's wait — against a real vendor
+        (~250 ms) and a 50 ms wait that is the ORDINARY case, delivered by the next
+        message — so the sentence says which message it belongs to. Without that it
+        reads as advice about the question it happens to sit under, which is
+        actively wrong rather than merely unhelpful (D2).
         """
         if not self.notice_enabled or not recommendation.resources:
             return None
-        count = len(recommendation.resources)
-        plural = "" if count == 1 else "s"
         urls = ", ".join(candidate.resource_url for candidate in recommendation.resources)
-        vendor = recommendation.vendor or "unknown vendor"
-        detail = f"{recommendation.latency_s:.2f}s"
-        if recommendation.cost_usd is not None:
-            detail = f"{detail}, ${recommendation.cost_usd:.6f}"
-        return (
-            f"Classification: {count} resource recommendation{plural} via {vendor} — "
-            f"{urls} ({detail})"
-        )
+        asked_for = "your previous message" if recommendation.late else "this message"
+        return f"Suggestion added for {asked_for}: {urls}"
 
     # -- internals ---------------------------------------------------------
 
@@ -497,19 +513,61 @@ class ClassificationService:
         return self._http
 
     async def aclose(self) -> None:
-        """Release the session's client. The session owner calls this on dispose.
+        """Release the session's client and abandon whatever it still has in flight.
 
         The credential and roster memos are dropped with it, so the service is
         usable again afterwards (a fresh client is created on the next call) —
         which is what makes this safe to call from a teardown path that may run
         before a later message, rather than only at process exit.
+
+        IN-FLIGHT FIRST, and that is the whole reason this is not just a client
+        close: the session's wait is 50 ms against a ~250 ms answer, so a session
+        disposed right after a message ALWAYS has one attempt running. Closing the
+        keep-alive client under it failed that attempt with a transport error — a
+        warning with a traceback, from a call whose answer nobody could use any
+        more (review round 2, MINOR 2). Cancelling it first is the honest outcome:
+        the work belonged to a session that is ending. ``gather(...,
+        return_exceptions=True)`` because a cancelled attempt may finish with
+        ``CancelledError`` rather than returning, and because teardown must never
+        fail on the failure of the thing it is tearing down.
         """
+        pending = [task for task in self._inflight.values() if not task.done()]
+        for task in pending:
+            # ``_recommend`` shields the attempt so a JOINER's cancellation cannot
+            # kill a call other callers are waiting for. This is not a joiner: the
+            # session is going away, so the attempt itself is what has to stop.
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._inflight.clear()
         client, self._http = self._http, None
         if client is not None:
             await client.aclose()
         self._vendors.clear()
         self._legs = None
         self._vendor_name = None
+
+    def warm_up(self) -> None:
+        """Build the keep-alive client NOW, so a session's first message does not.
+
+        WHY, with the number: the first ``httpx.AsyncClient`` construction measured
+        **139 ms** on this machine (the SSL context it builds dominates; the second
+        costs 0.0 ms), and it happens SYNCHRONOUSLY — before the call reaches its
+        first await, so no wait budget can bound it. A session's first message
+        therefore paid it inside the turn's prompt build (measured 75-107 ms of our
+        own time in total, against the operator's 100 ms ceiling), where a warm
+        message costs 3-56 ms. The composition root calls this where it builds the
+        seam — session construction already spends seconds on skill discovery and
+        embeddings, so the one-off sits where someone is already waiting.
+
+        NOT a network call and NOT a credential read: this builds the client object
+        only, and nothing connects until a request is made, which is what keeps it
+        side-effect-free at boot. Enabled-only, so a default install — which never
+        builds a service at all — still opens no client and imports nothing.
+        """
+        if not self.enabled:
+            return
+        self._client()
 
     def _vendor_for(self, name: str) -> DecisionVendor:
         """One cached leg instance per name for this session."""

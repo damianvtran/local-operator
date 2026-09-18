@@ -8,6 +8,7 @@ only way several of these paths are reachable at all.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 
 import pytest
@@ -494,9 +495,18 @@ async def test_a_cancelled_turn_stays_cancelled(manager, install_legs) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_the_notice_names_the_vendor_the_resources_and_the_spend(
+async def test_the_notice_names_the_resources_and_leaves_the_money_out(
     manager, install_legs
 ) -> None:
+    """The design round's copy, pinned: resources and attribution, nothing else.
+
+    The vendor, the six-decimal spend and the duration were all on this line and all
+    came off (design round 1, D2/D3): ``$0.000020`` bypassed the repo's one money
+    formatter, the 18-character tail is what pushed the line onto a second row at 100
+    columns, a cache hit printed ``(0.00s)`` for a call that never happened, and
+    ``via <vendor>`` named an implementation leg at a user. The spend still reaches
+    the operator — at INFO, from the wiring's own cost log.
+    """
     subject, _ = service(
         manager,
         install_legs,
@@ -506,20 +516,36 @@ async def test_the_notice_names_the_vendor_the_resources_and_the_spend(
     line = subject.notice(recommendation)
     assert line is not None
     assert "\n" not in line
-    assert "radient" in line
     assert "skill://minerva-deploy" in line
-    assert "$0.000020" in line
-    assert "1 resource recommendation " in line
+    # The three things the design round moved OFF the line.
+    assert "radient" not in line
+    assert "$" not in line
+    assert "s)" not in line
+    # Under 80 cells with one resource, which is the row budget D1 asked for.
+    assert len(line) <= 80, line
 
 
-async def test_a_singular_notice_says_one_resource(manager, install_legs) -> None:
+async def test_a_late_answer_is_attributed_to_the_message_it_answers(manager, install_legs) -> None:
+    """``late`` is the difference between advice about THIS question and the last one.
+
+    On a real vendor a late answer is the ORDINARY case (a ~250 ms answer against a
+    50 ms wait), delivered by the next message — so a line that says "for this
+    message" about it is wrong by default, not in an edge case (design round 1, D2).
+    """
     subject, _ = service(
         manager,
         install_legs,
         radient={"script": [choice_response("recommend_skill", "minerva-deploy")]},
     )
-    line = subject.notice(await subject.recommend_resources(request()))
-    assert line is not None and "1 resource recommendation via" in line
+    fresh = await subject.recommend_resources(request())
+    line = subject.notice(fresh)
+    assert line is not None and "for this message" in line
+
+    late = dataclasses.replace(fresh, late=True)
+    late_line = subject.notice(late)
+    assert late_line is not None
+    assert "for your previous message" in late_line
+    assert "for this message" not in late_line
 
 
 async def test_the_notice_is_silent_when_switched_off(manager, install_legs) -> None:
@@ -547,10 +573,18 @@ async def test_the_notice_says_nothing_when_there_is_nothing_to_announce(
     assert subject.notice(await subject.recommend_resources(request())) is None
 
 
-async def test_the_notice_of_an_unknown_vendor_does_not_claim_one(manager, install_legs) -> None:
+async def test_the_notice_never_names_a_vendor(manager, install_legs) -> None:
+    """Even when a leg DID answer: a vendor id is not a word a user chose.
+
+    The old line printed ``via unknown vendor`` when no leg answered, which is worse
+    — user-facing copy naming an implementation leg — and the fix was to take the
+    vendor off the sentence entirely rather than to spell its absence (D3).
+    """
     subject, _ = service(manager, install_legs, radient={})
     line = subject.notice(Recommendation(resources=(candidate("x"),), vendor=None))
-    assert line is not None and "unknown vendor" in line
+    assert line is not None and "vendor" not in line
+    named = subject.notice(Recommendation(resources=(candidate("x"),), vendor="radient"))
+    assert named is not None and "radient" not in named
 
 
 # ---------------------------------------------------------------------------

@@ -163,20 +163,34 @@ def plan_login_defaults(
         # state of all — a working hosting already configured — which is exactly the
         # silent-login failure this branch exists to remove (review round 1, Q4).
         #
-        # The receipt is the one channel the dataclass has for "the login did
-        # something you should know about, and it was not a config write", and both
-        # front ends print it even when ``hosting is None`` (the shape returned here).
-        # Naming the provider by its DISPLAY name, not the id: the receipt is read by
-        # the person who just pasted a key into TypeSafe's console and recognises
-        # "TypeSafe (Jev)", not `typesafe`.
+        # The COPY is design round 1's D5, and it is deliberately in the user's terms:
+        # the first version named Jev, decision-model calls, chat completions and
+        # resource recommendations (149 characters of the harness's own vocabulary,
+        # never one row at any width) and never said what would actually serve their
+        # chats. What it says instead is the answer to the only question the person
+        # who just pasted a key has — "did this change my model?" — plus the name of
+        # whatever IS serving, which is the fact they can act on. The period is part
+        # of the sentence (D6): the CLI used to append one and the TUI did not, so the
+        # same receipt ended two ways depending on where it was read.
+        #
+        # Which sentence depends on the CURRENT routing, and the unusable case is not
+        # the configured one: naming a hosting this build refuses to boot on would be
+        # the opposite of the reassurance being given.
+        if hosting and not is_unusable_hosting(hosting):
+            serving = f"{hosting}/{model_name}" if model_name else str(hosting)
+            receipt = (
+                "Nothing changed: this key only adds suggestions, chats keep running "
+                f"on {serving}."
+            )
+        else:
+            receipt = (
+                "Nothing changed: this key only adds suggestions, and no chat model is "
+                "configured yet — pick one with /model."
+            )
         return LoginDefaults(
             hosting=None,
             model_name=None,
-            receipt=(
-                f"{definition.name} serves decision-model calls, not chat completions: "
-                "the credential is stored for resource recommendations and your hosting "
-                "is unchanged"
-            ),
+            receipt=receipt,
             repairing=False,
         )
 
@@ -206,6 +220,13 @@ def plan_login_defaults(
         receipt = f"set default hosting to '{resolved}'"
         if model_to_write:
             receipt += f", model to '{model_to_write}'"
+
+    # The sentence carries its own full stop (design round 1, D6): the two front
+    # ends used to punctuate the SAME receipt differently — the CLI appended one,
+    # the TUI did not — so where it was read decided how it ended. Each of the four
+    # strings above is therefore complete, and neither front end touches it beyond
+    # the capital it gives the first word.
+    receipt += "."
 
     return LoginDefaults(
         hosting=resolved,

@@ -193,6 +193,8 @@ class Recommendation:
     cost_usd: float | None = None
     latency_s: float = 0.0
     skipped: str | None = None      # "disabled" | "no-vendor" | "empty-roster" | "timeout" | "error" | "circuit-open"
+    late: bool = False              # set by a CALLER whose turn stopped waiting: this answer
+                                    # is being delivered by a later message than it was asked for
 
 class ClassificationService:
     def __init__(self, *, manager: CredentialManager, settings: Mapping[str, Any] | None = None) -> None: ...
@@ -272,8 +274,13 @@ Rules, each of which has to be provable:
    the session, invalidated once on a 401/403 and re-resolved once — never in a loop. The
    Radient leg passes `read_only=True`, as `providers/radient_credentials.py` does, so a read
    cannot move account routing.
-3. **One persistent HTTP client with keep-alive.** A fresh TCP + TLS handshake per call is
-   50-150 ms on its own and would consume the entire budget before the request is sent.
+3. **One persistent HTTP client with keep-alive, built at session build.** A fresh TCP + TLS
+   handshake per call is 50-150 ms on its own and would consume the entire budget before the
+   request is sent. The client OBJECT is also expensive to construct — 139 ms cold / 29-39 ms
+   warm-cache on this machine, all of it SSL-context setup, all of it synchronous before the
+   call's first await and therefore unreachable by any wait budget — so the composition root
+   builds it when it builds the seam (`ClassificationService.warm_up`), not on a session's first
+   message. No connection is opened, and a session with the layer off still opens no client.
 4. **The roster half of the state is serialized once per roster digest**, so a warm turn
    serializes only the user message.
 5. **The concurrent gather.** Wiring awaits this layer alongside the existing selection work, so
@@ -288,6 +295,13 @@ Rules, each of which has to be provable:
    inside the budget while a real vendor answer is much slower than the budget: measured on a
    27-candidate roster, an answer takes ~250 ms median against OpenRouter, and the budget excludes
    that model time by its terms.
+
+   Measured on the real path (`/tmp/classify_wait_probe.py`, 27-candidate roster, real vendor,
+   default settings), reported as the DIFFERENCE against the layer being off: a warm message costs
+   **+3 ms median / +47 ms worst**, a cache hit ~**+4 ms**, and **a session's first message ~+49 ms**
+   — the one-off first-call setup that runs before the first await, which no wait budget can reach.
+   Before the client prewarm (above) that first message measured ~+63 ms. Every warm number is
+   inside the budget; the first message of a session is the honest exception, paid once.
 7. **Server side.** `POST /v1/decisions` must ride the agent-server's existing Redis `AuthCache`
    (`internal/cache/auth_cache.go`, 5-minute TTL for API-key→identity and billing balances),
    which is why the route sits on `jwtOrAPIKeyBillingMiddleware`. It must not introduce uncached
@@ -341,9 +355,18 @@ Sequence per user message:
 3. render the recommendation block, dropping anything already selected by the router, and append
    it to the knowledge/tail block. A LATE answer is rendered the same way by the next admitted
    user message, oldest first, inside the same per-message cap, and is delivered exactly once;
-4. emit the notice once per user message, at the moment an answer actually reaches the prompt —
+4. emit the notice ONCE per user message, at the moment an answer actually reaches the prompt —
    never when a call times out (nothing was delivered then) and never a second time for an answer
-   an earlier turn already rendered.
+   an earlier turn already rendered. When one prompt gains a late answer AND its own, BOTH sets are
+   announced on one line: the contract sentence is once per MESSAGE. The line is attributed to the
+   message it answers ("for your previous message" when the answer is late — the ordinary case
+   against a 250 ms vendor and a 50 ms wait), because otherwise it reads as advice about the
+   question it happens to sit under. It names the resources and nothing else: the vendor, the
+   duration and the six-decimal spend came off in the design round (the money bypassed the repo's
+   one formatter and the tail is what pushed the line to a second row), and the spend lives at INFO
+   in the harness's cost log. It is delivered after the turn's answer, through the session's own
+   post-turn notice queue, so it does not occupy the answer slot. A resource set identical to the
+   previous message's is not announced again.
 
 Rendered block (this is the whole token cost — target ≤ 6 lines):
 
@@ -408,8 +431,17 @@ ProviderDefinition(
 must never be offered as a chat model: it rejects `chat/completions` outright on every host we
 reach it through, so a user who picked it in `/model` would get a broken session, and the
 fallback chain must never route a turn onto it. Honoured in: model discovery and listing, the
-`/model` catalogue ranking, session model resolution, and the failover chain. Each of those
-needs a test that names this provider and asserts it is absent.
+`/model` catalogue ranking, session model resolution, the failover chain, the desktop pick
+boundary and the login planner (a decision-only provider stores its credential and never adopts
+itself as the hosting). Each of those needs a test that names this provider and asserts it is
+absent.
+
+The LIVE switch is the one door with no artefact in front of it — `/model <provider>/<id>` and the
+wire's `set_model` op both build a spec for a RUNNING session, and `ProviderController.provider`
+answers for `typesafe` (it is a shipped definition with a shipped login), so the unknown-provider
+gate waves it through. `build_model_spec` therefore refuses a decision-only provider itself, which
+is the one chokepoint all three live surfaces call: the typed `/model`, the viewer's routed
+`/model`, and `ServingHandle.set_model_effort`.
 
 ## 10. Radient server route (`radient-ml/agent-server`)
 

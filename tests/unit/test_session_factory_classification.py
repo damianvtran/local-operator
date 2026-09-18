@@ -23,10 +23,12 @@ the ``values.classification`` reads; they are named as such.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -309,13 +311,24 @@ async def test_the_block_is_capped_by_the_configured_maximum() -> None:
 
 @pytest.mark.asyncio
 async def test_the_notice_rides_the_session_notice_path_once_per_message() -> None:
-    """One line per admitted user message, through the bound sink, at info."""
+    """One line per admitted user message, through the bound sink, at info.
+
+    ONCE PER MESSAGE is the sentence the contract states, and it is what this now
+    checks at the seam: a message that delivers a LATE answer and its own prints ONE
+    line for both, because the resources of the whole prompt are announced together
+    (review round 2, MINOR 1 — the previous shape printed two).
+
+    The second half is D7: the same resource set two messages running says nothing
+    the line before it did not, so the line is suppressed while the BLOCK still goes
+    into the prompt. The set has to be identical AND consecutive — a different set
+    speaks again.
+    """
     classifier = _FakeClassifier(
         _Recommendation(
             resources=(_Candidate("guide", "tunnel", "tunnel guide", "guide://tunnel"),),
             vendor="typesafe",
         ),
-        notice_line="Classification: 1 resource recommendation via typesafe",
+        notice_line="Suggestion added for this message: guide://tunnel",
     )
     hooks = _hooks(
         _FakeIndex(picked=[_skill("alpha", "Alpha skill.")]),
@@ -324,15 +337,26 @@ async def test_the_notice_rides_the_session_notice_path_once_per_message() -> No
     delivered: list[tuple[str, str]] = []
     hooks.notice_sink = lambda text, kind="warning": delivered.append((text, kind))
 
-    await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     # Same task, tool continuation: frozen, so no second call and no second line.
     await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    assert delivered == [("Classification: 1 resource recommendation via typesafe", "info")]
+    assert delivered == [("Suggestion added for this message: guide://tunnel", "info")]
+    assert "guide://tunnel" in first
 
-    # A new admitted user message is a new notice (and a new classification pass).
-    await session_factory._select_knowledge_block(hooks, "a second question", task_id="t2")
+    # The SAME set on the next message: the prompt still gains the block, the line
+    # stays quiet (D7 — four identical rows is what the design round saw).
+    second = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
+    assert len(delivered) == 1
+    assert "guide://tunnel" in second
+
+    # A DIFFERENT set speaks again.
+    classifier.recommendation = _Recommendation(
+        resources=(_Candidate("skill", "beta", "Beta skill.", "skill://beta"),),
+        vendor="typesafe",
+    )
+    await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
     assert len(delivered) == 2
-    assert len(classifier.requests) == 2
+    assert len(classifier.requests) == 3
 
 
 @pytest.mark.asyncio
@@ -375,28 +399,33 @@ async def test_a_provider_without_a_session_binds_no_sink() -> None:
 
 
 def test_a_bound_sink_is_the_real_sessions_own_notice_event() -> None:
-    """The bound sink is ``Session._stream_notice``, the REAL attribute.
+    """The bound sink is ``Session.queue_notice``, the REAL attribute.
 
     WHY this is asserted against the class and not against a stand-in: the first
-    version of this test hand-built an object with ``_stream_notice`` assigned to
-    it, which proves the binder's shape and NOT that the facade has that attribute
-    — rename or drop ``Session._stream_notice`` and every test in this file kept
-    passing while notices silently never appeared, because
-    ``attach_classification_notices`` fails soft on purpose (``getattr(..., None)``,
-    for a benchmark preflight that renders a prompt with no facade at all). This is
-    the assertion that can fail: reach for the attribute on the real class, then
-    check the binder put THAT callable on the hooks, bound to THIS session.
+    version of this test hand-built an object with the method assigned to it, which
+    proves the binder's shape and NOT that the facade has that attribute — rename
+    or drop it and every test in this file kept passing while notices silently never
+    appeared, because ``attach_classification_notices`` fails soft on purpose
+    (``getattr(..., None)``, for a benchmark preflight that renders a prompt with no
+    facade at all). This is the assertion that can fail: reach for the attribute on
+    the real class, then check the binder put THAT callable on the hooks, bound to
+    THIS session.
 
-    ``Session.__new__`` rather than a constructed session: the notice method needs
-    no construction state, and paying for a real boot here would tempt the next
-    reader into driving a turn to observe the notice. The end-to-end half —
-    a session built by the composition root, with the layer on — is
-    ``test_the_classification_seam_is_closed_on_dispose`` below.
+    ``queue_notice`` and not ``_stream_notice`` since design round 1's D1: emitting
+    during prompt build put the line in the ANSWER's slot, so the sink is the
+    session's post-turn queue. The fallback is pinned too, because a facade-shaped
+    double without the queue must still get its notice.
+
+    ``Session.__new__`` rather than a constructed session: neither method needs
+    construction state, and paying for a real boot here would tempt the next reader
+    into driving a turn to observe the notice. The end-to-end half — a session built
+    by the composition root, with the layer on — is
+    ``test_the_classification_seam_is_closed_on_dispose`` in the factory suite.
     """
     from local_operator.session.session import Session
 
-    assert hasattr(Session, "_stream_notice"), (
-        "the notice path the wiring binds (Session._stream_notice) must still exist; "
+    assert hasattr(Session, "queue_notice"), (
+        "the notice path the wiring binds (Session.queue_notice) must still exist; "
         "without it a recommendation is delivered silently"
     )
     session = Session.__new__(Session)
@@ -405,8 +434,14 @@ def test_a_bound_sink_is_the_real_sessions_own_notice_event() -> None:
     session_factory.attach_classification_notices(session, hooks)
 
     assert hooks.notice_sink is not None
-    assert hooks.notice_sink.__func__ is Session._stream_notice  # type: ignore[attr-defined]
+    assert hooks.notice_sink.__func__ is Session.queue_notice  # type: ignore[attr-defined]
     assert hooks.notice_sink.__self__ is session  # type: ignore[attr-defined]
+
+    # A double with only the stream method still gets the line, just unparked.
+    plain = cast(Any, SimpleNamespace(_stream_notice=lambda text, kind="info": None))
+    fallback = session_factory._KnowledgeHooks()
+    session_factory.attach_classification_notices(plain, fallback)
+    assert fallback.notice_sink is plain._stream_notice
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +467,17 @@ async def test_the_classification_runs_concurrently_with_the_selection() -> None
     await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     elapsed = time.monotonic() - started
 
-    assert events == ["select-start", "classify-start", "select-end", "classify-end"]
+    # The first three events ARE the property: the classify leg started before the
+    # select leg ended. Its END is deliberately not in the list — the turn waits 50 ms
+    # and the fake takes 200 ms, so the answer lands after the turn has moved on, which
+    # is what the bounded wait means. Asserting the end here made the test a race
+    # between two 200 ms sleeps (it passed alone and failed under load).
+    assert events[:3] == ["select-start", "classify-start", "select-end"], events
     assert elapsed < 0.4, elapsed
+    for task in [task for task in hooks.classification_outstanding if not task.done()]:
+        with contextlib.suppress(Exception):
+            await task
+    assert "classify-end" in events, events
 
 
 @pytest.mark.asyncio

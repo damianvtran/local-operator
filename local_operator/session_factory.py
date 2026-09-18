@@ -489,11 +489,15 @@ def _not_chat_hosting_message(hosting: str, source: str = "config") -> str:
     would read as a typo the user should go and re-check in the console they just
     pasted a key from.
     """
+    from local_operator.providers.registry import decision_only_message
+
     remedy = _HOSTING_NOT_CHAT_REMEDY.get(source, _HOSTING_NOT_CHAT_REMEDY["config"])
-    return (
-        f"Hosting '{hosting}' serves decision-model calls, not chat completions, "
-        f"so no session can run on it. {remedy}"
-    )
+    # The FACT comes from the registry's one sentence (``decision_only_message``),
+    # which ``build_model_spec`` refuses a live switch with too: the two surfaces
+    # explain the same provider, so they must not drift into two spellings of it.
+    # The REMEDY stays local because it is per-surface — this one knows whether the
+    # value came from the config file, a flag, an agent record or a stored row.
+    return f"{decision_only_message(hosting)} {remedy}"
 
 
 def _refuse_decision_only(provider: str, source: str) -> None:
@@ -1344,11 +1348,28 @@ DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
 #: 100 ms, ideally under 50 ms, per user message"), and it is deliberately NOT the
 #: call's deadline: ``timeoutMs`` says how long the VENDOR may take, and on a real
 #: roster that is ~250 ms median — waiting for it would put the vendor's model time
-#: on the turn's critical path, which the budget explicitly excludes. Measured on the
-#: real path (27-candidate roster, real vendor, default settings): +52 ms median /
-#: +56 ms worst added wall-clock per warm message, +3 ms on a cache hit, against
-#: +250 ms if the turn waited for the vendor. Anything slower than the wait is
-#: delivered by the next message instead (see ``_harvest_classification``).
+#: on the turn's critical path, which the budget explicitly excludes.
+#:
+#: WHAT IT ACTUALLY COSTS, measured on the real path (27-candidate roster, real
+#: vendor, default settings, ``/tmp/classify_wait_probe.py``), and reported as the
+#: DIFFERENCE against the layer being off so the pre-existing cost of the turn path
+#: is not claimed as ours:
+#:
+#: - warm message: +3 ms median, +47 ms worst (the spread is the shared machine, not
+#:   the code — the same run shows the layer-OFF arm at +29 ms worst);
+#: - cache hit: ~+4 ms;
+#: - THE FIRST MESSAGE OF A SESSION is the expensive one, and it is honest to say so:
+#:   ~+63 ms of our own time, because the first call pays one-off setup before its
+#:   first await, where no wait budget can reach it. ~30-40 ms of that was the first
+#:   ``httpx.AsyncClient`` (139 ms cold, 29-39 ms warm-cache — SSL context setup),
+#:   which the composition root now builds at session build instead
+#:   (``ClassificationService.warm_up``), leaving ~+49 ms on a first message. The
+#:   rest is the package's own first-call setup, and a session that never sends a
+#:   message pays none of it.
+#:
+#: So: the ceiling holds on the steady state, and a session's first message can
+#: exceed it once. Anything slower than the wait is delivered by the next message
+#: instead (see ``_harvest_classification``).
 DEFAULT_CLASSIFICATION_WAIT_MS = 50
 
 #: How many background classification calls may be outstanding before the oldest is
@@ -1442,6 +1463,9 @@ class _KnowledgeHooks:
     #: already given up on, whose answer is worth keeping — a late recommendation is
     #: still a recommendation for the conversation it was computed against.
     classification_outstanding: list[Any] = field(default_factory=list)
+    #: The resource urls announced on the PREVIOUS message, so an unchanged set can
+    #: stay quiet rather than printing the same sentence again (design round 1, D7).
+    classification_last_announced: tuple[str, ...] | None = None
     #: Recommendations that arrived too late for their own turn and have not reached
     #: a prompt yet, oldest first. Rendered by the NEXT ``_select_knowledge_block``
     #: (a new user message re-renders block 3, which the harness journals as a
@@ -1741,6 +1765,10 @@ def _attach_classification(
     operator is already waiting. A default install never imports the package at
     all, because ``auto`` is read first and without it.
 
+    The seam's keep-alive CLIENT is warmed here too, for the same reason and with a
+    number: see ``ClassificationService.warm_up`` (139 ms of SSL-context setup, per
+    session, otherwise paid by the first message).
+
     Degrades rather than failing the boot, exactly as the sibling knowledge
     wiring does: a layer that cannot be built is a line in ``warnings_out`` and a
     ``classifier`` of ``None``, which is byte-for-byte today's prompt.
@@ -1757,6 +1785,25 @@ def _attach_classification(
         )
 
         hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
+        # …and its keep-alive client is built HERE, not on the first message. That
+        # construction is ~139 ms of SSL-context setup (measured) paid before the
+        # call's first await, so no wait budget can bound it, and the client is per
+        # SESSION — so the first message of every session paid it inside its own
+        # prompt build, against a 100 ms ceiling. No connection is opened: this builds
+        # the object only. See ``ClassificationService.warm_up``.
+        #
+        # ``getattr`` and a try of its own: warming is an OPTIMISATION, so a seam that
+        # does not publish it (the seam contract is ``recommend_resources`` +
+        # ``notice``, and the tests inject exactly that) keeps working, and a warm-up
+        # that fails must not cost the layer — the shared handler below would turn
+        # both into ``classifier = None``, i.e. a session with no classification
+        # because a prewarm went wrong.
+        warm_up = getattr(hooks.classifier, "warm_up", None)
+        if callable(warm_up):
+            try:
+                warm_up()
+            except Exception:  # noqa: BLE001 — the layer still works, just colder
+                logger.debug("classification: prewarm failed", exc_info=True)
         # The REQUEST's own cap field is an upper bound over the service's reader
         # (``min(request, settings)``), so it has to be the configured value:
         # left at the dataclass default it would silently cap a configured 5 at
@@ -2008,6 +2055,20 @@ async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> 
         )
         return None
     except asyncio.CancelledError:
+        # A cancelled TURN is a user's cancel, and they mean the WORK is over, not
+        # merely that this turn stopped waiting: the answer would otherwise be
+        # delivered onto the next message, which is how a "stop" quietly produces a
+        # recommendation for the question the user walked away from. (The WAIT's own
+        # timeout is the branch above, and it deliberately does NOT do this — "this
+        # turn has waited enough" and "throw that work away" are different
+        # statements. Review round 2, NIT 1: the comment here used to claim that
+        # distinction while the code left the task running either way.)
+        task.cancel()
+        hooks.classification_outstanding = [
+            outstanding
+            for outstanding in hooks.classification_outstanding
+            if outstanding is not task
+        ]
         raise
     except Exception:  # noqa: BLE001 — the layer may never fail a turn (§4)
         logger.warning("classification: recommendation failed", exc_info=True)
@@ -2092,17 +2153,26 @@ def _classification_block(
     return "\n".join(lines)
 
 
-def _delivered_view(recommendation: Any, urls: Sequence[str]) -> Any:
-    """The recommendation AS DELIVERED: only the resources that reached the prompt.
+def _delivered_view(recommendation: Any, urls: Sequence[str], *, late: bool) -> Any:
+    """The recommendation AS DELIVERED: what reached the prompt, and when it was asked for.
 
-    Handed to the seam's ``notice()`` instead of the original, because the line it
-    builds lists ``recommendation.resources`` — and a line naming a resource that
-    dedupe or the cap dropped would be the exact over-claim the delivery-time
-    notice exists to avoid. Untouched (returned as-is) in the common case where
-    nothing was dropped, so a host's own classifier keeps its own object unless
-    the answer really was trimmed. A seam whose recommendation is not a dataclass
-    keeps the untrimmed one: the line may then be optimistic by a resource, which
-    is a smaller lie than failing the notice.
+    Handed to the seam's ``notice()`` instead of the original, for two reasons and
+    both are honesty rather than polish:
+
+    - the line it builds lists ``recommendation.resources``, and a line naming a
+      resource the dedupe or the cap dropped would be the over-claim the
+      delivery-time notice exists to avoid;
+    - ``late`` says the answer missed its own turn's wait and is being delivered by
+      THIS message, which the line has to say out loud or it reads as advice about
+      the message it now sits under (design round 1, D2). On a real vendor that is
+      the ordinary case, not the edge one: the wait is 50 ms against a ~250 ms
+      answer.
+
+    Returned as the original object when neither fact changes anything (nothing
+    dropped, nothing late), so a host's own classifier keeps its own type unless it
+    really was trimmed. A seam whose recommendation is not a dataclass keeps the
+    untrimmed one: the line may then be optimistic by a resource, which is a
+    smaller lie than failing the notice.
     """
     resources = tuple(getattr(recommendation, "resources", ()) or ())
     kept = tuple(
@@ -2110,10 +2180,10 @@ def _delivered_view(recommendation: Any, urls: Sequence[str]) -> Any:
         for resource in resources
         if str(getattr(resource, "resource_url", "") or "") in set(urls)
     )
-    if len(kept) == len(resources):
+    if len(kept) == len(resources) and not late:
         return recommendation
     try:
-        return replace(recommendation, resources=kept)
+        return replace(recommendation, resources=kept, late=late)
     except Exception:  # noqa: BLE001 — a foreign seam's result is not a dataclass
         return recommendation
 
@@ -2307,10 +2377,22 @@ async def _select_knowledge_block(
     # message, and letting this turn's fresh answer take the per-message cap first
     # would starve them for as long as the vendor keeps missing the wait. The
     # pending list is consumed here, so an answer reaches a prompt exactly once.
+    #
+    # The BLOCKS are per answer (each is that answer's own text, capped and deduped
+    # in order), but the NOTICE is per MESSAGE: all the resources this prompt gained
+    # are announced on one line, which is what §7's "once per user message" says and
+    # what the previous shape broke — a message that delivered a late answer AND its
+    # own printed two lines (review round 2, MINOR 1). Late first, so the line reads
+    # in the order the sections appear.
     pending, hooks.classification_pending = hooks.classification_pending, []
-    answers = [*pending, *([recommendation] if recommendation is not None else [])]
+    answers: list[tuple[Any, bool]] = [(answer, True) for answer in pending]
+    if recommendation is not None:
+        answers.append((recommendation, False))
     carried: set[str] = set()
-    for answer in answers:
+    announced: list[Any] = []
+    announced_urls: list[str] = []
+    announced_late = False
+    for answer, late in answers:
         urls: list[str] = []
         block = _classification_block(
             hooks,
@@ -2328,18 +2410,48 @@ async def _select_knowledge_block(
             continue
         sections.append(block)
         carried.update(urls)
-        # THE NOTICE RIDES DELIVERY, not the call: it is emitted here, once, for
-        # the answer that just reached THIS prompt. A call that missed the wait is
-        # not announced when it is abandoned (nothing was delivered then) or when
-        # it lands, but when a prompt actually carries it; and the seam's own gate
-        # (``values.classification.notice``) stays inside ``notice()``. The
-        # ``_delivered_view`` is what keeps the line from naming a resource the
-        # dedupe above dropped.
-        await _emit_classification_notice(hooks, _delivered_view(answer, urls))
+        announced.append(answer)
+        announced_urls.extend(urls)
+        # LATENESS is a property of the LINE, not of any one answer: if any of the
+        # resources on it came from an earlier message, the attribution has to say
+        # so, or the sentence reads as advice about the message it sits under.
+        announced_late = announced_late or late
+    if announced:
+        # THE NOTICE RIDES DELIVERY, not the call: it is emitted here, once, for the
+        # resources this prompt actually gained. A call that missed the wait is not
+        # announced when it is abandoned (nothing was delivered then) or when it
+        # lands, but when a prompt carries it; and the seam's own gate
+        # (``values.classification.notice``) stays inside ``notice()``. The view is
+        # what keeps the line from naming a resource the dedupe or the cap dropped,
+        # and ``late`` is what stops it reading as an answer to the wrong question.
+        if not _already_announced(hooks, announced_urls):
+            await _emit_classification_notice(
+                hooks,
+                _delivered_view(announced[-1], announced_urls, late=announced_late),
+            )
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
     hooks.frozen_task_id = task_id
     return hooks.frozen_block
+
+
+def _already_announced(hooks: _KnowledgeHooks, urls: Sequence[str]) -> bool:
+    """Whether the SAME resource set was announced on the previous message.
+
+    Design round 1, D7: with the money tail gone, four consecutive messages that
+    recommend the same skill printed four byte-identical rows. A repeat of the
+    previous announcement says nothing new — the resource is in this prompt either
+    way, and the block above is what the model reads — so the line is suppressed,
+    not the delivery. Only the IMMEDIATELY preceding set counts: a resource that
+    comes back later in the session is worth its line again, because by then the
+    user has read other things.
+    """
+    signature = tuple(urls)
+    if not signature or signature != hooks.classification_last_announced:
+        hooks.classification_last_announced = signature
+        return False
+    logger.debug("classification: the same resources were just announced; staying quiet")
+    return True
 
 
 def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | None]:
@@ -3782,7 +3894,15 @@ def attach_classification_notices(session: Session, hooks: "_KnowledgeHooks | No
     """
     if hooks is None:
         return
-    sink = getattr(session, "_stream_notice", None)
+    # ``queue_notice`` FIRST, and this ordering is design round 1's D1: the notice
+    # describes the prompt this turn is BUILDING, so emitting it here painted it
+    # between the user's question and the reply — in the answer's slot, in the
+    # dimmest ink on screen, 2-4 rows depending on the width. ``queue_notice`` holds
+    # it until the turn's answer has landed, and the session flushes it there.
+    # ``_stream_notice`` stays the fallback for a facade-shaped double that has no
+    # queue (the TUI pilot's ``FakeSession``, a benchmark preflight, any host that
+    # supplies its own), so a missing queue costs placement rather than the line.
+    sink = getattr(session, "queue_notice", None) or getattr(session, "_stream_notice", None)
     if callable(sink):
         hooks.notice_sink = sink
 
@@ -3804,17 +3924,43 @@ def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | No
     ``attach_classification_notices``: a host's own classifier need not publish an
     ``aclose``, and an injected test double typically does not. A seam without one
     is not an error — it simply owns no resource this harness has to release.
+
+    ONE hook, in ONE order, and the order is the point. The calls this session left
+    running are cancelled FIRST, before anything closes the client they are using:
+    with ``waitMs`` at its 50 ms default against a ~250 ms answer, a session disposed
+    right after a message always has one in flight, and closing the keep-alive client
+    under it turned that call into a transport error with a traceback — an answer
+    nobody could use any more, reported as a failure (review round 2, MINOR 2). The
+    service's own ``aclose`` cancels what it still has in flight for the same
+    reason; this half cancels the wiring's wrappers so the session lets go of them
+    too.
+
+    The seam is resolved AT DISPOSE TIME rather than captured here, because it is an
+    injectable attribute (``hooks.classifier``) and a hook that closed the object
+    that happened to be there at REGISTRATION would leave a host's injected seam
+    open. That is not hypothetical: the test that covers this path swaps the seam
+    after ``create_session`` returns, which is the documented way to inject one, and
+    the captured-bound-method version sailed straight past it.
     """
     if hooks is None:
         return
-    close = getattr(hooks.classifier, "aclose", None)
-    if callable(close):
-        # ``getattr`` erases the signature the seam publishes (``() ->
-        # Awaitable[None]``, on the package's ``ClassificationService.aclose``), and
-        # ``add_dispose_hook`` takes exactly that shape. The cast is the seam
-        # contract, not a convenience: a seam whose ``aclose`` took arguments would
-        # already be wrong for this hook.
-        session.add_dispose_hook(cast("Callable[[], Awaitable[None] | None]", close))
+
+    def _release_the_seam() -> Any:
+        """Cancel what is running, then close the seam. Returns the awaitable."""
+        for task in hooks.classification_outstanding:
+            if not task.done():
+                task.cancel()
+        hooks.classification_outstanding.clear()
+        hooks.classification_pending.clear()
+        # ``getattr`` rather than a typed call, matching
+        # ``attach_classification_notices``: a host's own classifier need not publish
+        # an ``aclose``, and a seam without one simply owns no resource this harness
+        # has to release. The returned value is handed straight back to the dispose
+        # runner, which awaits what it gets (``Session.dispose``).
+        close = getattr(hooks.classifier, "aclose", None)
+        return close() if callable(close) else None
+
+    session.add_dispose_hook(cast("Callable[[], Awaitable[None] | None]", _release_the_seam))
 
 
 def attach_auth_dispose(session: Session, auth_store: AuthStore | None) -> None:

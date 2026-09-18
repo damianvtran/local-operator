@@ -4358,3 +4358,97 @@ async def test_the_classification_seam_is_closed_on_dispose(
         await session.dispose()
 
     assert built[0].closed is True, "dispose must close the seam it created"
+
+
+@pytest.mark.asyncio
+async def test_dispose_abandons_a_classification_call_still_in_flight(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing outlives the session, and the client is not closed under a live call.
+
+    On a real vendor a session disposed right after a message ALWAYS has one call
+    running — the turn waits 50 ms and the answer takes ~250 ms — and the round-1
+    hook closed the keep-alive client out from under it, which turned that call into
+    a transport error with a traceback whose answer nobody could use any more
+    (review round 2, MINOR 2). Cancelling first is the honest order, so this test
+    asserts the three things that order buys: the wrapper is cancelled, the seam is
+    still closed, and nothing logged a failure on the way.
+
+    Built through ``create_session`` with the seam CAPTURED off the real composition
+    root rather than hand-assembled: the claim is about the session's own dispose
+    path, and a double would prove only that a coroutine I wrote does what I wrote.
+    ``hooks.classifier`` is then replaced by a hanging seam — the documented
+    injection point — so the call is in flight on demand instead of when a vendor
+    feels like answering.
+    """
+    import asyncio
+    import contextlib
+    import logging
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    captured: list[Any] = []
+    real_attach = session_factory.attach_classification_dispose
+
+    def _capture(session: Any, hooks: Any) -> None:
+        captured.append(hooks)
+        real_attach(session, hooks)
+
+    monkeypatch.setattr(session_factory, "attach_classification_dispose", _capture)
+    config = ConfigManager(tmp_config_dir)
+    config.set_config_value("classification", {"auto": True, "waitMs": 50})
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert captured, "the composition root registers the seam's dispose hook"
+
+    started = asyncio.Event()
+    closed: list[bool] = []
+
+    class _HangingSeam:
+        """The seam contract, with the vendor holding the line forever."""
+
+        async def recommend_resources(self, request: Any) -> Any:
+            started.set()
+            await asyncio.sleep(30)
+            return None
+
+        def notice(self, recommendation: Any) -> str | None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    captured[0].classifier = _HangingSeam()
+    try:
+        await session_factory._select_knowledge_block(
+            captured[0], "a question about the tunnel", task_id="t1"
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        outstanding = [task for task in captured[0].classification_outstanding if not task.done()]
+        assert outstanding, "the call must still be running for this test to mean anything"
+
+        with caplog.at_level(logging.WARNING):
+            await session.dispose()
+    finally:
+        # ``getattr``: ``create_session`` is typed as returning the protocol, and
+        # ``_disposed`` is the facade's own flag rather than part of it.
+        if not getattr(session, "_disposed", False):
+            await session.dispose()
+
+    for task in outstanding:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    assert all(task.done() for task in outstanding), "the call outlived the session"
+    assert closed == [True], "dispose still closes the seam it opened"
+    assert captured[0].classification_outstanding == []
+    # The failure this replaces: the client closed under a live call logged a
+    # warning with a traceback, from the vendor leg.
+    noisy = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert not noisy, [record.getMessage() for record in noisy]

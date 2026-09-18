@@ -2026,6 +2026,10 @@ class Session:
         # Host-registered teardown (see add_dispose_hook): resources the
         # composition root owns but the session's lifetime governs.
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        #: Notices that belong AFTER the running turn's answer (see
+        #: :meth:`queue_notice`). A list, not a single slot: a turn can raise more
+        #: than one, and their order is the order they were raised in.
+        self._queued_notices: list[tuple[str, Literal["info", "warning", "error"]]] = []
         # Set by the composition root when MCP servers are wired in, and read
         # only for diagnostics — the session never drives the manager itself,
         # it just governs its lifetime through a dispose hook.
@@ -7450,6 +7454,48 @@ class Session:
 
         return unsubscribe
 
+    async def queue_notice(
+        self,
+        text: str,
+        kind: Literal["info", "warning", "error"] = "info",
+    ) -> None:
+        """Emit a notice AFTER the running turn's answer, or at once if none is running.
+
+        WHY THIS EXISTS, and why it is not just ``_stream_notice``. A notice raised
+        while a turn's prompt is being built lands between the user's question and
+        the reply — the notice occupies the answer slot, and a reader takes the
+        dimmest ink on screen for the first thing the model said (design round 1,
+        D1). The classification layer's resource line is exactly that case: it is
+        raised during prompt build, because that is where the resources are chosen.
+
+        Deferral is conditioned on a turn actually running, not on a flag the
+        caller passes: outside a turn there is no answer to wait for, and holding
+        the line would delay it with nothing to gain. ``_turn_lock`` is the same
+        condition ``_run_turn`` documents (its caller holds it), so a host that
+        emits from a viewer or a preflight still gets its line immediately.
+        """
+        if not self._turn_lock.locked() or self._disposed:
+            await self._stream_notice(text, kind)
+            return
+        self._queued_notices.append((text, kind))
+
+    async def _flush_queued_notices(self) -> None:
+        """Release the notices whose turn has finished. Never raises.
+
+        Called from ``_run_turn`` once the answer has landed and been persisted, so
+        the line reads as a note about the turn that just finished rather than as
+        part of the reply. One that fails to paint is logged and dropped: a notice
+        is never worth failing the teardown it rides on.
+        """
+        if not self._queued_notices:
+            return
+        queued, self._queued_notices = self._queued_notices, []
+        for text, kind in queued:
+            try:
+                await self._stream_notice(text, kind)
+            except Exception:  # noqa: BLE001 — a notice never fails a turn
+                logger.warning("session queued notice failed to emit", exc_info=True)
+
     async def _stream_notice(
         self,
         text: str,
@@ -8222,6 +8268,14 @@ class Session:
             # Placed after the persist above for the same reason as the other
             # site: the clone copies what is on disk.
             await self._drain_pending_fork()
+
+            # Anything that was waiting for this turn's answer goes out HERE, after
+            # the reply is on disk and therefore after it has painted: notices raised
+            # during prompt build would otherwise sit between the question and the
+            # answer (see ``queue_notice``). Before the bookkeeping below, so the line
+            # lands as promptly as the answer it follows rather than trailing the
+            # todo/spend writes.
+            await self._flush_queued_notices()
 
             # Snapshot the todo list when it moved this turn. Guarded by the
             # same full-list fingerprint the continuation guardrail uses, so an
@@ -14000,6 +14054,13 @@ class Session:
             from local_operator.session.retention import release_session
 
             release_session(self._transcript.directory)
+            # A queued notice whose turn never finished (aborted, or a raise out of
+            # the run) would otherwise sit here forever. Emitting it now is the
+            # honest choice of the two: it belongs to no later answer, and the
+            # substitute — delivering it onto the next turn — is exactly the wrong
+            # attribution the queue exists to avoid. Before the hooks, so the event
+            # stream is still live when it goes out.
+            await self._flush_queued_notices()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

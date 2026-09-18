@@ -36487,7 +36487,13 @@ class OperatorApp(App[None]):
             # second provider, not changing their default).
             set_msg = self._apply_login_defaults(provider)
             if set_msg:
-                await notice(set_msg, "info")
+                # ``note``, not ``info`` (design round 1, D4): the taxonomy
+                # (``transcript.py``'s ``_KIND_TOKENS``) reserves ``note`` for "the
+                # answer to something the user just did", which is exactly what this
+                # line is — and ``info``'s dim ink is the quietest in the app, so the
+                # longest sentence in the block was also its least legible one while
+                # the two routine confirmations above it were bright.
+                await notice(set_msg, "note")
             # The credential set just changed, so the owner's offerable-model
             # publication is stale: a follower's picker must see the newly
             # usable provider without waiting for a session restart (D3).

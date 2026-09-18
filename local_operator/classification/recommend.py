@@ -135,6 +135,14 @@ class Recommendation:
     cost_usd: float | None = None
     latency_s: float = 0.0
     skipped: SkipReason | None = None
+    #: Set by a CALLER whose turn stopped waiting before the answer arrived, so
+    #: this recommendation is being delivered by a LATER message than the one it was
+    #: computed for. Not produced by anything in this package — the service answers
+    #: inside its own deadline and does not know what the turn did with the
+    #: wait — but the notice renderer needs it, because saying "for this message"
+    #: about advice the model was asked for one message ago is a claim the line
+    #: cannot support (design round 1, D2).
+    late: bool = False
 
 
 @dataclass(frozen=True)

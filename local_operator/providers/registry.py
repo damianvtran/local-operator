@@ -685,6 +685,28 @@ def is_decision_only(provider_id: str | None) -> bool:
     return bool(definition is not None and definition.decision_only)
 
 
+def decision_only_message(provider_id: str) -> str:
+    """The ONE sentence for a provider that can serve no chat completion.
+
+    Shared by every door that refuses one, and there are now five: the config /
+    agent / flag hosting preflight and a resume's stored row (``session_factory``),
+    the desktop pick boundary, the draft-marker reader, and ``build_model_spec`` —
+    which is where a LIVE switch lands, since ``/model``, the viewer's slash result
+    and the wire's ``set_model`` all build their spec through it. A second spelling
+    of this fact would be a second chance to tell a user something the other surface
+    does not say, and the message is the only place the reason is explained at all.
+
+    The sentence stops at the fact: each caller appends the remedy that fits its own
+    surface (``/model`` from inside a session, ``local-operator config edit`` from a
+    config file), which is why this is a fragment of a message rather than a whole
+    one.
+    """
+    return (
+        f"Hosting '{provider_id}' serves decision-model calls, not chat completions, "
+        "so no session can run on it."
+    )
+
+
 def credential_provider_id(provider_id: str) -> str:
     """The provider id a credential for ``provider_id`` is actually STORED under.
 
