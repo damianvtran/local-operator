@@ -86,7 +86,7 @@ BOOT_RECORD_KIND = "runtime-boot"
 #: sentence (``"leaving after SIGTERM"``). Matching the raw spellings would make
 #: the escalated-sweep rung hold only by WHICH writer happened to run last —
 #: and a mislabel there hands the operator ``runtime-killed``, whose sentence
-#: ends "and nothing recorded a stop", for a death where a signal was recorded.
+#: ends "and no stop was asked for", for a death where a signal was recorded.
 _SIGNAL_TOKEN = re.compile(
     r"\bSIG(?:HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|"
     r"TERM|CHLD|CONT|STOP|TSTP|TTIN|TTOU|URG|XCPU|XFSZ|VTALRM|PROF|WINCH|IO|PWR|SYS)\b"
@@ -643,7 +643,7 @@ class TurnJournal:
         # which of them runs last is an ordering accident: a later writer with
         # no signal to report must not unname a signal that was recorded, or an
         # escalated sweep would be reported as a crash whose sentence claims
-        # nothing recorded a stop.
+        # no stop was asked for.
         if row.get("exit_cause") and signal_exit_token(str(row["exit_cause"])):
             row["still_open_at_exit"] = True
             self._write("exit")
@@ -791,13 +791,23 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        (this turn was in flight and never ended) instead of by the absence of a
        record.
 
+    RUNG 3 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
+    than a decoration. Nothing that reads this arm has seen a marker — a marker
+    covering this run is consumed by ``attention._classify_orphaned_run`` before
+    the row is ever consulted — so "this turn died and no act was recorded" is
+    exactly what the evidence supports, and saying so is what turns a fleet-wide
+    event from "we cannot tell you why" into "none of these deaths had a recorded
+    actor". ``incidents.KILL_UNATTRIBUTED`` is the same word the classifier's
+    marker arms use when a marker names no actor, so a reader comparing a
+    marked death with an unmarked one sees one vocabulary rather than two.
+
     ``CUT_OFF_UNKNOWN`` is unreachable from this function and that is the point:
     it is the taxonomy's statement that nothing on disk could say what happened,
     and an open row is something. The token is still the answer for a death that
     left no row at all, which is what "keep the legacy path working when the
     evidence is absent" means.
     """
-    from local_operator.incidents import render_cut_off_reason
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_cut_off_reason
 
     signal = signal_exit_token(row.exit_cause)
     if signal:
@@ -818,7 +828,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     return (
         "error",
         "runtime-killed",
-        render_cut_off_reason("runtime-killed", detail=row_detail(row)),
+        render_cut_off_reason("runtime-killed", detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
     )
 
 
