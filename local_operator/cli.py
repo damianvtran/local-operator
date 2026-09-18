@@ -2946,7 +2946,7 @@ def send_command(args: argparse.Namespace) -> int:
     # unique match come back, and neither may be converted into a stored send).
     from local_operator.mobile.peer_send import (
         live_scan_found_nothing,
-        session_id_unknown,
+        session_id_unowned,
     )
 
     # Matches the name/substring scan held back for being unengaged. Filled by
@@ -2991,18 +2991,18 @@ def send_command(args: argparse.Namespace) -> int:
             print(f"  e.g. `{example}`", file=sys.stderr)
         return 1
     cold_session_id = ""
-    if record is None and session_id_unknown(error):
-        # No DIALABLE live record AND the live scan did not know this id at all
-        # — so an exact `--session` may name a stored session that is simply
-        # not running. A quiet note to one of those is the mailbox mode's whole
-        # purpose, so it is spooled rather than refused; anything wanting
-        # attention starts a runtime for it.
+    if record is None and session_id_unowned(error):
+        # No live record OWNS this id — the scan did not know it at all, or the
+        # record it found was stale (the pid is gone) — so an exact `--session`
+        # may name a stored session that is simply not running. A quiet note to
+        # one of those is the mailbox mode's whole purpose, so it is spooled
+        # rather than refused; anything wanting attention starts a runtime.
         #
         # The predicate is what keeps a refusal about a LIVE session standing
-        # (QA round 3, Q8): an unengaged or wedged match is answered by the live
-        # resolver, and re-asking the store for that same id would spool the
-        # note behind a process that still owns the conversation while telling
-        # the sender it was merely held.
+        # (QA round 3, Q8; review round 4, MINOR-1): an unengaged or wedged
+        # match is the live resolver's answer, and re-asking the store for the
+        # same id would spool the note behind a process that still owns the
+        # conversation while telling the sender it was merely held.
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = resolve_cold_session(args.session or "") or ""
