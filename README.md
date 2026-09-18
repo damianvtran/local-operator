@@ -454,7 +454,7 @@ with its title and age:
 | `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics |
 | `/failovers` | The model cascade for this session, and which account is serving |
 | `/provider`, `/login`, `/logout`, `/accounts` | Manage providers and signed-in accounts |
-| `/credential` | Hand over a secret: type it after `/credential` and a space and it is masked and captured; a paste your terminal delivers as text (`Cmd+V`) is captured the same way, the composer's own `Ctrl+V` is not. Bare `/credential` lists this session's credentials, and `/credential --persist <KEY>` saves one to the long-term store. See [Credentials and secrets](#credentials-and-secrets) |
+| `/credential` | Hand over a secret: type it after `/credential` and a space to have it masked and captured; a paste your terminal delivers as text is captured the same way; the composer's own paste key (`Ctrl+V` on macOS) is not. Bare `/credential` lists this session's credentials, and `/credential --persist <KEY>` saves one to the long-term store. See [Credentials and secrets](#credentials-and-secrets) |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>`; `/team chart <name>` draws its org chart |
 | `/skills`, `/mcp` | List loaded skills · MCP servers |
@@ -494,10 +494,9 @@ update leaves the current terminal and runtime running.
 - `ctrl+t` / `ctrl+g`: expand the todo list · cycle the subagent panel.
 - **Hand over a secret**: `/credential` followed by a space opens a masked
   capture: type the value and **Enter** turns it into a chip, and a paste your
-  terminal delivers as text (`Cmd+V`) is captured the same way. The capture
-  token is what arms it, so the composer's own `Ctrl+V` — which reads the
-  clipboard itself and never consults the capture — inserts the value as
-  ordinary text.
+  terminal delivers as text (`Cmd+V` on macOS) is captured the same way. The
+  composer's own paste key (`Ctrl+V` on macOS) never consults the capture: it
+  reads the clipboard itself, so it inserts the value as ordinary text.
 - `option+←` / `option+→` (`ctrl+←` / `ctrl+→` on Linux and Windows): move the
   caret a word at a time in the composer; add `shift` to select by word. Works
   the same in shell (`!`) mode and with a command list open, and `option+↑` /
@@ -850,17 +849,18 @@ key from another process raises a macOS authorization prompt. Run
 What the store is **not** is a vault: `lop` is on your `PATH`, so anything
 running as you that is willing to run `lop` can read every secret exactly as
 the agent does, and a value an agent retrieves is in that session's memory for
-the turn. `lop secret status` reports the mode and, when it can open the store,
-the risk that goes with it: the key file itself in the default mode, the
-unlocked broker's memory in passphrase mode. When it cannot open the store it
-prints the reason and the command that fixes it, and no note. Neither mode is a
-vault, and the limit above holds in both. The store raises the cost of stealing
-these credentials a long way. It is not a guarantee.
+the turn. `lop secret status` reports the mode, and the risk that comes with it
+when the command can open the store: the key file itself in the default mode,
+the unlocked broker's memory in passphrase mode. When it cannot open the store
+it prints the reason and the command that fixes it, and no note. Neither mode
+is a vault, and the limit above holds in both. The store raises the cost of
+stealing these credentials a long way. It is not a guarantee.
 
 **One provider login you keep by hand** is the QwenCloud console ticket: a
 browser session cookie you capture and store yourself, expiring roughly weekly.
 Its value goes into the encrypted `lop secret` store rather than into `auth.db`,
-which keeps only the ticket's name, when it was captured and its length. The
+which keeps only the ticket's metadata — its name, when it was captured, and
+its length. The
 [QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
 including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
 
@@ -895,12 +895,13 @@ returns a receipt naming the secret and how to reach it, never the value: in
 than to the transcript. Agent-facing guidance lives in
 [`local_operator/guides/credentials/GUIDE.md`](./local_operator/guides/credentials/GUIDE.md).
 
-**Type `/credential` and a space, then type or paste a secret** and it is
-captured as a credential chip. Typing is masked and captured. A paste your
-terminal delivers into the composer as text (`Cmd+V` on macOS) is captured the
-same way. The composer's own `Ctrl+V` is **not** captured: it reads the
-clipboard directly and inserts the value as ordinary text, so a secret must not
-be pasted that way. The value goes to this session's credential store, the line
+**Type `/credential` and a space, then type the secret, or paste it so your
+terminal delivers it as text**, and it is captured as a credential chip. Typing
+is masked and captured. So is a paste your terminal delivers as text: `Cmd+V` on
+macOS, or your terminal's own Paste command elsewhere. The composer's own paste
+key, `Ctrl+V` on macOS, is **not** captured: it reads the clipboard directly and
+inserts the value as ordinary text, so a secret must not be pasted that way. The
+value goes to this session's credential store, the line
 carries only the chip, and you keep typing to say what the secret is for: that
 description, not the secret, is what the agent reads.
 
@@ -910,11 +911,11 @@ description, not the secret, is what the agent reads.
 
 <p align="center"><i>A key handed over with /credential goes to this session's credential store: the composer keeps a chip in its place, and your description is what the agent reads.</i></p>
 
-**A paste on its own is not captured.** What opens the capture is the
-`/credential` token, not what the text looks like: paste a key into a composer
-that has not been armed and it is inserted exactly as typed, into the draft,
-into the prompt and on to the provider. This gesture is a hand-over, not a
-safety net.
+**Without the `/credential` token, a paste is not captured.** What opens the
+capture is the `/credential` token, not what the text looks like: paste a key
+into a composer that has not been armed and it is inserted exactly as typed,
+into the draft, into the prompt and on to the provider. This gesture is a
+hand-over, not a safety net.
 
 **Typing into the capture is masked as well.** With the token entered, the
 characters are held out of the draft and painted as dots, and **Enter** turns
@@ -984,10 +985,10 @@ values:
 
 Set it per deployment, not globally: the interactive session you are sitting at
 wants `inherit`, a server-owned run wants `allowlist`. Why the strict mode
-exists: `lop` reads its provider API key **from its own environment** or from
-`credentials.env` — the file wins where it holds the key and the environment is
-the fallback — so an inherited copy is a spend credential in the hands of
-any command the model writes — and a run whose whole job is fetching
+exists: `lop` reads its provider API key **from its own environment**, falling
+back to `credentials.env` only when the name is not exported — so an inherited
+copy is the one a request uses, and it is a spend credential in the hands of
+any command the model writes. A run whose whole job is fetching
 attacker-influenceable pages is exactly the run that must not have one. `mode`
 unset (or blank) is `inherit`;
 an unrecognised value (`strict`, `allow-list`) resolves to `allowlist` and warns
@@ -1062,11 +1063,11 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   input and warned about on first connect. See [docs/mcp.md](./docs/mcp.md)
   for the trust model.
 - **Credential hygiene.** Provider keys live in a local file, are entered
-  through masked prompts, and are kept out of transcripts; a secret handed over
-  with `/credential` becomes a chip rather than text (the composer's own
-  `Ctrl+V` is not a hand-over: it inserts the value as ordinary text), provider
-  logins stay in `auth.db`, and everything you save with `lop secret` lives in
-  the encrypted long-term store. See
+  through masked prompts, and are kept out of transcripts. A secret handed over
+  with `/credential` becomes a chip rather than text; the composer's own paste
+  key (`Ctrl+V` on macOS) is not a hand-over, and it inserts the value as
+  ordinary text. Provider logins stay in `auth.db`, and everything you save with
+  `lop secret` lives in the encrypted long-term store. See
   [Credentials and secrets](#credentials-and-secrets).
 - **A shell's environment is a policy, not an accident.** A command the model
   runs sees your environment by default (`shell_environment.mode: inherit`); a
