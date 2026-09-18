@@ -54,12 +54,23 @@ response — so it is the page where a mark that distinguishes progress from the
 answer is either doing work or just spending the inset. The fixture it folds has
 both kinds (a sentence before a tool batch, then the closing sentence), which is
 what makes the pair checkable from one frame rather than argued from the source.
+
+``stream`` captures the ONE event that moves a progress sentence — the new
+motion this treatment introduces, and the only thing a settled frame cannot
+show. Two frames of the same page, one event apart: ``OUT`` is taken between the
+last delta and the ``message_end`` that finalizes the call into tool calls (the
+rail is still painted, because mid-stream nothing can know which message is the
+answer), and ``OUT`` with ``-finalized`` inserted before its suffix is the same
+page one event later, with the rail retracted. Both hooks sit INSIDE that one
+call, so nothing else on the page differs between the pair and the pair is
+evidence about the event rather than about the turn.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -146,6 +157,8 @@ async def _stream(
     *,
     stop_reason: str | None,
     has_tool_calls: bool,
+    before_end: Callable[[], Awaitable[None]] | None = None,
+    after_end: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Paint one model call through the app's own handlers.
 
@@ -153,22 +166,54 @@ async def _stream(
     handlers (``on_assistant_delta``/``on_assistant_message_end``), so posting
     the events is what makes the frame the one the product produces for a call
     that ends in tool calls — the same sequence ``test_narration_toggle`` drives.
+
+    ``before_end`` and ``after_end`` are AWAITED either side of the finalize
+    event, which is what gives ``SURFACE=stream`` both frames of the retraction
+    from one seeded turn (see the ``stream`` surface in the module docstring).
+    Awaitable rather than plain callables so a hook can take its own pause
+    before exporting: a frame is only evidence if the paint it shows has
+    settled, and the pause that settles it belongs with the capture.
     """
     app.post_message(AssistantMessageStart())
     await pilot.pause()
     app.post_message(AssistantDelta(text))
     await pilot.pause()
+    if before_end is not None:
+        await before_end()
     app.post_message(
         AssistantMessageEnd(text, stop_reason=stop_reason, has_tool_calls=has_tool_calls)
     )
     await pilot.pause()
+    if after_end is not None:
+        await after_end()
+    await pilot.pause()
 
 
-async def _seed(app: OperatorApp, pilot: Any) -> None:
-    """The reported turn: prompt, progress sentence, its tool card, the answer."""
+async def _seed(
+    app: OperatorApp,
+    pilot: Any,
+    *,
+    progress_frames: (
+        tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[None]]] | None
+    ) = None,
+) -> None:
+    """The reported turn: prompt, progress sentence, its tool card, the answer.
+
+    ``progress_frames`` is handed to the PROGRESS message's stream as
+    ``(before_end, after_end)`` — see ``SURFACE=stream``.
+    """
     app._append_block(UserBlock("how does the ingest path handle a failing source?"))
     await pilot.pause()
-    await _stream(app, pilot, PROGRESS, stop_reason="toolUse", has_tool_calls=True)
+    before_end, after_end = progress_frames or (None, None)
+    await _stream(
+        app,
+        pilot,
+        PROGRESS,
+        stop_reason="toolUse",
+        has_tool_calls=True,
+        before_end=before_end,
+        after_end=after_end,
+    )
     _tool(app, "t1", "read", {"path": "src/ingest/manifest.py"}, "412 lines")
     await pilot.pause()
     app._append_block(_answer(ANSWER))
@@ -238,6 +283,43 @@ async def main() -> None:
                 file=sys.stderr,
             )
             save_capture(app, out)
+        return
+
+    if surface == "stream":
+        # The retraction, photographed. `display.narration` and `display.rail`
+        # both stay at their shipped defaults: the subject is the ONE event that
+        # finalizes a progress sentence into tool calls, so anything else moved
+        # into the frame would be a second variable. Both frames come from one
+        # run of the real path, one event apart, with the capture hooks inside
+        # that call (R2, agent review round 1).
+        finalized = out.replace(".svg", "-finalized.svg")
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            if theme is not None:
+                app._apply_theme(theme)
+                await pilot.pause()
+
+            async def mid_stream() -> None:
+                """The last delta has landed and the call has NOT ended."""
+                await pilot.pause()
+                save_capture(app, out)
+
+            async def settled() -> None:
+                """The SAME page one event later, the rail retracted."""
+                await pilot.pause()
+                save_capture(app, finalized)
+
+            await _seed(app, pilot, progress_frames=(mid_stream, settled))
+            await pilot.pause()
+            await settle_status_line(pilot, app)
+            screen = app.screen
+            print(
+                f"size={screen.size} virtual={screen.virtual_size} "
+                f"vscroll={screen.show_vertical_scrollbar} "
+                f"streaming={out} finalized={finalized}",
+                file=sys.stderr,
+            )
         return
 
     app = OperatorApp(lambda: _factory(FakeSession()))

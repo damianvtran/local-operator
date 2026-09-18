@@ -8,9 +8,12 @@ reader cannot tell which paragraph is the answer.
 The flag drops the mid-turn prose at FINALIZE, leaving ``user -> tools ->
 answer``. Three properties carry the feature and are pinned here:
 
-* **The classification.** Tool calls OR ``stop_reason == "toolUse"`` means
-  narration; every other stop reason is FINAL and must survive, because
-  removing a refusal or a length-cut turn erases the outcome the user needs.
+* **The classification.** ``tool_calls`` is the WHOLE rule. ``stop_reason``
+  deliberately does not corroborate it (``tui/narration.py`` records why: a
+  ``toolUse`` whose calls fail to assemble once left the user's prompt followed
+  by silence, MAJOR-1), but every TERMINAL stop reason is the ANSWER and must
+  survive, because removing a refusal or a length-cut turn erases the outcome
+  the user needs.
 * **Default ON is byte-identical to today.** The toggle is opt-in, so the
   test that matters most is the one where the flag is left alone and the
   narration STAYS.

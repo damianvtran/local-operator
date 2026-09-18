@@ -85,6 +85,12 @@ STATE selects what the page is showing:
                before-frame is the row already toggled and the after-frame is
                a two-choice expansion that has written nothing. A still of the
                resting row cannot show either, so both frames are taken
+    rail       the `display.rail` row highlighted, and `rail-open` the same row
+               activated. The help field is clipped with an ellipsis when it
+               does not fit, so a clause past the cut never reaches the screen:
+               the pair exists because the wording a change puts in that field
+               is only checkable from a frame, and a transcript still cannot
+               show it (design round 1, D1)
     choosing   the same bool expansion with the cursor moved DOWN onto the
                unstored choice — the state whose whole claim is that browsing
                a value space writes nothing, and where the footer must read
@@ -463,6 +469,21 @@ async def main() -> None:
             view.action_activate()
             await pilot.pause()
             save_capture(app, out.replace(".svg", ".open.svg"))
+        elif state == "rail":
+            # TWO frames, because the subject is a HELP FIELD that is clipped
+            # with an ellipsis rather than wrapped: a clause that does not fit
+            # the line is not shortened, it is never painted, and the resting
+            # width and the activated width are different budgets (activating
+            # expands the choices underneath). The first frame is the row as a
+            # reader meets it while walking the page; the second is the whole
+            # value space, which is where the wording has to survive (design
+            # round 1, D1).
+            _select(view, "display.rail")
+            await pilot.pause()
+            save_capture(app, out)
+            view.action_activate()
+            await pilot.pause()
+            save_capture(app, out.replace(".svg", "-open.svg"))
         elif state == "choosing":
             # The expansion BROWSED, not merely opened. The claim under test is
             # that moving the cursor across a value space writes nothing, and
