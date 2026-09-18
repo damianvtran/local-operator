@@ -68,8 +68,15 @@ def resolve_radient_api_base_url(configured: Optional[str] = None) -> str:
     ``config.yml``), then ``RADIENT_API_BASE_URL``, then
     :data:`DEFAULT_RADIENT_API_BASE_URL`. That is the same rule
     :func:`get_env_config` already applies, so a caller cannot answer this
-    question a fourth way; the result is normalized because the value an
-    operator stores by hand is exactly where the version segment goes missing.
+    question a fourth way.
+
+    The version segment is completed at each of the two places a value is
+    PRODUCED — here for the configured one, and in :func:`get_env_config` for the
+    environment one — rather than at each consumer, which is what makes this the
+    whole answer for every surface. Normalizing only on this path left the CLI
+    on ``/v1`` and the server and desktop transport, which read
+    ``EnvConfig.radient_api_base_url`` directly, on the bare host: one
+    configuration, two destinations.
 
     Args:
         configured: An explicit base, or None to fall through to the environment.
@@ -79,7 +86,7 @@ def resolve_radient_api_base_url(configured: Optional[str] = None) -> str:
     """
     if configured:
         return normalize_radient_api_base_url(configured)
-    return normalize_radient_api_base_url(get_env_config().radient_api_base_url)
+    return get_env_config().radient_api_base_url
 
 
 @dataclass(frozen=True)
@@ -103,10 +110,21 @@ def get_env_config() -> EnvConfig:
     """
     Loads environment variables and returns an EnvConfig instance.
 
+    ``RADIENT_API_BASE_URL`` is normalized HERE, where the value is produced,
+    not at each consumer: the server routes, the desktop transport and the
+    speech/models clients all address ``EnvConfig.radient_api_base_url``
+    directly, so a hand-set bare host has to arrive at them already carrying the
+    ``/v1`` segment the hub's routes live under — the same completion
+    :func:`resolve_radient_api_base_url` applies to the configured value. Without
+    it one configuration resolved two destinations, working in the CLI and
+    404ing in the desktop transport.
+
     Returns:
         EnvConfig: The loaded environment configuration.
     """
     return EnvConfig(
-        radient_api_base_url=os.getenv("RADIENT_API_BASE_URL", DEFAULT_RADIENT_API_BASE_URL),
+        radient_api_base_url=normalize_radient_api_base_url(
+            os.getenv("RADIENT_API_BASE_URL", DEFAULT_RADIENT_API_BASE_URL)
+        ),
         radient_client_id=os.getenv("RADIENT_CLIENT_ID", "b0fd1aa8-05a2-4ca2-bac2-82db293e7584"),
     )

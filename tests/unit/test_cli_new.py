@@ -727,6 +727,109 @@ def test_agents_delete_command_not_found() -> None:
 # --- main() dispatch ------------------------------------------------------------
 
 
+class _FakeHub:
+    """The two hub calls ``agents push`` makes, and what the hub answered.
+
+    ``get_agent`` returning None IS the hub's 404 — the answer a LOCAL id gets,
+    because nothing aligns a local uuid with a hub listing id — so the create
+    branch is the ordinary outcome for ``--id``, not a corner.
+    """
+
+    def __init__(self) -> None:
+        self.existing: set[str] = set()
+        self.probe_error: Exception | None = None
+        self.overwrote: list[str] = []
+        self.created: list[str] = []
+
+    def get_agent(self, agent_id: str) -> dict[str, str] | None:
+        if self.probe_error is not None:
+            raise self.probe_error
+        return {"id": agent_id} if agent_id in self.existing else None
+
+    def overwrite_agent_in_marketplace(self, agent_id: str, zip_path: Path) -> None:
+        self.overwrote.append(agent_id)
+
+    def upload_agent_to_marketplace(self, zip_path: Path) -> str:
+        listing = f"hub-listing-{len(self.created) + 1}"
+        self.created.append(listing)
+        return listing
+
+
+def _push_fixture(tmp_home: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeHub, Any]:
+    """A real local registry row and a hub that records what it was asked to do."""
+    from pydantic import SecretStr
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.providers import radient_credentials
+
+    hub = _FakeHub()
+    monkeypatch.setattr("local_operator.clients.radient.RadientClient", lambda **kwargs: hub)
+    monkeypatch.setattr(
+        radient_credentials,
+        "resolve_radient_credential_sync",
+        lambda *args, **kwargs: SecretStr("k"),
+    )
+    registry = AgentRegistry(Path.home() / ".local-operator")
+    agent = registry.create_agent(AgentEditFields.model_validate({"name": "PushProbe"}))
+    return hub, agent
+
+
+def test_agents_push_by_id_reports_the_create_the_hub_performed(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The printed outcome follows the hub, not the flag that was typed.
+
+    ``--id`` is a LOCAL id and nothing makes it equal a hub listing id, so this
+    run creates a listing — and the branch used to test ``agent_id_to_overwrite``
+    instead of what the upload returned, printing "as overwrite" for a listing it
+    had just created without ever naming it. The user could not even find the
+    duplicate to delist.
+    """
+    hub, agent = _push_fixture(tmp_home, monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["program", "agents", "push", "--id", agent.id])
+
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert hub.created == ["hub-listing-1"]
+    assert "New agent ID: hub-listing-1" in out
+    assert "as overwrite" not in out
+
+
+def test_agents_push_by_id_reports_an_overwrite_only_when_one_happened(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The other direction of the same branch, with the hub really holding the id."""
+    hub, agent = _push_fixture(tmp_home, monkeypatch)
+    hub.existing.add(agent.id)
+    monkeypatch.setattr(sys, "argv", ["program", "agents", "push", "--id", agent.id])
+
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert hub.overwrote == [agent.id]
+    assert f"as overwrite to Radient (ID: {agent.id})" in out
+    assert "New agent ID" not in out
+
+
+def test_agents_push_fails_rather_than_publishing_a_duplicate(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A probe that could not answer must not resolve into a second listing.
+
+    "I could not tell whether this exists" is not "it does not exist": the run
+    stops with the real error instead of creating the duplicate the old code
+    created and then reported as an overwrite.
+    """
+    hub, agent = _push_fixture(tmp_home, monkeypatch)
+    hub.probe_error = RuntimeError('HTTP 500, Response Body: {"error":"boom"}')
+    monkeypatch.setattr(sys, "argv", ["program", "agents", "push", "--id", agent.id])
+
+    assert main() == 1
+    out = capsys.readouterr().out
+    assert "Error pushing agent to Radient" in out
+    assert "HTTP 500" in out
+    assert hub.created == []
+
+
 def test_main_exec_dispatch(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
