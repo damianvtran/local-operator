@@ -216,24 +216,26 @@ DEFAULT_DOCK_DENSITY = Density.FULL
 #: token is the one thing on the row that must always survive, because it is
 #: the ONLY cue the panel can be brought back (``todo_panel._footer`` rule).
 #: Counts of settled-quietly states go before the running count, and the
-#: failed count goes last because it is the reason the row re-emerged from
-#: ``hidden`` at all. The ``Subagents`` word goes before the numbers: on a
-#: 50-column terminal the reader can tell a row of ✗/⣾ counts from the todo
-#: list without the label, and cannot tell ``1 failed`` from nothing.
-#: ``paused`` sheds just before ``running`` and after every quietly-settled
-#: count: it is a state the user deliberately created and will come back to
-#: (its row now outlives the window), so it outranks the outcomes that merely
-#: happened — but a child working RIGHT NOW still outranks one deliberately
-#: stopped, and a failure still outranks both.
+#: failed count goes after it because it is the reason the row re-emerged from
+#: ``hidden`` at all. ``paused`` sheds just before ``running`` and after every
+#: quietly-settled count: it is a state the user deliberately created and will
+#: come back to (its row now outlives the window), so it outranks the outcomes
+#: that merely happened — but a child working RIGHT NOW still outranks one
+#: deliberately stopped, and a failure still outranks both. The ``label`` goes
+#: LAST (design round 1, D1): it names the LEVEL the counts belong to, and a
+#: shed count is re-readable by opening the page while an unnamed level is a
+#: caption that may be describing someone else's list — the exact reading the
+#: scope was added to make impossible. Below this row's floor the level name is
+#: still dropped, after every count has gone.
 _SUMMARY_SHED_ORDER = (
     "cancelled",
     "interrupted",
     "queued",
     "done",
-    "label",
     "paused",
     "running",
     "failed",
+    "label",
 )
 
 #: Eviction rank for the collapsed preview, lowest kept first. Running and
@@ -318,7 +320,31 @@ CHILDREN_MARKER = "⊞"
 #: scope, and the 9 of `HINT_GAP` + `ctrl+g` — inside the 58-cell dock
 #: :meth:`SubagentPanel._row_width` measured. The head of the label is what
 #: survives: two rounds of one review still read as the same review.
+#:
+#: IT IS A CEILING, NOT THE BUDGET (design round 1, D1). Twenty-four is sized
+#: against the 58-cell dock, so on its own it bounds the scope only from about
+#: 46 columns up and painted a 43-cell header into a 40-column terminal below
+#: that. The LIVE width is the budget: :func:`_scope_width` takes the smaller
+#: of the two, and drops the scope when what is left cannot name anything.
 SCOPE_CEILING = 24
+
+#: The dock's one key binding, spelled once because both captions charge its
+#: cells to the scope before the scope is truncated (:func:`_scope_width`).
+_HOTKEY = "ctrl+g"
+
+#: Cells ``Subagents of `` costs before the scope itself. Both captions name
+#: the level with these words, and both charge them to the row budget before
+#: the scope is measured, so the two cannot disagree about what is left.
+_SCOPE_CHROME = len("Subagents of ")
+
+#: Below this many cells there is nothing to name a level WITH: the truncation
+#: degrades to a bare `…`, or one letter beside it, while still costing the
+#: hint its cells — the worst of both. The scope is dropped instead, NEVER the
+#: hint: `ctrl+g` is the only way back out of the page, and it is the slot the
+#: scope would otherwise have consumed (design round 1, D1). Four holds a
+#: three-cell head plus the ellipsis, the shortest run that still reads as a
+#: name rather than as an ellipsis on its own.
+SCOPE_FLOOR = 4
 
 #: The widest a ROLE segment may be before it is truncated with the usual `…`.
 #:
@@ -365,6 +391,26 @@ CLOCK_CEILING = 6
 #: own ellipsis at the row's real edge, while an under-generous one would shed
 #: a segment the terminal had room for and then flicker it back on the resize.
 _DEFAULT_ROW_WIDTH = 120
+
+
+def _scope_width(available: int, *, hint_cells: int) -> int:
+    """Cells the scope may occupy inside ``available``, or ``0`` to drop it.
+
+    ``available`` is the row width the caption is being painted into and
+    ``hint_cells`` the cells the caller's own `ctrl+g` needs, separator
+    included — passed rather than read because the header pays
+    :data:`HINT_GAP` for it and the summary pays :data:`STATS_SEAM`, and both
+    must reserve the same hotkey.
+
+    The hint is charged FIRST, and that is the whole rule: the caption is the
+    only place `ctrl+g` can appear when the affordance row is not painted
+    (``hint = not self._affordance.display`` in ``_paint_header``), so a scope
+    that spends the hint's cells buys a name at the price of the way out.
+    """
+    room = available - _SCOPE_CHROME - hint_cells
+    if room < SCOPE_FLOOR:
+        return 0
+    return min(SCOPE_CEILING, room)
 
 
 def status_glyph(
@@ -1025,18 +1071,31 @@ def _lay_out(
         cost = "$—" if stats.billed else ""
     # The lineage mark rides the LABEL's own budget rather than a column of
     # its own: it is a fact about the name (`review-301-r2 ⊞3`), so it is
-    # appended BEFORE the truncation and yields with the name instead of
-    # adding a column to every row. It sits at the tail, so a squeezed row
-    # keeps the head of the name and loses the count — the number is
-    # re-derivable by opening the page, the name is not.
-    label = truncate_cells(
-        (
-            f"{facts.label} {CHILDREN_MARKER}{facts.child_count}"
-            if facts.child_count > 0
-            else facts.label
-        ),
-        budget if budget is not None else max(LABEL_FLOOR, width // 3),
-    )
+    # appended to the name instead of adding a column to every row.
+    #
+    # IT IS CHARGED TO THE BUDGET BEFORE THE NAME IS, and the name yields the
+    # cells (design round 1, D2). Building `name ⊞N` and truncating that
+    # positionally cut the mark and its digit off the tail — a 21-cell label
+    # kept its mark only from 76 columns and a 17-cell one only from 64, so
+    # below those widths a row with a whole level under it painted exactly the
+    # row a leaf paints, which is the one thing the mark exists to prevent,
+    # and the loss was a per-width cliff rather than a taper.
+    #
+    # That is the one trade :data:`LABEL_FLOOR` loses, and it loses it for a
+    # reason: a name cut short is legible AS cut, the `…` says the name
+    # continues, while a dropped mark is not legible at all — it states a
+    # different fact ("this child has no children"), and the reader's only way
+    # to falsify it is to open the page the mark was there to announce. The
+    # floor still protects the name against everything else: the reservation
+    # comes out of the rung's own ``label_budget``, so at the tightest rung the
+    # name keeps 9 of the floor's 12 cells and no marked row is wider than an
+    # unmarked one.
+    budget = budget if budget is not None else max(LABEL_FLOOR, width // 3)
+    if facts.child_count > 0:
+        mark = f" {CHILDREN_MARKER}{facts.child_count}"
+        label = truncate_cells(facts.label, budget - cell_len(mark)) + mark
+    else:
+        label = truncate_cells(facts.label, budget)
     head = (
         _CHROME_CELLS
         + max(cell_len(label), column)
@@ -1342,7 +1401,7 @@ def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -
 
 
 def _summary_segments(
-    counts: SummaryCounts, spinner_glyph: str, *, dropped: frozenset[str]
+    counts: SummaryCounts, scope: str, spinner_glyph: str, *, dropped: frozenset[str]
 ) -> list[tuple[str, str, str]]:
     """``(name, text, semantic ink)`` for every segment that survives ``dropped``.
 
@@ -1350,28 +1409,39 @@ def _summary_segments(
     at zero, and ``0 failed`` would spend the danger ink on good news). The
     spinner frame follows the running count so the count is what the eye
     reads first and the motion is what says it is still moving. When the
-    running COUNT is shed but children are still running, the frame stays as
-    a bare glyph: at the width that sheds it, the reader still needs to know
-    the panel is not describing a finished session. A count that is shed
-    while nonzero compresses to its glyph (``✗2``) for the same reason the
-    label is shed before it: the number carries the meaning, the word only
-    spells it.
+    running COUNT is shed and the level name has gone, the frame stays as a
+    bare glyph: at the width that sheds both, the reader still needs to know
+    the panel is not describing a finished session — while the name is still
+    painted the frame is not worth its cell, because the two compete for the
+    same one. A count that is shed while nonzero compresses to its glyph
+    (``✗2``) for the same reason the level name is shed before it: the number
+    carries the meaning, the word only spells it.
+
+    ``scope`` is already truncated for this width by :func:`compose_summary`,
+    and is empty on the root page. When it is set the label names the LEVEL
+    the counts beneath it belong to — the direct children of the page you have
+    open — rather than a bare ``Subagents`` over another level's numbers.
     """
     segments: list[tuple[str, str, str]] = []
     if "label" not in dropped:
-        segments.append(("label", "Subagents", "dim"))
+        segments.append(("label", f"Subagents of {scope}" if scope else "Subagents", "dim"))
     if counts.running:
-        if "running" in dropped:
-            segments.append(("running", spinner_glyph, "muted"))
-        else:
+        if "running" not in dropped:
             segments.append(("running", f"{counts.running} running {spinner_glyph}", "muted"))
+        elif "label" in dropped:
+            # The frame WITHOUT its count is the last representation of a live
+            # roster, so it is only worth its cells once the level name has
+            # gone: `⣾` says less than `Subagents of <level>` does, and at 40
+            # columns the two competed for the same cell and the glyph won the
+            # label's place (design round 1, D1).
+            segments.append(("running", spinner_glyph, "muted"))
     if counts.done and "done" not in dropped:
         segments.append(("done", f"{counts.done} done", "dim"))
     if counts.failed:
-        if "failed" in dropped:
-            segments.append(("failed", f"{GLYPH_FAILED}{counts.failed}", "danger"))
-        else:
+        if "failed" not in dropped:
             segments.append(("failed", f"{counts.failed} failed", "danger"))
+        elif "label" in dropped:
+            segments.append(("failed", f"{GLYPH_FAILED}{counts.failed}", "danger"))
     if counts.paused and "paused" not in dropped:
         segments.append(("paused", f"{counts.paused} paused", "muted"))
     if counts.queued and "queued" not in dropped:
@@ -1380,11 +1450,13 @@ def _summary_segments(
         segments.append(("cancelled", f"{counts.cancelled} cancelled", "dim"))
     if counts.interrupted and "interrupted" not in dropped:
         segments.append(("interrupted", f"{counts.interrupted} interrupted", "dim"))
-    segments.append(("hotkey", "ctrl+g", "muted"))
+    segments.append(("hotkey", _HOTKEY, "muted"))
     return segments
 
 
-def compose_summary(counts: SummaryCounts, *, spinner_glyph: str, width: int) -> Text:
+def compose_summary(
+    counts: SummaryCounts, *, spinner_glyph: str, width: int, scope: str = ""
+) -> Text:
     """The one-row summary the panel paints in :attr:`Density.SUMMARY`.
 
     ``Subagents · 1 running ⣾ · 3 done · 1 failed · ctrl+g``
@@ -1403,7 +1475,19 @@ def compose_summary(counts: SummaryCounts, *, spinner_glyph: str, width: int) ->
     the hotkey, and if even ``✗N · ctrl+g`` cannot fit the hotkey alone is
     painted and clipped by the renderer, which is the one case with nothing
     left to shed.
+
+    ``scope`` names the level the counts belong to (design round 1, D1). The
+    summary is the panel's ONLY representation once the roster has no row to
+    give — at 40x20 it painted a bare ``Subagents · 1 running ⣯ · ctrl+g``
+    over another level's counts, which is the unqualified word the scope
+    exists to qualify — so it is truncated here, against the same live width
+    as the full header, and the shed order keeps it while it drops counts: the
+    counts go, their bare glyphs included, before the level name does.
     """
+    # The hotkey's own cells come off the top, separator included, so the name
+    # yields before the way back out does — the rule `_scope_width` states.
+    scope_cells = _scope_width(width, hint_cells=cell_len(STATS_SEAM) + cell_len(_HOTKEY))
+    scope = truncate_cells(scope, scope_cells) if scope and scope_cells else ""
     inks = {
         name: Style(color=theme_mod.semantic_color(name)) for name in ("dim", "muted", "danger")
     }
@@ -1411,7 +1495,7 @@ def compose_summary(counts: SummaryCounts, *, spinner_glyph: str, width: int) ->
     # The widest frame is the reference so the choice is stable across frames.
     widest = max(SPINNER_FRAMES, key=cell_len)
     for _ in range(len(_SUMMARY_SHED_ORDER) + 1):
-        segments = _summary_segments(counts, widest, dropped=frozenset(dropped))
+        segments = _summary_segments(counts, scope, widest, dropped=frozenset(dropped))
         needed = sum(cell_len(text) for _name, text, _ink in segments)
         needed += cell_len(STATS_SEAM) * (len(segments) - 1)
         if needed <= width:
@@ -1420,7 +1504,7 @@ def compose_summary(counts: SummaryCounts, *, spinner_glyph: str, width: int) ->
         if not remaining:
             break
         dropped.add(remaining[0])
-    segments = _summary_segments(counts, spinner_glyph, dropped=frozenset(dropped))
+    segments = _summary_segments(counts, scope, spinner_glyph, dropped=frozenset(dropped))
     row = Text(no_wrap=True, overflow="ellipsis")
     for index, (_name, text, ink) in enumerate(segments):
         if index:
@@ -1702,7 +1786,7 @@ class SubagentPanel(Container):
         self._density_seeded: bool = False
         #: What the summary caption last painted, for its paint-once guard
         #: (counts + spinner frame). None until the summary has painted once.
-        self._summary_key: tuple[SummaryCounts, str] | None = None
+        self._summary_key: tuple[SummaryCounts, str, str, int] | None = None
         #: Memo for `_summary_counts_cached`: the ledger identity the counts
         #: were derived from, and the counts themselves. Keyed rather than
         #: invalidated because the caption is reached from every tick, and
@@ -2611,7 +2695,18 @@ class SubagentPanel(Container):
         # below needs it: opening or leaving a page moves neither the hint nor
         # the compact state, so a guard on those alone left the caption naming
         # the child the reader had just left.
-        scope = truncate_cells(self._selected_label, SCOPE_CEILING) if self._selected_label else ""
+        #
+        # Its BUDGET is the live row width, not `SCOPE_CEILING` alone (design
+        # round 1, D1). The constant is sized against the 58-cell dock, so below
+        # about 46 columns it bounded nothing: at 40x30 the header was 43 cells
+        # in a 45-cell region, `ctrl+g` sat in columns 38-43 and was therefore
+        # off screen, and the dock stopped following the terminal (panel width
+        # 45 at 40, 44 and 36 columns). `_scope_width` reserves the hint's cells
+        # first and drops the scope when what is left cannot name anything —
+        # the hint is the way back out of the page and outranks the name of it.
+        hint_cells = (cell_len(HINT_GAP) + cell_len(_HOTKEY)) if hint else 0
+        scope_cells = _scope_width(self._row_width(), hint_cells=hint_cells)
+        scope = truncate_cells(self._selected_label, scope_cells) if scope_cells else ""
         if (
             self._header_shown
             and not self._header_compact
@@ -2638,8 +2733,10 @@ class SubagentPanel(Container):
             # `HINT_GAP` to the `ctrl+g` below, which is a different KIND of
             # thing from the label (round 1, D3); the scope is neither, so it
             # borrows neither separator and the header invents no third.
-            # Bounded by :data:`SCOPE_CEILING` before it is painted, because
-            # the label is model-authored text and `#band` is content-sized.
+            # Bounded before it is painted, by the LIVE row width and not by
+            # :data:`SCOPE_CEILING` alone: the label is model-authored text and
+            # `#band` is content-sized, so an unmeasured scope paints the dock
+            # wider than the rows under it (see :func:`_scope_width`).
             header.append(f" of {scope}", style=muted)
         if hint:
             # A GAP, not `STATS_SEAM`. That ` · ` is the separator between
@@ -2649,7 +2746,7 @@ class SubagentPanel(Container):
             # has learned holds a statistic — it read as "Subagents, and also
             # ctrl+g" rather than "Subagents (press ctrl+g)" (round 1, D3).
             header.append(HINT_GAP, style=dim)
-            header.append("ctrl+g", style=muted)
+            header.append(_HOTKEY, style=muted)
         self._header.update(header)
 
     def _summary_counts_cached(self) -> SummaryCounts:
@@ -2720,21 +2817,30 @@ class SubagentPanel(Container):
         return bool(counts.running or counts.queued)
 
     def _paint_summary(self) -> None:
-        """Paint the one-row summary, once per (counts, spinner frame).
+        """Paint the one-row summary, once per (counts, glyph, scope, width).
 
         The guard is keyed on the counts tuple and the glyph, not on the
         density flag the old caption keyed on: a summary keyed on the flag
         alone painted once and then froze while children settled (design §8).
+        The SCOPE is in the key for the same reason the hint is in
+        ``_paint_header``'s: opening or leaving a page changes neither the
+        counts nor the glyph, so without it the caption kept naming the level
+        the reader had left. The WIDTH is in it because the scope is truncated
+        against it, so a resize that shortens the name has to repaint (design
+        round 1, D1).
         """
         counts = self._summary_counts_cached()
         glyph = SPINNER_FRAMES[self._spinner_index] if counts.running else ""
-        key = (counts, glyph)
+        width = self._row_width()
+        key = (counts, glyph, self._selected_label, width)
         if self._header_shown and self._header_compact and self._summary_key == key:
             return
         self._header_shown = True
         self._header_compact = True
         self._summary_key = key
-        self._header.update(compose_summary(counts, spinner_glyph=glyph, width=self._row_width()))
+        self._header.update(
+            compose_summary(counts, spinner_glyph=glyph, width=width, scope=self._selected_label)
+        )
 
     def summary_text(self) -> str:
         """The plain string the caption reads right now, for a test to assert."""

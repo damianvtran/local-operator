@@ -1204,7 +1204,8 @@ invocation that descends from an agent's bash tool call may not open a session,
 and the refusal states the rule — a session that HOLDS `task` delegates with it,
 and one that does not may not create subagents at all, does the work itself, and
 reports a genuine blocker with `hub` to the session that delegated to it. Work
-that belongs later goes in `wake`.
+that belongs later is not the child's to arm either — `wake` is pruned from
+EVERY child session — so it goes back to the session that delegated.
 
 WHO may delegate is the role's answer, never the depth's (operator, 2026-09-18).
 A subagent whose role allows delegation is expected to use `task` at any depth —

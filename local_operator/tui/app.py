@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping, MutableMapping, Sequence, Sized
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
@@ -26297,29 +26297,76 @@ class OperatorApp(App[None]):
     def _subagent_child_counts(self, jobs: Sequence[Any]) -> dict[str, int]:
         """Direct-child count per roster row, for the panel's ``⊞N`` mark.
 
-        Read from the SAME graph :meth:`_subagent_roster` walks, so a row's
-        mark and the roster the reader gets by drilling in cannot come from
-        two different trees — the count is a property of the graph, never of
-        the job row (``RowFacts.child_count``).
+        Read from the SAME graph :meth:`_subagent_roster` walks AND through the
+        SAME two resolvers, so a row's mark and the roster the reader gets by
+        drilling in cannot come from two different trees — the count is a
+        property of the graph, never of the job row (``RowFacts.child_count``).
+
+        THE WINDOW IS THE HALF THAT USED TO DISAGREE (review round 1, F1).
+        Resolving the node and stopping there counts every child the REGISTRY
+        still knows, while :meth:`_subagent_roster` additionally drops a row
+        whose job no longer resolves (``app.py``'s node loop) and one the
+        manager's ``retention_ms`` has released (:meth:`_within_roster_window`).
+        Counting verbatim therefore promised a level that opened EMPTY: with the
+        production default (5 min) and a settled child, the dock painted
+        ``Coordinate review ⊞1`` over a page whose roster resolved to ``[]``. A
+        mark is a promise about the PAGE, so the promise is computed with the
+        page's own filter — every child node resolved with
+        :meth:`_subagent_job`, skipped when it does not resolve, and put through
+        :meth:`_within_roster_window` before it is counted.
+
+        ONE pass over the graph, not one per row (review round 1, F2).
+        ``SubagentComms.children`` rebuilds every node per call
+        (``harness/comms.py``), so the per-row form was O(rows x nodes) and ran
+        from the 1 Hz poll and from every ``Subagent*`` handler — measured
+        **504 ms** for a single refresh at 500 rows / 6000 nodes on the real
+        follower facade, against **276 ms** for this one. ``nodes()`` is
+        grouped by ``parent_job_id`` ONCE here, and that predicate is what
+        ``children`` applies (both facades canonicalise a node's parent the same
+        way, and ``SubagentComms``'s alias table is already folded into
+        ``node.parent_job_id``). The grouping holds the NODE rather than a tally
+        so that F1's filter — which needs the resolved job — is applied per
+        roster row, and only to the children of rows actually listed: a page
+        deep in a large tree reads its own children, never the whole graph.
 
         Total and silent by design, because this runs from the 1 Hz poll and
         from every ``Subagent*`` handler: a host with no comms graph, or one
-        whose ``children`` is not callable, answers ``{}`` — i.e. no marks —
-        and a row that cannot be counted answers ``0``, which paints the same
-        nothing a leaf does. The alternative here is not a better mark but an
-        exception in a Textual message handler, for a decoration.
+        whose ``nodes`` is not callable, answers ``{}`` — i.e. no marks — and a
+        row that cannot be counted answers ``0``, which paints the same nothing
+        a leaf does. The alternative here is not a better mark but an exception
+        in a Textual message handler, for a decoration.
         """
         comms = getattr(self._session, "_subagent_comms", None)
-        children = getattr(comms, "children", None)
-        if not callable(children):
+        nodes = getattr(comms, "nodes", None)
+        if not callable(nodes):
             return {}
+        try:
+            buckets: dict[str, list[Any]] = {}
+            for node in cast(Sequence[Any], nodes()):
+                parent_id = str(getattr(node, "parent_job_id", "") or "")
+                if parent_id:
+                    buckets.setdefault(parent_id, []).append(node)
+        except Exception:  # noqa: BLE001 — a mark may not cost the band
+            return {}
+        manager = getattr(self._session, "jobs", None)
+        paused = paused_child_ids(comms)
         counts: dict[str, int] = {}
         for job in jobs:
             job_id = str(getattr(job, "id", "") or "")
             if not job_id:
                 continue
             try:
-                counts[job_id] = len(cast(Sized, children(job_id)))
+                # Resolved LAZILY, per roster row rather than per node in the
+                # graph: a page deep in a large tree reads its own children
+                # only, and `_subagent_job` is the roster's own resolver, whose
+                # follower form detaches a public job per call.
+                children = [
+                    child
+                    for node in buckets.get(job_id, ())
+                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or "")))
+                    is not None
+                ]
+                counts[job_id] = len(self._within_roster_window(children, manager, paused))
             except Exception:  # noqa: BLE001 — a mark may not cost the band
                 counts[job_id] = 0
         return counts

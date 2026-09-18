@@ -65,16 +65,8 @@ TOP-LEVEL conversation: an ordinary session directory with no `origin.json`, so
 desktop sidebar and the phone's history all offer it as their own work.
 
 ```
-exec failed: a `lop` invocation from inside an agent session cannot open one —
-the session it would start is a top-level conversation the operator never
-opened, listed in their session list and desktop sidebar as if they had, and
-running outside the job manager that lets this session see, steer, cancel and
-account for delegated work.
-Launch delegated work with the `task` tool. A session that does not hold
-`task` may not create subagents at all: do the work yourself, and say so with
-`hub` if the slice genuinely cannot be done alone — `hub` reaches the session
-that delegated to you and the brief travels in the message. Work that must
-happen later belongs in `wake`.
+exec failed: a `lop` invocation from inside an agent session cannot open one — the session it would start is a top-level conversation the operator never opened, listed in their session list and desktop sidebar as if they had, and running outside the job manager that lets this session see, steer, cancel and account for delegated work.
+Delegated work is launched with the `task` tool. A session that does not hold `task` may not create subagents at all: do the work yourself, and say so with `hub` if the slice genuinely cannot be done alone — `hub` reaches the session that delegated to you and the brief travels in the message. Work that must happen later is not yours to arm either — `wake` is pruned from every child session, this one included — so it belongs to the session that delegated to you.
 ```
 
 The incident this answers (2026-09-18): a subagent owed a review round on a PR,
