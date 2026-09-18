@@ -56,13 +56,22 @@ export LOP_BUILD_PREFIX="$ISO/next"
 
 cleanup() {
   # EXIT covers the normal paths; INT and TERM cover a runner that is stopped
-# while this is mid-flight, which is how two daemons from an earlier revision
+  # while this is mid-flight, which is how two daemons from an earlier revision
   # escaped with only `trap ... EXIT` (review round 2, MINOR-3).
-  kill -9 "$SERVE_PID" 2>/dev/null || true
-  kill -9 "$HOLDER" "$DIALLER" 2>/dev/null || true
+  #
+  # ``${VAR:-}`` AND NOT ``$VAR``: under `set -u` an unbound HOLDER or DIALLER
+  # aborted this function BEFORE the `rm -rf`, so a failure in the first ten lines
+  # of the script left both the daemon and the temp tree behind — which is how the
+  # strays escaped even after the trap was widened (review round 3, R3-3).
+  kill -9 "${SERVE_PID:-}" 2>/dev/null || true
+  kill -9 "${HOLDER:-}" "${DIALLER:-}" 2>/dev/null || true
   rm -rf "$ISO"
 }
-trap cleanup EXIT INT TERM
+# INT/TERM call the trap and then CONTINUE (bash runs the handler and resumes), so
+# the cleanup is followed by an explicit exit — otherwise an interrupted run
+# cleans up and then carries on asserting against a daemon it just killed.
+trap 'cleanup; exit 130' INT TERM
+trap cleanup EXIT
 
 "$PY" -m local_operator.cli serve --host 127.0.0.1 --port 0 > "$ISO/serve.log" 2>&1 &
 SERVE_PID=$!

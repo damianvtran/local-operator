@@ -3864,6 +3864,41 @@ def _print_current_generation() -> None:
         print(f"current install: {generation}")
 
 
+def _services_refusal() -> str | None:
+    """Why this process must not move the machine's services, or ``None``.
+
+    THE SAME TWO QUESTIONS :func:`_repair_refusal` ASKS before it rewrites a
+    plist, because moving a daemon onto a build is the same kind of act: it
+    changes which install a long-lived process runs.
+
+    1. **Is this an installation at all?** An editable or unknown install is
+       refused outright (review round 2, R2-1). A worktree venv once rewrote the
+       operator's four live plists to point at itself, and the same reasoning
+       applies to signalling the services those plists start.
+    2. **Is it the SAME installation the services already run?** (review round 3,
+       R3-2.) Asking only the first let a pip-installed `lop update` on this
+       machine reload the fleet the uv-tool install owns. Harmless in destination
+       — everything converges on the shared pointer — but not in authority, and a
+       spurious reload cuts the app's relay for nothing. A uv-tool caller IS the
+       interpreter `lop` runs from, so its ``sys.prefix`` resolves to the very
+       install root the pointer names; anything else is somebody else's daemon.
+    """
+    kind = install_kind()
+    if kind is not InstallKind.UV_TOOL:
+        return f"this install's kind is {kind.value}"
+    generation = current_generation()
+    if generation is None:
+        return "the install pointer names no build"
+    mine = Path(sys.prefix).resolve()
+    owner = _generation_install_root(generation).resolve()
+    if mine != owner:
+        return (
+            f"this process runs from {mine}, which is not the install the pointer "
+            f"names ({owner})"
+        )
+    return None
+
+
 def _services_stage(*, wait_s: float | None = None) -> None:
     """Bring the non-runtime fleet onto the build the pointer now names.
 
@@ -3882,27 +3917,31 @@ def _services_stage(*, wait_s: float | None = None) -> None:
     """
     from local_operator.services import print_refreshes, restart_services
 
-    # IS THIS AN INSTALLATION AT ALL? (review round 2, R2-1.) The same question
-    # `_repair_refusal` asks before it will touch the plists, and it is asked here
-    # for the same incident-shaped reason: a source checkout has no business
-    # moving the operator's services. Before the services stage existed this was
-    # unreachable by construction — a checkout that was behind hit
-    # `editable_refusal` above, and one that was not behind returned early — so
-    # wiring the stage to the "nothing to install" path is what opened it. The
-    # consequence was measured in review: an editable caller classifies EVERY
-    # daemon as stale (its `disk_build()` is None, and a comparison against an
-    # absent right-hand side is not a verdict) and signals the machine's fleet.
+    # IS THIS THE INSTALL THAT OWNS THEM? `_services_refusal` carries both halves
+    # and their reasoning. Before the services stage existed this was unreachable by
+    # construction — a checkout that was behind hit `editable_refusal` above, and
+    # one that was not behind returned early — so wiring the stage to the "nothing
+    # to install" path is what opened it. The consequence was measured in review:
+    # an editable caller classifies EVERY daemon as stale (its `disk_build()` is
+    # None, and a comparison against an absent right-hand side is not a verdict)
+    # and signals the machine's serve fleet.
     #
-    # `services.reload_serve_daemons` refuses on the same missing stamp, so this
-    # is the sentence rather than the fence — but the sentence is what an operator
-    # reads, and "a worktree bounced your mobile daemon" needs to be impossible to
-    # reach rather than merely survivable.
-    kind = install_kind()
-    if kind in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
+    # The plist half was never reachable this way: `_repair_refusal` already refuses
+    # an editable caller inside the refresh child, so the blast radius here is the
+    # SERVES — the part that had no guard at all (review round 3, R3-4: an earlier
+    # version of this comment listed the mobile daemon, the browser bridge and the
+    # tunnel too, and overclaimed).
+    #
+    # `services.reload_serve_daemons` refuses on the same missing stamp, so this is
+    # the sentence rather than the fence — but the sentence is what an operator
+    # reads, and "a worktree bounced your daemon" needs to be impossible to reach
+    # rather than merely survivable.
+    refusal = _services_refusal()
+    if refusal is not None:
         print(
-            f"warning: this install's kind is {kind.value}, so it does not own this "
-            "machine's services and none were moved; run `lop services status` to see "
-            "them, and run the update from the install that owns them",
+            f"warning: {refusal}, so it does not own this machine's services and none "
+            "were moved; run `lop services status` to see them, and run the update "
+            "from the install that owns them",
             file=sys.stderr,
         )
         return

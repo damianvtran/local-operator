@@ -296,6 +296,18 @@ class ReloadWatch:
         # what a reload is for. `to_thread` rather than a second loop: the body is
         # a single bounded subprocess call, so there is nothing to serialise.
         await asyncio.to_thread(_smoke, plan.interpreter)
+        # THE DRAIN DOES NOT COVER THAT AWAIT, SO IT IS RE-ASKED (review round 3,
+        # R3-1). Moving the smoke off the loop made the pre-exec phase longer than
+        # the wait that guards it, and the term the wait exists for — a runtime
+        # being SPAWNED, whose ~1.2 s handshake is the one cut this module calls
+        # unrecoverable — can begin inside that window. A first drain that returned
+        # at t=0 says nothing about t=0.3, so the predicate is asked again rather
+        # than assumed to still hold: the budget restarts, and a spawn that arrived
+        # in between is waited for on the same terms as one that was already there.
+        # It refuses rather than proceeds if the second budget expires, which is
+        # the fail-closed direction: staying on the loaded build costs a skew, and
+        # cutting a handshake costs a runtime.
+        await self.drain()
         logger.info(
             "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
             os.getpid(),
