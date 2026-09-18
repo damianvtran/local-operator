@@ -21,6 +21,32 @@ therefore owns ONE keep-alive client for the session and injects it here (and
 an injected client still works — it opens one for the call — which keeps the
 classes usable on their own in a diagnostic or a one-off script.
 
+HOW A LEG FINDS ITS CREDENTIAL
+===============================
+
+The order is the provider stack's, and it is the same for all three legs
+(:meth:`_HttpDecisionVendor._resolve_key`):
+
+1. **The ``AuthStore`` row for the provider** — ``auth.db``, read-only. This is
+   where an interactive login puts a key: ``ProviderController.login`` does
+   ``upsert_credential(store_credentials_as or provider_id, {"key": <pasted>,
+   "source": "login", "type": "api_key"})``. A leg that skipped this store
+   silently ignored ``lop login typesafe`` — the user saw "Stored API key" and
+   the classifier then fell through to the next leg, or to no vendor at all.
+2. **``CredentialManager.get_credential(<env key>)``** — the process environment
+   and the legacy ``credentials.env``. Still needed explicitly: the store's own
+   env tier reads only a provider's *single-string* ``env_keys``, so a tuple
+   like TypeSafe's ``("TYPESAFE_API_KEY", "JEV_API_KEY")`` is not covered there,
+   and neither is ``OPENROUTER_API_KEY_DEV``.
+3. **The vendor-specific alternates** — ``JEV_API_KEY`` for TypeSafe,
+   ``OPENROUTER_API_KEY_DEV`` behind the production key for OpenRouter.
+4. ``None`` — "this leg has no credential", which the cascade treats as "skip".
+
+``read_only=True`` for the same reason ``providers/radient_credentials.py`` uses
+it: a decorative classifier call must not block a credential, move account
+stickiness or decide routing. A required OAuth refresh still persists centrally
+inside the store, which is that account's own bookkeeping.
+
 CREDENTIALS ARE MEMOIZED WITH A SHORT TTL
 =========================================
 
@@ -73,6 +99,7 @@ from local_operator.classification.types import (
     Question,
 )
 from local_operator.clients._http import scrub_secrets
+from local_operator.providers.registry import get_provider_definition
 
 if TYPE_CHECKING:
     from local_operator.credentials import CredentialManager
@@ -381,6 +408,44 @@ def _probabilities(raw: Any) -> dict[str, float]:
     return out
 
 
+def storage_provider_id(provider: str) -> str:
+    """The provider id a pasted key is STORED under: ``store_credentials_as or id``.
+
+    Mirrors ``ProviderController.login`` (``providers/controller.py``), which
+    resolves the same expression before writing the row — deriving it rather than
+    hardcoding each name means an alias added to the registry (``xai-oauth``
+    stores under ``xai``) is honoured here without an edit. A provider id with no
+    registry row falls back to the id itself, so this leg behaves sensibly in a
+    tree where the registry entry has not landed yet.
+    """
+    definition = get_provider_definition(provider)
+    if definition is None:
+        return provider
+    return definition.store_credentials_as or definition.id
+
+
+async def auth_store_api_key(manager: "CredentialManager", provider: str) -> str | None:
+    """The ``AuthStore`` row a login wrote for ``provider``, or ``None``.
+
+    Read-only (see the module docstring), and every failure degrades to ``None``:
+    a corrupt or half-migrated ``auth.db``, or a network failure while refreshing
+    an expired grant, must land on "this tier said nothing" so the static tiers
+    below still get their turn. This layer is advisory; it may not fail a turn.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store: AuthStore | None = None
+    try:
+        store = AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
+        return await store.get_api_key(storage_provider_id(provider), read_only=True)
+    except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+        logger.warning("classification: %s auth store unavailable", provider, exc_info=True)
+        return None
+    finally:
+        if store is not None:
+            store.close()
+
+
 class _HttpDecisionVendor:
     """Shared wire behaviour; subclasses supply endpoint, model and credential.
 
@@ -391,6 +456,12 @@ class _HttpDecisionVendor:
     name: str = ""
     endpoint: str = ""
     default_model: str = ""
+    #: The provider whose login row this leg reads from ``auth.db``. Equals
+    #: :attr:`name` for all three legs; kept separate because they are different
+    #: vocabularies (a cascade id versus a provider id) that happen to coincide.
+    provider_id: str = ""
+    #: The env / ``credentials.env`` names to try after the store row, in order.
+    env_key_names: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -416,7 +487,20 @@ class _HttpDecisionVendor:
         self._key_expires_at = 0.0
 
     async def _resolve_key(self, manager: "CredentialManager") -> SecretStr | None:
-        raise NotImplementedError
+        """``AuthStore`` row → ``credentials.env``/env key → alternates → ``None``.
+
+        One implementation for all three legs because the order is the provider
+        stack's, not a per-vendor detail; the legs differ only in the ids and key
+        names they declare. See the module docstring for why each tier is needed.
+        """
+        stored = await auth_store_api_key(manager, self.provider_id)
+        if stored:
+            return SecretStr(stored)
+        for name in self.env_key_names:
+            value = manager.get_credential(name)
+            if value:
+                return value
+        return None
 
     async def credential(self, manager: "CredentialManager") -> SecretStr | None:
         """The bearer for this leg, memoized for :data:`CREDENTIAL_TTL_S`.
@@ -582,41 +666,17 @@ def _int(value: Any) -> int:
 
 
 class RadientVendor(_HttpDecisionVendor):
-    """Leg one: Radient's own route, billed to the signed-in Radient account."""
+    """Leg one: Radient's own route, billed to the signed-in Radient account.
+
+    The pattern the other two copy: the OAuth session (or a pasted key) lives in
+    the store, and ``RADIENT_API_KEY`` is only the static tier behind it.
+    """
 
     name = "radient"
     endpoint = RADIENT_ENDPOINT
     default_model = RADIENT_MODEL
-
-    async def _resolve_key(self, manager: "CredentialManager") -> SecretStr | None:
-        # The AuthStore tier comes FIRST, exactly as
-        # ``providers/radient_credentials.py`` resolves it, and ``read_only=True``
-        # for the same reason: a decorative classifier call must not move
-        # inference account stickiness or block a credential. A required refresh
-        # still persists centrally inside the store.
-        from local_operator.providers.auth_store import AuthStore
-
-        value: str | None = None
-        store: AuthStore | None = None
-        try:
-            store = AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
-            value = await store.get_api_key("radient", read_only=True)
-        except Exception:  # noqa: BLE001 — a leg that cannot resolve is simply not this leg
-            # Two failures land here and neither may propagate: an AuthStore that
-            # cannot be opened (a corrupt or half-migrated ``auth.db``) and a
-            # network failure while refreshing an expired OAuth grant. This
-            # whole layer is advisory, so a decision vendor being unreachable
-            # must degrade to the static tier and then to the next leg rather
-            # than fail a user's turn.
-            logger.warning("classification: radient auth store unavailable", exc_info=True)
-            value = None
-        finally:
-            if store is not None:
-                store.close()
-        if value:
-            return SecretStr(value)
-        fallback = manager.get_credential("RADIENT_API_KEY")
-        return fallback if fallback else None
+    provider_id = "radient"
+    env_key_names = ("RADIENT_API_KEY",)
 
 
 class TypeSafeVendor(_HttpDecisionVendor):
@@ -625,13 +685,11 @@ class TypeSafeVendor(_HttpDecisionVendor):
     name = "typesafe"
     endpoint = TYPESAFE_ENDPOINT
     default_model = TYPESAFE_MODEL
-
-    async def _resolve_key(self, manager: "CredentialManager") -> SecretStr | None:
-        for key_name in ("TYPESAFE_API_KEY", "JEV_API_KEY"):
-            value = manager.get_credential(key_name)
-            if value:
-                return value
-        return None
+    provider_id = "typesafe"
+    # ``JEV_API_KEY`` is the vendor's older name for the same credential (§3); it
+    # stays behind the current key so a machine carrying both uses the one the
+    # registry advertises.
+    env_key_names = ("TYPESAFE_API_KEY", "JEV_API_KEY")
 
 
 class OpenRouterVendor(_HttpDecisionVendor):
@@ -640,16 +698,11 @@ class OpenRouterVendor(_HttpDecisionVendor):
     name = "openrouter"
     endpoint = OPENROUTER_ENDPOINT
     default_model = OPENROUTER_MODEL
-
-    async def _resolve_key(self, manager: "CredentialManager") -> SecretStr | None:
-        # ``OPENROUTER_API_KEY_DEV`` is the documented second tier (§3) — a
-        # developer key, deliberately behind the production one so a machine
-        # that has both never spends the dev quota for real work.
-        for key_name in ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_DEV"):
-            value = manager.get_credential(key_name)
-            if value:
-                return value
-        return None
+    provider_id = "openrouter"
+    # ``OPENROUTER_API_KEY_DEV`` is the documented second tier (§3) — a developer
+    # key, deliberately behind the production one so a machine that has both
+    # never spends the dev quota for real work.
+    env_key_names = ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_DEV")
 
 
 #: The leg classes by name, so the cascade can build a pinned leg without a

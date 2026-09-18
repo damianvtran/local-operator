@@ -577,3 +577,155 @@ async def test_a_429_is_not_retried(manager) -> None:
         )
     assert caught.value.kind == "rate-limit"
     assert len(requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# Where the credential actually lives: the login row in auth.db comes FIRST
+#
+# ``ProviderController.login`` writes a pasted key into the AuthStore under the
+# provider id (``upsert_credential(store_credentials_as or provider_id, {"key":
+# <pasted>, "source": "login", "type": "api_key"})``). A leg that read only
+# ``CredentialManager`` — env and legacy ``credentials.env`` — ignored
+# ``lop login typesafe`` entirely, silently: the user saw "Stored API key" and
+# the classifier fell through to the next leg, or to no vendor at all.
+# ---------------------------------------------------------------------------
+
+
+def store_login_key(manager, provider: str, key: str, *, replace: bool = False) -> None:
+    """Write a pasted-key row EXACTLY as ``ProviderController.login`` writes it.
+
+    ``replace`` is how a ROTATION is expressed. The store resolves the first
+    login row it has for a provider, so a second ``upsert_credential`` for the
+    same provider adds a row that the resolver then ignores — that is the
+    provider stack's own behaviour (a re-login without an identity key leaves the
+    older row winning), not something this leg introduces, and it is why a test
+    that means "the key changed" must delete the old row rather than add one.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
+    try:
+        if replace:
+            for row in store.list_credentials():
+                if row.provider == provider:
+                    store.delete_credential(row.id)
+        store.upsert_credential(provider, {"key": key, "source": "login", "type": "api_key"})
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("provider", "vendor_class"),
+    [("typesafe", TypeSafeVendor), ("openrouter", OpenRouterVendor)],
+    ids=["typesafe", "openrouter"],
+)
+async def test_a_key_stored_by_login_is_used_when_no_env_key_exists(
+    bare_manager, provider: str, vendor_class: type
+) -> None:
+    """THE regression: nothing in the environment, everything in the store.
+
+    Before the fix this leg resolved ``None`` — the login row was invisible — and
+    the cascade either fell to a later leg or reported no vendor at all.
+    """
+    store_login_key(bare_manager, provider, f"{provider}-login-key")
+    vendor = vendor_class(bare_manager)
+    assert await credential_of(vendor, bare_manager) == f"{provider}-login-key"
+
+
+async def test_the_credential_manager_tier_still_answers(bare_manager) -> None:
+    """Regression guard for the env / ``credentials.env`` path, with the store empty."""
+    assert not (bare_manager.config_dir / "auth.db").exists()
+    bare_manager.set_credential("TYPESAFE_API_KEY", "env-key", write=False)
+    assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "env-key"
+    # A first resolve created the store; the assertion above only holds because
+    # nothing wrote a row into it.
+    assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "env-key"
+
+
+async def test_the_login_row_wins_over_the_environment_key(bare_manager) -> None:
+    """THE precedence rule: the store row first, the env tiers behind it.
+
+    Both are "the credential", and they disagree, so the order has to be stated
+    rather than left to whichever tier a reader happened to look at first: the
+    login row is the credential the operator actively stored in this harness,
+    while an exported variable is ambient and may belong to another tool.
+    """
+    store_login_key(bare_manager, "typesafe", "login-row-key")
+    bare_manager.set_credential("TYPESAFE_API_KEY", "env-key", write=False)
+    assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "login-row-key"
+
+    store_login_key(bare_manager, "openrouter", "login-row-key")
+    bare_manager.set_credential("OPENROUTER_API_KEY_DEV", "dev-env-key", write=False)
+    assert await credential_of(OpenRouterVendor(bare_manager), bare_manager) == "login-row-key"
+
+
+async def test_the_alternates_still_answer_behind_the_store_and_the_primary_env_key(
+    bare_manager,
+) -> None:
+    assert not (bare_manager.config_dir / "auth.db").exists()
+    bare_manager.set_credential("JEV_API_KEY", "jev-key", write=False)
+    assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "jev-key"
+
+
+async def test_a_login_stored_key_is_memoized_and_re_resolved_once_on_a_401(bare_manager) -> None:
+    """The store tier goes through the same memo and the same once-only retry.
+
+    The retry is proven to have RE-READ the store: the row is rotated between the
+    two attempts, and the second request's bearer is the rotated key.
+    """
+    store_login_key(bare_manager, "openrouter", "first-key")
+    resolves: list[int] = []
+    bearers: list[str] = []
+
+    class _Counting(OpenRouterVendor):
+        async def _resolve_key(self, manager):  # type: ignore[no-untyped-def]
+            resolves.append(1)
+            return await super()._resolve_key(manager)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bearers.append(request.headers["Authorization"])
+        if len(bearers) == 1:
+            store_login_key(bare_manager, "openrouter", "rotated-key", replace=True)
+            return httpx.Response(401, json={"error": {"message": "stale"}})
+        return json_response(
+            {"answers": {"recommend_skill": {"type": "choice", "choice": "minerva-deploy"}}}
+        )
+
+    vendor = _Counting(bare_manager, client=client_for(handler))
+    response = await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert response.answers["recommend_skill"].value == "minerva-deploy"
+    assert bearers == ["Bearer first-key", "Bearer rotated-key"]
+    assert len(resolves) == 2  # one initial + one re-resolve, never a loop
+
+    # The refreshed row is memoized: a third call resolves nothing new.
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert len(resolves) == 2
+    assert bearers[2] == "Bearer rotated-key"
+
+
+async def test_a_rotated_login_key_is_picked_up_after_the_ttl(bare_manager) -> None:
+    now = [0.0]
+    store_login_key(bare_manager, "typesafe", "old-row-key")
+    vendor = TypeSafeVendor(bare_manager, credential_ttl_s=300.0, clock=lambda: now[0])
+    assert await credential_of(vendor, bare_manager) == "old-row-key"
+
+    store_login_key(bare_manager, "typesafe", "new-row-key", replace=True)
+    now[0] = 299.0
+    assert await credential_of(vendor, bare_manager) == "old-row-key"
+    now[0] = 300.5
+    assert await credential_of(vendor, bare_manager) == "new-row-key"
+
+
+async def test_the_storage_id_follows_the_registrys_store_credentials_as(bare_manager) -> None:
+    """Derived, not hardcoded: a registry alias would otherwise be missed.
+
+    ``xai-oauth`` is the registry's own example (it stores under ``xai``), and
+    the login path resolves the same expression before writing.
+    """
+    from local_operator.classification.vendors import storage_provider_id
+
+    assert storage_provider_id("xai-oauth") == "xai"
+    assert storage_provider_id("openrouter") == "openrouter"
+    # A provider with no registry row degrades to its own id rather than raising,
+    # so this leg still works in a tree where the registry entry has not landed.
+    assert storage_provider_id("not-a-provider") == "not-a-provider"
