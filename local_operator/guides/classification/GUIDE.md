@@ -17,14 +17,16 @@ These may help with this request — read the ones that actually fit, ignore the
 ```
 
 The layer is ADVISORY: it may not gate a capability, it only adds resources (never
-removing one the embedder chose), and it never blocks a turn. Off, the prompt is
-byte-identical to the harness without it.
+removing one the embedder chose), and it never blocks a turn.
 
-## Turn it on
+## Turning it on and off
 
-Off by default, so an upgrade can never silently change behaviour or spend.
+ON by default since 2026-09-18: `values.classification.auto` ships `true`, so a stock
+install classifies without being asked. Turning it off is a real off — the prompt is
+byte-identical to a harness without the layer, and nothing from the package is imported:
 
 ```bash
+lop config edit classification.auto false
 lop config edit classification.auto true
 ```
 
@@ -37,7 +39,7 @@ the CLI spells it `classification.<key>`, which is what `lop config list` prints
 
 | key | default | what it changes |
 | --- | --- | --- |
-| `auto` | `false` | the master switch |
+| `auto` | `true` | the master switch |
 | `vendor` | `auto` | pin one leg: `radient`, `typesafe` or `openrouter` |
 | `model` | `""` | the leg's model id; empty uses the leg's own default |
 | `timeoutMs` | `1500` | the CALL's deadline, and the breaker's clock |
@@ -73,9 +75,11 @@ then start a new session.
 
 Measured against a real skill library, mostly on the OpenRouter leg:
 
-- **~$0.00006–$0.00018 per call** — the bill is input tokens, so it tracks the roster: an
-  isolated 14-candidate run measured $0.00006, and a full skill library ~$0.00018 (the
-  example below is one of those calls, at the low end);
+- **~$0.00006–$0.00018 per call** on the OpenRouter leg — the bill is input tokens, so it
+  tracks the roster: an isolated 14-candidate run measured $0.00006, and a full skill
+  library ~$0.00018 (the example below is one of those calls, at the low end). The
+  preferred Radient leg bills to your own account at its own rate (~$0.00003 per message
+  at catalogue scale, per the design doc);
 - **0.17–0.87 s** of the vendor's own model time: seven real calls on the OpenRouter leg,
   median ~0.51 s (`scripts/classification_latency_probe.py` re-measures this arm; the
   figure moves with the roster and the route);
@@ -111,10 +115,10 @@ recommendation (skipped=…)` (DEBUG) names why: `no-vendor` (no leg held a cred
 
 ## Troubleshooting
 
-1. **No suggestions.** Check `auto` is true and that a leg holds a credential
-   (`lop login-status`). An empty answer is not a failure — the block appears only when
-   the model actually picked something. And a session that started with no usable
-   credential keeps reporting `no-vendor`: log in, then **start a new session**.
+1. **No suggestions.** Check `auto` has not been switched off and that a leg holds a
+   credential (`lop login-status`). An empty answer is not a failure — the block appears
+   only when the model actually picked something. And a session that started with no
+   usable credential keeps reporting `no-vendor`: log in, then **start a new session**.
 2. **One leg misbehaving is survivable.** A leg answering 5xx or 429, or one whose key
    expired, does not break the layer — that call moves to the next leg and the layer
    reports the answer it got.

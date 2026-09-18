@@ -311,12 +311,12 @@ HINT_KEY_WIDTH_TIGHT = max(cell_len(key) for key, _ in HINTS) + 1
 #: have no second route. Do not read this as the bound being soft — a
 #: slash-command tip should still take a slot rather than add one.
 #:
-#: Seventeen from fifteen — the classification layer's switch and one of its
-#: logins; the pair's own comment on the pool carries the argument and the
-#: width budget. The same class of entry, second instance: the layer is off by
-#: default and silent in every state where it has nothing to say, so both facts
-#: are commands a user has to be told, not behaviour they can meet by
-#: experiment.
+#: Seventeen from fifteen — the classification layer's OFF switch and one of
+#: its logins; the pair's own comment on the pool carries the argument and the
+#: width budget. The same class of entry, second instance: the layer ships ON
+#: and spends per message while staying silent when it has nothing to say, so
+#: the one-line way to stop it and the credential a leg needs are commands a
+#: user has to be told, not behaviour they can meet by experiment.
 #:
 #: The original argument, which continues to hold: the pool is what a user
 #: meets a couple of
@@ -424,19 +424,20 @@ TIPS: tuple[str, ...] = (
     "/settings → Fork → Where a fork opens sets placement",
     "Under cmux, Where it opens sets workspace or surface",
     "lop detects terminal or multiplexer, then picks placement",
-    # The classification layer's two facts: how to turn it on and how to give
-    # one of its legs a credential. Appended at the END of the literal group
-    # rather than interleaved, so the pinned opening tip stays `TIPS[0]` and
-    # the placement cluster above keeps its ring positions.
+    # The classification layer's two facts: how to stop it and how to give one
+    # of its legs a credential. Appended at the END of the literal group rather
+    # than interleaved, so the pinned opening tip stays `TIPS[0]` and the
+    # placement cluster above keeps its ring positions.
     #
     # WHY THESE EARN A SLOT, by the test this pool is bounded for ("a further
-    # slash-command tip takes a slot rather than adding one"): the switch is OFF
-    # by default AND the layer is silent in every state where it has nothing to
-    # say — no credential, nothing picked, a skipped call are all the ordinary
-    # quiet cases — so a user who never opens `/settings` has no ambient route
-    # to either fact. The splash is the one surface every launch crosses, and
-    # these are the two things that have to be true before the feature can run
-    # at all.
+    # slash-command tip takes a slot rather than adding one"): the layer ships
+    # ON (`values.classification.auto`, true since 2026-09-18), it spends money
+    # and reads the roster on every user message, and it stays SILENT in every
+    # state where it has nothing to say — no credential, nothing picked, a
+    # skipped call are all the ordinary quiet cases. So using the app never
+    # teaches a user either fact: the one-line way to stop it, and the login a
+    # leg needs before it can serve at all. The splash is the one surface every
+    # launch crosses.
     #
     # Both are COMMANDS rather than descriptions, because the row is one line
     # and the cascade does not fit on it: the reasoning (three legs, which
@@ -455,7 +456,7 @@ TIPS: tuple[str, ...] = (
     # 60, and at 60 no tip row is drawn at all), and `len(TIPS)` sits exactly at
     # the ceiling `test_welcome.py` asserts. An entry that needs either budget
     # takes a slot from the pool rather than adding one.
-    "lop config edit classification.auto true adds smart hints",
+    "lop config edit classification.auto false turns hints off",
     "lop login <radient|typesafe|openrouter> enables hints",
     # The KEYED entries. Held as templates in the pool and substituted at
     # render (`_resolve_tip`), which is what keeps them true after a remap —
