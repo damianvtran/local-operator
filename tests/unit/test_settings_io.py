@@ -1965,3 +1965,57 @@ def test_parallel_is_a_providers_member(manager: ConfigManager) -> None:
 
     assert settings_io.validate(providers, ["parallel"]) is None
     assert settings_io.coerce(providers, "exa, parallel") == ["exa", "parallel"]
+# ---------------------------------------------------------------------------
+# Two rows whose answer is a PLATFORM question (B26 and D23).
+# ---------------------------------------------------------------------------
+
+
+def test_the_bash_shell_help_names_the_shell_this_os_falls_back_to() -> None:
+    """``/bin/sh`` cannot exist on Windows, so that row must not promise it (B26).
+
+    The row names a PATH, and the resolver behind it (``tools.builtin``, pinned
+    to this row by ``test_bash_shell_row_shares_the_consumer_path``) ends
+    somewhere different on each platform: ``/bin/sh`` on POSIX, a Git for Windows
+    ``bash.exe`` on Windows, and — with neither — a refusal with an install hint
+    rather than an execution in a dialect the tool does not advertise.
+    """
+    posix = settings_io._bash_shell_help(windows=False)
+    windows = settings_io._bash_shell_help(windows=True)
+
+    assert posix == "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
+    assert "/bin/sh" not in windows, "Windows has no /bin/sh to fall back to"
+    assert "bash.exe" in windows and "Git for Windows" in windows
+    assert "refuses" in windows, "the no-bash case is a refusal, not a fallback"
+
+    # The row itself carries this host's spelling, and only one of them.
+    assert settings_io._BASH_SHELL_HELP == settings_io._bash_shell_help(settings_io._IS_WINDOWS)
+    assert settings_io.BY_KEY["bash.shell"].help == settings_io._BASH_SHELL_HELP
+
+
+def test_a_windows_launcher_is_judged_by_what_windows_can_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.access(path, X_OK)`` is vacuous on Windows, so PATHEXT answers (D23).
+
+    The check it replaced was satisfied by ANY existing file, so a ``.txt`` or a
+    ``.ps1`` was accepted as a click launcher and the failure arrived later as an
+    unexplained refusal to launch. What Windows itself uses is the extension
+    list, plus the ``.exe`` ``CreateProcess`` appends to a name with none.
+    """
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    assert settings_io._windows_command_is_runnable(r"C:\tools\app.exe")
+    assert settings_io._windows_command_is_runnable(r"C:\tools\app.CMD")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\notes.txt")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\script.ps1")
+
+    # A name with no extension runs ``<name>.exe``, and only when that exists.
+    naked = tmp_path / "app"
+    assert not settings_io._windows_command_is_runnable(str(naked))
+    (tmp_path / "app.exe").write_text("", encoding="utf-8")
+    assert settings_io._windows_command_is_runnable(str(naked))
+
+    # PATHEXT is the user's own list, read rather than hardcoded.
+    monkeypatch.setenv("PATHEXT", ".PY")
+    assert settings_io._windows_command_is_runnable(r"C:\tools\tool.py")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\app.exe")

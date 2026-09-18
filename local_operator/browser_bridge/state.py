@@ -17,6 +17,7 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from local_operator import procstate
 from local_operator.paths import config_dir
 
 RUN_DIRNAME = "run/browser"
@@ -220,17 +221,14 @@ def read(
 
 
 def pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    """Whether some process still holds this pid.
+
+    Delegates to :func:`local_operator.procstate.pid_alive`, which asks the
+    right question per platform: `os.kill(pid, 0)` here would TERMINATE the
+    bridge daemon it is probing on Windows (signal 0 is `TerminateProcess`
+    there), and this decides whether the daemon's state file is trusted.
+    """
+    return procstate.pid_alive(pid)
 
 
 def heartbeat_age(current: HeartbeatStamp, *, now: float | None = None) -> float:

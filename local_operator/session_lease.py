@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
 
-from local_operator.procstate import is_zombie
+from local_operator.procstate import is_zombie, pid_liveness
 
 LEASE_NAME = ".execution-lease"
 MIRROR_NAME = ".session.pid"
@@ -72,31 +72,18 @@ def _pid_state(pid: int, *, check_zombie: bool = True) -> Literal["live", "dead"
     """
     if pid <= 0:
         return "uncertain"
-    if os.name == "nt":
-        # OpenProcess is the Windows liveness primitive. Access denial means the
-        # process may exist under another integrity level, so fail closed.
-        try:
-            import ctypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-            if handle:
-                kernel32.CloseHandle(handle)
-                return "live"
-            error = ctypes.get_last_error()
-            return "dead" if error == 87 else "uncertain"  # ERROR_INVALID_PARAMETER
-        except Exception:
-            return "uncertain"
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "dead"
-    except PermissionError:
-        # Another account's process. It cannot be a zombie of ours, and an
-        # unverifiable holder must never lose its claim: fail closed.
-        return "live"
-    except OSError:
+    # ONE PROBE, TWO PLATFORMS. `os.kill(pid, 0)` is a liveness question on
+    # POSIX and a KILL on Windows (signal 0 falls through to
+    # `TerminateProcess`), so the branch lives in `procstate.pid_liveness`
+    # rather than here — this module probes the owner of a transcript, and a
+    # probe that terminated that owner would destroy the very writer the lease
+    # exists to protect. `None` is "the platform could not prove it", which
+    # keeps its old "uncertain" meaning: uncertainty never permits theft.
+    live = pid_liveness(pid)
+    if live is None:
         return "uncertain"
+    if not live:
+        return "dead"
     if not check_zombie:
         # The caller is on a dense poll cadence and has already accepted that
         # it will wait; see the docstring. A zombie reads as live here.

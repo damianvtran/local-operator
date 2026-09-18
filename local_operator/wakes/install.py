@@ -9,17 +9,26 @@ persist has already succeeded by the time it runs, and nothing it does (or
 fails to do) may change that.
 
 The supervisor it installs is :mod:`local_operator.wakes.supervisor`, run as
-a LaunchAgent on macOS and shaped after ``local_operator.mobile.install``.
-``KeepAlive: {SuccessfulExit: False}`` is the load-bearing key: the
+a LaunchAgent on macOS, a ``systemd --user`` service on Linux and a Task
+Scheduler task on Windows, and shaped after ``local_operator.mobile.install``.
+``KeepAlive: {SuccessfulExit: False}`` is the load-bearing key on macOS: the
 supervisor exits 0 when the wake index empties, and that setting is what lets
-a FINISHED supervisor stay down while a CRASHED one restarts. The next
+a FINISHED supervisor stay down while a CRASHED one restarts. The same
+distinction is spelled ``Restart=on-failure`` in the systemd unit and is
+carried by ``RestartOnFailure`` plus the periodic trigger on Windows. The next
 persist calls this hook again and brings it back.
 
 Install-on-demand rather than install-at-setup, because the cost only makes
 sense once there is something to supervise: a user who never schedules a wake
-never gets the process. Linux has no installer here yet and reports
-``installed=False``; a session there keeps firing its own wakes in-process,
-which is what happened everywhere before this existed.
+never gets the process.
+
+**"No installer for this platform" and "wakes only fire while a session is
+open" used to be the answer on Linux and Windows, and that is the whole point
+of ``lop wake``.** Nothing ran when no TUI was open, so a scheduled wake fired
+only when a human next opened that session — silently, with no error anywhere.
+All three platforms now install a supervisor; :func:`is_supported` answers
+``False`` only where there is genuinely no user-level supervisor to install
+into (see :mod:`local_operator.supervisors`).
 
 **"Installed" now means RUNNING, and that change fixed a permanent miss.**
 The hook used to answer "is it installed?" with ``launchctl print`` returning
@@ -51,13 +60,13 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_operator import launchd, procname
+from local_operator import launchd, procname, supervisors
+from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.paths import config_dir as ambient_config_dir
 
 logger = logging.getLogger(__name__)
@@ -66,12 +75,52 @@ logger = logging.getLogger(__name__)
 #: supervised units read as siblings in ``launchctl list``.
 LABEL = "com.local-operator.wakes"
 
+#: Linux user unit and timer. Deliberately NOT suffixed per config root, for
+#: the same reason ``LABEL`` is not: the unit RECORDS the store it supervises in
+#: ``EnvironmentVariables``/``Environment=``, so a second store retargets the
+#: one supervised unit rather than shadowing it — exactly how the plist behaves.
+SYSTEMD_UNIT = "local-operator-wakes.service"
+SYSTEMD_TIMER = "local-operator-wakes.timer"
+
+#: Task Scheduler task name (Windows), same reasoning.
+TASK_NAME = "Local Operator wake supervisor"
+
 #: Reported when the platform has no installer this hook knows.
 UNSUPPORTED_REASON = "no supervisor installer for this platform"
 
 
 def plist_path() -> Path:
+    """Where THIS platform's supervisor registration lives.
+
+    Named for the launchd plist because that was the only platform it
+    addressed; what it means is "the registration file", and the three callers
+    that matter (this installer, ``uninstall``, and the ``lop wake status``
+    lines that report the path) all mean that too. On Windows Task Scheduler
+    keeps its registration in its own store — the registry — so the answer there
+    is the definition file this installer wrote, which exists exactly when we
+    registered a task.
+    """
+    kind = supervisors.supervisor()
+    if kind == supervisors.SYSTEMCTL:
+        return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+    if kind == supervisors.SCHTASKS:
+        return task_record_path(ambient_config_dir())
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+
+def systemd_timer_path() -> Path:
+    return supervisors.systemd_unit_path(SYSTEMD_TIMER)
+
+
+def task_record_path(config_dir: Path) -> Path:
+    """Our own copy of the task definition registered for ``config_dir``.
+
+    Task Scheduler stores its copy in the registry and ``schtasks /Query`` is
+    the authoritative question, so this is a RECORD: it makes "is anything
+    registered for this store, and with which command?" answerable without a
+    subprocess, and it is what ``plist_path()`` answers with on Windows.
+    """
+    return config_dir / "supervisor" / "wakes-task.xml"
 
 
 def log_path(config_dir: Path) -> Path:
@@ -104,7 +153,78 @@ SELF_HEAL_INTERVAL_S = 900
 
 
 def is_supported() -> bool:
-    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+    """Whether this machine has a user supervisor this hook can install into.
+
+    Binary-guarded, not platform-guarded (see :mod:`local_operator.supervisors`):
+    a Linux without systemd is a real machine with no user manager, and a
+    ``False`` here is what makes ``lop wake status`` say "wakes fire only while
+    a session is open" instead of pretending something supervises them.
+    """
+    return supervisors.supervisor() is not None
+
+
+def render_systemd(config_dir: Path) -> str:
+    """The Linux user unit — the ``KeepAlive`` contract, in systemd's words.
+
+    Three keys are load-bearing and each replaces one launchd setting:
+
+    * ``Restart=on-failure`` — the ``KeepAlive{SuccessfulExit: false}``
+      analogue, and NOT ``Restart=always``: the supervisor exits 0 when the
+      index empties, and that exit has to STICK or an empty-index machine runs
+      a supervisor forever.
+    * ``Environment=LOCAL_OPERATOR_CONFIG_DIR=`` — the plist's
+      ``EnvironmentVariables``: the store is part of the contract, so a second
+      profile (or a test) supervises its own store.
+    * the separate ``.timer`` (:func:`render_systemd_timer`) — the
+      ``StartInterval`` self-heal, which is the one repair that needs no live
+      caller.
+    """
+    image = procname.supervised_image() or Path(sys.executable)
+    return supervisors.render_systemd_unit(
+        description="Local Operator wake supervisor",
+        exec_start=f"{image} -m local_operator.wakes.supervisor",
+        post_lines=[
+            f"Environment=LOCAL_OPERATOR_CONFIG_DIR={config_dir}",
+            *supervisors.output_redirect_lines(log_path(config_dir)),
+        ],
+    )
+
+
+def render_systemd_timer() -> str:
+    """The ``.timer`` that re-runs the supervisor every ``SELF_HEAL_INTERVAL_S``.
+
+    ``OnUnitInactiveSec`` and not ``OnCalendar``: the semantic being reproduced
+    is launchd's ``StartInterval``, which (measured) does NOT start a second
+    instance while the job runs — it waits for the current one to exit.
+    ``systemd`` behaves the same way for an ``OnUnitInactiveSec`` timer, and the
+    timer is ``WantedBy=timers.target`` so enabling it is enough. The store lives
+    in the SERVICE unit, not here: the timer only decides when to start it.
+    """
+    return supervisors.render_systemd_timer(
+        description="Local Operator wake supervisor self-heal",
+        unit=SYSTEMD_UNIT,
+        interval_seconds=SELF_HEAL_INTERVAL_S,
+    )
+
+
+def render_task_xml(config_dir: Path) -> str:
+    """The Windows task: logon start, restart-on-failure, 15-minute self-heal.
+
+    ``interval_minutes`` is the ``StartInterval``/``OnUnitInactiveSec`` analogue
+    and is the reason the wake supervisor ports to Windows at all: a wake armed
+    on a machine where nothing is running needs a mechanism that does not depend
+    on a live caller.
+    """
+    image = procname.supervised_image() or Path(sys.executable)
+    return supervisors.render_task_xml(
+        description="Local Operator wake supervisor (fire due wakes)",
+        image=str(image),
+        argv=["-m", "local_operator.wakes.supervisor"],
+        environment={CONFIG_DIR_ENV: str(config_dir)},
+        log=log_path(config_dir),
+        interval_minutes=max(1, SELF_HEAL_INTERVAL_S // 60),
+        user_id=supervisors.current_user_id(),
+    )
 
 
 def _launchd_is_addressable() -> bool:
@@ -294,10 +414,15 @@ def supervisor_state(config_dir: Path) -> SupervisorState:
     :func:`ensure_supervisor_installed`), so a second subprocess here would be
     a cost paid by every scheduling operation on the machine.
     """
-    if not is_supported():
+    kind = supervisors.supervisor()
+    if kind is None:
         return SupervisorState(
             loaded=False, running=False, verifiable=False, detail=UNSUPPORTED_REASON
         )
+    if kind == supervisors.SYSTEMCTL:
+        return _systemd_supervisor_state(config_dir)
+    if kind == supervisors.SCHTASKS:
+        return _task_supervisor_state(config_dir)
     if not _launchd_is_addressable() or not _config_lives_in_real_home(config_dir):
         # Same two guards the installer uses to decide whether it may ACT;
         # asking is subject to them for the same reason, because the answer
@@ -315,6 +440,99 @@ def supervisor_state(config_dir: Path) -> SupervisorState:
         return SupervisorState(loaded=False, running=False, detail="not loaded")
     running, pid, detail = _parse_supervisor_state(result.stdout)
     return SupervisorState(loaded=True, running=running, pid=pid, detail=detail)
+
+
+#: ActiveState words that POSITIVELY mean "not serving", for the same
+#: asymmetric-cost reason as ``_STOPPED_STATES`` above, plus one MEASURED case:
+#: ``activating`` with ``auto-restart`` is what systemd shows while it retries a
+#: CRASHING unit (observed on a real systemd 255 crash loop), and a unit systemd
+#: is still retrying is not a supervisor that can fire a wake. A `start` on such
+#: a unit is a no-op — systemd merges the job into the pending one — so treating
+#: it as stopped costs nothing and stops a crash loop reading as "running".
+_SYSTEMD_STOPPED_STATES = frozenset({"inactive", "failed", "deactivating", "activating"})
+
+
+def _parse_systemd_state(stdout: str) -> SupervisorState:
+    """``SupervisorState`` from one ``systemctl --user show`` body.
+
+    Pure so the parse is testable against recorded systemctl output without a
+    subprocess. ``LoadState=not-found`` is the only honest "systemd has never
+    heard of this unit"; everything else it prints describes a unit it knows,
+    and a unit whose process exited 0 (the supervisor's self-retirement) is
+    exactly the ``loaded but not running`` state the installer has to repair.
+    """
+    fields: dict[str, str] = {}
+    for raw in stdout.splitlines():
+        key, _, value = raw.partition("=")
+        if key.strip():
+            fields[key.strip()] = value.strip()
+    active = fields.get("ActiveState", "").lower()
+    sub = fields.get("SubState", "")
+    main = fields.get("MainPID", "0")
+    pid = int(main) if main.isdigit() and main != "0" else None
+    detail = f"{active}/{sub}" if sub else active
+    if fields.get("LoadState", "") == "not-found":
+        return SupervisorState(loaded=False, running=False, detail="not loaded")
+    if active in _SYSTEMD_STOPPED_STATES:
+        return SupervisorState(loaded=True, running=False, detail=detail)
+    if active == "active" and pid is not None:
+        return SupervisorState(loaded=True, running=True, pid=pid, detail=detail)
+    # Unknown vocabulary: fail safe (see _SYSTEMD_STOPPED_STATES).
+    return SupervisorState(loaded=True, running=True, pid=pid, detail=detail or "unknown")
+
+
+def _systemd_supervisor_state(config_dir: Path) -> SupervisorState:
+    """The Linux probe: one ``systemctl --user show``.
+
+    A user manager that cannot be reached at all (no D-Bus, a plain SSH login
+    without lingering) is ``verifiable=False`` and NOT "not loaded" — the
+    difference matters, because the status surface renders the first as "cannot
+    be verified for this store" and the second as "nothing is installed", and
+    only one of those is actionable by installing something.
+    """
+    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT) or not _config_lives_in_real_home(
+        config_dir
+    ):
+        return SupervisorState(
+            loaded=False,
+            running=False,
+            verifiable=False,
+            detail="this store is outside the real home; the user manager cannot supervise it",
+        )
+    shown = supervisors.systemctl_user(
+        "show", "--property=LoadState,ActiveState,SubState,MainPID", SYSTEMD_UNIT
+    )
+    if shown.returncode != 0:
+        text = (shown.stderr or shown.stdout or "").strip()
+        if supervisors.is_bus_failure(text):
+            return SupervisorState(
+                loaded=False,
+                running=False,
+                verifiable=False,
+                detail=supervisors.translate_systemctl_error(text),
+            )
+        return SupervisorState(loaded=False, running=False, detail="not loaded")
+    return _parse_systemd_state(shown.stdout)
+
+
+def _task_supervisor_state(config_dir: Path) -> SupervisorState:
+    """The Windows probe: one ``schtasks /Query``.
+
+    ``running`` comes from Task Scheduler's own status word. No pid is available
+    through ``schtasks``, so ``pid`` stays ``None`` — reporting a guess would be
+    worse than reporting nothing, and the field is optional by design.
+    """
+    if not supervisors.task_scheduler_is_addressable(config_dir):
+        return SupervisorState(
+            loaded=False,
+            running=False,
+            verifiable=False,
+            detail="this store is outside the real profile; Task Scheduler cannot supervise it",
+        )
+    registered, running, detail = supervisors.task_state(TASK_NAME)
+    if not registered:
+        return SupervisorState(loaded=False, running=False, detail=detail or "not loaded")
+    return SupervisorState(loaded=True, running=running, pid=None, detail=detail or "ready")
 
 
 @dataclass(frozen=True)
@@ -343,12 +561,19 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
     - **Never raises.** The caller is the wake persist path; an installer
       failure is logged and reported through the outcome, never propagated.
       The persist has already succeeded and must stay succeeded.
-    - **Best-effort.** A platform with no installer (Linux without a service
-      manager the hook knows) reports ``installed=False`` and the session
-      carries on firing its own wakes in-process.
+    - **Best-effort.** A platform with no user-level supervisor at all (a
+      Linux without systemd, see :mod:`local_operator.supervisors`) reports
+      ``installed=False`` and the session carries on firing its own wakes
+      in-process. That is the only platform where a wake can sit unfired, and
+      the reason it is reported rather than passed over in silence.
     """
-    if not is_supported():
+    kind = supervisors.supervisor()
+    if kind is None:
         return InstallOutcome(installed=False, reason=UNSUPPORTED_REASON)
+    if kind == supervisors.SYSTEMCTL:
+        return _ensure_systemd_installed(config_dir)
+    if kind == supervisors.SCHTASKS:
+        return _ensure_task_installed(config_dir)
     try:
         wanted = render_plist(config_dir)
         path = plist_path()
@@ -464,6 +689,186 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
         return InstallOutcome(installed=False, reason=f"install failed: {exc}")
 
 
+def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
+    """The Linux arm of :func:`ensure_supervisor_installed`.
+
+    Same three properties as the launchd arm, in the same order, because they
+    are the contract rather than a launchd detail: idempotent by CONTENT (a unit
+    from an older build names a different interpreter or store), the file half
+    runs under a redirected home while the manager is only addressed when the
+    unit is the one the real home owns, and a loaded-but-dead unit is RESTARTED
+    rather than counted as installed. The systemd arm adds one thing the plist
+    has no analogue for: the ``.timer`` that re-runs the supervisor every
+    ``SELF_HEAL_INTERVAL_S``, which is what makes a wake armed on an otherwise
+    idle machine fire.
+    """
+    try:
+        wanted = render_systemd(config_dir)
+        unit = supervisors.systemd_unit_path(SYSTEMD_UNIT)
+        timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        log_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
+        addressable = supervisors.systemd_unit_is_addressable(
+            SYSTEMD_UNIT
+        ) and _config_lives_in_real_home(config_dir)
+        current = None
+        if unit.exists():
+            try:
+                current = unit.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                current = None
+        if current == wanted and not addressable:
+            return InstallOutcome(
+                installed=False,
+                reason="unit already written; the user manager is not addressable from here",
+            )
+        if current == wanted and addressable:
+            state = _systemd_supervisor_state(config_dir)
+            if state.running:
+                return InstallOutcome(installed=True, reason="already installed")
+            if state.loaded:
+                # The same repair the launchd arm makes with `kickstart -k`: the
+                # unit is right and systemd knows it, but the process exited
+                # (self-retirement on an empty index, or a crash). `start` on a
+                # known unit is the narrow operation; the timer would repair this
+                # within SELF_HEAL_INTERVAL_S anyway, but the wake is due now.
+                started = supervisors.systemctl_user("start", SYSTEMD_UNIT)
+                if started.returncode != 0:
+                    return InstallOutcome(
+                        installed=False,
+                        reason=(
+                            "supervisor was loaded but not running and could not be "
+                            f"restarted: {supervisors.translate_systemctl_error(started.stderr)}"
+                        ),
+                    )
+                logger.info("wake supervisor was loaded but not running; started it")
+                return InstallOutcome(installed=True, reason="restarted a stopped supervisor")
+        if addressable and not _config_lives_in_real_home(config_dir):
+            # The write half is the one that escapes: with the real HOME and a
+            # redirected config dir, `systemd_unit_path()` is the REAL
+            # `~/.config/systemd/user`, so a sandbox run would plant a unit in
+            # the operator's live user manager pointed at a store that vanishes
+            # with the sandbox. Same refusal, same reason, as the plist half.
+            return InstallOutcome(
+                installed=False,
+                reason=(
+                    "config dir is outside the real home; "
+                    "not writing into the real systemd user directory"
+                ),
+            )
+        unit.write_text(wanted, encoding="utf-8")
+        timer.write_text(render_systemd_timer(), encoding="utf-8")
+        if not addressable:
+            return InstallOutcome(
+                installed=False,
+                reason="unit written; the user manager is not addressable from here",
+            )
+        # Lingering BEFORE enable --now: without a user manager the enable fails
+        # with the bus error, and enabling linger is what spawns one. Best-effort,
+        # so a refusal does not fail the install.
+        supervisors.enable_linger()
+        supervisors.systemctl_user("daemon-reload")
+        # THREE calls, each doing one thing, none of them a duplicate of another:
+        #
+        # 1. enable the service — the `RunAtLoad` half, so it starts at login.
+        # 2. enable --now the TIMER — the `StartInterval` half: it re-runs the
+        #    service once it is no longer active, which is the self-heal that
+        #    needs no live caller. Enabling a timer does NOT enable the unit it
+        #    activates, which is why both are enabled.
+        # 3. start the service — because `enable --now <timer>` only schedules
+        #    the first fire (in SELF_HEAL_INTERVAL_S), and the wake that
+        #    triggered this install is due NOW. macOS gets this from
+        #    `bootstrap` running the job immediately; without step 3 a wake armed
+        #    on a freshly installed Linux would sit for a quarter of an hour.
+        supervisors.systemctl_user("enable", SYSTEMD_UNIT)
+        enabled = supervisors.systemctl_user("enable", "--now", SYSTEMD_TIMER)
+        if enabled.returncode:
+            return InstallOutcome(
+                installed=False,
+                reason=(
+                    "systemctl could not load the supervisor: "
+                    f"{supervisors.translate_systemctl_error(enabled.stderr)}"
+                ),
+            )
+        started = supervisors.systemctl_user("start", SYSTEMD_UNIT)
+        if started.returncode:
+            return InstallOutcome(
+                installed=False,
+                reason=(
+                    "the supervisor unit was registered but could not be started: "
+                    f"{supervisors.translate_systemctl_error(started.stderr)}"
+                ),
+            )
+        return InstallOutcome(installed=True, reason="installed")
+    except Exception as exc:  # noqa: BLE001 — NEVER raises: the persist already won
+        logger.debug("wake supervisor systemd install failed", exc_info=True)
+        return InstallOutcome(installed=False, reason=f"install failed: {exc}")
+
+
+def _ensure_task_installed(config_dir: Path) -> InstallOutcome:
+    """The Windows arm: register the task, or restart a stopped one.
+
+    Same contract as the other two arms, and one honest difference recorded here
+    rather than in a footnote: Task Scheduler publishes no pid, so "restarted a
+    stopped supervisor" is decided by the task's own status word plus the
+    trigger, not by an observed process.
+    """
+    try:
+        wanted = render_task_xml(config_dir)
+        record = task_record_path(config_dir)
+        if not supervisors.task_scheduler_is_addressable(config_dir):
+            return InstallOutcome(
+                installed=False,
+                reason=(
+                    "config dir is outside the real profile; "
+                    "not registering a scheduled task for it"
+                ),
+            )
+        current = None
+        if record.exists():
+            try:
+                current = record.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                current = None
+        if current == wanted:
+            registered, running, detail = supervisors.task_state(TASK_NAME)
+            if registered and running:
+                return InstallOutcome(installed=True, reason="already installed")
+            if registered:
+                started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+                if started.returncode != 0:
+                    return InstallOutcome(
+                        installed=False,
+                        reason=(
+                            "supervisor task was registered but not running and could not be "
+                            f"started: {((started.stderr or started.stdout) or '').strip()[:200]}"
+                        ),
+                    )
+                logger.info("wake supervisor task was registered but not running; started it")
+                return InstallOutcome(installed=True, reason="restarted a stopped supervisor")
+            logger.debug("wake supervisor task is gone (%s); registering it again", detail)
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(wanted, encoding="utf-8")
+        ok, detail = supervisors.create_task(TASK_NAME, wanted)
+        if not ok:
+            return InstallOutcome(
+                installed=False, reason=f"schtasks could not register the supervisor: {detail}"
+            )
+        started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+        if started.returncode != 0:
+            return InstallOutcome(
+                installed=False,
+                reason=(
+                    "the supervisor task was registered but could not be started: "
+                    f"{((started.stderr or started.stdout) or '').strip()[:200]}"
+                ),
+            )
+        return InstallOutcome(installed=True, reason="installed")
+    except Exception as exc:  # noqa: BLE001 — NEVER raises: the persist already won
+        logger.debug("wake supervisor task install failed", exc_info=True)
+        return InstallOutcome(installed=False, reason=f"install failed: {exc}")
+
+
 def refresh_plist_if_stale() -> launchd.PlistRefresh:
     """Rewrite the supervisor's plist when an older build wrote it.
 
@@ -479,7 +884,18 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
     """
     name = "wakes supervisor"
     try:
-        if not is_supported():
+        kind = supervisors.supervisor()
+        if kind != supervisors.LAUNCHCTL:
+            # NOT "the unit is re-read on every start": systemd caches a unit's
+            # definition until `daemon-reload`, and it is this installer's own
+            # `daemon-reload` at install time that refreshes it. What makes the
+            # omission harmless here is narrower, and true: the systemd unit and
+            # the Windows task both name `procname.supervised_image()` — the shim
+            # that resolves the pointer at exec — so there is no stale
+            # INTERPRETER PATH for a rewrite to fix. A refresh for the other two
+            # platforms needs its own decision (the upgrade path that calls this
+            # only walks LaunchAgents), not a plist function stretched to cover
+            # them.
             return launchd.PlistRefresh(name=name, kind="unsupported")
         path = plist_path()
         if not _launchd_is_addressable():
@@ -525,8 +941,29 @@ def _is_loaded(config_dir: Path) -> bool:
 
 def uninstall() -> InstallOutcome:
     """Remove the supervisor. Used by ``lop wake status --uninstall`` and tests."""
-    if not is_supported():
+    kind = supervisors.supervisor()
+    if kind is None:
         return InstallOutcome(installed=False, reason=UNSUPPORTED_REASON)
+    if kind == supervisors.SYSTEMCTL:
+        unit = supervisors.systemd_unit_path(SYSTEMD_UNIT)
+        timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
+        if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+            # The timer first: disabling the service alone leaves a timer that
+            # starts it again, which is the opposite of an uninstall.
+            supervisors.systemctl_user("disable", "--now", SYSTEMD_TIMER)
+            supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
+        try:
+            unit.unlink(missing_ok=True)
+            timer.unlink(missing_ok=True)
+        except OSError as exc:
+            return InstallOutcome(installed=False, reason=f"could not remove the unit: {exc}")
+        return InstallOutcome(installed=False, reason="uninstalled")
+    if kind == supervisors.SCHTASKS:
+        ok, detail = supervisors.delete_task(TASK_NAME)
+        if not ok:
+            return InstallOutcome(installed=False, reason=f"could not remove the task: {detail}")
+        task_record_path(ambient_config_dir()).unlink(missing_ok=True)
+        return InstallOutcome(installed=False, reason="uninstalled")
     path = plist_path()
     if _launchd_is_addressable():
         _launchctl("bootout", _domain(), str(path))

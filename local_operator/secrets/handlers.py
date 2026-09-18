@@ -596,7 +596,10 @@ def _status(args: argparse.Namespace) -> int:
     implying a vault.
     """
     from local_operator.secrets.client import broker_status
-    from local_operator.secrets.keys import key_of_record_inconsistency
+    from local_operator.secrets.keys import (
+        at_rest_protection_note,
+        key_of_record_inconsistency,
+    )
 
     directory = secrets_dir()
     mode = key_mode()
@@ -638,6 +641,11 @@ def _status(args: argparse.Namespace) -> int:
         "broker_pid": (broker or {}).get("pid"),
         "broker_locked": (broker or {}).get("locked"),
         "key_inconsistency": inconsistency,
+        # Present only where the POSIX mode bits are not the protection (D9),
+        # and in the machine-readable payload as well as the prose: a script
+        # auditing a store should not have to grep the human text to learn that
+        # the mode it just read means nothing on this platform.
+        "at_rest_protection": at_rest_protection_note(),
     }
     if store is not None:
         payload["secrets"] = len(store.list())
@@ -656,6 +664,8 @@ def _status(args: argparse.Namespace) -> int:
 
     print(f"directory   {payload['directory']}")
     print(f"key mode    {mode}")
+    if payload["at_rest_protection"] is not None:
+        print(f"NOTE        {payload['at_rest_protection']}")
     if inconsistency is not None:
         print(f"WARNING     {inconsistency}")
     if broker is None:
@@ -867,9 +877,29 @@ def _harden(args: argparse.Namespace) -> int:
     from local_operator.secrets.keys import assert_key_of_record_invariant
     from local_operator.secrets.keys import key_mode as current_mode
     from local_operator.secrets.keys import key_of_record_inconsistency, wrap_master_key
+    from local_operator.secrets.peer import broker_unsupported_reason
 
     if current_mode() == "passphrase":
         _err("This store is already hardened. Use `lop secret unlock` to unlock it.")
+        return 2
+    # **The destructive step is refused where the broker cannot run.** `harden`
+    # deletes the plaintext master key and leaves the scrypt-wrapped copy to the
+    # broker, which is the ONLY code that can unwrap it (`keys.unwrap_master_key`
+    # is called from nowhere else). Where peer authentication is not implemented
+    # the broker refuses every caller (peer.PEER_AUTHENTICATION_SUPPORTED), so
+    # proceeding would delete the last key that opens this store and leave a
+    # wrapped file no reachable code path can open — unrecoverable data loss for
+    # a verb that would otherwise report success. Checked BEFORE the passphrase
+    # is read, so nobody types one for a change that is not going to happen.
+    refusal = broker_unsupported_reason()
+    if refusal is not None:
+        _err(
+            f"Cannot harden this store: {refusal}\n"
+            "Hardening removes the plaintext master key from disk, and only the broker "
+            "can unwrap what replaces it — so on this platform it would destroy the only "
+            "key that opens this store. Nothing has changed and the store keeps working "
+            "in keyfile mode."
+        )
         return 2
     repairing = key_of_record_inconsistency() is not None
     if repairing:
@@ -907,6 +937,7 @@ def _unlock(args: argparse.Namespace) -> int:
     """
     from local_operator.secrets.client import ensure_broker, unlock
     from local_operator.secrets.keys import key_mode as current_mode
+    from local_operator.secrets.peer import broker_unsupported_reason
 
     if current_mode() != "passphrase":
         _err(
@@ -915,7 +946,15 @@ def _unlock(args: argparse.Namespace) -> int:
         )
         return 2
     if not ensure_broker(None):
-        _err("Could not start the secret broker, so there is nowhere to hold the unlocked key.")
+        # On a platform with no peer-identity probe that is by design, not a
+        # failure, so the platform sentence replaces the generic one. Reached
+        # only by a store hardened elsewhere and copied here (harden itself
+        # refuses there), which is exactly the case where the operator needs to
+        # be told the tier is out of reach rather than that a start failed.
+        _err(
+            broker_unsupported_reason()
+            or "Could not start the secret broker, so there is nowhere to hold the unlocked key."
+        )
         return 2
     unlock(_read_passphrase("Passphrase for the secret store: "))
     # **The grant is stated at the moment it starts applying (review R9).** The
@@ -989,12 +1028,20 @@ def _broker(args: argparse.Namespace) -> int:
     """``lop secret broker {status,start,stop,restart,run}``."""
     from local_operator.secrets import broker as broker_module
     from local_operator.secrets import client
+    from local_operator.secrets.peer import broker_unsupported_reason
 
     command = getattr(args, "broker_command", None) or "status"
 
     if command == "run":
         # Foreground, for debugging. The normal path is the lazy start in
         # client.ensure_broker; this exists so an operator can watch one.
+        # Refused here rather than left to `Broker.start`, so the operator gets
+        # the platform sentence on stderr instead of a traceback out of a
+        # daemon entry point.
+        refusal = broker_unsupported_reason()
+        if refusal is not None:
+            _err(refusal)
+            return 2
         return broker_module.run_broker()
 
     if command == "start":
@@ -1010,7 +1057,10 @@ def _broker(args: argparse.Namespace) -> int:
             status = client.broker_status(None) or {}
             _err(f"secret broker running (pid {status.get('pid', '?')})")
             return 0
-        _err("Could not start the secret broker.")
+        # On a platform with no peer-identity probe `ensure_broker` returns
+        # False by design, so say WHY here: "Could not start" alone reads as a
+        # broken install rather than as "this tier is not available here".
+        _err(broker_unsupported_reason() or "Could not start the secret broker.")
         return 2
 
     if command in ("stop", "restart"):
@@ -1027,7 +1077,7 @@ def _broker(args: argparse.Namespace) -> int:
             status = client.broker_status(None) or {}
             _err(f"secret broker restarted (pid {status.get('pid', '?')})")
             return 0
-        _err("Could not start the secret broker.")
+        _err(broker_unsupported_reason() or "Could not start the secret broker.")
         return 2
 
     status = client.broker_status(None)

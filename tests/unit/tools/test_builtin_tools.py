@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from local_operator import imaging
+from local_operator import imaging, procstate
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -369,6 +369,111 @@ def test_resolve_bash_shell_expands_a_tilde(monkeypatch) -> None:
     monkeypatch.setenv("HOME", "/home/tester")
     assert builtin.resolve_bash_shell("~/bin/bash") == "/home/tester/bin/bash"
     assert builtin.resolve_bash_shell("  ~/bin/bash  ") == "/home/tester/bin/bash"
+
+
+# -- Windows: there is no /bin/sh, so the last resort must be found or refused --
+
+
+def _as_windows_without_bash(monkeypatch, tmp_path, *, program_files: Path | None = None) -> None:
+    """A Windows host with no ``bash`` on PATH and no OTHER source of one."""
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: None)
+    # The platform fact has one home (`procstate._PLATFORM`), which every
+    # Windows branch in the package — this module's included — reads.
+    monkeypatch.setattr(procstate, "_PLATFORM", "win32")
+    monkeypatch.setenv("ProgramFiles", str(program_files if program_files else tmp_path / "pf"))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+
+def test_resolve_bash_shell_finds_git_bash_where_which_cannot(monkeypatch, tmp_path) -> None:
+    r"""A Windows host that HAS bash still missed `shutil.which`.
+
+    Git for Windows' default PATH option installs ``...\Git\cmd``, which has no
+    ``bash.exe`` inside it — so the resolver has to look in the install tree
+    itself, or a machine with a perfectly good bash falls through to a Unix path
+    Windows cannot execute.
+    """
+    program_files = tmp_path / "pf"
+    git_bash = program_files / "Git" / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+    _as_windows_without_bash(monkeypatch, tmp_path, program_files=program_files)
+
+    assert builtin.resolve_bash_shell(None) == str(git_bash)
+    # The configured override still wins over the search, on every platform.
+    assert builtin.resolve_bash_shell("C:/other/bash.exe") == "C:/other/bash.exe"
+
+
+def test_resolve_bash_shell_last_resort_on_windows_is_the_posix_sentinel(
+    monkeypatch, tmp_path
+) -> None:
+    """With no bash anywhere it returns `/bin/sh` as a SENTINEL, not as a plan.
+
+    The spawn path refuses on it (see the tool-level test below): guessing
+    ``cmd.exe`` here would make this tool execute every command in a language it
+    does not advertise, which is the silent wrong answer the refusal replaces.
+    """
+    _as_windows_without_bash(monkeypatch, tmp_path)
+    assert builtin.resolve_bash_shell(None) == builtin.BASH_SHELL_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_bash_refuses_legibly_when_windows_has_no_bash(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """Before this, every call on such a host failed with `cannot execute
+    '/bin/sh'` under a ``FileNotFoundError`` — naming a path the user never
+    chose and prescribing `clear it to auto-resolve bash on PATH`, which on
+    Windows is the thing that just failed."""
+    _as_windows_without_bash(monkeypatch, tmp_path)
+    # `bash.shell` unset: this is the auto-resolve path a fresh install takes.
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value("bash", {"shell": ""})
+
+    spawns: list[tuple[object, ...]] = []
+
+    async def _never_spawn(*args, **kwargs):
+        spawns.append(args)
+        raise AssertionError("the refusal must come before any spawn")
+
+    monkeypatch.setattr(builtin.asyncio, "create_subprocess_exec", _never_spawn)
+
+    result = await _call(tools, "bash", {"command": "echo hi"}, context)
+
+    assert result.is_error is True
+    assert "no bash on this Windows host" in result.text
+    assert "Git for Windows" in result.text
+    assert "bash.shell" in result.text  # names the key that changes the answer
+    assert spawns == []
+
+
+@pytest.mark.asyncio
+async def test_bash_kill_path_goes_through_the_shared_platform_helper(
+    tools, context, monkeypatch
+) -> None:
+    """The timeout/abort teardown must not name `os.killpg`/`signal.SIGKILL`.
+
+    Neither exists on Windows, so the first attribute lookup raised
+    ``AttributeError`` out of the tool — on the stop paths, with the spawned tree
+    still alive. ``procstate.terminate_process_tree`` is the one implementation;
+    on POSIX it is the ``killpg(getpgid(pid), SIGKILL)`` this used to do inline
+    (pinned by the descendant tests above).
+    """
+    calls: list[tuple[int, bool]] = []
+
+    def _record(pid: int, *, force: bool = False) -> bool:
+        calls.append((pid, force))
+        return True
+
+    monkeypatch.setattr(builtin, "terminate_process_tree", _record)
+
+    result = await _call(tools, "bash", {"command": "sleep 5", "timeout": 0.2}, context)
+
+    assert "TIMEOUT" in result.text
+    assert calls, "the timeout path never reached the kill helper"
+    assert all(force is True for _pid, force in calls)
 
 
 def _set_configured_shell(monkeypatch, tmp_path, value: str):
