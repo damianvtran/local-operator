@@ -2996,6 +2996,16 @@ class ServingSessionHandle(SessionHandle):
         sessions` and sorts it first in the picker, and the notification tells
         the user out of band. A parked gate nobody can see is a process nobody
         can find.
+
+        THE DURABLE HALF RUNS EVEN WHEN NOTIFICATIONS ARE OFF, and the OS half
+        does not. A silenced process is a test surface (see
+        ``tui.notify.suppress_notifications_for_process``), and a test surface
+        still owes the honest record — ``pending`` is what keeps a parked gate
+        findable in `lop sessions`, and it is read by the operator's own tooling
+        and by every later assertion about the session's state. What is skipped
+        is the out-of-band leg: the routing probe over watching surfaces, the
+        desktop-presence read and the composition, all of which exist only to
+        decide whether to put a banner on somebody's screen.
         """
         # Remembered so a later detach can re-run this decision (B2). Held
         # until the gate settles, which is the only point the question stops
@@ -3008,6 +3018,14 @@ class ServingSessionHandle(SessionHandle):
                 setter(kind)
             except Exception:  # noqa: BLE001
                 logger.debug("could not publish the pending state", exc_info=True)
+        from local_operator.tui.notify import notifications_enabled
+
+        if not notifications_enabled():
+            # `notifications_enabled` reads the process environment fresh, so a
+            # kill switch turned on mid-run (a session that just switched to the
+            # mock hosting) silences a gate that parks afterwards — and
+            # `reannounce_pending` on a detach re-reads it the same way.
+            return
         # ROUTE TO WHATEVER IS WATCHING; fall out to the OS only when nothing
         # is. The old test was `attached_clients() > 0`, which counts only
         # terminals — so a user whose PHONE was watching got a desktop toast
@@ -3296,8 +3314,23 @@ class ServingSessionHandle(SessionHandle):
         exception escape past the release branch, which left exactly that
         watermark behind for a banner that was never raised — the worst of both
         outcomes, since the completion was neither announced nor left claimable.
+
+        A SILENCED PROCESS DOES NOT CLIMB THE LADDER AT ALL, and it returns
+        SETTLED rather than DEFERRED. Checking this first is what stops a
+        mock-hosting runtime from taking a delivery claim and releasing it
+        every turn — a write and an un-write in the operator's attention store
+        per turn, for a banner that would never be raised (the claim is a
+        watermark asserting "somebody was told"; nobody was). SETTLED is the
+        honest outcome: nothing is owed TO THIS PROCESS. Nothing is lost
+        either, because the durable unseen mark is untouched, so any surface
+        that still delivers — a TUI, a desktop app — reads the same state and
+        raises its own banner.
         """
         try:
+            from local_operator.tui.notify import notifications_enabled
+
+            if not notifications_enabled():
+                return _ANNOUNCE_SETTLED
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.
                 return _ANNOUNCE_DEFERRED

@@ -171,6 +171,59 @@ _AMBIENT_VARS = (
     "HF_TOKEN",
 )
 
+#: The two escape hatches that keep a test from reaching the developer's real
+#: DESKTOP, set in the PROCESS environment at import time as well as per test by
+#: ``isolate_environment``.
+#:
+#: WHY BOTH. ``monkeypatch.setenv`` in the autouse fixture is enough for the test
+#: process itself and enough for a child that copies ``os.environ`` wholesale —
+#: but the e2e and rig builders deliberately hand a child a FILTERED environment
+#: (dropping ``CMUX_*``/``LOP_*``), and a builder that constructs its mapping
+#: from scratch never sees a fixture's value at all. Those children are real
+#: ``lop`` runtimes started against a scratch store, and a runtime with neither
+#: switch announces a parked gate through ``detached_notify`` — a genuine
+#: ``osascript display notification`` on this machine. Setting them here, at
+#: import, means every child built from any spelling of the environment inherits
+#: them, which is the only version of this gate a spawned process can honour.
+#:
+#: The fixture still sets them per test: a test that wants to exercise the
+#: notification path unsets or monkeypatches around that (the visible, deliberate
+#: opt-in), and that must keep working — a test that cleared the variable could
+#: otherwise leave the suite's later tests un-gated in the same xdist worker.
+_PROCESS_DESKTOP_GATES: tuple[tuple[str, str], ...] = (
+    ("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1"),
+    ("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1"),
+)
+
+
+def arm_process_desktop_gates() -> None:
+    """Set every process-wide desktop escape hatch, before anything else runs.
+
+    Idempotent and safe to call twice (import time and ``pytest_configure``),
+    which it deliberately is: conftest import order differs between a plain run
+    and an xdist worker's, and a gate that depends on which of the two happened
+    first is a gate that fails open on the path nobody tested.
+    """
+    for name, value in _PROCESS_DESKTOP_GATES:
+        os.environ[name] = value
+
+
+# At IMPORT, not only in a hook: a collection-time import (a module-scope helper,
+# a fixture that builds a child env) runs before ``pytest_configure`` in a worker
+# that receives already-collected items, and the whole point of setting it here
+# is that no child can be spawned before it is in the environment.
+arm_process_desktop_gates()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Re-assert the desktop gates once pytest owns the process.
+
+    Cheap, and it covers the one case import-time cannot: a plugin or an earlier
+    conftest that cleared the environment between this module's import and the
+    session's first test.
+    """
+    arm_process_desktop_gates()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def warm_tiktoken_encoding() -> None:
@@ -277,6 +330,12 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # and it gets the same answer: gate it centrally, once, for every test.
     # A test that specifically exercises the notification path unsets or
     # monkeypatches around this, which is the visible, deliberate opt-in.
+    #
+    # BOTH lines are also set at module import (`arm_process_desktop_gates`),
+    # because a child spawned with a hand-built environment never sees a
+    # fixture's value; what the fixture adds is the RESTORE — monkeypatch puts
+    # these back after each test, so a test that cleared one cannot leave the
+    # rest of the worker un-gated.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
     # ...and the same gate for the OTHER way a test can reach the real desktop:
     # `lop resume-click` launches the desktop app when one is installed, and

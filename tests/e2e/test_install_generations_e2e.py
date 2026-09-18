@@ -55,6 +55,7 @@ import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import registry
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -76,6 +77,7 @@ BUSY_TEXT = "hold this turn open [bash:8]"
 def _env(config: Path, session_id: str) -> dict[str, str]:
     """The child's environment: nothing inherited that names a live resource."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
+    env.update(NO_NOTIFY_ENV)
     env.update(
         {
             "LOCAL_OPERATOR_CONFIG_DIR": str(config),

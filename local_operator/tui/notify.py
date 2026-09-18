@@ -72,6 +72,17 @@ systems rather than defensiveness:
   the user is already staring at is pure interruption; Textual reports focus
   through ``AppFocus``/``AppBlur``, which every terminal here supports.
 - **Only for the parent's own edges** — see below.
+- **Never for a session on the test hosting** (``--hosting test``, the
+  deterministic mock in ``providers/clients.py``). A mock stream answers
+  "Hello from the mock provider!", and a notification's body is a snippet of
+  the session's last assistant line (``notifications/compose.py``) — so any
+  notification about a mock session carries that sentence onto the user's lock
+  screen, from a test or a drive-by rig, which is what the operator kept
+  seeing. The gate is a PROCESS one
+  (:func:`suppress_notifications_for_process`) rather than a per-session flag
+  because the mock is only ever a test surface: whichever process adopts a
+  mock spec is a test process, so the whole process — and every child it
+  spawns, which inherits the environment — goes quiet.
 
 Whose events count
 ------------------
@@ -394,16 +405,61 @@ MAX_TITLE_CHARS = 80
 EnvMap = Mapping[str, str]
 
 
-def notifications_enabled() -> bool:
+def notifications_enabled(env: EnvMap | None = None) -> bool:
     """Whether notifications may be emitted at all (env gate + config flag).
 
     Same two-tier shape as ``terminal_title_enabled``/``nerd_icons_enabled``:
     an environment kill switch for a capture or a CI run, and a
     ``display.notifications`` config flag for a persistent preference.
+
+    ``env`` defaults to ``os.environ``, which is what every process-level
+    caller wants, and is read FRESH on each call — a kill switch turned on
+    mid-process (see :func:`suppress_notifications_for_process`) must take
+    effect on the next send, not on the next boot. :class:`Notifier` passes the
+    mapping it was constructed with instead, so its own live re-check reads the
+    same environment as every other decision it makes (``detect_protocol``,
+    ``cmux_surface_id``) and an injected mapping stays deterministic in tests.
     """
-    if os.environ.get(_ENV_DISABLE):
+    source = os.environ if env is None else env
+    if source.get(_ENV_DISABLE):
         return False
     return bool(settings_get("display.notifications", True))
+
+
+def suppress_notifications_for_process(reason: str = "") -> None:
+    """Turn this process's notification kill switch ON, and keep it on.
+
+    WHY THIS EXISTS, and why it is not a per-session flag. A session on the
+    test hosting (``--hosting test``, the mock wire) answers "Hello from the
+    mock provider!", and a composed notification body is a snippet of the
+    session's last assistant line — so every notification about a mock session
+    shouts that sentence onto the operator's lock screen. The mock exists only
+    for tests, so the honest rule is "a process running the mock never
+    notifies", and a process-wide environment switch is the only form of that
+    rule a SPAWNED CHILD also respects: a runtime born from a mock session
+    inherits the environment, so it starts silent rather than deciding again.
+
+    STICKY AND ONE-WAY, deliberately. It is never cleared, and there is no
+    un-suppress: the flag describes what this process IS (a test surface), not
+    what it is doing at the moment. Idempotent, so the several call sites on
+    one boot path log once rather than four times.
+
+    WHO MAY CALL IT. The two choke points where a process adopts a mock model —
+    ``providers/clients.py::client_for_spec`` (every mock stream passes it,
+    including a mid-session switch to the mock) and
+    ``model/configure.py::configure_model`` (so an app that BOOTS on the mock
+    never constructs a notifier at all) — plus a test's own setup. Nothing may
+    call it on behalf of a user preference: a user who does not want
+    notifications sets ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` in their own shell or
+    turns ``display.notifications`` off.
+    """
+    if os.environ.get(_ENV_DISABLE):
+        return  # Already suppressed; keep the FIRST reason rather than relabelling.
+    os.environ[_ENV_DISABLE] = "1"
+    logger.debug(
+        "notifications suppressed for this process%s",
+        f": {reason}" if reason else " (no reason given)",
+    )
 
 
 def session_names_in_notifications() -> bool:
@@ -1034,8 +1090,17 @@ class Notifier:
 
     @property
     def enabled(self) -> bool:
-        """Whether this instance delivers anything at all."""
-        return self._enabled
+        """Whether this instance delivers anything at all.
+
+        The construction-time value AND the LIVE gate, read per call rather
+        than cached in ``__init__``. A notifier resolved once at boot would
+        keep delivering after a session switched onto the test hosting mid-run
+        (``/model test/test-model``, which is how a user or a rig turns a real
+        session into a mock one) — and the in-band OSC leg below is a real
+        interruption, not chrome, so "suppressed" has to mean this process is
+        silent on every wire and not merely on the OS one.
+        """
+        return self._enabled and notifications_enabled(self._env)
 
     @property
     def protocol(self) -> NotifyProtocol:
@@ -1109,7 +1174,7 @@ class Notifier:
         transcript snippet, so a user got a richer banner for a session they
         were not in than for the one they were.
         """
-        if not self._enabled:
+        if not self.enabled:
             return False
         if self._focused:
             return False
