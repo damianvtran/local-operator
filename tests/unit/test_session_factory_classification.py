@@ -696,10 +696,16 @@ def test_a_warm_request_only_carries_the_message_and_the_cached_roster() -> None
 def test_auto_off_builds_no_seam_and_never_imports_the_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The default install's import graph must be what it was before the layer."""
+    """An EXPLICIT ``auto: false`` must still cost nothing — not even an import.
+
+    The default is ON since 2026-09-18, so this test names the off value rather
+    than relying on the absent key; the absent key's behaviour (seam built) is
+    ``test_auto_on_builds_the_service_from_the_snapshot``'s sibling below.
+    """
     monkeypatch.delitem(sys.modules, "local_operator.classification", raising=False)
     monkeypatch.delitem(sys.modules, "local_operator.classification.service", raising=False)
     manager = ConfigManager(tmp_path)
+    manager.set_config_value("classification", {"auto": False})
     hooks = session_factory._KnowledgeHooks()
     warnings: list[str] = []
 
@@ -709,6 +715,19 @@ def test_auto_off_builds_no_seam_and_never_imports_the_package(
     assert warnings == []
     assert "local_operator.classification" not in sys.modules
     assert "local_operator.classification.service" not in sys.modules
+
+
+def test_an_absent_key_builds_the_seam(tmp_path: Path) -> None:
+    """The flip's whole content: no key at all means the layer is ON."""
+    manager = ConfigManager(tmp_path)
+    hooks = session_factory._KnowledgeHooks()
+    warnings: list[str] = []
+
+    session_factory._attach_classification(hooks, manager, cast(Any, None), warnings)
+
+    assert warnings == []
+    assert hooks.classifier is not None
+    assert type(hooks.classifier).__name__ == "ClassificationService"
 
 
 def test_auto_on_builds_the_service_from_the_snapshot(tmp_path: Path) -> None:
@@ -733,14 +752,19 @@ def test_auto_on_builds_the_service_from_the_snapshot(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (None, False),
+        # The absent case is the default, and the default is ON since
+        # 2026-09-18 — this row is the flip (it read False before).
+        (None, True),
         (True, True),
         (False, False),
         ("true", True),
         ("false", False),
         ("off", False),
         ("yes", True),
-        ("maybe", False),
+        # Unreadable reads as the DEFAULT, not as off: the service's own reader
+        # passes ``DEFAULT_AUTO`` as its fallback, and two readings of one toggle
+        # must agree on garbage as well as on YAML 1.1 spellings.
+        ("maybe", True),
     ],
 )
 def test_the_enablement_read_matches_the_services_own(raw: Any, expected: bool) -> None:
@@ -1017,3 +1041,114 @@ async def test_a_line_its_own_gate_suppressed_is_not_remembered() -> None:
     await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
 
     assert delivered == ["Suggestion added for this message: guide://tunnel"], delivered
+
+
+# ---------------------------------------------------------------------------
+# Freshness: a skill installed while the session is RUNNING (operator
+# requirement, 2026-09-18). Resolved per message, so it is a candidate on the
+# very next one -- mid-conversation, after a steer, and for later subagents.
+# ---------------------------------------------------------------------------
+
+
+def _write_skill(root: Path, name: str, description: str) -> Path:
+    """A real skill tree entry, so the fingerprint and the scanner both see it."""
+    directory = root / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\nBody for {name}.\n",
+        encoding="utf-8",
+    )
+    return directory
+
+
+def test_a_skill_installed_mid_session_becomes_a_candidate(tmp_path: Path) -> None:
+    """The roster is resolved from the tree AS IT IS, not as it was at session start.
+
+    The index is a startup snapshot (its vectors are far too expensive to rebuild
+    per message), so a skill authored after boot was invisible to the roster — and
+    the roster is the surface whose whole purpose is making installed resources
+    reachable. Here the fingerprint-gated rescan is what puts it back.
+    """
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha skill.")
+    index = _FakeIndex([_skill("alpha", "Alpha skill.")])
+    hooks = _hooks(index, classifier=None, servers=())
+    hooks.skill_roots = [root]
+    hooks.skills_fingerprint = session_factory._skills_fingerprint(hooks)
+
+    before = [row.name for row in session_factory._classification_roster(hooks)]
+    assert before == ["alpha"]
+
+    # The operator installs a skill while the session is live. The dict handed to
+    # the resolver (and to every running child) must be updated IN PLACE — a
+    # rebound name would leave them all on the stale mapping.
+    shared = hooks.skills_by_name
+    _write_skill(root, "beta", "Beta skill, authored mid-session.")
+
+    after = [row.name for row in session_factory._classification_roster(hooks)]
+
+    assert sorted(after) == ["alpha", "beta"]
+    assert "beta" in hooks.skills_by_name
+    assert hooks.skills_by_name is shared
+
+
+@pytest.mark.asyncio
+async def test_a_skill_tree_change_reopens_the_frozen_knowledge_block(tmp_path: Path) -> None:
+    """The freeze must not outlive the tree it describes.
+
+    Selection is frozen per admitted user message so a tool loop does not re-render
+    it, and that freeze is what hid a new skill from the rest of the session — and
+    from subagents, which inherit the parent's frozen block. The previous render is
+    PARKED rather than dropped, because a child's block is built synchronously and
+    must not come back empty in the window before the next render.
+    """
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha skill.")
+    index = _FakeIndex([_skill("alpha", "Alpha skill.")], picked=[_skill("alpha", "Alpha skill.")])
+    hooks = _hooks(index, classifier=None, servers=())
+    hooks.skill_roots = [root]
+    hooks.skills_fingerprint = session_factory._skills_fingerprint(hooks)
+
+    rendered = await session_factory._select_knowledge_block(hooks, "alpha please", task_id="t1")
+    assert hooks.frozen_block == rendered
+    assert hooks.frozen_block
+
+    _write_skill(root, "beta", "Beta skill, authored mid-session.")
+    session_factory._refresh_knowledge_freshness(hooks)
+
+    assert hooks.frozen_block is None
+    assert hooks.superseded_block == rendered
+    assert hooks.frozen_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_tree_leaves_the_frozen_block_alone(tmp_path: Path) -> None:
+    """The gate is a fingerprint, not a clock: no change, no re-render, no cost."""
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha skill.")
+    index = _FakeIndex([_skill("alpha", "Alpha skill.")], picked=[_skill("alpha", "Alpha skill.")])
+    hooks = _hooks(index, classifier=None, servers=())
+    hooks.skill_roots = [root]
+    hooks.skills_fingerprint = session_factory._skills_fingerprint(hooks)
+
+    rendered = await session_factory._select_knowledge_block(hooks, "alpha please", task_id="t1")
+    session_factory._refresh_knowledge_freshness(hooks)
+
+    assert hooks.frozen_block == rendered
+    assert hooks.superseded_block == ""
+
+
+def test_a_large_roster_is_shortlisted_by_relevance() -> None:
+    """Hundreds of skills: the dozen that travel are chosen, not just the first dozen."""
+    rows = [_skill(f"fleet-{index:03d}", "Fleet automation.") for index in range(40)]
+    rows.append(_skill("flavia-adverse-media", "Adverse media screening for a person."))
+    hooks = _hooks(_FakeIndex(rows), classifier=None, servers=())
+    hooks.classification_max_candidates = 12
+
+    request = session_factory._classification_request(
+        hooks, "run an adverse media screen for Flavia"
+    )
+
+    names = [candidate.name for candidate in request.candidates]
+    assert "flavia-adverse-media" in names
+    assert len(names) == 12
