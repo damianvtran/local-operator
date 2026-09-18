@@ -145,8 +145,6 @@ import os
 import sys
 from pathlib import Path
 
-from local_operator import procstate
-
 logger = logging.getLogger(__name__)
 
 #: The display name users see in Activity Monitor and ``ps -o ucomm``.
@@ -466,19 +464,55 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
     once per crashed startup and turn ``ls <venv>/bin`` into a junkyard.
 
     Only entries whose embedded pid is no longer alive are removed, so a plant
-    running concurrently in another worktree is never disturbed.
+    running concurrently in another worktree is never disturbed. That question
+    is answered by TWO probes, and the second one is the fix: existence, then
+    zombiehood.
 
-    The liveness question goes through :func:`procstate.pid_alive` and NEVER
-    through ``os.kill(pid, 0)``. That call is a liveness PROBE on POSIX and
-    TERMINATE on Windows — CPython's ``os_kill_impl`` ends in
-    ``TerminateProcess`` for any signal that is not ``CTRL_C_EVENT`` /
-    ``CTRL_BREAK_EVENT`` — so the sweep would kill whichever live process
-    happened to match a stale entry's embedded pid and then read the
-    successful kill as "still running", keeping the entry. Housekeeping must
-    not be able to do that, and this is the same shared probe the rest of the
-    package was moved onto.
+    Existence goes through :func:`procstate.pid_alive` and NEVER through
+    ``os.kill(pid, 0)``. That call is a liveness PROBE on POSIX and TERMINATE on
+    Windows — CPython's ``os_kill_impl`` ends in ``TerminateProcess`` for any
+    signal that is not ``CTRL_C_EVENT`` / ``CTRL_BREAK_EVENT`` — so a sweep
+    written on it would kill whichever live process happened to match a stale
+    entry's embedded pid, and then read the successful kill as "still running"
+    and keep the entry. Housekeeping must not be able to do that, and this is
+    the same shared probe the rest of the package was moved onto.
+
+    A ZOMBIE IS NOT A LIVE PLANT, THOUGH, and existence is not the whole
+    question because a zombie exists. ``pid_alive`` is
+    ``pid_liveness(pid) is not False``, and on POSIX ``pid_liveness`` is itself
+    signal 0 — so it answers for an exited-but-unreaped process exactly as it
+    does for a running one, which is the same answer the raw call it replaced
+    gave. Measured here: a ``kill -9``'d child reads as alive through signal 0
+    while ``ps`` reports it as ``Z``. That is precisely the fleet-wide case this
+    sweep exists for, so the error is worst exactly when it matters: when a
+    whole fleet dies at once (the incident shape this repo has now seen three
+    times) every leaked temp belongs to a zombie and NONE is reclaimed, because
+    the parent that would have reaped it is the long-lived frontend that just
+    lost all its children.
+
+    The pids that read alive are therefore asked the ZOMBIE question as well,
+    through :func:`procstate.zombie_states` — the module that owns it, in ONE
+    ``ps`` fork for the whole surviving set, rather than through a second probe
+    written here that could answer it differently.
+
+    A pid the zombie probe does not answer for reads as NOT a zombie, the
+    fail-closed direction ``procstate`` documents: an unprobeable set may cost a
+    leftover file, and must never cost a live plant its temp. Another account's
+    pid lands on that side by construction rather than through the branch this
+    function used to carry — ``pid_alive`` answers True for ``EPERM`` (the
+    process exists and cannot be a corpse of ours), and ``ps`` still reports
+    such a pid's state, which is not a zombie — so it is passed over, exactly as
+    the old ``EPERM`` arm left it.
     """
     try:
+        # Function-local import: this sweep runs only on the REPLANT path, and
+        # ``procstate`` pulls ``subprocess`` in with it — the house rule here is
+        # that the common startup (a stat probe and no writes) pays for nothing
+        # it does not use (see the ``update`` and ``ctypes`` imports below).
+        from local_operator import procstate
+
+        gone: list[Path] = []
+        unproven: dict[int, Path] = {}
         for entry in directory.glob(f".{prefix}.*.tmp"):
             pid_text = entry.name[len(prefix) + 2 : -4]
             if not pid_text.isdigit():
@@ -486,10 +520,19 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
             # POSIX semantics preserved exactly: a gone pid is False and is
             # swept, while EPERM (alive, another user's) and an unanswerable
             # probe both fail CLOSED to "alive" — ``pid_alive`` is
-            # ``pid_liveness(pid) is not False`` — which leaves the entry
-            # alone rather than racing somebody else's plant.
-            if procstate.pid_alive(int(pid_text)):
-                continue  # still running, or unprovable: not ours to clean
+            # ``pid_liveness(pid) is not False`` — which leaves the entry alone
+            # rather than racing somebody else's plant. "Alive" is not the end
+            # of it: it is the input to the zombie probe below.
+            if not procstate.pid_alive(int(pid_text)):
+                gone.append(entry)
+                continue
+            unproven[int(pid_text)] = entry
+        zombies = procstate.zombie_states(unproven)
+        # A pid absent from the probe's answer reads as NOT a zombie, the same
+        # fail-closed direction ``procstate`` documents: an unprobeable set may
+        # cost a leftover file, and must never cost a live plant its temp.
+        gone.extend(entry for pid, entry in unproven.items() if zombies.get(pid, False))
+        for entry in gone:
             try:
                 entry.unlink()
             except OSError:
@@ -520,6 +563,30 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
             pass
         os.link(real, tmp)
         os.replace(tmp, link)
+        # THE TEMP IS CONSUMED ONLY WHEN THE TWO NAMES ARE DIFFERENT INODES, and
+        # the ordinary replant is the case where they are the SAME one: trigger
+        # (c) (a missing or wrong companion libpython) fires while the link
+        # already names the right interpreter, so ``link`` and ``tmp`` are two
+        # hardlinks to one inode — and POSIX says ``os.replace`` of two
+        # hardlinks to one file "shall return successfully and perform no other
+        # action". The temp therefore survived EVERY such replant, one per
+        # stale-fleet startup: measured on this host as 573 leftovers across 17
+        # generations, each a real directory entry in ``<venv>/bin`` (and
+        # reproduced directly: one ``_plant_hardlink`` call onto the link's own
+        # inode leaves ``.<BRAND>.<pid>.tmp`` behind).
+        #
+        # Unlinking the NAME is safe in both shapes and touches nothing else:
+        # when the replace did consume it this raises ``ENOENT``; when it did
+        # not, the temp is a second name for ``link``'s own inode, so removing
+        # it leaves ``link`` — the file the caller asked for — exactly as it
+        # was, and every process already running that inode keeps running it.
+        # ``link`` itself is never unlinked here, and no mode or owner is
+        # changed: see the module docstring on why mutating the shared inode's
+        # metadata is forbidden.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass  # already consumed by the replace — the expected case
         return True
     except OSError as exc:
         # EXDEV, EPERM (a read-only or foreign-owned prefix), ENOSPC — all mean
