@@ -2483,6 +2483,67 @@ SETTINGS: tuple[Setting, ...] = (
         help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
         empty_unsets=True,
     ),
+    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the same
+    # way as the row above. The three rows are one policy and are read together
+    # by one reader, but they are three settings rather than a JSON blob because
+    # each answers a different question and each has a shape the editor already
+    # knows: a mode to pick, and two name lists to type.
+    Setting(
+        key="shell_environment.mode",
+        path=("shell_environment", "mode"),
+        section="tools",
+        label="Agent shell environment",
+        kind=Kind.ENUM,
+        # Pinned to ``shell_env.MODE_DEFAULT`` by
+        # ``test_shell_environment_rows_share_the_reader_paths`` rather than
+        # imported: the default must stay the permissive one, and the pin is
+        # what makes flipping it a decision rather than an edit.
+        default="inherit",
+        help=(
+            "'inherit' lets a command the agent runs see your environment "
+            "(gh, aws, npm keep their tokens). 'allowlist' passes only "
+            "PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, "
+            "so a provider key this session launched with is not readable from "
+            "a command the model writes."
+        ),
+        choices=(
+            Choice("inherit", "inherit", "your environment, as today (default)"),
+            Choice("allowlist", "allowlist", "the safe set plus the lists below, nothing else"),
+        ),
+    ),
+    Setting(
+        key="shell_environment.inherit",
+        path=("shell_environment", "inherit"),
+        section="tools",
+        label="…kept in allowlist mode",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Empty = the safe set alone. Names the allowlist mode keeps ON TOP "
+            "of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that "
+            "must still resolve $(lop secret get NAME), or LANG. Inert in "
+            "inherit mode."
+        ),
+        # OPEN namespace: these are the operator's own variable names, so there
+        # is no vocabulary for this repo to bound.
+        placeholder="LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+        empty_unsets=True,
+    ),
+    Setting(
+        key="shell_environment.exclude",
+        path=("shell_environment", "exclude"),
+        section="tools",
+        label="…removed in both modes",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Empty = nothing removed. Names never passed to a command the agent "
+            "runs, in either mode — including the session credential store's "
+            "own injections, so this is how a variable is denied outright."
+        ),
+        placeholder="OPENROUTER_API_KEY, …",
+        empty_unsets=True,
+    ),
     *[
         setting
         for provider, (name, endpoint, _url) in LOCAL_PRESETS.items()

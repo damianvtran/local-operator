@@ -1,0 +1,429 @@
+"""What a child process the MODEL asked for actually receives.
+
+Behavioural, and deliberately over the REAL handlers: ``execute_bash`` (the real
+``bash`` tool, spawning the real interpreter) and the real ``eval`` worker
+subprocess. The property this file exists for is "which NAMES are in the child's
+environment", and a test of the policy dataclass alone would stay green with the
+policy wired to nothing — which is exactly the bug class that let a provider key
+sit in a model-authored shell in the first place.
+
+Every assertion here is over NAMES (or over booleans and counts computed inside
+the child), never over a variable's value: a test that printed the environment
+would put a credential in the transcript, which is the exposure being closed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+import pytest_asyncio
+
+from local_operator.config import ConfigManager
+from local_operator.harness.types import AbortSignal, ToolContext
+from local_operator.tools import builtin
+from local_operator.tools import eval as eval_tool
+from local_operator.tools import shell_env
+from local_operator.variables import VariableStore
+
+#: The name of a provider key, as the E2 finding observed it in a lop child's
+#: environment. Its VALUE here is a sentinel: nothing in this file depends on
+#: what a real key looks like, only on the name being absent or present.
+PROVIDER_KEY_NAME = "OPENROUTER_API_KEY"
+PROVIDER_KEY_SENTINEL = "sentinel-not-a-real-key"
+#: A non-credential name that the parent exports and the strict mode must drop
+#: on its own (it is neither in the base set nor credential-shaped).
+UNGRANTED_NAME = "LOP_E2_UNGRANTED"
+UNGRANTED_SENTINEL = "1"
+#: A credential-SHAPED name that is not a provider key: the name-shape floor,
+#: not the provider table, is what has to catch this one.
+SERVICE_TOKEN_NAME = "MINERVA_E2_SERVICE_TOKEN"
+SERVICE_TOKEN_SENTINEL = "sentinel-not-a-real-token"
+
+
+def _store_policy(config_dir: Path, **values: object) -> None:
+    """Write ``shell_environment`` through the real ``ConfigManager``.
+
+    The same path a deployment takes (an adapter writes the per-run
+    ``config.yml``), so the reader under test resolves it the way it will in
+    production rather than through an injected policy object.
+    """
+    stored = {"mode": "inherit", "inherit": [], "exclude": []}
+    stored.update(values)
+    ConfigManager(config_dir).set_config_value("shell_environment", stored)
+
+
+def _stdout_block(result) -> str:
+    """The stdout section of a tool result, without the wrapper or the exit line.
+
+    The result wraps both streams with ``--- stdout ---``/``--- stderr ---`` and
+    may append an exit-code or ``result:`` line; parsing the block rather than
+    the whole payload is what keeps a header out of a name set and out of a JSON
+    parse.
+    """
+    assert not result.is_error, result.text
+    text = result.text
+    start = text.find("--- stdout ---")
+    end = text.find("--- stderr ---")
+    return text[start + len("--- stdout ---") : end if end > start else None]
+
+
+def _child_environment_names(result) -> set[str]:
+    """The child's variable NAMES, from a command that prints names only."""
+    return {line.strip() for line in _stdout_block(result).splitlines() if line.strip()}
+
+
+def _env_names_command() -> str:
+    """A command that prints the child's variable names and nothing else.
+
+    ``cut -d= -f1`` is the whole reason this is safe to assert on: a value can
+    never reach the result, whatever the policy did.
+    """
+    return "env | cut -d= -f1"
+
+
+def _session_store() -> VariableStore:
+    """A store holding one session credential, the way an operator grants one."""
+    store = VariableStore(cwd="/tmp", env={})
+    result = store.store_credential("github token", "ghp_sentinel_1", "command")
+    assert result.ok is True
+    return store
+
+
+@pytest.fixture
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A REAL config dir, pointed at by the environment the reader uses."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _sentinel_parent_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent environment a strict mode has to defend against.
+
+    The two non-interactive markers are DELETED from the parent on purpose: the
+    harness's own shell exports them, so a test that left them there would
+    assert the host rather than the tool's injection.
+    """
+    monkeypatch.setenv(PROVIDER_KEY_NAME, PROVIDER_KEY_SENTINEL)
+    monkeypatch.setenv(UNGRANTED_NAME, UNGRANTED_SENTINEL)
+    monkeypatch.setenv(SERVICE_TOKEN_NAME, SERVICE_TOKEN_SENTINEL)
+    monkeypatch.delenv("LOCAL_OPERATOR_AGENT_SHELL", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _clean_kernel_registry():
+    """Kill any eval worker a test leaves behind (it outlives the test)."""
+    eval_tool._KERNELS.clear()
+    eval_tool._LOST_KERNELS.clear()
+    eval_tool._ACTIVE_KERNELS.clear()
+    eval_tool._CLOSE_ON_RETURN.clear()
+    yield
+    for kernel in list(eval_tool._KERNELS.values()):
+        await eval_tool._close_kernel(kernel)
+    eval_tool._KERNELS.clear()
+    for task in list(eval_tool._CLOSING):
+        task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# bash — the real handler, the real interpreter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inherit_mode_is_unchanged(config_dir: Path, tmp_path: Path) -> None:
+    """The default keeps today's behaviour: the child sees the parent env.
+
+    This is the promise that makes the strict mode safe to ship — an
+    interactive operator's own commands must not change until a deployment says
+    so, and this is the assertion that holds that.
+    """
+    _store_policy(config_dir, mode="inherit")
+    context = ToolContext(cwd=str(tmp_path), variables=_session_store())
+
+    result = await builtin.execute_bash(
+        "bash-env", {"command": _env_names_command()}, AbortSignal(), None, context
+    )
+    names = _child_environment_names(result)
+
+    assert PROVIDER_KEY_NAME in names
+    assert UNGRANTED_NAME in names
+    assert SERVICE_TOKEN_NAME in names
+    # …and the two intentional injections are there in this mode too, which is
+    # what makes the allowlist assertions below meaningful rather than a
+    # different baseline.
+    assert "LOCAL_OPERATOR_AGENT_SHELL" in names
+    assert "CI" in names
+    assert "GITHUB_TOKEN" in names
+
+
+@pytest.mark.asyncio
+async def test_allowlist_mode_gives_the_child_only_the_grants(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    """The strict mode: base set + ``inherit`` + injections, and nothing else."""
+    _store_policy(config_dir, mode="allowlist")
+    context = ToolContext(cwd=str(tmp_path), variables=_session_store())
+
+    result = await builtin.execute_bash(
+        "bash-env",
+        {"command": _env_names_command()},
+        AbortSignal(),
+        None,
+        context,
+    )
+    names = _child_environment_names(result)
+
+    # The exposure: the provider key the harness itself launched with is not in
+    # the child a model-written command runs in.
+    assert PROVIDER_KEY_NAME not in names
+    # The name-shape floor, not the provider table: a service token this repo
+    # has never heard of goes too.
+    assert SERVICE_TOKEN_NAME not in names
+    # A plain parent variable is not granted either — the mode grants NAMES, and
+    # this one was never named.
+    assert UNGRANTED_NAME not in names
+    # What the child legitimately keeps: the safe set where the PARENT had it, and
+    # the harness's own injections.
+    #
+    # Relative to ``os.environ`` on purpose. The base set is a filter over the parent
+    # environment (``shell_env.BASE_ALLOWLIST``), not a set the child invents: a runner
+    # that launches pytest with ``env -i`` — the repo's isolated pattern for keeping a
+    # test run out of the operator's real home — has no ``SHELL``, and asserting the
+    # name absolutely would fail for the runner's environment rather than for the code
+    # under test. Asserting the intersection checks the property that matters: every
+    # base name the parent had survives, and none the parent lacked appears.
+    base_names = {"HOME", "PATH", "SHELL", "TERM", "LOGNAME", "USER"}
+    assert (base_names & set(os.environ)) <= names
+    assert "LOCAL_OPERATOR_AGENT_SHELL" in names
+    assert "CI" in names
+    assert "TERM" in names
+    assert "GITHUB_TOKEN" in names
+
+
+@pytest.mark.asyncio
+async def test_allowlist_mode_granted_names_reach_the_child(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``inherit`` is a real grant, and it is the knob a deployment needs.
+
+    ``LOCAL_OPERATOR_CONFIG_DIR`` is the motivating case: without it a shell in
+    the strict mode cannot resolve ``$(lop secret get NAME)`` for a store held
+    outside the default home.
+    """
+    monkeypatch.setenv("LOP_E2_GRANTED", "granted-value")
+    _store_policy(config_dir, mode="allowlist", inherit=["LOP_E2_GRANTED"])
+    context = ToolContext(cwd=str(tmp_path))
+
+    result = await builtin.execute_bash(
+        "bash-env",
+        {"command": "printf 'granted=%s\\n' \"$LOP_E2_GRANTED\""},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert not result.is_error, result.text
+    assert "granted=granted-value" in result.text
+
+
+@pytest.mark.asyncio
+async def test_exclude_removes_a_name_in_both_modes(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``exclude`` is the operator's veto, and it wins over the injections too."""
+    monkeypatch.setenv("LOP_E2_KEPT", "kept-value")
+    _store_policy(config_dir, mode="inherit", exclude=["LOP_E2_KEPT", "GITHUB_TOKEN"])
+    context = ToolContext(cwd=str(tmp_path), variables=_session_store())
+
+    result = await builtin.execute_bash(
+        "bash-env", {"command": _env_names_command()}, AbortSignal(), None, context
+    )
+    names = _child_environment_names(result)
+
+    assert "LOP_E2_KEPT" not in names
+    # The veto outranks the session credential store: naming a variable in
+    # `exclude` is an operator saying "not even that".
+    assert "GITHUB_TOKEN" not in names
+    assert PROVIDER_KEY_NAME in names
+
+
+# ---------------------------------------------------------------------------
+# eval — the real worker subprocess
+# ---------------------------------------------------------------------------
+
+
+async def _eval_env_report(context: ToolContext, code: str) -> dict[str, Any]:
+    tool = eval_tool.build_eval_tool()
+    result = await tool.execute(  # type: ignore[operator]
+        "call-1", {"code": code}, None, None, context
+    )
+    lines = [line for line in _stdout_block(result).splitlines() if line.strip()]
+    report = json.loads(lines[-1])
+    assert isinstance(report, dict)
+    return report
+
+
+_ENV_REPORT_CODE = (
+    "import json, os; print(json.dumps({"
+    "'names': len(os.environ),"
+    f"'provider_key': {PROVIDER_KEY_NAME!r} in os.environ,"
+    "'path': 'PATH' in os.environ, 'home': 'HOME' in os.environ,"
+    "'agent_shell': os.environ.get('LOCAL_OPERATOR_AGENT_SHELL'),"
+    "'ungranted': os.environ.get('LOP_E2_UNGRANTED'),"
+    "}))"
+)
+
+
+@pytest.mark.asyncio
+async def test_inherit_mode_eval_worker_keeps_the_parent_environment(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    """``inherit``: an eval cell reads the environment it always could."""
+    _store_policy(config_dir, mode="inherit")
+    context = ToolContext(cwd=str(tmp_path), session_id="eval-env-inherit")
+
+    report = await _eval_env_report(context, _ENV_REPORT_CODE)
+
+    assert report["provider_key"] is True
+    assert report["path"] is True
+    assert report["ungranted"] == UNGRANTED_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_allowlist_mode_eval_worker_loses_the_provider_key(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    """The eval worker is not a smaller exposure than a shell: the model writes
+    the Python, so it can read ``os.environ`` and hand it to any subprocess the
+    cell spawns. The same policy therefore governs the spawn.
+    """
+    _store_policy(config_dir, mode="allowlist")
+    context = ToolContext(cwd=str(tmp_path), session_id="eval-env-allowlist")
+
+    report = await _eval_env_report(context, _ENV_REPORT_CODE)
+
+    assert report["provider_key"] is False
+    assert report["ungranted"] is None
+    assert report["path"] is True
+    assert report["home"] is True
+    # The eval worker has never received ``NON_INTERACTIVE_ENV`` (that contract
+    # belongs to the bash tool, and this change does not widen the worker's
+    # injections), so the strict mode leaves it with the safe set and the scrub
+    # fd alone. Asserted rather than left implicit: a deployment reading "the
+    # strict mode gives the child the safe set plus the injections" should see
+    # which injections that actually is on this path.
+    assert report["agent_shell"] is None
+    assert report["names"] > 0
+
+
+@pytest.mark.asyncio
+async def test_allowlist_mode_still_runs_a_real_subprocess_from_a_cell(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    """The strict mode must not break the tool: a cell that spawns a command
+    still works, because PATH is part of the safe set — and the grandchild
+    inherits the same strict environment, which is the property that matters,
+    since the model can spawn from a cell exactly as it can from bash.
+    """
+    _store_policy(config_dir, mode="allowlist")
+    context = ToolContext(cwd=str(tmp_path), session_id="eval-env-subprocess")
+
+    cell = (
+        "import json, subprocess, sys\n"
+        "probe = \"import os, sys; print('yes' if sys.argv[1] in os.environ else 'no')\"\n"
+        "out = subprocess.run([sys.executable, '-c', probe, "
+        + repr(PROVIDER_KEY_NAME)
+        + "], capture_output=True, text=True)\n"
+        "print(json.dumps({'sees_key': out.stdout.strip() == 'yes',"
+        " 'returncode': out.returncode}))\n"
+    )
+    report = await _eval_env_report(context, cell)
+
+    assert report["returncode"] == 0
+    assert report["sees_key"] is False
+
+
+# ---------------------------------------------------------------------------
+# the policy reader itself
+# ---------------------------------------------------------------------------
+
+
+def test_absent_mode_defaults_to_inherit(config_dir: Path) -> None:
+    assert shell_env.load_policy().mode == shell_env.MODE_INHERIT
+
+
+def test_blank_mode_is_no_opinion_and_stays_inherit(config_dir: Path) -> None:
+    """A blank value is what an unset field holds, not an intent to harden."""
+    _store_policy(config_dir, mode="   ")
+    assert shell_env.load_policy().mode == shell_env.MODE_INHERIT
+
+
+def test_mode_is_read_case_insensitively(config_dir: Path) -> None:
+    _store_policy(config_dir, mode=" ALLOWLIST ")
+    assert shell_env.load_policy().mode == shell_env.MODE_ALLOWLIST
+
+
+def test_unrecognised_mode_fails_closed_and_says_so(
+    config_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo must not silently mean "off".
+
+    This key exists to harden a run nobody is watching, so the strict mode is
+    the safe reading of a value the reader cannot parse — and the WARNING naming
+    the value is how the deployment finds out.
+    """
+    _store_policy(config_dir, mode="allow-list")
+
+    with caplog.at_level("WARNING"):
+        policy = shell_env.load_policy()
+
+    assert policy.mode == shell_env.MODE_ALLOWLIST
+    assert "allow-list" in caplog.text
+
+
+def test_provider_key_names_cover_the_registry_without_being_restated() -> None:
+    """The provider table is READ, not copied — the failure mode of a second
+    list is that it stops covering the provider added later."""
+    from local_operator.model.registry import SupportedHostingProviders
+
+    names = shell_env.provider_credential_names()
+    for detail in SupportedHostingProviders:
+        for name in detail.requiredCredentials or ():
+            assert name.upper() in names, name
+    assert "OPENROUTER_API_KEY" in names
+    # The callable form is why the shape markers are needed beside the table:
+    # Anthropic's resolver picks between two names and answers ``None`` to a
+    # name-only question, so its key names come from the second source.
+    assert shell_env.is_credential_shaped("ANTHROPIC_OAUTH_TOKEN") is True
+    assert shell_env.is_credential_shaped("PATH") is False
+    assert shell_env.is_credential_shaped("LANG") is False
+
+
+def test_base_allowlist_matches_the_sdk() -> None:
+    """The SDK's safe set is the contract this module restates; a change there
+    must show up here rather than as a silent difference in a child's env."""
+    mcp_stdio = pytest.importorskip("mcp.client.stdio")
+
+    assert set(shell_env.BASE_ALLOWLIST) == set(mcp_stdio.DEFAULT_INHERITED_ENV_VARS)
+
+
+def test_child_environment_subtracts_exclude_after_injections() -> None:
+    """The ordering is the contract: exclude is applied LAST, so it can deny an
+    injection as well as an inherited name."""
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=shell_env.MODE_ALLOWLIST, exclude=frozenset({"GITHUB_TOKEN"})
+    )
+
+    env = shell_env.child_environment(
+        policy,
+        parent={"PATH": "/usr/bin", "GITHUB_TOKEN": "inherited"},
+        injections={"GITHUB_TOKEN": "from-the-store", "CI": "1"},
+    )
+
+    assert env == {"PATH": "/usr/bin", "CI": "1"}

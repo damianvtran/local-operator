@@ -53,6 +53,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
+from local_operator.tools import shell_env
 from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
     TRACEBACK_TAIL_CHARS,
@@ -560,6 +561,14 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     # and is inheritable only for this one spawn. Setup is best-effort: a
     # platform without ``os.pipe`` semantics leaves the channel absent and the
     # crash path scrubs nothing — the pre-fix behaviour, still safe.
+    #
+    # The rest of the worker's environment goes through the same
+    # ``shell_environment`` policy as the bash tool, because a worker holding a
+    # cell's ``os.environ`` is not a smaller exposure than a shell: the model
+    # writes the Python, so it can read this environment and hand it to any
+    # subprocess the cell spawns. The scrub fd is an injection, not an
+    # inheritance — it is this process's own protocol channel, and the worker
+    # pops it out of ``os.environ`` as soon as it has resolved it.
     scrub_read: int | None = None
     scrub_write: int | None = None
     try:
@@ -570,8 +579,9 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         # wasted syscalls and a window where a failure would leave the parent
         # reading a blocking fd inside the response path.
         os.set_blocking(scrub_read, False)
-        env = dict(os.environ)
-        env["LOCAL_OPERATOR_EVAL_SCRUB_FD"] = str(scrub_write)
+        env = shell_env.child_environment(
+            injections={"LOCAL_OPERATOR_EVAL_SCRUB_FD": str(scrub_write)},
+        )
         spawn_options["env"] = env
         # ``close_fds=False`` so the worker inherits the scrub-write fd; every
         # other fd the parent holds is already non-inheritable (PEP 446), so
