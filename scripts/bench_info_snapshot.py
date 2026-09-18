@@ -1064,9 +1064,11 @@ def main() -> int:
     if args.json:
         # The store is gitignored, so a fresh clone or worktree has no ``bench/``
         # at all — git materialises an ignored directory for nobody. Without this
-        # mkdir the write below, the LAST thing a long run does, dies with
-        # FileNotFoundError and the whole measurement is lost. Same shape as
-        # ``bench_session_page.py`` and ``bench_session_switch.py``.
+        # mkdir the write below, the LAST action a long run takes, dies with
+        # FileNotFoundError and the artifact is lost: ``_print_report`` above has
+        # already put the digest on stdout, so the numbers survive only if that
+        # stdout was captured. Same shape as ``bench_session_page.py`` and
+        # ``bench_session_switch.py``.
         json_path = Path(args.json)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

@@ -1768,7 +1768,7 @@ The commit to retrieve each from:
 | `fork-ux`, `fork-cache` | `a70e3460` |
 | `browser-extension` | `39691ea0` |
 | `sibling-modes-boot-layout` | `2c4ebc77` |
-| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `5cbea141` (the last `main` before the sweep) |
+| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
 | `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
 ## Timing, flakes, and how to assert that something is fast
