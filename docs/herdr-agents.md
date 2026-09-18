@@ -18,10 +18,18 @@ custom-agent CLI:
 | exit | released (`pane release-agent`) |
 
 Detection is `HERDR_ENV=1` plus `HERDR_PANE_ID`, both of which Herdr injects
-into every pane process. Reporting additionally needs the `herdr` CLI:
-`HERDR_BIN_PATH` is preferred (it names the binary that spawned the pane, so
-its protocol matches the running server), with `herdr` on `PATH` as the
-fallback. Outside Herdr, or with neither resolvable, nothing runs.
+into every pane process — and both of which are *inherited*, so a `lop`
+started from a shell in another pane (a split, an ssh hop) carries the marker
+of the pane it came from. Before reporting, `lop` therefore asks Herdr which
+processes are in that pane (`herdr pane process-info`) and compares the answer
+with its own pid, process group and ancestry; when that proves it is somewhere
+else, nothing is reported for that pane. When Herdr cannot answer — no socket,
+a timeout, an unknown pane — it reports anyway, deliberately: a pane that never
+reports is worse than one whose row is briefly duplicated. Reporting
+additionally needs the `herdr` CLI: `HERDR_BIN_PATH` is preferred (it names the
+binary that spawned the pane, so its protocol matches the running server), with
+`herdr` on `PATH` as the fallback. Outside Herdr, or with neither resolvable,
+nothing runs.
 
 The row appears as source `custom:local-operator`, agent `local-operator`:
 
