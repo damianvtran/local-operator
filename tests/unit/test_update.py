@@ -10,7 +10,6 @@ import time
 from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -51,8 +50,16 @@ def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
     be asserting against a refusal instead of against the thing they were written
     for.
 
-    WHAT THIS HIDES, stated so it is not discovered by surprise (review round 4,
-    R4-3): while it is in force NO test in this module can see the guard through
+    THE GUARD FIRES ON KIND HERE, which is the honest reason rather than the
+    prefix one this docstring first gave (serve-reload review round 4, R4-3, and
+    round 5, R5-3, which caught that the first correction still described the
+    wrong half): a pytest process inside this worktree reports
+    ``install_kind() == EDITABLE``, so it is refused before the membership
+    question is ever reached. The prefix half would refuse it too, but that is a
+    coincidence of where the venv lives rather than the reason.
+
+    WHAT THIS HIDES, stated so it is not discovered by surprise: while it is in
+    force NO test in this module can see the guard through
     `update_command`. That is why the test that must see it — the upgrade-path one
     below, which is the shape that broke in R4-1 — restores the real refusal and
     drives `update_command` itself rather than calling `_services_stage`.
@@ -528,7 +535,7 @@ def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> No
     """Nothing to INSTALL is not nothing to do.
 
     This test used to assert that the daemon refresh was NOT called on this path,
-    which was the bug rather than the contract (review round 1, R1-2): the
+    which was the bug rather than the contract (serve-reload review round 1, R1-2): the
     reporting machine printed exactly this line, returned 0, and left its backend
     on a build four releases old. The canary is now the SERVICES STAGE, and it is
     asserted to run — with the install itself untouched, which is what "is the
@@ -700,7 +707,7 @@ def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
 
 
 def test_update_command_moves_the_services_on_the_upgrade_path(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R4-1's regression: the caller that just flipped the pointer is SUPERSEDED.
 
@@ -725,7 +732,14 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
     superseded = generations / "20260101T000000Z-0.1.0" / "tools" / "local-operator"
     superseded.mkdir(parents=True)
     # The pointer has already moved on, and this process is still the old build.
-    (generations / "20260102T000000Z-0.2.0").mkdir(parents=True)
+    current = generations / "20260102T000000Z-0.2.0"
+    current.mkdir(parents=True)
+    # THE POINTER IS ACTUALLY CREATED, so the pre-fix failure is the one this
+    # docstring narrates — "is not the install the pointer names" — rather than the
+    # "the install pointer names no build" a missing symlink produces (serve-reload
+    # review round 5, R5-4). A regression test whose failure mode is a different
+    # refusal is one that would keep passing if the real check were deleted.
+    (tmp_path / "lop" / "current").symlink_to(current)
 
     ran: list[str] = []
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
@@ -768,7 +782,7 @@ def test_the_services_stage_refuses_a_checkout(
 
 
 def test_a_generation_of_this_install_may_proceed(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The guard must not refuse the callers it exists for — either of them.
 
@@ -1803,7 +1817,7 @@ def test_write_source_marker_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     """Temp-and-rename: a reader must never see a partial marker.
 
     ``RuntimeServer.__init__`` reads this file, so a torn write would reach
-    every runtime on the host (review round 1, R1-2).
+    every runtime on the host (serve-reload review round 1, R1-2).
 
     NOT SUFFICIENT ON ITS OWN. A plain ``path.write_text`` leaves no temp file
     either, so this assertion is satisfied by the very implementation it reads
@@ -1828,7 +1842,7 @@ def test_write_source_marker_installs_by_rename_not_by_writing_in_place(
     Inode identity is a fact about how the file got there, so this cannot flake
     the way a race-the-writer test would.
 
-    Verified to discriminate (review round 1, R1-1): both the ``write_text``
+    Verified to discriminate (serve-reload review round 1, R1-1): both the ``write_text``
     and ``copyfile`` mutants keep the inode and fail here.
     """
     marker = tmp_path / ".lop-source"

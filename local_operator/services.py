@@ -54,7 +54,7 @@ logger = logging.getLogger("local_operator.services")
 #: How long one daemon has to come back on the new build before it is reported.
 #:
 #: Sized against the phases it covers, MEASURED rather than assumed (review
-#: round 2, R2-2: the first version was 30 s while the daemon's own budgets
+#: serve-reload review round 2, R2-2: the first version was 30 s while the daemon's own budgets
 #: summed to 40 s, so the caller could give up while the daemon was still
 #: working and report a failure for a reload that then succeeded):
 #:
@@ -62,7 +62,7 @@ logger = logging.getLogger("local_operator.services")
 #:   smoke   up to ``reload.SMOKE_TIMEOUT_S`` = 10 s
 #:   start   interpreter + record publish     = ~1.5-2 s on the reporting host
 #:
-#: THE DRAIN IS PAID TWICE (review round 4, R4-2: this and the reload's own
+#: THE DRAIN IS PAID TWICE (serve-reload review round 4, R4-2: this and the reload's own
 #: comment both described one drain, which invites a future smoke bump that
 #: silently overruns the caller — a reload is drained, smoke-checked, and drained
 #: AGAIN, because the smoke is off the loop and a spawn can arrive during it).
@@ -88,7 +88,7 @@ HEALTH_TIMEOUT_S = 1.0
 def _answers_as_record(record: Any) -> str | None:
     """Why this record must NOT be trusted, or ``None`` when it is proven.
 
-    THE RECORD IS NOT PROOF OF WHO IS LISTENING (review round 1, R1-4). It is a
+    THE RECORD IS NOT PROOF OF WHO IS LISTENING (serve-reload review round 1, R1-4). It is a
     file whose name is a pid, and a pid is recycled: review constructed a live
     ``sleep`` named by a hand-written live, ``reloadable: true`` record, and
     ``reload_serve_daemons`` signalled it — rc ``-30``, a process killed by a
@@ -111,8 +111,8 @@ def _answers_as_record(record: Any) -> str | None:
     # not: `f"http://{[record.host]}:…"` renders the list `['::1']`, so every
     # probe of a v6 daemon asked a URL that cannot parse and the daemon was
     # reported as "did not identify itself" while answering perfectly. Found by
-    # the test the review asked for (round 2, R2-6), which is the whole reason it
-    # was asked for.
+    # the test the review asked for (serve-reload review round 2, R2-6), which is the
+    # whole reason it was asked for.
     authority = f"[{record.host}]" if ":" in record.host else record.host
     url = f"http://{authority}:{record.port}/health"
     try:
@@ -241,7 +241,7 @@ def reload_serve_daemons(
         return []
     stamp = _current_stamp()
     if stamp is None:
-        # NO STAMP MEANS NO PREDICATE (review round 2, R2-1). ``_serves_current_build``
+        # NO STAMP MEANS NO PREDICATE (serve-reload review round 2, R2-1). ``_serves_current_build``
         # answers False when the stamp is unreadable, so without this guard EVERY
         # daemon looks stale and the whole fleet gets signalled by a caller that
         # has no build to move anything onto. That is not hypothetical: it was
@@ -250,7 +250,7 @@ def reload_serve_daemons(
         # such a caller — its ``disk_build()`` is None, so a developer running
         # ``lop update`` in their worktree would have signalled this machine's serve
         # daemon. Demonstrated end to end in review with a fabricated-root daemon:
-        # stale → signalled → really reloaded. (Review round 4, R4-4: the first two
+        # stale → signalled → really reloaded. (serve-reload review round 4, R4-4: the first two
         # versions of this sentence listed the mobile daemon, the browser bridge and
         # the tunnel as well, and both overclaimed — see below.)
         #
@@ -312,7 +312,7 @@ def reload_serve_daemons(
             )
             continue
         try:
-            # PROVE THE PROCESS BEFORE TOUCHING IT (review round 1, R1-4). A pid
+            # PROVE THE PROCESS BEFORE TOUCHING IT (serve-reload review round 1, R1-4). A pid
             # is not an identity, and the request is a signal whose default
             # disposition is death.
             mismatch = probe(record)

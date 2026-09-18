@@ -48,7 +48,7 @@ is served, while the one that was already connected is cut).
 Those cuts are *recoverable by reconnect* — the app re-opens its relay and
 re-reads history, and the turn itself is running inside the runtime, which never
 stopped. Two things are NOT recoverable, and the original version of this
-paragraph named only one of them (review round 1, R1-6):
+paragraph named only one of them (serve-reload review round 1, R1-6):
 
 * **A runtime being SPAWNED**, whose ~1.2 s handshake would be cut in the middle.
   This is what the drain below waits for.
@@ -132,11 +132,20 @@ DRAIN_POLL_S = 0.1
 #: Generous on purpose — a cold import of a CLI with a large dependency closure on
 #: a loaded machine is seconds rather than milliseconds — but it has to FIT INSIDE
 #: the caller's patience, because this runs before the exec and a caller that gave
-#: up first would report a failure for a reload that then succeeded (review round
-#: 2, MINOR-2: the first version was 30 s, which with the 10 s drain overran
-#: ``services.RELOAD_WAIT_S``). Thirty was never a measurement; ten is still an
-#: order of magnitude over the measured cold import, and an expiry is treated as
-#: "the check could not run" — see :func:`_smoke`.
+#: up first would report a failure for a reload that then succeeded (serve-reload
+#: serve-reload review round 2, R2-2: the first version was 30 s, which with the 10 s drain
+#: overran ``services.RELOAD_WAIT_S``). Thirty was never a measurement; ten is
+#: still an order of magnitude over the measured cold import, and an expiry is
+#: treated as "the check could not run" — see :func:`_smoke`.
+#:
+#: THE SUM THIS FITS INTO NOW CONTAINS TWO DRAINS, not one (serve-reload review
+#: round 4, R4-2, which the first version of this note narrowed but did not
+#: close):
+#: ``ReloadWatch.perform`` drains, smoke-checks, and drains AGAIN, because the
+#: smoke runs off the loop and a spawn can arrive during it. Worst honest sum is
+#: therefore 10 + 10 + 10 + ~2 s ≈ 32 s against ``RELOAD_WAIT_S``'s 45 s. Raising
+#: either budget has to redo that sum — the point of writing it down twice is that
+#: a reader of this file is the one who would raise it.
 SMOKE_TIMEOUT_S = 10.0
 
 
@@ -290,7 +299,7 @@ class ReloadWatch:
         """
         plan = self.plan()
         await self.drain()
-        # OFF THE EVENT LOOP (review round 2, R2-3). The check spawns a process
+        # OFF THE EVENT LOOP (serve-reload review round 2, R2-3). The check spawns a process
         # and waits for it, measured at 0.20-0.35 s cold; run inline it would stop
         # this daemon answering HTTP for that whole time, which is the opposite of
         # what a reload is for. `to_thread` rather than a second loop: the body is
@@ -446,7 +455,7 @@ def _exec(plan: ReloadPlan) -> None:
     TWO THINGS HAPPEN HERE THAT ARE NOT ABOUT THE EXEC ITSELF, and both exist for
     the window between this call and the successor's first instruction — a window
     the record CANNOT cover, because the record it will publish does not exist
-    yet (review round 1, R1-1 and NIT-2).
+    yet (serve-reload review round 1, R1-1 and NIT-2).
     """
     fd = plan.listener_fd
     # The fd must survive ``execve``. Python 3's PEP 446 makes every fd
@@ -487,7 +496,7 @@ def _exec(plan: ReloadPlan) -> None:
         os.execve(str(plan.interpreter), argv, dict(os.environ))
     finally:
         # Reached only when the exec FAILED — a successful one never returns.
-        # Both restorations run even if the first raises (review round 2, R2-7):
+        # Both restorations run even if the first raises (serve-reload review round 2, R2-7):
         # a daemon left deaf is worse off than one left with a writable
         # descriptor, because the first can never be asked to reload again.
         # The descriptor goes back exactly as the reload found it, because this
@@ -504,7 +513,7 @@ def _smoke(interpreter: Path) -> None:
     """Prove the target build can even start its CLI, or refuse. Bounded.
 
     THE ONE THING THAT MAKES "FAIL-CLOSED, ALWAYS" TRUE ON THE FAR SIDE OF THE
-    EXEC (review round 1, R1-5). Every other refusal in this module happens
+    EXEC (serve-reload review round 1, R1-5). Every other refusal in this module happens
     BEFORE anything is interrupted, which is what makes a refusal cheap: the
     daemon keeps its pid, its socket and its record. An exec into a build that
     cannot import its own CLI is the one failure with no such floor — a dead
