@@ -811,8 +811,18 @@ def test_a_call_that_reports_no_counts_prints_none_rather_than_a_zero(
         session_factory._log_classification_cost(
             _Recommendation(vendor="typesafe", cost_usd=None, latency_s=0.1)
         )
+        # The other side of the distinction, pinned where it RENDERS: a leg that
+        # really reported zero must still print ``0``. Without this, collapsing
+        # zero into the placeholder (``if not value: return "-"``) would leave the
+        # suite green while re-erasing the difference this round exists to keep.
+        session_factory._log_classification_cost(
+            _Recommendation(
+                vendor="typesafe", cost_usd=0.000021, input_tokens=0, output_tokens=0, latency_s=0.2
+            )
+        )
 
     assert caplog.text.count("tokens=-/-") == 2
+    assert "tokens=0/0" in caplog.text
 
 
 def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -> None:
