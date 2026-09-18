@@ -62,7 +62,7 @@ from local_operator.ansi import strip_control_sequences
 from local_operator.callback_page import callback_response
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     # The SDK is an optional extra: these names are needed for annotations
     # only, so importing them here keeps this module importable without it.
@@ -173,6 +173,32 @@ RefreshOutcome = Literal[
     "unattributed",
 ]
 
+
+@dataclass
+class RefreshSendState:
+    """What one exchange knows about ITS OWN request's progress.
+
+    ``dispatched`` flips in the httpx request EVENT HOOK that arms the
+    write-ahead send marker, i.e. at the last instant before the transport
+    writes — so it answers exactly one question: did this exchange's request
+    reach the wire? That is the question a lost exchange turns on (a token that
+    reached the wire may have been spent, one that did not cannot have been),
+    and until this existed the log could not answer it, because the two states
+    were indistinguishable after the fact: the marker was armed BEFORE the
+    client existed, so an armed marker was as consistent with "cancelled during
+    DNS" as with "cancelled mid-POST" (design audit Q1).
+
+    Deliberately NOT persisted: it describes a live task, and the row already
+    carries the durable half (the marker itself). One instance per exchange,
+    created by :func:`_refresh_oauth_token_locked`, handed to
+    :func:`_perform_refresh_exchange` and kept by
+    :func:`_detach_refresh_exchange` so the exchange's own settle line can name
+    the state after the connect that started it has gone.
+    """
+
+    dispatched: bool = False
+
+
 #: Refresh this far BEFORE the stored access token's deadline. A connect that
 #: starts with a token dying in ten seconds would otherwise open with a 401 and
 #: lean on the in-flow refresh at the worst possible moment; spending the
@@ -200,6 +226,34 @@ REFRESH_HTTP_TIMEOUT_S = 10.0
 #: Finite on purpose: a server that never answers must not leave a task reading
 #: a socket for the life of the process.
 REFRESH_LATE_RESPONSE_GRACE_S = 30.0
+
+#: How long a teardown waits for DETACHED refresh exchanges to persist their
+#: rotation (see :func:`drain_refresh_exchanges`).
+#:
+#: Why this number is small, and why the wait is a CUT rather than a join: the
+#: exchange's own budget is ``REFRESH_HTTP_TIMEOUT_S`` plus
+#: ``REFRESH_LATE_RESPONSE_GRACE_S`` (40 s), and the exit paths that pay this
+#: wait are quiescent (idle-exit, a signal drain, a quit) where a couple of
+#: seconds is invisible — but a TUI or CLI quit must never visibly hang on an
+#: authorization server that has stopped answering. So the bound is chosen to
+#: cover the ordinary case (a rotation already on its way back, measured in
+#: tens of milliseconds against a local endpoint and a second or two against a
+#: remote issuer) and to give up loudly on the rest: hitting the bound is LOGGED
+#: rather than silently tolerated, because a rotation that outlives it is the
+#: loss this drain exists to remove.
+REFRESH_DRAIN_TIMEOUT_S = 2.5
+
+#: Every refresh exchange currently running DETACHED from the connect that
+#: started it, i.e. one whose awaiter has cancelled or timed out while the POST
+#: stayed on the wire (``_detach_refresh_exchange`` adds, the exchange's own done
+#: callback discards). Process-wide rather than per-session on purpose: the task
+#: is created inside the exchange, which knows nothing about sessions, and a
+#: teardown that waits a moment too long for a sibling's exchange is harmless
+#: while a rotation lost to a store closing under it is not. It is the ONLY
+#: handle on such a task — the connect that would have awaited it is gone — so
+#: :func:`drain_refresh_exchanges` reads it to keep the credential store open
+#: until the rotations still in flight have landed.
+_DETACHED_REFRESH_EXCHANGES: set["asyncio.Task[RefreshOutcome]"] = set()
 
 #: How long a "presented but unacknowledged" send marker stays live (see
 #: :data:`GRANT_UNCONFIRMED_SEND_KEY`).
@@ -873,10 +927,33 @@ class McpTokenStorage:
         """
         return self._read() is None and self.has_stored_row() is False
 
-    def _write(self, creds: dict[str, Any]) -> None:
+    def _write(self, creds: dict[str, Any]) -> bool:
+        """Persist this server's row, and REPORT whether it landed.
+
+        Returns ``True`` when the payload was handed to the store without
+        raising, ``False`` when the write was DROPPED — no store bound, or the
+        store refused it.
+
+        The return value exists because a dropped write was previously
+        invisible: every failure was logged at DEBUG and the caller carried on
+        as though the row had been updated. That is tolerable for the
+        best-effort writers (the marker, the client-info seeds), where losing
+        the write degrades to the behaviour before the feature existed, but it
+        is NOT tolerable for :meth:`store_refresh_result`, where the payload is
+        the ONLY copy of a rotation the authorization server has already
+        performed — a rotation this codebase has measured being lost to a
+        store closed during teardown, and then reported as success. So the
+        failure is signalled here and the one caller that cannot afford to
+        swallow it logs and returns it upward.
+
+        The exception itself still goes to DEBUG (uncallable callers, and the
+        marker writes, should not have to look at a return value to find the
+        cause); a caller that needs the reason in a readable record says so in
+        its own line.
+        """
         store = self._store
         if store is None:
-            return
+            return False
         payload = dict(creds)
         # The store stamps ``type`` into the data it persists; carrying it
         # back on the next write would make _identity_key_for short-circuit
@@ -892,6 +969,8 @@ class McpTokenStorage:
             store.upsert_credential(MCP_OAUTH_PROVIDER, payload)
         except Exception:
             logger.debug("MCP token write failed for %s", self.credential_id, exc_info=True)
+            return False
+        return True
 
     # --- SDK TokenStorage protocol ---------------------------------------
 
@@ -1051,7 +1130,15 @@ class McpTokenStorage:
         deliberately do not take the lock (a completed interactive login, the
         SDK's client-info writes, a `/mcp logout`).
 
-        Returns ``True`` when the response was written.
+        Returns ``True`` when the response was written, and ``False`` when the
+        write was DROPPED — the case the previous contract could not express,
+        because ``_write`` swallowed the failure while this method returned
+        ``True`` unconditionally. A dropped rotation is the one loss in this
+        subsystem that is both silent and expensive: the provider has already
+        spent the presented token, so the row that keeps it is a spent token
+        that the NEXT refresh will re-present (the reuse-detecting POST). It is
+        therefore logged at INFO like the other two refusals above, and the
+        caller is told.
         """
         creds = self._read()
         if self._row_was_removed():
@@ -1084,7 +1171,16 @@ class McpTokenStorage:
                 "[writer: McpTokenStorage.store_refresh_result]",
                 self.server_url,
             )
-        self._write(creds)
+        if not self._write(creds):
+            logger.info(
+                "MCP token refresh for %s was NOT persisted: the credential store "
+                "refused the write (a store closed by teardown, or a failed upsert), "
+                "so the rotation this exchange received is LOST and the row still "
+                "holds the refresh token the exchange presented "
+                "[writer: McpTokenStorage.store_refresh_result]",
+                self.server_url,
+            )
+            return False
         return True
 
     def mark_send_unconfirmed(self, presented_refresh_token: str) -> None:
@@ -3261,6 +3357,14 @@ async def _refresh_oauth_token_locked(
     # result and releases the lock itself, so the rotation survives whichever of
     # the three ways this ends: completed in time, cancelled mid-flight, or
     # landed after the bound.
+    # One state object per exchange, handed down so BOTH halves can use it: the
+    # event hook inside ``_perform_refresh_exchange`` flips ``dispatched`` when
+    # the request is about to be written, and the settle line attached below
+    # reads it after the connect that started the exchange is long gone. It is
+    # created here rather than inside the exchange because the detaching side
+    # needs it too, and only a value passed to both can describe the same
+    # request.
+    send_state = RefreshSendState()
     exchange: asyncio.Task[RefreshOutcome] = asyncio.ensure_future(
         _perform_refresh_exchange(
             server_url,
@@ -3268,6 +3372,7 @@ async def _refresh_oauth_token_locked(
             endpoints,
             lock=lock,
             peer_refresh_is_success=peer_refresh_is_success,
+            send_state=send_state,
         )
     )
     if lock is not None:
@@ -3291,7 +3396,7 @@ async def _refresh_oauth_token_locked(
             server_url,
             REFRESH_HTTP_TIMEOUT_S,
         )
-        _detach_refresh_exchange(exchange, server_url)
+        _detach_refresh_exchange(exchange, server_url, send_state)
         return "overran"
     except asyncio.CancelledError:
         # Routine teardown: every sidebar switch disposes a manager and cancels
@@ -3304,25 +3409,63 @@ async def _refresh_oauth_token_locked(
         # outlived the remainder); the ownership transfer replaces it, and
         # teardown is now immediate instead of blocked for up to
         # ``REFRESH_HTTP_TIMEOUT_S``.
-        _detach_refresh_exchange(exchange, server_url)
+        _detach_refresh_exchange(exchange, server_url, send_state)
         raise
 
 
-def _detach_refresh_exchange(exchange: "asyncio.Task[RefreshOutcome]", server_url: str) -> None:
+def _detach_refresh_exchange(
+    exchange: "asyncio.Task[RefreshOutcome]",
+    server_url: str,
+    send_state: RefreshSendState | None = None,
+) -> None:
     """Make a refresh exchange that outlived its connect safe to leave running.
 
     The task persists its own result (see :func:`_perform_refresh_exchange`),
     so nothing here consumes a value: this exists so a task nobody awaits is
-    not reported as "exception was never retrieved" when the loop closes, and
-    so a failure inside it is logged against the server it belongs to.
+    not reported as "exception was never retrieved" when the loop closes, so a
+    failure inside it is logged against the server it belongs to, and — the
+    load-bearing half — so TEARDOWN CAN WAIT FOR IT (see
+    :func:`drain_refresh_exchanges`).
+
+    The exchange joins ``_DETACHED_REFRESH_EXCHANGES`` for exactly as long as it
+    is running: registered here, discarded from the done callback below. That
+    registry is the only handle anything has on a detached exchange, because the
+    connect that started it is gone by definition — and without it a runtime
+    exit closes the credential store underneath a rotation that is still on its
+    way back, which is the defect this whole module's marker exists to survive.
 
     INFO, not debug, for the same reason the write paths say so: an exchange
     nobody awaited is exactly the state whose rotation support has to be able to
-    read out of a log after the fact.
+    read out of a log after the fact. ``send_state`` is what makes that log line
+    answer the question support actually has — did this exchange's request reach
+    the wire? — and is optional only so the module's own tests can drive an
+    exchange directly.
     """
 
+    _DETACHED_REFRESH_EXCHANGES.add(exchange)
+
     def _settle(finished: "asyncio.Task[RefreshOutcome]") -> None:
+        _DETACHED_REFRESH_EXCHANGES.discard(finished)
         if finished.cancelled():
+            # The loop is going down and cancelled the task mid-flight (a
+            # runtime exit reaches here through ``asyncio.run``'s own
+            # cancellation of everything still pending). This used to return
+            # SILENTLY, and that silence is why a measured 14-hour window with
+            # 36 user-visible connect failures contained ZERO exchange-outcome
+            # lines: the armings that matter were invisible by construction, so
+            # the loss could not be counted, attributed or even noticed. One
+            # line per lost exchange, naming whether its request had been
+            # dispatched — a request that reached the wire may have spent the
+            # stored token, one that did not cannot have, and only this flag can
+            # tell the two apart after the fact.
+            logger.info(
+                "detached MCP token refresh for %s was CANCELLED before any answer "
+                "arrived; the request had %s been dispatched, so any rotation the "
+                "authorization server performed is lost and any armed send marker "
+                "stays armed [writer: detached refresh exchange]",
+                server_url,
+                "already" if (send_state is not None and send_state.dispatched) else "never",
+            )
             return
         with contextlib.suppress(BaseException):
             exc = finished.exception()
@@ -3338,12 +3481,67 @@ def _detach_refresh_exchange(exchange: "asyncio.Task[RefreshOutcome]", server_ur
             if outcome != "refreshed":
                 logger.info(
                     "detached MCP token refresh for %s ended %r without persisting"
+                    " (the request had %s been dispatched)"
                     " [writer: detached refresh exchange]",
                     server_url,
                     outcome,
+                    "already" if (send_state is not None and send_state.dispatched) else "never",
                 )
 
     exchange.add_done_callback(_settle)
+
+
+async def drain_refresh_exchanges(timeout_s: float | None = None) -> bool:
+    """Wait, BOUNDED, for detached refresh exchanges to persist their rotation.
+
+    Called by the MCP teardown after it has cancelled every connect and while
+    the credential store is still OPEN (see ``attach_auth_dispose``'s
+    ``last=True`` and ``McpManager.disconnect_all``). Returns ``True`` when the
+    registry emptied inside the bound and ``False`` when it did not — in which
+    case the rotation of whatever was still running is lost, so the bound being
+    hit is logged rather than tolerated silently.
+
+    Three properties are deliberate:
+
+    * **A cut, not a join.** The exchange's own budget is
+      ``REFRESH_HTTP_TIMEOUT_S`` plus ``REFRESH_LATE_RESPONSE_GRACE_S`` and this
+      process is on its way out, so the wait is capped at ``timeout_s`` (see
+      ``REFRESH_DRAIN_TIMEOUT_S``). A wedged authorization server must cost a
+      quit a couple of seconds, never a hang.
+    * **The lock is not touched.** The exchange acquired and will release the
+      cross-process refresh lock itself; waiting on the lock here would be
+      waiting on the thing this function is waiting for.
+    * **Nothing is cancelled.** A task that outlives the bound is left running:
+      it may still land its rotation before the process really ends, and
+      killing it here would be this module choosing to lose it.
+
+    The loop re-reads the registry after each wait, because a cancellation
+    delivered by the teardown itself can still be unwinding: a connect that has
+    not yet reached its ``CancelledError`` arm has not registered its exchange
+    yet, and a single snapshot taken before that would silently drain nothing.
+    """
+    loop = asyncio.get_running_loop()
+    if timeout_s is None:
+        # Read HERE rather than as a default argument, which Python evaluates once
+        # at import: the bound is a knob the tests lower, and a default would make
+        # ``REFRESH_DRAIN_TIMEOUT_S`` unpatched code that looks patched.
+        timeout_s = REFRESH_DRAIN_TIMEOUT_S
+    deadline = loop.time() + timeout_s
+    while True:
+        pending = [task for task in list(_DETACHED_REFRESH_EXCHANGES) if not task.done()]
+        if not pending:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning(
+                "%d detached MCP token refresh exchange(s) outlived the %.1fs teardown "
+                "drain; any rotation they were carrying is lost when this process "
+                "exits [writer: refresh teardown drain]",
+                len(pending),
+                timeout_s,
+            )
+            return False
+        await asyncio.wait(pending, timeout=remaining)
 
 
 async def _perform_refresh_exchange(
@@ -3353,6 +3551,7 @@ async def _perform_refresh_exchange(
     *,
     lock: _OAuthRefreshLock | None = None,
     peer_refresh_is_success: bool = False,
+    send_state: RefreshSendState | None = None,
 ) -> RefreshOutcome:
     """POST one refresh grant and persist whatever the server decided.
 
@@ -3370,13 +3569,30 @@ async def _perform_refresh_exchange(
     reuse-detection POST that revokes the family.
 
     The request is also WRITE-AHEAD MARKED
-    (:meth:`McpTokenStorage.mark_send_unconfirmed`) immediately before the POST,
-    because the token is spent by the REQUEST and a process that dies mid-flight
-    takes all in-memory knowledge with it. A failure BEFORE the request was
-    written clears the marker again (the token was never presented, so that is
-    an ordinary transient retry); anything later leaves it armed, and the
-    refresh path then refuses to present that token until an interactive grant
-    replaces it (see :data:`GRANT_UNCONFIRMED_SEND_KEY`).
+    (:meth:`McpTokenStorage.mark_send_unconfirmed`) at the instant it is
+    DISPATCHED — from an httpx request event hook, which runs after the endpoint
+    URL is resolved and immediately before the transport writes the bytes, and
+    therefore still strictly before any answer can exist — because the token is
+    spent by the REQUEST and a process that dies mid-flight takes all in-memory
+    knowledge with it. A failure BEFORE the request was written clears the marker
+    again (the token was never presented, so that is an ordinary transient
+    retry); anything later leaves it armed, and the refresh path then refuses to
+    present that token until an interactive grant replaces it (see
+    :data:`GRANT_UNCONFIRMED_SEND_KEY`).
+
+    That hook is the WHOLE point of the ordering, and it replaces an arm that sat
+    before ``httpx.AsyncClient`` was even constructed. The earlier placement
+    covered strictly more than the danger it guards against: a cancellation or a
+    kill anywhere in client construction, DNS, TLS or the pool wait left a marker
+    armed for a request that had never left the machine, and a live marker costs
+    the user a browser sign-in (the refusal above, then ``/mcp reauth``, which
+    deletes the credential). Spending an hour of hard refusal on a POST that was
+    never made is a false positive with the maximum possible price, and arming at
+    dispatch removes the class without weakening the guarantee: the hook runs
+    before the transport, so no response can exist before the marker does.
+
+    ``send_state`` is the caller's record of that dispatch, used by the settle
+    line on a detached exchange; a direct caller may leave it out.
 
     ``lock=None`` means the CALLER owns exclusivity (the direct-call path used
     by the unit tests and by nothing else); a caller that hands over a handle it
@@ -3402,6 +3618,9 @@ async def _perform_refresh_exchange(
     import httpx
     from mcp.shared.auth import OAuthToken
     from mcp.shared.auth_utils import resource_url_from_server_url
+
+    if send_state is None:
+        send_state = RefreshSendState()
 
     try:
         # Re-read UNDER the lock, inside the task that owns it: whatever we
@@ -3478,18 +3697,33 @@ async def _perform_refresh_exchange(
             encoded = base64.b64encode(f"{cid}:{csecret}".encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
 
-        # WRITE-AHEAD, before the request can be on the wire: from this instant
-        # the row records that this token may have been spent, so a crash or a
-        # kill between here and the response cannot leave a spent token looking
-        # untouched to the next boot.
-        storage.mark_send_unconfirmed(tokens.refresh_token)
+        # WRITE-AHEAD by REQUEST EVENT HOOK, not here: the marker must exist
+        # before the request can be on the wire and must NOT exist before the
+        # request is even dispatchable, and only the transport's own seam can
+        # tell those apart (see this function's docstring). httpx runs
+        # ``request`` hooks in ``_send_single_request`` immediately before
+        # handing the request to the transport, so this fires exactly once per
+        # attempt, after DNS/TLS/pool work that a cancellation may never get
+        # past. The hook also records the fact for the log, which is the only
+        # thing that can distinguish "lost a live POST" from "cancelled before
+        # the wire" after the fact.
+        #
+        # Bound to a local because the guard above is what proves the token is
+        # there, and a closure does not inherit that narrowing.
+        presented_refresh_token = tokens.refresh_token
+
+        async def _arm_send_marker(request: httpx.Request) -> None:
+            storage.mark_send_unconfirmed(presented_refresh_token)
+            send_state.dispatched = True
+
         try:
             # ``read`` is the LATE GRACE, not the budget: a response that lands
             # after the awaiting connect has given up is still a rotation we
             # must not throw away. Connect/write/pool keep the budget, so a
             # server that never accepts the request still fails fast.
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S, read=REFRESH_LATE_RESPONSE_GRACE_S)
+                timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S, read=REFRESH_LATE_RESPONSE_GRACE_S),
+                event_hooks={"request": [_arm_send_marker]},
             ) as client:
                 response = await client.post(token_endpoint, data=data, headers=headers)
         except (httpx.HTTPError, TimeoutError) as exc:
@@ -3847,6 +4081,7 @@ def _make_refresh_coordinating_provider(
     server_url: str,
     storage: "McpTokenStorage",
     endpoints: DiscoveredOAuthEndpoints | None,
+    leaving: Callable[[], bool] | None = None,
 ) -> Any:
     """An ``OAuthClientProvider`` whose in-flow refresh is race-free across processes.
 
@@ -3917,6 +4152,28 @@ def _make_refresh_coordinating_provider(
         _refresh_coord_storage = storage
         _refresh_coord_endpoints = endpoints
 
+        #: The teardown gate, consulted before ANY exchange this provider could
+        #: start (see :meth:`_is_leaving`), so a session on its way out cannot
+        #: become the party that spends a rotating refresh token. Set on the
+        #: INSTANCE below rather than as a class attribute like its siblings
+        #: above: a plain function in a class body is a descriptor, so reading it
+        #: back through ``self`` would bind it as a method and call it with
+        #: ``self`` — a TypeError inside the auth flow, which httpx2 reports as a
+        #: connection failure rather than as the bug it is.
+        _refresh_coord_leaving: "Callable[[], bool] | None"
+
+        def _is_leaving(self) -> bool:
+            """Whether the owner of this provider is tearing down.
+
+            A per-provider predicate rather than a module global on purpose: the
+            server facade hosts several sessions in ONE process, and a global
+            would let the first session's teardown suppress every other
+            session's refreshes. The predicate is supplied by whoever created
+            the provider and lives exactly as long as the provider does.
+            """
+            predicate = self._refresh_coord_leaving
+            return bool(predicate()) if predicate is not None else False
+
         async def _coordinate_inflight_refresh(self) -> None:
             """Re-sync from the store (and refresh once, race-free) if the SDK is
             about to refresh. No-op unless the loaded token is invalid AND
@@ -3927,6 +4184,31 @@ def _make_refresh_coordinating_provider(
             # Gate on the SAME predicate the SDK's async_auth_flow uses so we
             # intercept precisely when it would refresh, and never otherwise.
             if ctx.is_token_valid() or not ctx.can_refresh_token():
+                return
+            if self._is_leaving():
+                # THE TEARDOWN GATE, and the reason the credential store can now
+                # outlive the MCP teardown. The SDK runs this same auth flow for
+                # its session-terminate DELETE, so teardown itself enters here
+                # whenever the in-memory token is expired — which is exactly the
+                # state the short-token servers are in at most boots. Before this
+                # change that POST failed closed only by ACCIDENT — a closed store
+                # made the exchange report "unsent" (the "held nothing to present"
+                # line in the fleet log) — and once the store stays open past the
+                # teardown, leaving this ungated turns a process that is already
+                # exiting into the one party that spends the refresh token: a
+                # rotation whose response nothing will be alive to persist. So:
+                # strip the token (the SDK's own unlocked refresh must not run
+                # either — same load-bearing strip as the dead-grant arm below) and
+                # return, which sends a non-interactive flow to its actionable auth
+                # error instead of the wire. A request whose token is still valid
+                # above never reaches this: it goes out authenticated, as it should.
+                logger.info(
+                    "MCP in-flight refresh suppressed for %s: this session is "
+                    "tearing down, so no token POST is made and no send marker is "
+                    "armed [writer: refresh leaving gate]",
+                    self._refresh_coord_server_url,
+                )
+                self._strip_in_memory_refresh_token(ctx)
                 return
             if self._refresh_coord_storage.grant_is_dead():
                 # Same suppression as ensure_mcp_oauth_fresh, before the lock.
@@ -4399,6 +4681,29 @@ def _make_refresh_coordinating_provider(
             """
             from local_operator.mcp import auth as auth_mod
 
+            if self._is_leaving():
+                # Same teardown gate as the coordination step, on the path that
+                # makes it complete rather than partial. The terminate DELETE
+                # that a disposing session sends carries an EXPIRED access token
+                # (that is the state these servers are in when the exit lands),
+                # so its 401 arrives here — and the refresh arm below would POST
+                # the refresh token from a process that is already leaving,
+                # which is precisely what the store outliving the teardown was
+                # supposed to make safe and this gate is what makes possible.
+                # Stripping before returning is mandatory, not tidiness: the
+                # caller hands the 401 to the SDK on a ``None``, and the SDK's
+                # unlocked refresh only stays out of the way because
+                # ``can_refresh_token()`` reads False — the same contract the
+                # dead-grant arm relies on.
+                logger.info(
+                    "MCP 401 recovery suppressed for %s: this session is tearing "
+                    "down, so no token POST is made and no send marker is armed "
+                    "[writer: refresh leaving gate]",
+                    self._refresh_coord_server_url,
+                )
+                self._strip_in_memory_refresh_token(self.context)
+                return None
+
             outcome: RefreshOutcome | None = None
             try:
                 async with _oauth_refresh_lock(self._refresh_coord_server_url) as lock:
@@ -4493,7 +4798,13 @@ def _make_refresh_coordinating_provider(
                 if ctx.current_tokens is not None:
                     ctx.current_tokens.refresh_token = None
 
-    return _RefreshCoordinatingOAuthProvider(**kwargs)
+    provider = _RefreshCoordinatingOAuthProvider(**kwargs)
+    # The gate rides on the INSTANCE, not the class (see the annotation above): it
+    # is a callable, and a callable in a class body would be bound as a method.
+    # ``None`` means "never leaving", which keeps every existing direct caller —
+    # including the module's own tests — exactly as it was.
+    provider._refresh_coord_leaving = leaving
+    return provider
 
 
 def build_oauth_provider(
@@ -4503,6 +4814,7 @@ def build_oauth_provider(
     *,
     interactive: bool = True,
     endpoints: DiscoveredOAuthEndpoints | None = None,
+    leaving: Callable[[], bool] | None = None,
 ) -> Any:
     """An ``OAuthClientProvider`` that knows when its stored token expires.
 
@@ -4525,6 +4837,13 @@ def build_oauth_provider(
     and needs an in-flow refresh targets the real token endpoint instead of the
     SDK's ``<server_base>/token`` guess (which 404s for providers like Datadog
     whose token endpoint lives on a different host).
+
+    ``leaving`` is the teardown gate: a predicate the provider consults before
+    it may start a refresh exchange, so a process on its way out never becomes
+    the party that spends a rotating refresh token (see
+    :meth:`_RefreshCoordinatingOAuthProvider._is_leaving`). It is optional
+    because a provider built without an owner that can be torn down has nothing
+    to gate on, and every existing caller therefore keeps today's behaviour.
     """
     # The flow is created HERE (not inside wire_oauth_auth) so it can be
     # attached to the provider: an abandoned grant arrives at the connect as
@@ -4542,7 +4861,11 @@ def build_oauth_provider(
     # long-lived sessions cannot double-spend a rotating refresh token
     # mid-session — see :func:`_make_refresh_coordinating_provider`.
     provider = _make_refresh_coordinating_provider(
-        kwargs, server_url=server_url, storage=storage, endpoints=endpoints
+        kwargs,
+        server_url=server_url,
+        storage=storage,
+        endpoints=endpoints,
+        leaving=leaving,
     )
     provider._loopback_flow = flow  # type: ignore[attr-defined]
     if endpoints is not None:

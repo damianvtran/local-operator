@@ -3804,6 +3804,14 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     # REGISTRATION order, and ``disconnect_all`` bumps the manager's epoch, so
     # the revalidation poller has to be cancelled first or a tick could register
     # a connection into a manager that is tearing down.
+    #
+    # ``disconnect_all`` also DRAINS the refresh exchanges its cancellation
+    # detached, so a rotation still in flight is persisted — which is only
+    # possible because the credential store's own close is registered
+    # ``last=True`` (``attach_auth_dispose``) and therefore runs after this
+    # hook, whatever order the two were registered in. That pairing is the fix
+    # for the lost rotation (see ``attach_auth_dispose``); it is noted here
+    # because this is the hook whose writes depend on it.
     _attach_mcp_auth_revalidation(session, manager)
     session.add_dispose_hook(manager.disconnect_all)
     session.mcp_manager = manager
@@ -4014,10 +4022,28 @@ def attach_auth_dispose(session: Session, auth_store: AuthStore | None) -> None:
     calls ``session.dispose()`` exactly once, so registering here guarantees
     the connection (and its file lock) is released everywhere without
     teaching each caller.
+
+    Registered ``last=True``, and that is a correctness property rather than a
+    tidy-up: this store is what MCP teardown WRITES to. A refresh exchange
+    detached mid-POST when the session began disposing still persists the
+    authorization server's rotation seconds later — the response is the only
+    copy of the new refresh token — and closing the store first swallowed that
+    write at DEBUG while ``store_refresh_result`` still reported success,
+    leaving the row holding the SPENT token plus a live
+    ``grant_refresh_unconfirmed`` marker. Every later connect then refused to
+    refresh for up to an hour and told the user to run ``/mcp reauth``, which
+    deletes the credential and demands a browser grant; measured on this machine
+    as 96 refusal lines / 48 refused connects over 14.4 h across the four
+    servers whose access tokens live 30-60 minutes. So the store must outlive
+    both ``manager.disconnect_all`` and the bounded refresh drain that follows
+    it, and it must do so WITHOUT depending on the order the MCP hooks happen to
+    be registered in — the deferred wiring path registers its own from a
+    background task, after this one, and a session disposed before that task
+    finished has no MCP hook at all.
     """
     if auth_store is None:
         return
-    session.add_dispose_hook(auth_store.close)
+    session.add_dispose_hook(auth_store.close, last=True)
 
 
 def attach_stream_dispose(session: Session, stream_fn: SessionStreamFn) -> None:
