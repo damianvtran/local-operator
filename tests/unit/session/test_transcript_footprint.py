@@ -329,6 +329,83 @@ def test_encode_rejects_nothing_it_cannot_rebuild():
 # -- the cold-open load path: what compaction can shed, and how the file is read
 
 
+def test_the_collapsible_allowlist_names_the_frontend_checkpoint_type():
+    """The type is written as a LITERAL; this is what stops it drifting.
+
+    ``transcript`` must stay a leaf module (``read_replay_suffix`` says why), and
+    the constant's owner — ``session/frontend_state.py`` — reaches the TUI, so the
+    allowlist cannot import it. A rename there would otherwise turn the fold off
+    silently, which is the failure this test exists for.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import _COLLAPSIBLE_CUSTOM_TYPES
+
+    assert FRONTEND_CHECKPOINT_CUSTOM_TYPE in _COLLAPSIBLE_CUSTOM_TYPES
+
+
+@pytest.mark.asyncio
+async def test_compaction_drops_superseded_frontend_checkpoints(tmp_path):
+    """Every turn end appends the FULL frontend state; only the newest is read.
+
+    Measured on the operator's store: 1,100 rows / 379.8 MB across 216 sessions,
+    93.1% of it superseded, and on the largest journal those rows alone are 75% of
+    the whole-file parse cost. Every reader takes the newest entry of the type, so
+    the older copies are dead bytes — and the fold must keep the answer a reader
+    gets before it identical.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_message(Message.user("hello"))
+    for index in range(3):
+        await transcript.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"cwd": f"/work/{index}"}}
+        )
+    before = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    assert before == {"state": {"cwd": "/work/2"}}
+
+    assert await transcript.compact_file(min_reclaim_bytes=0) > 0
+
+    rows = [
+        entry
+        for entry in transcript.entries()
+        if entry.payload.get("custom_type") == FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    ]
+    assert len(rows) == 1, "the fold kept more than the newest checkpoint"
+    # ... and what a reader is told did not change: newest-wins is the contract
+    # every caller depends on (cold open, desktop locate, the picker pane).
+    assert transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE) == before
+    assert transcript.entries()[0].payload["content"][0]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_compacting_checkpoints_leaves_the_message_history_alone(tmp_path):
+    """The fold is a byte operation on ONE type, not a rewrite of the transcript."""
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+
+    transcript = Transcript(tmp_path / "sess")
+    for index in range(3):
+        await transcript.append_message(Message.user(f"turn {index}"))
+        await transcript.append_custom(
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"state": {"cwd": f"/work/{index}"}}
+        )
+    replayed = [m.text for m in transcript.build_llm_history() if isinstance(m, Message)]
+    await transcript.compact_file(min_reclaim_bytes=0)
+    reopened = Transcript(tmp_path / "sess")
+    assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == replayed
+    # Only the NEWEST checkpoint survives, and the surviving rows keep their
+    # relative order — a fold that reordered rows would change what a reader
+    # paging by ``before_id`` reconstructs.
+    assert [entry.type for entry in reopened.entries()] == [
+        "message",
+        "message",
+        "message",
+        "custom",
+    ]
+    assert reopened.entries()[-1].payload["details"] == {"state": {"cwd": "/work/2"}}
+
+
+@pytest.mark.asyncio
 async def test_construction_streams_the_journal_instead_of_materialising_it(tmp_path, monkeypatch):
     """3.38x the file, gone — asserted as a MECHANISM and as a peak.
 
