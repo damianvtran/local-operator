@@ -793,6 +793,92 @@ async def test_a_narration_block_renders_the_rail_off_build(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (60, 24)])
+@pytest.mark.parametrize("text", [THREE_PARAGRAPHS, MIXED_CONSTRUCTS])
+async def test_a_streaming_block_renders_the_rail_off_build(
+    monkeypatch: pytest.MonkeyPatch, text: str, size: tuple[int, int]
+) -> None:
+    """The settle gate makes the SAME equivalence: a message still arriving is
+    the rail-OFF build.
+
+    The claim is that the streaming state is not a third geometry — not "railed
+    geometry minus a glyph" — so the two builds are compared to EACH OTHER, the
+    way the narration case above is, and ``T2-a`` pins OFF to the pre-rail export
+    by transitivity rather than this adding a third opinion about it.
+
+    This is the case where the temptation to reserve the cells is strongest: the
+    block is about to settle into a railed frame, so leaving the two cells blank
+    would look like "the geometry the message is about to need". It is rejected
+    for the reason the OFF promise already records — an indent with nothing in it
+    — plus its own: it would indent EVERY streaming message to reserve space for
+    a bar that is not there yet. What that costs instead is recorded on
+    ``AssistantBlock._rail_cols``: the settle re-folds the message once.
+
+    The last block is the CONTROL: settled, with the rail on, it paints the
+    railed frame — without it the equivalence above would also hold for a build
+    that had simply lost the rail altogether.
+
+    Faithful revert shape: make ``_rail_cols`` return ``RAIL_COLS if
+    settings_get("display.rail", ...) else 0`` without consulting ``_settled``.
+    The streaming rows then carry the glyph and fold two cells narrow — the frame
+    v0.59.1 shipped, which is the report this change answers.
+    """
+    state = _mutable_rail(monkeypatch)
+
+    async def render(pilot, view, *, on: bool, settle: bool) -> tuple[list[str], AssistantBlock]:
+        state["on"] = on
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        block.update_text(text)
+        if settle:
+            block.finalize_text()
+        await pilot.pause()
+        await pilot.pause()
+        return _painted_rows(block), block
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=size) as pilot:
+        view = app.query_one(TranscriptView)
+        streaming_rows, streaming = await render(pilot, view, on=True, settle=False)
+        off_rows, off = await render(pilot, view, on=False, settle=False)
+
+        # The pair is the interesting one, not two empty frames agreeing.
+        assert sum(1 for row in off_rows if row.strip()) >= 3, off_rows
+        assert RAIL not in "\n".join(off_rows), off_rows
+
+        assert streaming_rows == off_rows, (
+            "a streaming block must paint the rail-OFF build exactly.\n"
+            f"streaming: {streaming_rows!r}\n"
+            f"rail off:  {off_rows!r}"
+        )
+        assert streaming._rail_cols() == off._rail_cols() == 0
+        assert streaming._built_width == off._built_width, (
+            streaming._built_width,
+            off._built_width,
+        )
+        lane = streaming.fold_width(80)
+        assert streaming.authored_width(lane) == off.authored_width(lane)
+        assert streaming.copy_gutter(0) == off.copy_gutter(0) == 0
+
+        selection = Selection(
+            Offset(0, 0), Offset(len(streaming_rows[-1]), len(streaming_rows) - 1)
+        )
+        copied = streaming.get_selection(selection)
+        assert copied is not None
+        assert copied[0] == (off.get_selection(selection) or ("", ""))[0]
+        assert RAIL not in copied[0], copied[0]
+
+        # CONTROL: settling the same block on the same lane DOES rail it.
+        settled_rows, settled = await render(pilot, view, on=True, settle=True)
+        assert all(row.startswith(RAIL) for row in settled_rows), settled_rows
+        assert settled._built_width == max(streaming._built_width - RAIL_COLS, 0), (
+            settled._built_width,
+            streaming._built_width,
+        )
+
+
+@pytest.mark.asyncio
 async def test_a_mid_session_flip_leaves_a_narration_block_unrailed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

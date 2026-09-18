@@ -1814,6 +1814,12 @@ async def test_a_paged_block_is_folded_at_its_destination_width_not_the_fallback
     # was handed. Both are still "the width this block is about to be given",
     # which is what this assertion is about; collapsing them to ``== pane``
     # would demand the assistant overhang its own box by two cells.
+    #
+    # ONE width per kind, which is the discrimination this assertion exists for:
+    # the projection marks each block SETTLED before its first ``update_text``
+    # (the message is durable), so a projected assistant block is painted at the
+    # pane LESS the gutter from its first paint rather than spending one paint at
+    # the full pane that the commit then re-folds away (review R2).
     expected = {"AssistantBlock": pane - RAIL_COLS, "UserBlock": pane}
     assert all(width == expected[kind] for kind, width in folds), (
         sorted(set(folds)),

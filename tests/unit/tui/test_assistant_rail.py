@@ -81,6 +81,11 @@ from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.events import (
+    AssistantDelta,
+    AssistantMessageEnd,
+    AssistantMessageStart,
+)
 from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import (
     MIN_BODY,
@@ -90,7 +95,11 @@ from local_operator.tui.widgets.assistant import (
     RAIL_TOKEN,
     AssistantBlock,
 )
-from local_operator.tui.widgets.subagent_view import SubagentView
+from local_operator.tui.widgets.subagent_view import (
+    SubagentEntry,
+    SubagentView,
+    entry_block,
+)
 from local_operator.tui.widgets.transcript import (
     SPINE_INDENT,
     TranscriptView,
@@ -1059,6 +1068,312 @@ async def test_the_mark_is_the_only_difference_between_progress_and_the_answer()
     assert all(row.startswith(RAIL) for row in answer_rows), answer_rows
     assert all(not row.startswith(RAIL) for row in progress_rows), progress_rows
     assert answer.text() == progress.text(), "the mark must not move the prose"
+
+
+# --------------------------------------------------------------------------
+# The settle — the rail is a settled-state property
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "width",
+    [pytest.param(10, id="clamp"), 16, 24, 40, 60, 120],
+)
+@pytest.mark.asyncio
+async def test_a_streaming_message_paints_no_rail_and_folds_at_the_lane(
+    width: int,
+) -> None:
+    """The report, at the block: no gutter until the message stops arriving.
+
+    The block is driven through ``update_text`` alone — every delta, no
+    finalize — which is the state a reader watches. Asserted as three things at
+    once because each alone passes a different half-implementation: NO row
+    carries the glyph (a rail that is merely not painted would still be here);
+    the fold is taken at the LANE (a mark that skipped the paint but kept the
+    two cells would leave the prose indented with nothing in the space, which
+    the next assertion's arithmetic catches); and the copy gutter is 0, so the
+    clipboard does not strip two cells of real content from a frame that never
+    had them. Then the SAME block settles, and the pair is the whole claim.
+
+    The ``clamp`` case is the narrowest and is there on purpose. The block's
+    region is the terminal less its spine, so a 10-column terminal gives a
+    6-cell lane — under ``MIN_BODY``, which is where ``_body_width`` has to let
+    its floor GIVE WAY rather than fold prose wider than the block it is painted
+    in. Every other width in the list is above the floor and takes the ordinary
+    branch, and the repo's existing clamp sweep
+    (``test_rail_toggle.py::test_no_row_paints_outside_the_block_at_any_width``)
+    finalizes before it measures, so it only ever sees the SETTLED arithmetic:
+    this is the one test that meets the floor in the STREAMING state the settle
+    gate introduced, where the gutter is 0 and nothing else stands between the
+    lane and the fold (review R1).
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(width, 40)) as pilot:
+        view = app.query_one(TranscriptView)
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        block.update_text(THREE_PARAGRAPHS)
+        await pilot.pause()
+        await pilot.pause()
+
+        lane = block.region.width
+        assert lane > 0, "the block never got a real width"
+        streaming_rows = _rendered(block)
+        assert sum(1 for row in streaming_rows if row.strip()) >= 3, streaming_rows
+        assert all(not row.startswith(RAIL) for row in streaming_rows), streaming_rows
+        assert block._painted_rail_cols == 0
+        assert block.copy_gutter(0) == 0
+        # The lane itself is the fold: rail-OFF geometry, not railed geometry
+        # with the glyph left off.
+        assert block._built_width == lane, (block._built_width, lane)
+        if lane < MIN_BODY:
+            # THE FLOOR GAVE WAY, which is the clamp's own claim rather than
+            # containment by accident: a fold that took ``MIN_BODY`` here would
+            # be wider than the block and would paint over whatever sits beside
+            # it, so the width has to come out BELOW the floor and still be the
+            # lane.
+            assert block._built_width < MIN_BODY, (block._built_width, lane)
+        for row in streaming_rows:
+            assert len(row.rstrip()) <= lane, (row, lane)
+
+        block.finalize_text()
+        await pilot.pause()
+
+        settled_rows = _rendered(block)
+        assert all(row.startswith(RAIL) for row in settled_rows), settled_rows
+        assert block._painted_rail_cols == RAIL_COLS
+        assert block.copy_gutter(0) == RAIL_COLS
+        # The two cells came off the fold, and the box did not move: the box is
+        # the whole lane and the rail lives inside it. In the clamp region that
+        # is the same giving-way body, two cells narrower again.
+        assert block._built_width == max(lane - RAIL_COLS, 0), (block._built_width, lane)
+        if lane < MIN_BODY:
+            assert block._built_width < MIN_BODY, (block._built_width, lane)
+        for row in settled_rows:
+            assert len(row.rstrip()) <= block.region.width, (row, block.region.width)
+
+
+@pytest.mark.asyncio
+async def test_the_live_path_rails_the_answer_only_once_its_message_ends() -> None:
+    """The settle, end to end through the app's OWN handlers.
+
+    The tests above drive ``update_text``/``finalize_text`` themselves, which
+    fixes the widget's contract and says nothing about which of the app's two
+    statements in ``on_assistant_message_end`` runs first. This one posts the
+    events, so the frame read between the delta and the end event is the frame
+    a reader watching a live stream actually gets — and the rail has to be
+    absent from it and present on the next.
+    """
+    app = OperatorApp(_async_factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        view = app.query_one(TranscriptView)
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        app.post_message(AssistantDelta(THREE_PARAGRAPHS))
+        await pilot.pause()
+        await pilot.pause()
+
+        blocks = [block for block in view.blocks() if isinstance(block, AssistantBlock)]
+        assert len(blocks) == 1, "the delta did not mount one assistant block"
+        block = blocks[0]
+        streaming_rows = _rendered(block)
+        assert all(not row.startswith(RAIL) for row in streaming_rows), streaming_rows
+
+        app.post_message(
+            AssistantMessageEnd(THREE_PARAGRAPHS, stop_reason="stop", has_tool_calls=False)
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        settled_rows = _rendered(block)
+        assert all(row.startswith(RAIL) for row in settled_rows), settled_rows
+
+
+@pytest.mark.asyncio
+async def test_the_paint_that_commits_the_message_is_the_one_that_adds_the_rail() -> None:
+    """D3, with NO pause between the commit and the read.
+
+    The frame the reader gets at the settle is the frame that was painted BY
+    the settle. A settle flag raised after ``finalize_text``'s paint leaves the
+    committed rows un-railed until something else repaints the block, and every
+    paused assertion in this file would still pass — the rail arrives one
+    repaint late, which on a screen that then goes quiet is never. So the rows
+    are read twice with no await between them: bare before the call, railed
+    immediately after it.
+
+    ``_render`` returns what the block is painting NOW, so this reads the frame
+    rather than a re-derivation of it.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        block.update_text(THREE_PARAGRAPHS)
+        await pilot.pause()
+
+        before = _rendered(block)
+        assert all(not row.startswith(RAIL) for row in before), before
+
+        block.finalize_text()  # deliberately NOT followed by a pause
+
+        after = _rendered(block)
+        assert after != before, "the settle did not repaint the block"
+        assert all(row.startswith(RAIL) for row in after), after
+        assert block._painted_rail_cols == RAIL_COLS
+
+
+@pytest.mark.asyncio
+async def test_narration_takes_no_rail_while_streaming_or_after_it_settles() -> None:
+    """Both routes to zero, on one block — and the prose untouched by both.
+
+    Narration is never railed: not while it streams (the settle gate answers 0)
+    and not after it settles (the mark answers 0). Two independent "no"s on the
+    same block, which is the state the live path commits at
+    ``app.py::on_assistant_message_end`` — the mark is applied and the rows
+    committed in that order, one event apart from the streaming frame above.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        block.mark_narration()
+        block.update_text(MIXED_CONSTRUCTS)
+        await pilot.pause()
+
+        streaming_rows = _rendered(block)
+        assert all(not row.startswith(RAIL) for row in streaming_rows), streaming_rows
+        assert block.copy_gutter(0) == 0
+
+        block.finalize_text()
+        await pilot.pause()
+
+        settled_rows = _rendered(block)
+        assert all(not row.startswith(RAIL) for row in settled_rows), settled_rows
+        assert block.copy_gutter(0) == 0
+        # The mark must not move or drop the prose: the message comes back whole
+        # and still folded at the LANE, which is what makes this the rail-OFF
+        # geometry rather than a rail whose glyph went missing.
+        assert block.text().strip() == MIXED_CONSTRUCTS.strip()
+        assert block._built_width == block.region.width, (
+            block._built_width,
+            block.region.width,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_theme_switch_keeps_the_rail_on_a_settled_block() -> None:
+    """D4, the trap: ``retheme`` clears ``_finalized`` to force a repaint.
+
+    A rail gated on ``_finalized`` is therefore painted OFF on a theme switch —
+    the bar vanishing when the user changes theme — and the flag is restored
+    afterwards without a second repaint, so nothing puts it back. Gated on the
+    message's own settled state, the rebuild paints exactly what the frame had.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        settled = AssistantBlock()
+        streaming = AssistantBlock()
+        view.append_block(settled)
+        view.append_block(streaming)
+        await pilot.pause()
+        settled.update_text(THREE_PARAGRAPHS)
+        settled.finalize_text()
+        streaming.update_text(THREE_PARAGRAPHS)
+        await pilot.pause()
+        assert all(row.startswith(RAIL) for row in _rendered(settled))
+
+        settled.retheme()
+        streaming.retheme()
+        await pilot.pause()
+
+        rebuilt = _rendered(settled)
+        assert all(row.startswith(RAIL) for row in rebuilt), rebuilt
+        assert settled._painted_rail_cols == RAIL_COLS
+        # ...and the half that matters as much: a theme switch must not hand one
+        # to a message that has not settled.
+        assert all(not row.startswith(RAIL) for row in _rendered(streaming))
+        assert streaming._painted_rail_cols == 0
+
+
+@pytest.mark.asyncio
+async def test_the_copy_strips_the_rail_only_once_it_has_been_painted() -> None:
+    """Selection parity across the settle: what is painted is what is stripped.
+
+    A whole-message take, taken at both states of ONE block. While streaming
+    there is no gutter on any row, so the take is the message byte for byte; at
+    the settle the same take must come back with the rail removed and nothing
+    else — the two cells are chrome, and a copy that reported a gutter it never
+    painted would eat real prose instead (review round 2, M1).
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(60, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        block = AssistantBlock()
+        view.append_block(block)
+        await pilot.pause()
+        block.update_text(MIXED_CONSTRUCTS)
+        await pilot.pause()
+
+        streaming_rows = _rendered(block)
+        streaming_copy = _whole_message(block, streaming_rows)
+        assert streaming_copy is not None
+        assert RAIL not in streaming_copy
+        assert "- alpha item" in streaming_copy and "> a quoted line" in streaming_copy
+
+        block.finalize_text()
+        await pilot.pause()
+
+        settled_rows = _rendered(block)
+        settled_copy = _whole_message(block, settled_rows)
+        assert settled_copy is not None
+        assert settled_copy == streaming_copy, (settled_copy, streaming_copy)
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_row_gains_its_rail_when_its_own_message_settles() -> None:
+    """The page settles per ROW, so its rail arrives per row.
+
+    ``entry_block`` is the page's own factory, and a row whose message may still
+    receive deltas is built UNFINALIZED on purpose (a finalized block ignores
+    ``update_text``). So the page's live row is exactly the streaming state, and
+    its rail must arrive when the row is committed — the same seam
+    ``_refresh_row`` drives, one row at a time, rather than at job end.
+    """
+    entry = SubagentEntry("m1", "text", text=MIXED_CONSTRUCTS)
+    live = entry_block(entry, fold_width=60, settled=False)
+    done = entry_block(entry, fold_width=60, settled=True)
+    assert isinstance(live, AssistantBlock) and isinstance(done, AssistantBlock)
+    assert not live.is_finalized(), "a live row must not be frozen at building time"
+    assert done.is_finalized()
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one(TranscriptView)
+        view.append_block(live)
+        view.append_block(done)
+        await pilot.pause()
+        await pilot.pause()
+
+        live_rows = _rendered(live)
+        assert all(not row.startswith(RAIL) for row in live_rows), live_rows
+        assert live.copy_gutter(0) == 0
+        done_rows = _rendered(done)
+        assert all(row.startswith(RAIL) for row in done_rows), done_rows
+
+        # ...and the row that commits IN PLACE (deltas arrived, then the row's own
+        # message ended) gains the rail in the paint that commits it.
+        live.finalize_text()
+        assert all(row.startswith(RAIL) for row in _rendered(live))
 
 
 # --------------------------------------------------------------------------
