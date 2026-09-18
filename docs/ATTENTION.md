@@ -228,8 +228,9 @@ re-derive differently:
   composed per surface AND per route, deliberately: the classifier's strings are
   the send path's ("the message could not be written", "send it again") and are
   false about a receipt clear, which has no message in it — so both the TUI's
-  command and the desktop route that clears receipts (`POST
-  /v1/desktop/attention/seen`, `receipts_refusal`) compose their own. All three
+  command and BOTH desktop routes that clear receipts (`POST
+  /v1/desktop/sessions/{session_id}/seen` and `POST /v1/desktop/attention/seen`,
+  through `receipts_refusal`) compose their own. All three
   surfaces say the same things — which condition they met, what could not happen,
   and whether retrying is the remedy. A failed read also means no write: an acknowledgement that cannot be
   verified is not a receipt.

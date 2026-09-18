@@ -981,16 +981,23 @@ StoreRefusalCopy = Callable[[StoreFailure, pathlib.Path | None], str]
 
 
 def receipts_refusal(failure: StoreFailure, root: pathlib.Path | None) -> str:
-    """``POST /v1/desktop/attention/seen``'s own refusal sentence.
+    """The receipt routes' own refusal sentence.
 
-    WHY THIS ROUTE COMPOSES ITS OWN COPY (QA round 2, Q1). The classifier's
+    Both of them: ``POST /v1/desktop/sessions/{session_id}/seen`` clears one
+    conversation's receipt and ``POST /v1/desktop/attention/seen`` clears a batch,
+    and neither sends a message. A composer passed to one and not the other is how
+    this defect shipped twice (review round 4, M1), so the pins below are
+    handler-level on each route rather than on this function alone.
+
+    WHY THESE ROUTES COMPOSE THEIR OWN COPY (QA round 2, Q1). The classifier's
     sentences are the SEND path's and were written for a request carrying a
-    message: on a full volume this route answered "the message could not be
-    written ... and send it again" about a BULK READ RECEIPT, which has no message
-    in it and sends nothing. That is the same defect this PR already fixed on the
-    TUI (agent review round 1 F1 / UX round 1 U8), left standing on the other
-    surface, and the fix has the same shape: the CLASSIFICATION stays shared, the
-    SENTENCE says what this route was doing.
+    message: on a full volume both routes answered "the message could not be
+    written ... and send it again" about a receipt clear, which has no message in
+    it and sends nothing, and both answered "it will catch up on its own" to a
+    write the user had just asked for. That is the defect this PR already fixed on
+    the TUI (agent review round 1 F1 / UX round 1 U8), left standing on this
+    surface; the fix has the same shape: the CLASSIFICATION stays shared, the
+    SENTENCE says what the route was doing.
 
     Three conditions, three answers, because they need three different actions:
     contention is retryable and the remedy is to ask again -- the desktop client
@@ -1082,9 +1089,10 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
     ``copy`` is the calling ROUTE's sentence composer for a classified store
     failure, and it is optional because almost every route here carries a message
     and can let the classifier speak for it. The routes that cannot pass their
-    own: ``POST /v1/desktop/attention/seen`` clears read receipts, so the send
-    path's nouns are false about it (QA round 2, Q1 -- see
-    :func:`receipts_refusal`).
+    own: the two receipt routes (``POST /v1/desktop/sessions/{session_id}/seen``
+    and ``POST /v1/desktop/attention/seen``) clear read receipts, so the send
+    path's nouns are false about them (QA round 2, Q1; review round 4, M1, for
+    passing it to one and not the other -- see :func:`receipts_refusal`).
     """
     try:
         yield
@@ -2057,7 +2065,11 @@ async def answer(session_id: str, body: Answer, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[AttentionState])
 async def seen(session_id: str, body: Seen, request: Request):
-    async with errors(request):
+    # Same composer as the bulk sibling: BOTH receipt routes clear read receipts
+    # and neither sends a message, so the classifier's send-path nouns are false
+    # about both (review round 4, M1 — this route is the shipped ``sessions.seen``
+    # contract and was left on the classifier's copy).
+    async with errors(request, receipts_refusal):
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
 
 
