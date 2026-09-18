@@ -79,9 +79,16 @@ def test_answer_defaults_are_empty_so_a_noul_answer_needs_no_distribution() -> N
 
 
 def test_response_defaults_report_no_spend_rather_than_zero_spend() -> None:
+    """An unreported figure is absent, not zero — the test the counts had to join.
+
+    ``0`` is a legal value on this wire (Radient bills with output tokens zero),
+    so a default of ``0`` made "nobody sent a usage block" indistinguishable from
+    "the vendor reported zero", and the operator's cost line printed a fabricated
+    ``tokens=0/0`` beside a real cost.
+    """
     response = DecisionResponse(vendor="typesafe", model="jev-1.13.0", answers={})
     assert response.cost_usd is None
-    assert (response.input_tokens, response.output_tokens) == (0, 0)
+    assert (response.input_tokens, response.output_tokens) == (None, None)
     assert response.latency_s == 0.0
 
 

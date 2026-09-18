@@ -141,8 +141,8 @@ class DecisionResponse:
     vendor: str                                     # "radient" | "typesafe" | "openrouter"
     model: str
     answers: dict[str, Answer]
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None     # None = the vendor sent no usage, NEVER a fabricated 0
+    output_tokens: int | None = None    # (0 is a real figure: Radient bills with output zero)
     cost_usd: float | None = None
     latency_s: float = 0.0
 
@@ -218,7 +218,9 @@ class ClassificationService:
   list is empty, or the circuit breaker is open.
 - Caches by `sha256(user_message + candidates_digest)` in a bounded per-session LRU (64 entries),
   taken over the roster AS SENT — i.e. after `maxCandidates` has been applied, so a roster change
-  that never reaches the request body cannot force a paid re-call;
+  that never reaches the request body cannot force a paid re-call. The key covers the ROSTER, not
+  the whole body: `context` and the `maxStateChars` rung are body inputs outside it (both benign
+  today — no caller supplies `context`, and the rung is a session setting);
   a cache hit costs nothing and must be visible in the returned `latency_s` as ~0.
 - Opens the circuit breaker after **3 consecutive failures** (transport error, 401/403, 429, 529,
   or a 5xx) and leaves it open for the rest of the session. A 422 (our request was malformed) is
@@ -537,7 +539,8 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
   servers, so it is a rubric input rather than a second copy of one. Left in place; revisit as a
   deliberate answer-quality decision, not as a cost tweak. (For the record, the obvious
   "fix the contradiction" variant — sending the state's copy untrimmed so the two agree — is worse
-  on both counts: 5,862 input tokens per call, and it moves the answers on 3 of the 8.)
+  on both counts: 5,862 input tokens per call, and it moves the answers on 3 of the 8 over two calls
+  per leg, so that variant was not carried further than the second round.)
 
 - Whether the recommendation should be allowed to *remove* an embedder-selected resource when
   its confidence is high. Today: no — additive only. Revisit with data.
