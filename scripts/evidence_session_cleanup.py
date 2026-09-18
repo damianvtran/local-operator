@@ -164,6 +164,13 @@ def main() -> int:
     parsed = parser.parse_args()
     config_dir = _refuse_real_home()
 
+    # This driver builds REAL sessions on the ``test``/mock hosting against the
+    # scratch store it was pointed at, and a mock completion's banner body is
+    # the mock's own reply. Gated once, before any session exists.
+    from scripts.rig_safety import disable_notifications
+
+    disable_notifications()
+
     import logging
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")

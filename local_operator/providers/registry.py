@@ -637,6 +637,25 @@ def get_provider_definition(provider_id: str) -> ProviderDefinition | None:
     return _BY_ID.get(_ALIASES.get(provider_id, provider_id))
 
 
+def is_mock_provider(provider_id: str) -> bool:
+    """Whether ``provider_id`` serves the deterministic TEST wire.
+
+    The ONE answer to "is this the test hosting", shared by the two places a
+    process adopts a model that must never notify:
+    ``providers/clients.py::client_for_spec`` (it already holds the definition,
+    so it reads ``wire`` directly) and ``model/configure.py::configure_model``
+    (which has only the provider id). Spelling the wire name in a second place
+    is how the two would drift, and drift here fails OPEN — a mock session that
+    banners the operator — which is the failure this whole rule exists to stop.
+
+    Keyed on the WIRE rather than on the ``test`` id so a future mock provider
+    is covered by construction; resolved through
+    :func:`get_provider_definition`, so the legacy ``noop`` alias answers too.
+    """
+    definition = get_provider_definition(provider_id)
+    return definition is not None and definition.wire == "mock"
+
+
 def known_provider_ids() -> tuple[str, ...]:
     """Every id :func:`get_provider_definition` answers for, aliases included.
 

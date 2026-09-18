@@ -20,6 +20,7 @@ import pytest
 
 from local_operator.config import ConfigManager
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+from tests.e2e.harness import NO_NOTIFY_ENV
 
 
 @pytest.fixture
@@ -161,6 +162,12 @@ def exec_server(tmp_path, monkeypatch):
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_") and k != "NO_COLOR"}
     env["TERM"] = "xterm-256color"
+    # A real ``lop`` CLI child. Re-asserted rather than inherited: the strip
+    # above removes the pane families only, and this mapping is handed to a
+    # process that can park a gate (see the ``--team`` cell below, which drives
+    # a real runtime) — with no gate it would put a genuine macOS banner on the
+    # operator's screen from a test.
+    env.update(NO_NOTIFY_ENV)
 
     def run(*args, stdin=None):
         result = subprocess.run(

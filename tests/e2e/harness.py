@@ -45,6 +45,30 @@ from local_operator.harness.types import (
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 
+#: The notification kill switch every bespoke child-environment builder in this
+#: suite must re-assert, spelled ONCE so it cannot drift between them.
+#:
+#: WHY A CONSTANT RATHER THAN TRUSTING THE AMBIENT ENVIRONMENT. The builders
+#: here deliberately hand a child a FILTERED environment — dropping ``CMUX_*``
+#: and ``LOP_*`` so a runtime cannot address the operator's live panes or adopt
+#: their session — and several of them build the mapping with no reference to
+#: ``os.environ`` at all. Those children are real ``lop`` runtimes: with no kill
+#: switch one announces a parked gate through ``tui.notify.detached_notify``,
+#: which on darwin is a genuine ``osascript display notification``, and with a
+#: mock model it announces a completion whose body is the mock's own reply.
+#: Both have fired from this suite before.
+#:
+#: ``tests/conftest.py`` also arms it at import time, which covers the builders
+#: that copy ``os.environ``; this mapping is for the ones that do not, and is
+#: guarded by ``tests/unit/test_notification_isolation.py``, which walks the
+#: ``env=`` builders under ``tests/e2e/`` and ``scripts/`` and fails on one that
+#: spawns a local-operator child without it.
+NO_NOTIFY_ENV: dict[str, str] = {
+    "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
+    "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH": "1",
+}
+
+
 #: A model spec no provider is ever asked about. ``provider="test"`` keeps the
 #: pricing and discovery paths on their unknown-model branches instead of
 #: reaching the model registry over the network.
