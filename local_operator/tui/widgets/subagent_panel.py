@@ -1784,8 +1784,9 @@ class SubagentPanel(Container):
         #: exists, and a session swap (`/new`, `/resume`) re-seeds through
         #: `reset_density` anyway.
         self._density_seeded: bool = False
-        #: What the summary caption last painted, for its paint-once guard
-        #: (counts + spinner frame). None until the summary has painted once.
+        #: What the summary caption last painted, for its paint-once guard:
+        #: the counts, the spinner glyph, the scope the caption names, and the
+        #: width it was laid out at. None until the summary has painted once.
         self._summary_key: tuple[SummaryCounts, str, str, int] | None = None
         #: Memo for `_summary_counts_cached`: the ledger identity the counts
         #: were derived from, and the counts themselves. Keyed rather than
