@@ -1013,7 +1013,14 @@ async def test_scratchpad_roundtrip_write_list_read_range_edit(tmp_path) -> None
         context,
     )
     assert created.is_error is False
-    assert created.text == f"Created scratchpad://perf.md -> {pad / 'perf.md'} (17 chars)."
+    # The create receipt also states the LIFETIME: it is the moment a person
+    # watching the transcript (or the Files panel) learns a file appeared, and
+    # the store is session-scoped, so every file in it was created in this
+    # session and this one clause covers all of them.
+    assert created.text == (
+        f"Created scratchpad://perf.md -> {pad / 'perf.md'} (17 chars)"
+        " — deleted with the session."
+    )
     # ``details['path']`` and never ``details['url']``: the ``url`` key means
     # "an internal URL the resolver served", which is what compaction's pruning
     # exemption reads.
@@ -1023,7 +1030,7 @@ async def test_scratchpad_roundtrip_write_list_read_range_edit(tmp_path) -> None
 
     listed = await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context)
     assert listed.is_error is False
-    assert listed.text == f"scratchpad:// -> {pad} (1 entries):\nperf.md"
+    assert listed.text == f"scratchpad:// -> {pad} (1 entry):\nperf.md"
     assert listed.details is not None and listed.details["path"] == str(pad)
 
     read = await tools["read"].execute("c", {"path": "scratchpad://perf.md"}, None, None, context)
@@ -1057,13 +1064,14 @@ async def test_scratchpad_roundtrip_write_list_read_range_edit(tmp_path) -> None
     )
     assert nested.is_error is False
     assert (
-        nested.text == f"Created scratchpad://run/deep.csv -> {pad / 'run' / 'deep.csv'} (4 chars)."
+        nested.text == f"Created scratchpad://run/deep.csv -> {pad / 'run' / 'deep.csv'} (4 chars)"
+        " — deleted with the session."
     )
     assert (pad / "run" / "deep.csv").read_text(encoding="utf-8") == "a,b\n"
 
     sub = await tools["read"].execute("c", {"path": "scratchpad://run/"}, None, None, context)
     assert sub.is_error is False
-    assert sub.text == f"scratchpad://run/ -> {pad / 'run'} (1 entries):\ndeep.csv"
+    assert sub.text == f"scratchpad://run/ -> {pad / 'run'} (1 entry):\ndeep.csv"
 
 
 @pytest.mark.asyncio
@@ -1080,8 +1088,8 @@ async def test_a_scratch_script_is_a_first_class_citizen_of_the_store(tmp_path) 
     )
     assert created.is_error is False
     assert (
-        created.text
-        == f"Created scratchpad://probe.sh -> {pad / 'probe.sh'} ({len(script)} chars)."
+        created.text == f"Created scratchpad://probe.sh -> {pad / 'probe.sh'} ({len(script)} chars)"
+        " — deleted with the session."
     )
 
     read = await tools["read"].execute("c", {"path": "scratchpad://probe.sh"}, None, None, context)
@@ -1221,14 +1229,16 @@ async def test_scratchpad_refuse_traversal_absolute_and_directory_targets(tmp_pa
     )
     assert root_write.is_error is True
     assert root_write.text == (
-        f"a {SCRATCHPAD_NAMESPACE} URL must name a file: scratchpad:// — e.g. scratchpad://name.md"
+        f"A {SCRATCHPAD_NAMESPACE} URL must name a file, not the folder itself: scratchpad:// "
+        f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. 'scratchpad://name.md'; "
+        'read(path="scratchpad://") lists what is already there.'
     )
 
     dir_write = await tools["write"].execute(
         "c", {"path": "scratchpad://run/", "content": "x"}, None, None, context
     )
     assert dir_write.is_error is True
-    assert "e.g. scratchpad://run/name.md" in dir_write.text
+    assert "e.g. 'scratchpad://run/name.md'" in dir_write.text
 
     assert not list(tmp_path.rglob("escape.md"))
 
@@ -1263,12 +1273,50 @@ async def test_a_path_argument_carrying_a_stranger_scheme_creates_nothing(tmp_pa
     # ``<cwd>/notes:/x.py``.
     grep = await tools["grep"].execute("c", {"pattern": "x", "path": stranger}, None, None, context)
     assert grep.is_error is True
-    assert "notes:// is not a scheme grep can resolve" in grep.text
+    # ``grep`` serves no scheme at all, so its refusal is the PATH-shaped one.
+    assert "notes:// is a URL, and grep takes only filesystem paths" in grep.text
 
     # The point of the test: nothing anywhere on disk, under any spelling.
     assert not (tmp_path / "notes:").exists()
     assert not (tmp_path / "ws" / "notes:").exists()
     assert not list(tmp_path.rglob("notes*"))
+
+
+@pytest.mark.asyncio
+async def test_glob_refuses_a_scheme_pattern_instead_of_matching_nothing(tmp_path) -> None:
+    """``glob`` resolves no scheme either: a ``scratchpad://*.md`` pattern can
+    only ever match nothing, and "No paths matched" reads as "the file is not
+    there" rather than "this tool cannot be addressed that way". Nothing is at
+    risk of being written here — glob only reads — but the ANSWER was wrong, so
+    it gets the same refusal as the other path-taking tools."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["glob"].execute("c", {"pattern": "scratchpad://*.md"}, None, None, context)
+    assert result.is_error is True
+    assert "glob takes only filesystem paths" in result.text
+    assert "No paths matched" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_drive_shaped_argument_is_refused_and_that_is_disclosed(tmp_path) -> None:
+    """``C://x.txt`` is refused as scheme ``C`` (review round 1, R5).
+
+    The finding asked whether that breaks anything real. Nothing in the suite —
+    or in the two files the Windows CI job runs — hands a path-taking tool a
+    ``C://`` argument, and a Windows drive path is written ``C:\\x.txt``, which
+    contains no ``://`` and is not touched by this rule. So the refusal stands,
+    stated here rather than special-cased: a drive-letter allowance would be a
+    second spelling of "scheme" for one platform to save nothing.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c", {"path": "C://tmp/x.txt", "content": "x"}, None, None, context
+    )
+    assert result.is_error is True
+    assert "C:// is not a scheme write can resolve" in result.text
+    assert not (tmp_path / "ws" / "C:").exists()
+    assert not (tmp_path / "ws" / ("C:" + os.sep)).exists()
 
 
 @pytest.mark.asyncio
@@ -1383,6 +1431,250 @@ async def test_scratchpad_never_calls_the_internal_resolver(tmp_path) -> None:
     still_resolved = await tools["read"].execute("c", {"path": "skill://demo"}, None, None, context)
     assert calls == ["skill://demo"]
     assert still_resolved.text == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_serves_no_scheme_refuses_scratchpad_itself(tmp_path) -> None:
+    """The refusal is PER TOOL, and the bug it fixes was reached by following the
+    tool's own advice: the guard used to exempt ``scratchpad://`` for every
+    caller, so ``grep path=scratchpad://perf.md`` was allowed through and read
+    ``<cwd>/scratchpad:/perf.md``, while the browser's screenshot WROTE
+    ``<cwd>/scratchpad:/shot.png`` and reported success. Neither tool can resolve
+    a scheme; both must refuse one, and the refusal must name the path route out
+    (read it with the scheme, pass the absolute path that prints)."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    grep = await tools["grep"].execute(
+        "c", {"pattern": "x", "path": "scratchpad://perf.md"}, None, None, context
+    )
+    assert grep.is_error is True
+    assert grep.text.startswith("scratchpad:// is a URL, and grep takes only filesystem paths")
+    assert 'read(path="scratchpad://<name>")' in grep.text
+    # NOT the old, false promise that grep takes the scheme.
+    assert "The one URL scheme grep takes" not in grep.text
+
+    shot = await builtin._browser_screenshot("c", "surface-1", "scratchpad://shot.png", context)
+    assert shot.is_error is True
+    assert "browser takes only filesystem paths" in shot.text
+
+    assert not (tmp_path / "ws" / "scratchpad:").exists()
+    assert not list(tmp_path.rglob("scratchpad*"))
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_screenshot_refuses_a_scheme_url_too(tmp_path, monkeypatch) -> None:
+    """The extension host reaches its own path branch (the tool keeps path
+    resolution, PNG validation and write approval in Python), so the refusal has
+    to cover it as well — one host fixed and one host left writing is the same
+    bug with a narrower trigger."""
+    from local_operator.harness.types import BrowserSurface
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        return {"data": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+    context, pad, _tools = _scratchpad_context(tmp_path)
+
+    result = await builtin._bridge_action(
+        "t",
+        surface,
+        "screenshot",
+        builtin.BrowserParams(action="screenshot", path="scratchpad://shot.png"),
+        context,
+    )
+    assert result.is_error is True
+    assert "browser takes only filesystem paths" in result.text
+    assert not (tmp_path / "ws" / "scratchpad:").exists()
+    assert not list(tmp_path.rglob("*.png"))
+
+
+@pytest.mark.asyncio
+async def test_a_scratchpad_name_that_cannot_resolve_is_the_models_error(tmp_path) -> None:
+    """``Path.resolve()`` raises ``ValueError`` for a NUL byte, which the parser
+    did not fold into its own error: the call came back as
+    "Tool 'read' failed unexpectedly:" with a traceback and an EXECUTION fault,
+    i.e. a malformed argument (the model's fault) reported as a broken machine."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    results = [
+        await tools["read"].execute("c", {"path": "scratchpad://a%00b"}, None, None, context),
+        await tools["write"].execute(
+            "c", {"path": "scratchpad://a%00b", "content": "x"}, None, None, context
+        ),
+        await tools["edit"].execute(
+            "c",
+            {"path": "scratchpad://a%00b", "old_text": "a", "new_text": "b"},
+            None,
+            None,
+            context,
+        ),
+    ]
+    for result in results:
+        assert result.is_error is True
+        assert "Invalid scratchpad URL 'scratchpad://a%00b': cannot be resolved" in result.text
+        assert "failed unexpectedly" not in result.text
+        assert result.details is not None
+        assert result.details["__fault"] == "invalid_arguments"
+    assert not pad.exists()
+
+
+@pytest.mark.asyncio
+async def test_an_upper_case_scheme_is_told_which_case_to_use(tmp_path) -> None:
+    """The tools dispatch on the typed prefix (case-sensitive) while the parser
+    compares the scheme urlsplit lower-cases, so ``SCRATCHPAD://x`` used to be
+    refused as a STRANGER scheme. One rule now: dispatch is case-insensitive and
+    the parser is where the spelling is corrected."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["read"].execute("c", {"path": "SCRATCHPAD://perf.md"}, None, None, context)
+    assert result.is_error is True
+    assert "the scheme must be written exactly 'scratchpad://'" in result.text
+    assert "is not a scheme read can resolve" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_file_named_as_a_directory_is_not_reported_as_an_empty_listing(tmp_path) -> None:
+    """``read scratchpad://perf.md/`` says "directory" and the disk says file.
+    Listing it answered "0 entries … nothing here yet" for a file the caller can
+    plainly see, which reads as data loss."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    await tools["write"].execute(
+        "c", {"path": "scratchpad://perf.md", "content": "x\n"}, None, None, context
+    )
+
+    result = await tools["read"].execute(
+        "c", {"path": "scratchpad://perf.md/"}, None, None, context
+    )
+    assert result.is_error is True
+    assert "names a directory, but it is a file" in result.text
+    assert "0 entries" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_encoded_separator_lists_the_directory_it_names(tmp_path) -> None:
+    """``scratchpad://run%2F`` IS the directory URL: the marker is in the
+    unquoted string, and reading it off the quoted one sent the caller to a
+    file that does not exist."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    await tools["write"].execute(
+        "c", {"path": "scratchpad://run/deep.csv", "content": "a,b\n"}, None, None, context
+    )
+
+    result = await tools["read"].execute("c", {"path": "scratchpad://run%2F"}, None, None, context)
+    assert result.is_error is False
+    assert result.text == f"scratchpad://run%2F -> {pad / 'run'} (1 entry):\ndeep.csv"
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_scratchpad_read_continues_with_the_url_form(tmp_path) -> None:
+    """The continuation hint is a CALL the model will make, so it has to be one
+    that costs nothing: the absolute scratchpad path is outside the workspace and
+    therefore a read the approval gate escalates, while the same continuation
+    written as ``scratchpad://big.md`` asks nothing. The result still prints the
+    absolute path — that is what the shell and the Files panel need."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "big.md").write_text(("x" * 3_000 + "\n") * 5, encoding="utf-8")
+
+    result = await tools["read"].execute("c", {"path": "scratchpad://big.md"}, None, None, context)
+    assert result.is_error is False
+    assert result.text.startswith(f"scratchpad://big.md -> {pad / 'big.md'}\n")
+    assert 'read(path="scratchpad://big.md", range="' in result.text
+    assert f'read(path="{pad / "big.md"}"' not in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_over_limit_scratchpad_listing_still_spills_and_names_its_folder(
+    tmp_path,
+) -> None:
+    """A listing goes through the spill clamp like every other read outcome, and
+    the header must survive the clamp: it carries the resolved folder, which is
+    the only addressable form of a directory the agent has."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    for index in range(240):
+        (pad / f"file-{index:03d}-{'x' * 40}.md").write_text("x\n", encoding="utf-8")
+
+    result = await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context)
+    assert result.is_error is False
+    assert result.text.startswith(f"scratchpad:// -> {pad} (240 entries):")
+    assert "SAVED" in result.text
+    assert 'read(path="spill://' in result.text
+    assert result.details is not None and result.details["path"] == str(pad)
+
+
+@pytest.mark.asyncio
+async def test_only_the_create_receipt_states_the_lifetime(tmp_path) -> None:
+    """The lifetime is a person's concern and it is stated ONCE per file, on the
+    receipt that announces the file — the store is session-scoped, so every file
+    in it was created in this session and an overwrite or an edit would only
+    restate what the create already said."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    first = await tools["write"].execute(
+        "c", {"path": "scratchpad://perf.md", "content": "a\n"}, None, None, context
+    )
+    assert first.text == (
+        f"Created scratchpad://perf.md -> {pad / 'perf.md'} (2 chars) — deleted with the session."
+    )
+
+    again = await tools["write"].execute(
+        "c", {"path": "scratchpad://perf.md", "content": "b\n"}, None, None, context
+    )
+    assert again.text == f"Overwrote scratchpad://perf.md -> {pad / 'perf.md'} (2 chars)."
+
+    edited = await tools["edit"].execute(
+        "c", {"path": "scratchpad://perf.md", "old_text": "b", "new_text": "c"}, None, None, context
+    )
+    assert edited.text == (
+        f"Edited scratchpad://perf.md -> {pad / 'perf.md'}: 1 hunk(s), 1 replacement(s) applied."
+    )
+
+    # A plain file in the workspace is not session-scoped and says nothing.
+    plain = await tools["write"].execute(
+        "c", {"path": "report.md", "content": "a\n"}, None, None, context
+    )
+    assert "deleted with the session" not in plain.text
+
+
+@pytest.mark.asyncio
+async def test_reads_unresolvable_url_names_the_remedy(tmp_path) -> None:
+    """The catch-all answered "the resolver does not handle this URL" (or "no
+    resolver is available") and stopped there — a statement about the harness
+    rather than about what to do next."""
+    context, _, tools = _scratchpad_context(tmp_path)
+    remedy = "read takes a filesystem path, or scratchpad://<name>"
+
+    no_resolver = await tools["read"].execute("c", {"path": "notes://perf.md"}, None, None, context)
+    assert no_resolver.is_error is True
+    assert "no internal URL resolver is available" in no_resolver.text
+    assert remedy in no_resolver.text
+
+    def resolver(_url: str) -> str | None:
+        return None
+
+    with_resolver = ToolContext(cwd=str(tmp_path), session_id="s", resolve_internal_url=resolver)
+    other_tools = {tool.name: tool for tool in create_tools(with_resolver)}
+    unanswered = await other_tools["read"].execute(
+        "c", {"path": "notes://perf.md"}, None, None, with_resolver
+    )
+    assert unanswered.is_error is True
+    assert "the resolver does not handle this URL" in unanswered.text
+    assert remedy in unanswered.text
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_a_missing_plain_file_names_the_next_call(tmp_path) -> None:
+    """``read`` names the write that creates a missing file; ``edit`` — the tool
+    that most often meets a file that does not exist yet — did not."""
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["edit"].execute(
+        "c", {"path": "missing.md", "old_text": "a", "new_text": "b"}, None, None, context
+    )
+    assert result.is_error is True
+    assert "File does not exist" in result.text
+    assert 'write(path="' in result.text
 
 
 # ---------------------------------------------------------------------------

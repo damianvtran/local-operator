@@ -6,28 +6,35 @@ description: Use `scratchpad://` for your own scratch files — notes, data, a o
 # Session scratchpad (`scratchpad://`)
 
 `scratchpad://` is your own scratch area for this session, in this session's own
-`scratchpad/` folder under the local-operator store. It exists so that
-intermediate work has somewhere to live that is not the user's working
-directory.
+`scratchpad/` folder inside the session directory. It exists so that intermediate
+work has somewhere to live that is not the user's working directory.
 
 The rule is one line: **your own scratch goes in `scratchpad://`; anything the
 user asked for as an output goes in the working directory.** Their tree should
 end up holding deliverables and the files they named, and nothing else.
 
+The test to apply in one line: is this file for YOU to keep working from, or is
+it the answer the user asked for? Working material goes here; the answer does
+not.
+
 ## Use it for
 
 Every kind of text file you would otherwise drop into their tree:
 
-- **A one-off script or snippet** — a `.sh`, a `.py`, a SQL fragment, a
-  throwaway harness. Write it here, then run it by the absolute path the tool
-  printed (`bash`, `eval` and `grep` all take that path; none of them can resolve
-  a scheme).
+- **A one-off script or snippet you write for yourself** — a `.sh`, a `.py`, a
+  SQL fragment, a throwaway harness. Here, and only here, when it is your own
+  means to an end: a script the user asked you to deliver is an output and goes
+  in the working directory. Run it by the absolute path the tool printed
+  (`bash`, `eval` and `grep` all take that path; none of them can resolve a
+  scheme).
 - **Data you are still shaping** — a `.csv`/`.tsv` extract, a `.json` payload, a
   scratch list of rows you will filter next turn.
 - **A benchmark or perf run** — raw numbers, timings, before/after tables. Keep
   the measurements and re-read them instead of re-running the work.
-- **Wake and scheduled-run bookkeeping** — what a run did, what it must not
-  repeat.
+- **Wake and scheduled-run bookkeeping** — before a scheduled run, write
+  `scratchpad://wake-log.json` recording which items you have already reported
+  and which must not be repeated; on the next wake, read it first and decide
+  from it instead of re-running the whole check.
 - **A long tool result worth keeping** across turns, when a `spill://` handle is
   not enough because you need to grep, edit or re-read it.
 
@@ -40,8 +47,9 @@ cannot tell apart from output.
   they would expect.
 - Anything that must outlive this conversation → the scratchpad is this
   session's own folder, and it is deleted with the session.
-- Binaries → text only: markdown, JSON, CSV/TSV, TXT, YAML, logs, script
-  sources.
+- Binary files. This store is for text — markdown, JSON, CSV/TSV, TXT, YAML,
+  logs, script sources — so an image, an archive or a model file belongs
+  somewhere else.
 
 ## The protocol
 
@@ -55,12 +63,12 @@ Five calls, all through the tools you already have:
 | `write(path="scratchpad://logs/run.md", content="…")` | create or overwrite it (parent folders are made for you) |
 | `edit(path="scratchpad://logs/run.md", edits=[…])` | change it in place with SEARCH/REPLACE hunks |
 
-Every result begins with the URL as you typed it, followed by the resolved
-absolute path it maps to (`<url> -> <path>`), so the two can never be confused.
-That real path is what `bash`, `ls`, `grep`, `glob` and `eval` need — a shell
-cannot resolve a scheme — so use it whenever you step outside the tools. A
-listing prints its entries as relative names and carries the resolved folder in
-its header.
+A result that succeeds names the URL as you typed it and the resolved absolute
+path it maps to (`<url> -> <path>`), so the two can never be confused, and its
+verb says whether the file was created or overwritten. That real path is what `bash`,
+`ls`, `grep`, `glob` and `eval` need — a shell cannot resolve a scheme — so use
+it whenever you step outside the tools. A listing prints its entries as relative
+names and carries the resolved folder in its header.
 
 ## File names and types
 
@@ -75,8 +83,11 @@ gets no tile and no viewer. One file per subject; subdirectories are free
 
 - `..`, absolute paths and dotfiles are refused outright, as are `?` and `#`
   (they open a query or fragment — percent-encode as `%3F`/`%23`).
-- One directory level per listing, and the whole folder is bounded, so a wide
-  directory cannot flood the transcript.
+- One directory level per listing, and a listing is bounded, so a wide
+  directory cannot flood the transcript. The FOLDER itself is not capped: a
+  single write is not refused for its size, so keep the files to what you need
+  and let the session's cleanup take the whole folder when it goes. Reading a
+  very large file comes back truncated with the `read` call that continues it.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.
 - Any other URL scheme in a path argument is refused: a scheme the tools do not

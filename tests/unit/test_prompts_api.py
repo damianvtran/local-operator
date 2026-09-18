@@ -219,7 +219,7 @@ def test_system_md_teaches_eval_digest_pipeline() -> None:
     assert "spill://" in text
 
 
-def test_system_md_points_scratch_work_at_notes() -> None:
+def test_system_md_points_scratch_work_at_the_scratchpad() -> None:
     """The pointer must name the scheme, say what it is FOR, and name the guide
     explicitly — guides are selected semantically per task, so a bare "read the
     notes guide" would be unresolvable on a turn that did not select one.
