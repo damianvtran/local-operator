@@ -259,3 +259,89 @@ def test_resolve_hosting_model_no_hosting_raises_hosting_error(
     args = argparse.Namespace(hosting=None, model=None)
     with pytest.raises(HostingNotConfiguredError):
         resolve_hosting_model(None, args, manager)
+
+
+# ---------------------------------------------------------------------------
+# A decision-only provider is never a chat hosting (the fifth door)
+# ---------------------------------------------------------------------------
+
+
+def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
+    """``login typesafe`` stores a credential; it must not move the routing.
+
+    TypeSafe's Jev rejects ``chat/completions`` on every host we reach it through
+    (``registry.is_decision_only``), so a plan that adopted it as hosting — as
+    cases 2 and 3 below would — writes a config whose very next session cannot
+    answer a turn. That is the trap the catalogue, the ``/model`` ranking, the
+    session-model resolver and the failover chain each refuse; login is the fifth
+    door to it, and this is the only one where the credential IS the point: the
+    layer needs the key, and nothing about that needs a chat hosting.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    # Case 2: hosting empty (a fresh config, or `hosting: ""`).
+    for empty in ("", None):
+        plan = plan_login_defaults("typesafe", empty, None)
+        assert plan.hosting is None, empty
+        assert plan.model_name is None
+        # Not a repair: nothing was written, and `repairing` is what the callers
+        # use for wording.
+        assert plan.repairing is False
+        # The receipt is the ONE caller-facing channel, and it has to name both
+        # the reason and the provider a user recognises.
+        assert plan.receipt is not None
+        assert "TypeSafe (Jev)" in plan.receipt
+        assert "decision-model calls, not chat completions" in plan.receipt
+        assert "hosting is unchanged" in plan.receipt
+
+    # Case 3: hosting set but unusable. A repair must not replace a broken
+    # hosting with one that cannot serve a session at all, and it must not write
+    # the dead model either.
+    repaired = plan_login_defaults("typesafe", "anthropicxyq", "claude-sonnet-4-5")
+    assert repaired.hosting is None
+    assert repaired.model_name is None
+    assert repaired.receipt is not None
+
+
+def test_a_normal_provider_still_adopts_on_an_empty_hosting() -> None:
+    """The regression guard: the exemption is about ONE provider, not the rule.
+
+    Identical call, same empty hosting, an ordinary provider — the adoption that
+    makes a fresh ``login`` usable has to survive.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("xai", None, None)
+
+    assert plan.hosting == "xai"
+    assert plan.model_name == "grok-3"
+    assert plan.receipt is not None
+
+
+def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI half: the no-write path must still print the note.
+
+    ``_apply_login_defaults`` returned before printing whenever the plan wrote
+    nothing, which would have made this receipt unreachable — the user would see
+    ``Stored API key for 'typesafe'.`` and then nothing about their routing.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers import auth_cli
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    auth_cli._apply_login_defaults("typesafe")
+    printed = capsys.readouterr().out
+
+    assert "TypeSafe (Jev) serves decision-model calls, not chat completions" in printed
+    assert "your hosting is unchanged" in printed
+    # ...and the config is untouched: no hosting, no model.
+    reloaded = ConfigManager(tmp_path)
+    assert not reloaded.get_config_value("hosting")
+    assert not reloaded.get_config_value("model_name")
+
+    # A normal provider through the SAME command still adopts, and prints its
+    # write receipt — the two paths share one print site.
+    auth_cli._apply_login_defaults("deepseek")
+    assert "Set default hosting to 'deepseek'" in capsys.readouterr().out

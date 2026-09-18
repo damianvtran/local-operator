@@ -87,6 +87,23 @@ def plan_login_defaults(
        the error it produces recommends this command as the remedy, so
        "already set, leave it alone" would loop one level deeper.
 
+    …and ONE provider is exempt from cases 2 and 3: a DECISION-ONLY one
+    (``registry.is_decision_only`` — TypeSafe's Jev), whose wire rejects
+    ``chat/completions`` on every host we reach it through. Logging in to it
+    stores a credential the resource-classification layer uses and is not a
+    statement about chat routing at all, so the routing is left exactly as it
+    was and the plan carries a RECEIPT saying so (``hosting=None`` +
+    ``receipt``, the dataclass's own "wrote nothing, but here is why" shape —
+    callers print it instead of the write receipt). Adopting it in case 2 would
+    produce a config whose very next session cannot answer a turn: the same trap
+    the catalogue, the ``/model`` ranking, the session-model resolver and the
+    failover chain each refuse, and login is the fifth door to it. It is
+    deliberately NOT repaired in case 3 either — a hosting that is already
+    broken is not improved by replacing it with one that cannot serve a session.
+
+    The credential is never in question here: storing it is the caller's step
+    and it has already happened by the time this runs.
+
     The model is resolved through ``credential_provider_id`` and, when
     repairing, is always overwritten — cleared if the provider has no known
     default. Both halves of that are load-bearing:
@@ -134,8 +151,30 @@ def plan_login_defaults(
     # a registry-resolved definition, so this is a belt, not a currently-hit
     # path -- and a no-op plan is the honest answer when there is nothing
     # legitimate to write.
-    if get_provider_definition(resolved) is None:
+    definition = get_provider_definition(resolved)
+    if definition is None:
         return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
+    if definition.decision_only:
+        # Before BOTH adoption branches: a decision model is not a chat hosting,
+        # so there is no case in which this login should move the routing. The
+        # receipt is the one channel the dataclass has for "the login did
+        # something you should know about, and it was not a config write" — and
+        # both front ends print it (they must print it even when
+        # ``hosting is None``, which is the shape this branch returns).
+        #
+        # Naming the provider by its DISPLAY name, not the id: the receipt is
+        # read by the person who just pasted a key into TypeSafe's console and
+        # is matched by "TypeSafe (Jev)", not by `typesafe`.
+        return LoginDefaults(
+            hosting=None,
+            model_name=None,
+            receipt=(
+                f"{definition.name} serves decision-model calls, not chat completions: "
+                "the credential is stored for resource recommendations and your hosting "
+                "is unchanged"
+            ),
+            repairing=False,
+        )
     default_model = default_model_for(resolved) or ""
 
     if repairing:

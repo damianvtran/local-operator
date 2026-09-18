@@ -36378,8 +36378,12 @@ class OperatorApp(App[None]):
         """Adopt a just-logged-in provider as hosting when none is set.
 
         Returns a one-line receipt naming what was written, or ``None`` when
-        hosting was already configured (nothing changed, nothing to say). The
-        provider id is the credential's storage id \u2014 an OAuth flavour like
+        hosting was already configured (nothing changed, nothing to say). One
+        case speaks WITHOUT writing: a decision-only provider (TypeSafe's Jev)
+        has a credential worth storing and no chat hosting worth adopting, so
+        the plan carries a receipt with ``hosting=None`` and it is returned
+        here for the caller to paint. The provider id is the credential's
+        storage id — an OAuth flavour like
         ``xai-oauth`` stores under ``xai``, and that is the hosting the app
         should point at. Config-write failure is reported but never fatal: the
         login itself already succeeded.
@@ -36406,7 +36410,12 @@ class OperatorApp(App[None]):
                 manager.get_config_value("model_name"),
             )
             if plan.hosting is None:
-                return None
+                # Nothing to write, but there can still be something to SAY: a
+                # decision-only provider (TypeSafe's Jev) leaves the routing
+                # exactly as it was and says so in ``receipt``. Returning None
+                # here — as this did — swallowed that line and made the login
+                # look like it had silently done nothing.
+                return plan.receipt
             manager.set_config_value("hosting", plan.hosting)
             # ``None`` = leave it; ``""`` = clear a model belonging to the
             # provider just replaced. The explicit None test is what keeps the
