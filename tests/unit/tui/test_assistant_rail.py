@@ -81,6 +81,11 @@ from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.events import (
+    AssistantDelta,
+    AssistantMessageEnd,
+    AssistantMessageStart,
+)
 from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import (
     MIN_BODY,
@@ -101,6 +106,7 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
 )
 from tests.unit.tui.conftest import StyledTranscriptApp
+from tests.unit.tui.test_app_pilot import _factory
 from tests.unit.tui.test_band_panels import FakeSession
 from tests.unit.tui.test_subagent_view import (
     TRAJECTORY,
@@ -1124,6 +1130,46 @@ async def test_a_streaming_message_paints_no_rail_and_folds_at_the_lane(
         assert block._built_width == max(lane - RAIL_COLS, 0), (block._built_width, lane)
         for row in settled_rows:
             assert len(row.rstrip()) <= block.region.width, (row, block.region.width)
+
+
+@pytest.mark.asyncio
+async def test_the_live_path_rails_the_answer_only_once_its_message_ends() -> None:
+    """The settle, end to end through the app's OWN handlers.
+
+    The tests above drive ``update_text``/``finalize_text`` themselves, which
+    fixes the widget's contract and says nothing about which of the app's two
+    statements in ``on_assistant_message_end`` runs first. This one posts the
+    events, so the frame read between the delta and the end event is the frame
+    a reader watching a live stream actually gets — and the rail has to be
+    absent from it and present on the next.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        view = app.query_one(TranscriptView)
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        app.post_message(AssistantDelta(THREE_PARAGRAPHS))
+        await pilot.pause()
+        await pilot.pause()
+
+        blocks = [block for block in view.blocks() if isinstance(block, AssistantBlock)]
+        assert len(blocks) == 1, "the delta did not mount one assistant block"
+        block = blocks[0]
+        streaming_rows = _rendered(block)
+        assert all(not row.startswith(RAIL) for row in streaming_rows), streaming_rows
+
+        app.post_message(
+            AssistantMessageEnd(THREE_PARAGRAPHS, stop_reason="stop", has_tool_calls=False)
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        settled_rows = _rendered(block)
+        assert all(row.startswith(RAIL) for row in settled_rows), settled_rows
 
 
 @pytest.mark.asyncio
