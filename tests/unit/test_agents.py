@@ -2071,6 +2071,53 @@ def test_upload_agent_to_radient_new_and_overwrite(tmp_path: Path):
         )
 
 
+def test_a_probe_that_could_not_answer_does_not_become_a_new_listing(tmp_path: Path):
+    """A failed existence check is not evidence that the hub does not hold the agent.
+
+    This used to be swallowed — ``except Exception`` then carry on "as if the
+    agent doesn't exist" — so a 500, a timeout or an auth failure on the probe
+    published a SECOND listing under the same name while the caller reported an
+    overwrite. Only ``get_agent``'s own 404 (``None``) means absent.
+    """
+    from unittest.mock import MagicMock
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(AgentEditFields.model_validate({"name": "ProbeFails"}))
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        radient_client = MagicMock()
+        radient_client.get_agent.side_effect = RuntimeError(
+            'HTTP 500, Response Body: {"error":"boom"}'
+        )
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            registry.upload_agent_to_radient(radient_client, "existing-id", zip_path)
+        radient_client.upload_agent_to_marketplace.assert_not_called()
+        radient_client.overwrite_agent_in_marketplace.assert_not_called()
+
+
+def test_a_404_from_the_probe_is_a_create_and_returns_the_new_id(tmp_path: Path):
+    """``None`` is the hub's 404, and the create names its own result.
+
+    A LOCAL id lands here every time: nothing aligns a local uuid with a hub
+    listing id, so the returned id is the only handle a user has on the listing
+    that was just created.
+    """
+    from unittest.mock import MagicMock
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(AgentEditFields.model_validate({"name": "ProbeCreates"}))
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        radient_client = MagicMock()
+        radient_client.get_agent.return_value = None
+        radient_client.upload_agent_to_marketplace.return_value = "hub-listing-7"
+        result = registry.upload_agent_to_radient(radient_client, "local-uuid", zip_path)
+        assert result == "hub-listing-7"
+        radient_client.overwrite_agent_in_marketplace.assert_not_called()
+
+
 def test_download_agent_from_radient(tmp_path: Path):
     """Test download_agent_from_radient."""
     from unittest.mock import MagicMock

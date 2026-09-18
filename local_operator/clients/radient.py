@@ -541,11 +541,25 @@ class RadientClient:
             response = requests.post(url, headers=headers, files=files)
             response.raise_for_status()
             data = response.json()
-            # The response is a dict with the new agent ID (e.g., {"id": "new-agent-id"})
+            # The hub answers a created listing with an envelope, not a bare id
+            # (`{"msg": "Agent imported successfully", "result": {"agent_id": …}}`,
+            # HTTP 201, measured against the live hub on 2026-09-18). Returning
+            # `next(iter(data.values()))` took the FIRST value, which is that
+            # message — so the id a caller printed as "New agent ID" was the
+            # sentence "Agent imported successfully", and the user had no handle
+            # on the listing the push had just created. Read the id from where the
+            # hub puts it and refuse to answer with anything that is not one: a
+            # wrong string here is a listing nobody can find to delist.
             if not isinstance(data, dict) or not data:
                 raise RuntimeError("Unexpected response from Radient agent upload")
-            # Return the first value (agent ID)
-            return next(iter(data.values()))
+            nested = data.get("result")
+            listing_id = nested.get("agent_id") if isinstance(nested, dict) else None
+            listing_id = listing_id or data.get("agent_id") or data.get("id")
+            if not isinstance(listing_id, str) or not listing_id:
+                raise RuntimeError(
+                    f"Radient agent upload returned no listing id: keys {sorted(data)}"
+                )
+            return listing_id
         except requests.exceptions.RequestException as e:
             error_body = self._surfaceable_body(response_body(e))
             raise RuntimeError(
@@ -610,8 +624,16 @@ class RadientClient:
             ) from e
 
     def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get agent details from the Radient Agent Hub by ID.
+        """Get agent details from the Radient Agent Hub by ID.
+
+        The path joins this client's base like every sibling method does — no
+        literal ``/v1`` of its own. A hard-coded version segment here means the
+        base the product actually passes (``env_config.radient_api_base_url``,
+        which already carries ``/v1``) is addressed as ``/v1/v1/agents/{id}``;
+        the 404 that comes back is mapped to ``None`` below, and the only caller,
+        :meth:`AgentRegistry.upload_agent_to_radient`, reads ``None`` as "the
+        agent does not exist" — so a ``push --id`` silently POSTs a new listing
+        instead of overwriting the one it was asked to.
 
         Args:
             agent_id (str): The agent ID to fetch.
@@ -623,7 +645,7 @@ class RadientClient:
         Raises:
             RuntimeError: If the API request fails for reasons other than 404.
         """
-        url = f"{self.base_url}/v1/agents/{agent_id}"
+        url = f"{self.base_url}/agents/{agent_id}"
         # This is a public endpoint, no API key required
         headers = self._get_headers(content_type="application/json", require_api_key=False)
         try:
