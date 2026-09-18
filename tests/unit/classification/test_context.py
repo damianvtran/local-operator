@@ -47,6 +47,23 @@ _REALISTIC_DESCRIPTION = (
 )
 
 
+def option_chars_of(plan: Any) -> int:
+    """The character cost of the questions' OPTION text.
+
+    ``Question.criteria`` is a per-kind union — a mapping for ``choice``/``noul`` and a
+    tuple of level descriptions for ``score`` — so the mapping arm is named here rather
+    than assumed, which is also what keeps this measurable under the repo's type
+    checker (CI's whole-repo pyright run caught the first version of this helper
+    reaching for ``.items()`` on the union).
+    """
+    total = 0
+    for question in plan.questions:
+        criteria = question.criteria
+        if isinstance(criteria, dict):
+            total += sum(len(f"{name}: {text}") for name, text in criteria.items())
+    return total
+
+
 def _realistic_roster(count: int) -> list[Candidate]:
     return [
         candidate(f"skill-{index:03d}", description=_REALISTIC_DESCRIPTION)
@@ -510,11 +527,7 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
     assert state_chars <= DEFAULT_MAX_STATE_CHARS
 
     plan = build_questions(rows)
-    option_chars = sum(
-        len(f"{name}: {text}")
-        for question in plan.questions
-        for name, text in question.criteria.items()
-    )
+    option_chars = option_chars_of(plan)
     # The questions themselves carry instructions; counted roughly, they are a few
     # hundred characters each and bounded by the three kinds.
     instruction_chars = sum(len(question.instructions) for question in plan.questions)
@@ -535,11 +548,7 @@ def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() ->
 
     state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
     plan = build_questions(rows, limit=40)
-    option_chars = sum(
-        len(f"{name}: {text}")
-        for question in plan.questions
-        for name, text in question.criteria.items()
-    )
+    option_chars = option_chars_of(plan)
     estimated_tokens = (serialized_size(state) + option_chars) // 4
 
     # Measured at head: 14 184 chars ≈ 3 546 tokens ≈ 10.8% of the window. The cap is
