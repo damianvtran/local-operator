@@ -66,8 +66,11 @@ def unengaged_refusal(label: str) -> str:
     also holds against a sender on an older build) — and they use the SAME
     sentence, because a sender refused at one layer and retried into another
     must not have to learn a second rule. Only ``label`` varies, and it is
-    written in the caller's own grammar (``pid 12345``, ``session 'abc'``,
-    ``session 12345``) so the target the refusal names is the one addressed.
+    written in the caller's own grammar — ``pid 12345`` where a live record
+    gives us the pid the sender typed, ``session 'abc'`` for an id (see
+    :func:`delivery_label` and the resolver's own ``f"pid {pid}"`` /
+    ``f"session {session!r}"`` forms) — so the target the refusal names is the
+    one that was addressed.
 
     The reason is stated as the FIX, not as a prohibition: the owner sends a
     first message and the session becomes eligible at that moment (the first
