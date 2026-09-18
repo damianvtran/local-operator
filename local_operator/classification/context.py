@@ -43,6 +43,23 @@ make us send less, never more.
 A kind with no candidates is omitted from the mapping rather than sent as an
 empty list: the ladder drops kinds entirely at rung 3, and keeping the key with
 ``[]`` would pay tokens to say nothing.
+
+WHO SUPPLIES ``context`` TODAY: NOBODY
+======================================
+
+Recorded here because it is the one §5 field no caller fills. The contract
+describes ``context`` as "in practice the newest compaction summary line or the
+last assistant message's first line", and §7's wiring passes ``None``
+(`session_factory.py`'s request builder argues the case: the transcript is
+deliberately not read, and the newest user message is already the state's
+request field). The builder keeps it because it is the contract's field and
+because it is the only lever that grounds a very short request — "continue",
+"yes", a bare path — with something to judge against, so the caller-side half is
+a wiring decision rather than something to delete here. The cost while it is
+unused is exactly zero: an absent context is simply absent from the state, and
+the ladder's rung 1 is then a no-op. What the package owes in the meantime is
+proof that the field WORKS when a caller does supply one, which
+``tests/unit/classification/test_context.py`` provides rung by rung.
 """
 
 from __future__ import annotations

@@ -140,17 +140,6 @@ async def resolve_vendor(
         if credential:
             return vendor
     return None
-    model = model_override(settings)
-    for name in leg_order(settings):
-        vendor = build_vendor(name, manager, model=model)
-        try:
-            credential = await vendor.credential(manager)
-        except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
-            logger.warning("classification: %s credential resolution failed", name, exc_info=True)
-            continue
-        if credential:
-            return vendor
-    return None
 
 
 def vendor_status(

@@ -298,3 +298,111 @@ def test_the_digest_notices_a_reordered_roster() -> None:
     first = candidates_digest([candidate("a"), candidate("b")])
     second = candidates_digest([candidate("b"), candidate("a")])
     assert first != second
+
+
+def test_a_caller_supplied_context_reaches_the_state_and_the_ladder_applies_in_order() -> None:
+    """The ladder, rung by rung, with a context present — §5's one caller-less field.
+
+    Context is the field no caller fills today (see the module docstring of
+    ``context.py``), so the package owes proof that it WORKS when one does:
+    the caller's string must reach the serialized state, and it must be the first
+    thing the ladder gives up — before any candidate text is trimmed. Each
+    assertion below sits on a cap computed from a hand-built state at that rung,
+    so a reordering of the ladder changes which assertion fails rather than
+    quietly passing.
+    """
+    summary = "compaction summary line: user asked to deploy core to qa"
+    # Descriptions longer than the 120-char trim, so each trim rung actually
+    # changes the state: a roster of short lines makes rungs 2 and 3 identical
+    # and the "first state that fits" test ambiguous.
+    long_description = "d" * 200
+    candidates = (
+        roster("skill", 2, description=long_description)
+        + roster("guide", 2, description=long_description)
+        + roster("mcp", 2, description=long_description)
+    )
+    state_keys = {"skill": "skills", "guide": "guides", "mcp": "mcp_servers"}
+
+    def payload(
+        context_text: str | None, limit: int | None, kinds: tuple[str, ...]
+    ) -> dict[str, Any]:
+        built: dict[str, Any] = {"request": "hi"}
+        if context_text is not None:
+            built["context"] = context_text
+        if kinds:
+            built["candidates"] = {
+                state_keys[kind]: [
+                    candidate_line(item, limit) for item in candidates if item.kind == kind
+                ]
+                for kind in kinds
+            }
+        return built
+
+    all_kinds = ("skill", "guide", "mcp")
+    size_rung0 = size_of(payload(summary, None, all_kinds))
+    size_rung1 = size_of(payload(None, None, all_kinds))  # context dropped
+    size_rung2 = size_of(payload(None, 120, all_kinds))
+    size_rung3 = size_of(payload(None, 60, all_kinds))
+    size_rung4 = size_of(payload(None, 60, ("skill", "guide")))  # mcp dropped
+    size_rung5 = size_of(payload(None, 60, ("skill",)))  # guides dropped
+    # Strictly descending, so "the first state that fits" is unambiguous at every
+    # cap used below.
+    assert size_rung0 > size_rung1 > size_rung2 > size_rung3 > size_rung4 > size_rung5
+
+    # Rung 0: room to spare — the caller's context is IN the state with the
+    # roster whole.
+    roomy = build_state(
+        user_message="hi", context=summary, candidates=candidates, max_chars=size_rung0
+    )
+    assert roomy["context"] == summary
+    assert roomy["candidates"]["skills"] == [
+        candidate_line(item) for item in candidates if item.kind == "skill"
+    ]
+
+    # Rung 1: one character tighter, the CONTEXT goes and nothing else does.
+    dropped_context = build_state(
+        user_message="hi", context=summary, candidates=candidates, max_chars=size_rung1
+    )
+    assert "context" not in dropped_context
+    assert dropped_context["candidates"]["skills"] == [
+        candidate_line(item) for item in candidates if item.kind == "skill"
+    ]
+
+    # Rung 2: then the lines trim, 120 before 60.
+    trimmed_120 = build_state(
+        user_message="hi", context=summary, candidates=candidates, max_chars=size_rung2
+    )
+    assert "context" not in trimmed_120
+    assert len(trimmed_120["candidates"]["skills"][0]) == 120
+    trimmed_60 = build_state(
+        user_message="hi", context=summary, candidates=candidates, max_chars=size_rung3
+    )
+    assert len(trimmed_60["candidates"]["skills"][0]) == 60
+
+    # Rung 3: then kinds, lowest priority first — MCP, then guides, then skills.
+    no_mcp = build_state(
+        user_message="hi", context=summary, candidates=candidates, max_chars=size_rung4
+    )
+    assert set(no_mcp["candidates"]) == {"skills", "guides"}
+    no_guides = build_state(
+        user_message="hi", context=summary, candidates=candidates, max_chars=size_rung5
+    )
+    assert set(no_guides["candidates"]) == {"skills"}
+
+    # Rung 4: last, and only last, the request itself — and the roster is gone by
+    # then, because a truncated request with a roster still attached would have
+    # given up the operator's words before the model's own rubric.
+    long_message = "deploy core to qa " * 100
+    truncated = build_state(
+        user_message=long_message, context=summary, candidates=candidates, max_chars=200
+    )
+    assert truncated["request"].endswith(TRUNCATION_MARKER)
+    assert "candidates" not in truncated
+    assert "context" not in truncated
+
+
+def test_a_context_only_state_needs_no_candidates_key() -> None:
+    """A caller with a context and an empty roster still gets a valid, bounded state."""
+    state = build_state(user_message="", context="summary", candidates=[], max_chars=100)
+    assert state == {"request": "", "context": "summary"}
+    assert serialized_size(state) <= 100

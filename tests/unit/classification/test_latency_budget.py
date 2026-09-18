@@ -12,10 +12,14 @@ The local path only: settings reads, the cache key, the roster memo, the state
 build, the question build, the credential memo hit and the serialization. The
 vendor's model time (~200 ms, measured) is not ours and is not in the budget.
 
-The ceiling asserted here is **10 ms**, far above the target (<50 ms, hard
-ceiling 100 ms) on purpose: this suite runs on a shared machine with a dozen
-concurrent worktrees, and a budget test that flakes on a loaded host would be
-deleted rather than fixed. 10 ms catches a real regression — anything that
+What this file measures is OUR OWN overhead only — not how long a turn waits,
+which is the caller's knob (§7's wiring waits ``values.classification.waitMs``,
+default 50 ms, and delivers a late answer on a later turn).
+
+The ceiling asserted here is **10 ms**, deliberately far above the measured
+0.011-0.2 ms: this suite runs on a shared machine with a dozen concurrent
+worktrees, and a budget test that flakes on a loaded host would be deleted
+rather than fixed. 10 ms still catches a real regression — anything that
 reintroduces per-message credential resolution, a per-message TLS handshake or
 per-message roster serialization costs milliseconds, not microseconds — without
 punishing the host's mood. The measured figure travels in the PR report and in

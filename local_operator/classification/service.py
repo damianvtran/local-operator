@@ -24,17 +24,23 @@ THE LATENCY BUDGET (the constraint that shapes this class)
 =========================================================
 
 This layer runs ONCE PER USER MESSAGE, on the critical path, before the turn's
-first token. So the design rule is not "make it fast" but "make it add as little
-as possible", and the numbers are:
+first token — and **the caller owns how long the turn may wait for it**: §7's
+wiring gives it ``values.classification.waitMs`` (default 50 ms) and delivers a
+late answer on a later turn rather than blocking. So this class makes no claim
+about the turn's added wall clock. What it does promise is its own overhead and
+its own deadline:
 
-* **target < 50 ms of OUR OWN overhead** per message;
-* **hard ceiling 100 ms**, excluding the vendor's model time (the decision model
-  itself answers in ~200 ms, measured — that is the vendor's, not ours);
-* measured local path (settings read, cache key, roster-cached state build,
-  credential memo hit, question build): see
-  ``tests/unit/classification/test_latency_budget.py`` — the assertion ceiling
-  there is 10 ms, generous on purpose so a loaded shared host cannot flake it,
-  and the measured figure is in the report on the MR.
+* **OUR OWN OVERHEAD, measured: 0.011-0.2 ms per message** — the work that
+  happens whether or not a vendor answers: settings reads, the cache key, the
+  roster memo, the state build, the question build, the credential memo hit and
+  the serialization. ``tests/unit/classification/test_latency_budget.py`` pins it
+  with a deliberately loose 10 ms assertion so a loaded shared host cannot flake
+  it; the measured figure is in the report on the MR.
+* ``values.classification.timeoutMs`` (default 1500) is the **ceiling on the call
+  itself** — the deadline this service enforces around the vendor request — not a
+  promise that a turn waits that long. A caller that stops waiting earlier simply
+  gets the empty outcome on its side, and a call that does land is cached for the
+  next message either way.
 
 That is why §7's wiring runs this inside an ``asyncio.gather`` beside the
 existing skill/guide selection: the added wall time is then the DIFFERENCE
