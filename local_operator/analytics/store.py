@@ -2631,7 +2631,7 @@ class AnalyticsStore:
         # scanning a third of the rows.
         #
         # SAYING WHAT THAT IS A SHARE OF, because the last version of this
-        # comment mixed two sessions: against the committed shipping pair —
+        # comment mixed two sessions: against the recorded shipping pair —
         # 187 ms wall / 166 ms CPU, both arms at load ~215-280 — it is roughly
         # an EIGHTH (21.8 / 187 = 12 % of wall, 13 % of CPU; 15-17 % on QA's
         # slightly slower clock for the same SQL). The ~20 % figure that used to
