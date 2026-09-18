@@ -1170,11 +1170,20 @@ def project_settled_rows(
                 # fold ladder on every update, and a hint set afterwards would
                 # only reach a rebuild that has already happened.
                 block.set_fold_hint(fold_width)
-                # And marked before it too, for exactly that reason: the rail is
-                # read at paint rate, so a mark applied after `update_text`
-                # would leave the rows this call authors carrying a rail the
-                # next rebuild drops. Replay is a REPLAY of the live frame, and
-                # the live one is marked in the same order at
+                # And marked SETTLED before it too, for the same rate reason and
+                # a second one: every row this pass projects belongs to a message
+                # the engine has already committed to the transcript, so it has
+                # stopped arriving and there is no streaming frame to paint. Left
+                # to `finalize_text` alone, the first `update_text` would author
+                # the whole lane with no rail and the commit would then re-fold
+                # the same message two cells narrower — a discarded paint per
+                # row, at a width these rows are never seen at (review round 1, R2).
+                block.mark_settled()
+                # And marked narration before it too, for exactly that reason: the
+                # rail is read at paint rate, so a mark applied after
+                # `update_text` would leave the rows this call authors carrying a
+                # rail the next rebuild drops. Replay is a REPLAY of the live
+                # frame, and the live one is marked in the same order at
                 # `app.py::on_assistant_message_end`.
                 if narration:
                     block.mark_narration()
