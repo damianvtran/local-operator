@@ -756,11 +756,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
                     # The clock the fold stamps onto a retained end, copied
                     # verbatim from the start that row replaced — the same value
                     # `live_tool_started_at` carries below, and as wide as a real
-                    # one gets (a 17-character epoch). It is charged against the
+                    # one gets (an 18-character epoch: `time.time()` at 1.789e9
+                    # needs ten integer digits and, because the value is
+                    # microsecond-quantised, up to seven fractional ones). The
+                    # width is charged at its MAXIMUM rather than at a typical
+                    # sample, because this fixture is the calibration the text
+                    # budget below is derived from. It is charged against the
                     # line HERE, with every other field at its own maximum,
                     # rather than reasoned about; the marginal cost is measured
                     # by `test_the_seed_stamp_costs_a_bounded_sliver_of_the_line`.
-                    "started_at_epoch": 1_756_000_000.123456,
+                    "started_at_epoch": 1_789_696_914.5158982,
                     "result": {
                         "tool_call_id": f"call-{index}",
                         "tool_name": "read",
@@ -799,7 +804,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # maximum — say "the default" rather than "the largest possible" when
         # describing it. Ids are the width a provider actually issues rather
         # than `call-0`.
-        "live_tool_started_at": {f"call_{index:024d}": 1_756_000_000.123456 for index in range(8)},
+        "live_tool_started_at": {f"call_{index:024d}": 1_789_696_914.5158982 for index in range(8)},
         "mcp_servers": [
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)
         ],
@@ -3238,8 +3243,13 @@ def test_an_evicted_tool_end_takes_its_start_with_it() -> None:
 
 
 #: The epoch a stamped seed end carries, as the fold copies it from the call's
-#: own start. Seventeen characters, which is what ``time.time()`` is today.
-_STAMPED_EPOCH = 1_756_000_000.123456
+#: own start. EIGHTEEN characters, which is the widest ``time.time()`` takes at
+#: this magnitude and a width it commonly does take — ten integer digits plus
+#: seven fractional ones, because the value is microsecond-quantised and a
+#: float64 near 1.79e9 needs that seventh digit to round-trip. The width is the
+#: point of the measurement below, so it is charged at the maximum the producer
+#: can emit rather than at a shorter sample.
+_STAMPED_EPOCH = 1_789_696_914.5158982
 
 #: How many settled calls the measurement below folds, deliberately past the row
 #: cap: what survives bounding is the charge the stamp is paid for.
