@@ -481,21 +481,25 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
 _LINE_BUDGET = 80
 
 
-def _restart_can_move_anything() -> bool:
-    """Will ``lop services restart`` actually move a daemon on this machine?
+def _install_may_repoint_daemons() -> bool:
+    """May THIS caller rewrite the supervised plists?
 
-    BOTH questions the repair guard asks, because they gate different states and this
-    output promised on only one of them twice — once for the note (design review D7)
-    and once for the fleet advice line (round 11 R11-3). ``_repair_refusal`` refuses a
-    caller that is not an install at all AND one that is a different install from the
-    one the plists already run; keying on the stamp alone covered only the first.
+    The repair guard's own question, and only IT — because the guard does not speak for
+    the other half of ``restart``. Measured on 2026-09-18 by bouncing the real daemon
+    from a checkout: ``update.refresh_daemons_after_upgrade`` composes
+    ``refresh_service_daemons_after_upgrade`` (the plist REPAIR, which consults this
+    guard) with ``refresh_mobile_after_upgrade`` (a plain ``lop mobile restart`` BOUNCE,
+    which consults nothing). So a checkout refuses to repoint browser/tunnel/wakes and
+    still bounces the mobile relay onto the current build.
+
+    Drawing that distinction too coarsely is what round 11's R11-3 fix got wrong in the
+    other direction: it suppressed a clause that is TRUE in every state, and gated the
+    serve-daemon advice — which never consults this guard at all — on it as well.
 
     An unanswerable guard is NOT permission, so an exception reads as "no".
     """
     from local_operator import update
 
-    if _current_stamp() is None:
-        return False
     try:
         return update._repair_refusal() is None
     except Exception:  # noqa: BLE001 - an unreadable guard must not licence a promise
@@ -544,16 +548,25 @@ def status_lines() -> list[str]:
     if supervised:
         lines.append("note: a supervised daemon resolves the install when it starts,")
         lines.append("      so its build is not in the plist.")
-        if _restart_can_move_anything():
+        if _install_may_repoint_daemons():
             lines.append("      `lop services restart` puts them on the current build")
+        else:
+            # TRUE IN BOTH HALVES, which the blunt gate was not: the bounce happens
+            # whatever this caller is, the repoint does not.
+            lines.append("      `lop services restart` still bounces the mobile relay;")
+            lines.append("      the rest are repointed only by the install that owns them")
     return lines
 
 
 def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
     """What the reader should DO about the fleet, or nothing at all.
 
-    The advice is only printed when ``restart`` would actually act — there is a build
-    to move onto AND the guard permits it AND at least one stale daemon is reloadable.
+    The advice is only printed when ``restart`` would actually act on a serve daemon:
+    there is a build to move onto (an unnameable install refuses the whole half) and at
+    least one stale daemon is reloadable. The repair guard is deliberately NOT consulted
+    here: ``reload_serve_daemons`` never asks it, so gating on it suppressed correct
+    advice in a durable second install, where serve reloads work and only the plist
+    repoint is refused.
     ``reloadable`` defaults to False and records written before the capability existed
     do not carry it, so "every stale daemon is unmovable" is the COMMON case, not an
     edge one: naming the verb there sends the reader to a command that skips the very
@@ -565,7 +578,9 @@ def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
     if not stale:
         return []
     movable = [r for r in stale if getattr(r, "reloadable", False)]
-    if not movable or not _restart_can_move_anything():
+    if stamp is None or not movable:
+        # ``stamp is None`` refuses the whole half in ``reload_serve_daemons`` ("no
+        # service can be moved onto it"), so nothing may be advised there either.
         # Written to the budget like every other line here — the first version of this
         # sentence was 86 columns, over the budget it was added to protect.
         return ["the stale ones cannot be moved by `lop services restart`; restart them by hand"]
