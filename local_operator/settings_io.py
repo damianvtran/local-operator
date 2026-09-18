@@ -432,8 +432,13 @@ SECTIONS: tuple[Section, ...] = (
         "classification",
         "Resource recommendations",
         Scope.NEW_SESSIONS,
-        "Advisory skills, guides and MCP servers a decision model suggests "
-        "per message. Off keeps the prompt unchanged.",
+        # Names BOTH vocabularies deliberately. The splash tips and
+        # `guide://classification` call this feature "smart hints", so a user
+        # arriving here from a tip would otherwise search a page for a word it
+        # never uses (design round 1, D5). The label keeps its own wording: it
+        # is what the row and the runtime notice already say.
+        "Smart hints: advisory skills, guides and MCP servers a decision model "
+        "may suggest per message. Off keeps the prompt unchanged.",
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
@@ -2009,8 +2014,10 @@ SETTINGS: tuple[Setting, ...] = (
         # Same precedent as `values.effort.auto` (`model/effort_classifier.py`):
         # default OFF, because an upgrade must never silently change behaviour or
         # spend. The help says what ON does rather than what the feature is: the
-        # row's label already names the feature.
-        help="Off: the prompt is unchanged. On: advisory resources may be added.",
+        # row's label already names the feature. It carries the word "hints"
+        # because that is what the splash tip and `guide://classification` call
+        # it, and this row is where a user who read the tip arrives (D5).
+        help="Off: the prompt is unchanged. On: adds advisory resources (smart hints).",
         choices=_bool_choices(
             "a decision model may add advisory resources",
             "the prompt stays exactly as it is",
