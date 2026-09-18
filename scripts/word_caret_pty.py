@@ -48,6 +48,14 @@ def main() -> int:
     # inherits the agent-shell marker from whoever launched this, and without
     # declaring the harness the TUI would refuse to open at all
     # (`agent_shell.harness_child_env`).
+    #
+    # It deliberately does NOT isolate `LOCAL_OPERATOR_CONFIG_DIR`, unlike every
+    # other harness here (review round 2, F5): what it reproduces is a chord
+    # arriving at the real terminal's prompt, and an empty store boots into
+    # first-run setup instead of that prompt — the evidence would be of a
+    # different screen. It types text and never submits, so no session is
+    # created; if one ever were, the escape also stamps it `agent-shell`, so it
+    # still cannot be mistaken for a chat the operator opened.
     env = harness_child_env()
     env.update(
         {

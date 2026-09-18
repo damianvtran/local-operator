@@ -67,7 +67,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.agent_shell import harness_child_env
+# The repo root first, exactly as `bench_task_cost.py` and
+# `bench_complex_tasks.py` do: this script imports the package in its own
+# process, and under an interpreter whose `local_operator` resolves elsewhere
+# (notably the primary checkout's venv, which `word_caret_pty.py` names as its
+# runner) that import would fail AT STARTUP, before any harness work — the
+# round-2 F2 finding.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from local_operator.agent_shell import harness_child_env  # noqa: E402
 
 WEB_TOOLS = {"web_search", "web_fetch"}
 
