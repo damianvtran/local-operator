@@ -563,7 +563,7 @@ def test_a_grant_name_that_matches_nothing_is_reported_at_debug(
     """The grant side is reported too, but quietly: a missing name is often benign."""
     policy = shell_env.ShellEnvironmentPolicy(
         mode=shell_env.MODE_ALLOWLIST,
-        inherit=["LOP_E2_ABSENT_GRANT"],
+        inherit=("LOP_E2_ABSENT_GRANT",),
     )
     with caplog.at_level(logging.DEBUG, logger=shell_env.logger.name):
         shell_env.child_environment(policy, parent={"PATH": "/usr/bin"})
@@ -592,3 +592,34 @@ def test_the_name_machinery_has_no_enforcement_role_in_suppression() -> None:
     )
     assert plain_ungranted not in env
     assert PROVIDER_KEY_NAME not in env
+
+
+def test_denying_an_injection_counts_as_a_denial_that_happened(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``exclude`` exists to deny what the harness hands over; that is not a miss.
+
+    The unmatched-name report measures membership BEFORE the denial runs, so a
+    name that was present only because the harness injected it still counts as
+    matched. Asking after the pop reported the loudest WORKING denial — denying
+    ``CI`` or the session credential, which is what the README and the settings
+    help text advertise — as a denial that "matches nothing" and is "silently a
+    no-op".
+    """
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=shell_env.MODE_ALLOWLIST,
+        exclude=frozenset({"CI"}),
+    )
+    with caplog.at_level(logging.WARNING, logger=shell_env.logger.name):
+        env = shell_env.child_environment(
+            policy,
+            parent={"PATH": "/usr/bin"},
+            injections={"CI": "1", "LOCAL_OPERATOR_AGENT_SHELL": "1"},
+        )
+
+    assert "CI" not in env, "the denial must still apply"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("exclude" in m for m in warnings), (
+        "a denial that removed an injected name DID happen; reporting it as unmatched "
+        f"is a false alarm: {warnings}"
+    )
