@@ -458,11 +458,23 @@ partial result it did get — while a per-item failure is `unknown` for that ite
 rather than a 404 for the call. A store failure (`sqlite3.Error`) goes through the
 shared classifier (`session/store_failures.py` — the same module the TUI's
 `/notifications` consumes, so one store cannot be described two ways), which
-splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503` —
-the sentence the frozen design names — while a store this process cannot read or
-open answers `500` with code `store_unavailable` and a message saying retrying
-will not help. Because the batch is one transaction, **both** refusals promise
-nothing was written. `422` covers the malformed bodies: empty, more
+splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503`,
+a full volume `507` `store_out_of_space`, and a store this process cannot read or
+open `500` `store_unavailable`. Because the batch is one transaction, **every**
+refusal promises nothing was written.
+
+**This route composes its own sentence** (`receipts_refusal`) rather than
+publishing the classifier's: the classifier's copy belongs to the send path
+("the message could not be written", "send it again"), and a bulk read receipt
+has no message in it and sends nothing. The codes, the statuses and the log
+levels are the shared ones — a client keys on the code — and the sentence says
+what this route was doing, condition by condition:
+
+| condition | status / code | message |
+| --- | --- | --- |
+| contention | `503` `store_busy` | `Read state is busy right now, so nothing was written. Try again in a moment.` |
+| volume full | `507` `store_out_of_space` | `This computer is out of disk space, so nothing was written. Free some space on the volume holding <root>, then try again.` |
+| unreadable store | `500` `store_unavailable` | `The read state could not be written. Retrying will not help; check <root> and the disk it is on.` | `422` covers the malformed bodies: empty, more
 than 500 items, a session id that is not 12 lowercase hex characters, a
 token that is not a UUID, and any unknown field (`extra="forbid"`, like every
 other body in this module).
