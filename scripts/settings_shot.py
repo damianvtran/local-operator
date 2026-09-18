@@ -18,7 +18,10 @@ where a machine set to ``auto`` renders a frame with no prompt in it and the
 surface looks broken rather than skipped. It also means a capture can never
 write to the real config.
 
-STATE selects what the page is showing:
+STATE is the THIRD POSITIONAL argument (default ``overview``) and is not an
+environment variable, so it has to be passed after the size — the same trap the
+rail capture's SURFACE documents after a caller sent a state name into THEME
+(design round 2, D3). STATE selects what the page is showing:
 
     overview   the page as it opens (default)
     enum       an enum row expanded into its choices
@@ -86,11 +89,13 @@ STATE selects what the page is showing:
                a two-choice expansion that has written nothing. A still of the
                resting row cannot show either, so both frames are taken
     rail       the `display.rail` row highlighted, and `rail-open` the same row
-               activated. The help field is clipped with an ellipsis when it
-               does not fit, so a clause past the cut never reaches the screen:
-               the pair exists because the wording a change puts in that field
-               is only checkable from a frame, and a transcript still cannot
-               show it (design round 1, D1)
+               activated. The help field is CLIPPED with an ellipsis rather than
+               wrapped, so a clause past the cut never reaches the screen: the
+               pair exists because the wording a change puts in that field is
+               only checkable from a frame, and a transcript still cannot show
+               it (design round 1, D1). At 100 columns the field elides past 92
+               characters of text, and the shipped sentence is 90 — so this is
+               also the state that says how much headroom the wording has
     choosing   the same bool expansion with the cursor moved DOWN onto the
                unstored choice — the state whose whole claim is that browsing
                a value space writes nothing, and where the footer must read
@@ -470,20 +475,30 @@ async def main() -> None:
             await pilot.pause()
             save_capture(app, out.replace(".svg", ".open.svg"))
         elif state == "rail":
-            # TWO frames, because the subject is a HELP FIELD that is clipped
-            # with an ellipsis rather than wrapped: a clause that does not fit
-            # the line is not shortened, it is never painted, and the resting
-            # width and the activated width are different budgets (activating
-            # expands the choices underneath). The first frame is the row as a
-            # reader meets it while walking the page; the second is the whole
-            # value space, which is where the wording has to survive (design
-            # round 1, D1).
+            # The row as a reader walking the list meets it. ONE frame, like
+            # every other `*-open` sibling pair; `rail-open` below is the same
+            # row activated.
             _select(view, "display.rail")
             await pilot.pause()
             save_capture(app, out)
+        elif state == "rail-open":
+            # The same row ACTIVATED, which is a different row budget: `enter`
+            # on a BOOL expands its two choices and the help line gives way to
+            # the detail line.
+            #
+            # A state of its own rather than a second frame written by `rail`.
+            # It once was exactly that — named in this page's docs as though it
+            # were a state while nothing handled the name, so asking for it fell
+            # through to the default page and wrote a frame byte-identical to
+            # `overview` while the geometry line printed `state=rail-open`
+            # (QA round 2, Q1). A frame captioned with a state that does not
+            # exist is the evidence failure this whole PR has been repairing,
+            # which is why the fall-through it relied on is gone too.
+            _select(view, "display.rail")
+            await pilot.pause()
             view.action_activate()
             await pilot.pause()
-            save_capture(app, out.replace(".svg", "-open.svg"))
+            save_capture(app, out)
         elif state == "choosing":
             # The expansion BROWSED, not merely opened. The claim under test is
             # that moving the cursor across a value space writes nothing, and
@@ -599,8 +614,16 @@ async def main() -> None:
                 view.action_move(-1)
             await pilot.pause()
             save_capture(app, out)
-        else:
+        elif state == "overview":
+            # The page as it opens. EXPLICIT rather than the chain's fallback:
+            # a misspelled state used to land here and write an overview frame
+            # captioned with whatever the caller passed — a frame that shows one
+            # state while claiming another, which is the evidence failure this
+            # page's states exist to avoid, and how `rail-open` was once
+            # "captured" byte-identical to the control (QA round 2, Q1).
             save_capture(app, out)
+        else:
+            raise SystemExit(f"unknown state: {state!r}")
 
         print(geometry if geometry is not None else _geometry(app, view, state, size))
 
