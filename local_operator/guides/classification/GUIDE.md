@@ -75,10 +75,10 @@ Measured against a real skill library, mostly on the OpenRouter leg:
 
 - **~$0.00006–$0.00018 per call** — the bill is input tokens, so it tracks the roster: an
   isolated 14-candidate run measured $0.00006, and a full skill library ~$0.00018 (the
-  example below is one of those calls);
-- **~0.2–0.9 s** of the vendor's own model time: eight real calls on the OpenRouter leg
-  measured 0.17 s to 0.87 s, median ~0.56 s (`scripts/classification_latency_probe.py`
-  re-measures this arm; the figure moves with the roster and the route);
+  example below is one of those calls, at the low end);
+- **0.17–0.87 s** of the vendor's own model time: seven real calls on the OpenRouter leg,
+  median ~0.51 s (`scripts/classification_latency_probe.py` re-measures this arm; the
+  figure moves with the roster and the route);
 - **$0 on a repeat**: answers are cached per session, and a hit reports no spend.
 
 None of that is the turn's latency: a turn waits at most `waitMs` (50 ms) and then stops
@@ -93,7 +93,7 @@ Every call a leg answered is logged at INFO in the session's log file
 Linux):
 
 ```
-classification: vendor=openrouter model=- tokens=4238/380 cost=$0.000178 latency=0.744s resources=1
+classification: vendor=openrouter model=- tokens=1403/122 cost=$0.000059 latency=0.378s resources=0
 ```
 
 `vendor` names the leg that answered, `resources` how many suggestions came back, and
