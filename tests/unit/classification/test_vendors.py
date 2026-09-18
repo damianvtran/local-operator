@@ -950,3 +950,52 @@ async def test_the_walk_restarts_at_the_preferred_tier_when_the_memo_expires(
 
     assert bearers[-1] == "second-login-bearer"
     assert vendor._tier == 0
+
+
+async def test_a_walk_that_ended_with_no_credential_still_resets(bare_manager) -> None:
+    """The reset keys on the memo LAPSING, not on a memo still holding a value.
+
+    The reproduction from round 1 that survived the first fix: every tier refused, so
+    the leg ends holding NO credential at all — and a reset guarded by
+    ``self._key is not None`` never fires for exactly that session, so a re-login
+    could not revive it either (agent review round 2, major).
+    """
+    now = [0.0]
+    store_login_key(bare_manager, "radient", "dead-bearer")
+    bearers: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bearer = request.headers["Authorization"].replace("Bearer ", "")
+        bearers.append(bearer)
+        if bearer == "dead-bearer":
+            return httpx.Response(401, json={"error": {"message": "revoked"}})
+        return _answers_choice()
+
+    vendor = RadientVendor(
+        bare_manager,
+        client=client_for(handler),
+        credential_ttl_s=300.0,
+        clock=lambda: now[0],
+    )
+
+    with pytest.raises(DecisionVendorError):
+        await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    # Nothing resolved at all — the state the old guard could not see.
+    assert vendor._key is None
+    assert vendor._tier == 1
+    assert bearers == ["dead-bearer", "dead-bearer"]
+
+    # Inside the TTL the walk stays where it is: a re-login is NOT consulted yet, and
+    # costs no request (the monotone half of the bound).
+    store_login_key(bare_manager, "radient", "fresh-bearer", replace=True)
+    with pytest.raises(DecisionVendorError) as still_dead:
+        await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert "no credential" in str(still_dead.value)
+    assert bearers == ["dead-bearer", "dead-bearer"]
+
+    # Once the memo has lapsed, the preferred tier is consulted again and the re-login
+    # takes effect — no restart, no config edit.
+    now[0] = 301.0
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert bearers[-1] == "fresh-bearer"
+    assert vendor._tier == 0

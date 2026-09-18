@@ -47,6 +47,10 @@ _REALISTIC_DESCRIPTION = (
 )
 
 
+#: An MCP server's harness-owned capability hint, the shape the roster carries for one.
+_MCP_DESCRIPTION = "CRM contacts, companies, deals, marketing, and sales."
+
+
 def option_chars_of(plan: Any) -> int:
     """The character cost of the questions' OPTION text.
 
@@ -509,16 +513,23 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
     (operator's figure, 2026-09-18; §5 of the design doc said 64k, which nothing
     had measured).
 
-    The numbers, recomputed at head rather than quoted from §5: a realistic
-    description (~85 chars, the shape a discovered skill actually has) at 537
-    resources gives **7 405 chars ≈ 1 851 tokens ≈ 5.6%** of the 32 768-token window
-    at the shipped defaults. The assertion is deliberately tight against that figure
-    so a regression of the kind review round 1 caught (a 5x drift that a `<= 3000`
-    bound accepted) fails here.
+    The numbers, MEASURED on this roster (537 rows: 500 skills, 30 guides, 7 servers,
+    each skill/guide carrying a realistic ~85-character description) rather than quoted
+    from §5: **6 943 chars ≈ 1 735 tokens ≈ 5.3%** of the 32 768-token window at the
+    shipped defaults. The assertion is tight against that figure, because review round
+    1 found the previous version's toy descriptions let a 5x drift through a `<= 3000`
+    bound, and round 2 found the doc and the test measuring different rosters.
     """
-    rows = tuple(_realistic_roster(500)) + tuple(
-        candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
-        for index in range(30)
+    rows = (
+        tuple(_realistic_roster(500))
+        + tuple(
+            candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
+            for index in range(30)
+        )
+        + tuple(
+            candidate(f"server-{index}", kind="mcp", description=_MCP_DESCRIPTION)
+            for index in range(7)
+        )
     )
     message = "why can't this tenant run legal searches? " * 8
 
@@ -543,7 +554,10 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
 
 def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() -> None:
     """The knob's safe range, measured: the window is not what binds at 40 a kind."""
-    rows = tuple(_realistic_roster(500))
+    rows = tuple(_realistic_roster(500)) + tuple(
+        candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
+        for index in range(30)
+    )
     message = "deploy core to qa"
 
     state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
@@ -551,8 +565,9 @@ def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() ->
     option_chars = option_chars_of(plan)
     estimated_tokens = (serialized_size(state) + option_chars) // 4
 
-    # Measured at head: 14 184 chars ≈ 3 546 tokens ≈ 10.8% of the window. The cap is
-    # the lever, and even at 40 per kind the window is not what binds.
+    # Measured on the same 537-row roster at head: 13 953 chars ≈ 3 488 tokens ≈ 10.6%
+    # of the window. The cap is the lever, and even at 40 per kind the window is not
+    # what binds.
     print(f"maxCandidates=40: state+options ~{estimated_tokens} tokens")
     assert estimated_tokens <= 5_000
 
