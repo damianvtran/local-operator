@@ -678,8 +678,18 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
-            assert app._sidebar_timer is not None
-            app._sidebar_timer.pause()
+            # Both catalog-refresh paths that OPENING the list starts have to be
+            # quiet before this test hands the list its own rows: the 2 s timer,
+            # AND the one-shot `_refresh_sidebar()` worker `_set_sidebar_open`
+            # launches beside it. That worker's in-flight read returns the EMPTY
+            # isolated store and lands whenever its thread finishes — QA round 1
+            # measured 1 red in 90 head runs as `RuntimeError: coroutine raised
+            # StopIteration` out of `row_line`'s `next(...)`, and it reproduces on
+            # demand when that read is held until the rows below are set.
+            # `_quiesce_sidebar_refresh` is this file's helper for exactly that
+            # (see its docstring); the eight sibling tests that hand the list
+            # their own rows already call it.
+            _quiesce_sidebar_refresh(app)
             sidebar = app._session_sidebar
             sidebar.set_entries(_hover_entries(("alpha", "sess", "gamma")))
             sidebar.cursor_id = cursor
@@ -701,10 +711,33 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
     assert straight != mirrored, "requested and cursor render identically"
 
     def row_line(lines: list[str], title: str) -> str:
-        return next(line for line in lines if title in line)
+        """The row carrying `title`, or a failure that NAMES the frame.
+
+        A bare `next(...)` over a frame without the row raises `StopIteration`
+        inside this coroutine, which Python re-raises as `RuntimeError: coroutine
+        raised StopIteration` — a trace with no line and no frame in it. That is
+        how the catalog-landing defect above presented (QA round 1), so the
+        lookup now says what it actually saw.
+        """
+        line = next((row for row in lines if title in row), None)
+        if line is None:
+            raise AssertionError(f"{title!r} is not in the frame: {lines}")
+        return line
 
     def caret(line: str) -> str:
-        """The caret cell: one gutter cell, then the marker column's slot."""
+        """The CURSOR-PREFIX slot — the source's own name for this cell.
+
+        Not the mark column: `row_state_mark` owns the cell at `line[3]` in this
+        arrangement (see `SessionSidebar.render`), which is precisely the column
+        this test stopped reading.
+
+        `line[1]` is that slot here because the docked list's LEFT padding is one
+        cell (`padding: 0 3 0 1` in `local_operator.tcss`), and
+        `_sync_sidebar_layout` swaps in the gutter when the list is docked right
+        (`padding: (0, 1, 0, gutter)`, gutter 3), where the caret would sit at
+        `line[3]`: a right-docked run then fails loudly above rather than quietly
+        reading a padding cell here.
+        """
         return line[1]
 
     # The CARET SLOT, not a fixed prefix. The cell beside the caret is the row's
