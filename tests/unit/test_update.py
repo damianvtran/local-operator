@@ -535,7 +535,9 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check"])
     with patch("local_operator.update.update_command", return_value=2) as cmd:
         assert main() == 2
-        cmd.assert_called_once_with(check=True, refresh_daemons=False, from_snapshot=None)
+        cmd.assert_called_once_with(
+            check=True, refresh_daemons=False, from_snapshot=None, services=True
+        )
 
 
 def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,7 +546,9 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update"])
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
-        cmd.assert_called_once_with(check=False, refresh_daemons=False, from_snapshot=None)
+        cmd.assert_called_once_with(
+            check=False, refresh_daemons=False, from_snapshot=None, services=True
+        )
 
 
 def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,12 +558,66 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update", "--from-snapshot", "main"])
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
-        cmd.assert_called_once_with(check=False, refresh_daemons=False, from_snapshot="main")
+        cmd.assert_called_once_with(
+            check=False, refresh_daemons=False, from_snapshot="main", services=True
+        )
 
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
     with patch("local_operator.update.update_command", return_value=1) as refused:
         assert main() == 1
         refused.assert_called_once()
+
+
+def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--no-services`` reaches the installer as the escape hatch it is.
+
+    The default is to finish the job (move the serves onto the new build); the
+    flag is what a caller that will start the daemons itself uses, so it has to
+    survive the CLI rather than only existing in the function's signature.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "update", "--no-services"])
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(
+            check=False, refresh_daemons=False, from_snapshot=None, services=False
+        )
+
+
+def test_main_dispatches_services_status(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """``lop services status`` prints what it finds and changes nothing."""
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "services", "status"])
+    with patch("local_operator.services.status_lines", return_value=["line one"]):
+        assert main() == 0
+    assert capsys.readouterr().out.strip() == "line one"
+
+
+def test_main_dispatches_services_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``restart`` runs the fleet stage, and ``--wait`` reaches it."""
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "services", "restart"])
+    with patch("local_operator.services.restart_services", return_value=[]) as restart:
+        assert main() == 0
+    restart.assert_called_once_with()
+
+    monkeypatch.setattr("sys.argv", ["lop", "services", "restart", "--wait", "5"])
+    with patch("local_operator.services.restart_services", return_value=[]) as waited:
+        assert main() == 0
+    waited.assert_called_once_with(wait_s=5.0)
+
+
+def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """A bare ``lop services`` names its verbs instead of doing something."""
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "services"])
+    with pytest.raises(SystemExit):
+        main()
+    assert "usage: lop services" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

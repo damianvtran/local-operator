@@ -429,6 +429,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable hot reload for the server",
     )
+    serve_parser.add_argument(
+        "--listener-fd",
+        type=int,
+        default=None,
+        help=(
+            "Adopt an already-bound listening socket instead of binding one. "
+            "Set by a daemon replacing its own process image onto a new build "
+            "(`server/reload`), so the port never has a moment with nothing "
+            "behind it. Not a user-facing flag."
+        ),
+    )
 
     # Mobile command: the phone-facing control plane (daemon + supervision).
     # Same lazy-import rule as ``serve`` — the mobile modules pull starlette/
@@ -966,6 +977,56 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=(
             "Install a local source tree (a directory, or a git ref of the current "
             "repository) into its own install generation, instead of upgrading from PyPI"
+        ),
+    )
+    update_parser.add_argument(
+        "--no-services",
+        dest="no_services",
+        action="store_true",
+        help=(
+            "Replace the install and stop there. Default is to finish the job: the "
+            "supervised daemons are repaired and every `lop serve` daemon still on the "
+            "old build is asked to move onto the new one (their conversations keep "
+            "running). Use this only when you want the trees alone, e.g. from a script "
+            "that will start the daemons itself."
+        ),
+    )
+
+    # The NON-RUNTIME SERVICES, as one verb group. A service is a long-lived
+    # non-conversational process (a serve daemon, the mobile daemon, the browser
+    # bridge, the tunnel, the wakes supervisor); a runtime is a conversation, and
+    # nothing here ever touches one. `restart` is the same stage `lop update`
+    # finishes with, exposed on its own so the recovery sentences the update path
+    # prints can name a command that exists.
+    services_parser = subparsers.add_parser(
+        "services",
+        help=(
+            "Bring this machine's non-runtime services (serve daemons and the "
+            "supervised daemons) onto the current build, without stopping any "
+            "running conversation"
+        ),
+        parents=[parent_parser],
+    )
+    services_subparsers = services_parser.add_subparsers(dest="services_command")
+    services_subparsers.add_parser(
+        "status",
+        help="Report each non-runtime service and the build it is serving",
+        parents=[parent_parser],
+    )
+    services_restart = services_subparsers.add_parser(
+        "restart",
+        help="Move every service onto the current build (never stops a runtime)",
+        parents=[parent_parser],
+    )
+    services_restart.add_argument(
+        "--wait",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long to wait for an asked daemon to come back on the new build "
+            "(default: 30). A daemon that does not make it is reported and left "
+            "serving the build it loaded."
         ),
     )
 
@@ -5396,7 +5457,39 @@ def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
     return 1
 
 
-def serve_command(host: str, port: int, reload: bool) -> int:
+def adopt_serve_socket(fd: int) -> socket.socket:
+    """Take over an already-bound listener handed across ``execve``.
+
+    WHY THIS EXISTS AT ALL. A reload replaces this process's image and keeps the
+    socket fd open across the exec, so the port a client is connected to is the
+    same kernel object before and after; the successor must therefore ADOPT it
+    rather than bind. A fresh ``bind`` would fail with ``EADDRINUSE`` against the
+    socket this very process is still holding, and the tempting alternative —
+    close it and rebind — is a window in which ``connect`` gets refused, which is
+    the outage the in-place design was chosen to avoid.
+
+    ``socket.fromfd`` DUPLICATES the descriptor rather than wrapping it, so the
+    inherited fd is closed here: leaving it open would leak one descriptor per
+    reload in a process that may live for months, and would keep a second handle
+    on a socket nothing is serving from.
+
+    Deliberately does NOT re-apply ``SO_REUSEADDR`` or re-bind anything: the
+    socket is already fully configured and listening, and touching it would undo
+    the only property this path is for.
+    """
+    listener = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+    # The dup ``fromfd`` just made is the one we keep, and it must NOT be
+    # inherited by anything this process later spawns — only a future reload of
+    # this daemon should see it, and that reload publishes its own fd.
+    listener.set_inheritable(False)
+    try:
+        os.close(fd)
+    except OSError:  # pragma: no cover — an fd already reaped by the dup path
+        pass
+    return listener
+
+
+def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     """Start the FastAPI server using uvicorn.
 
     ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
@@ -5439,7 +5532,30 @@ def serve_command(host: str, port: int, reload: bool) -> int:
 
     listener: socket.socket | None = None
     resolved_port = port
-    if not reload:
+    if listener_fd is not None and reload:
+        # Both at once is a contradiction rather than a precedence rule: a
+        # ``--reload`` child's port belongs to uvicorn's supervisor, which is
+        # precisely why ``reload.install`` refuses to arm a reload on one. A
+        # caller that asked for both has asked for neither, and refusing by name
+        # is better than picking one silently.
+        print(
+            "--listener-fd and --reload cannot be combined: a reload child's port "
+            "belongs to its supervisor, so there is no socket of its own to adopt",
+            file=sys.stderr,
+        )
+        return 1
+    if listener_fd is not None:
+        # The reload path: this process is the replacement, and the socket is
+        # already bound and listening in the kernel. Nothing is bound here, so a
+        # failure can only be a bad descriptor — reported like a bind failure,
+        # because from the client's side the consequence is the same one.
+        try:
+            listener = adopt_serve_socket(listener_fd)
+        except OSError as exc:
+            print(f"--listener-fd {listener_fd} could not be adopted: {exc}", file=sys.stderr)
+            return 1
+        resolved_port = listener.getsockname()[1]
+    elif not reload:
         try:
             listener = _bind_serve_socket(host, port)
         except OSError as exc:
@@ -5482,6 +5598,13 @@ def serve_command(host: str, port: int, reload: bool) -> int:
         # inherited variable would let any of them publish a record naming OUR
         # listener as its own.
         serve_registry.announce_address(asgi_app, host, resolved_port)
+        # The fd a reload hands across ``execve``. Published on the app object
+        # for the same reason the announcement is: the socket lives in THIS
+        # frame and the reload runs in the lifespan's loop, so state is the one
+        # channel that reaches both.
+        from local_operator.server import reload as serve_reload
+
+        serve_reload.bind_listener_fd(asgi_app, listener.fileno())
         config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
@@ -7580,7 +7703,7 @@ def main() -> int:
                 return 1
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
-            return serve_command(args.host, args.port, args.reload)
+            return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
         elif args.subcommand == "mobile":
             return mobile_command(args)
         elif args.subcommand == "tunnel":
@@ -7645,7 +7768,31 @@ def main() -> int:
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
+                services=not bool(getattr(args, "no_services", False)),
             )
+        elif args.subcommand == "services":
+            # Lazy for the same reason as ``update``: this pulls the serve
+            # registry, and the CLI's own startup path must stay stdlib-light.
+            from local_operator.services import (
+                print_refreshes,
+                restart_services,
+                status_lines,
+            )
+
+            command = getattr(args, "services_command", None)
+            if command == "status":
+                for line in status_lines():
+                    print(line)
+                return 0
+            if command == "restart":
+                wait = getattr(args, "wait", None)
+                refreshes = (
+                    restart_services(wait_s=wait) if wait is not None else restart_services()
+                )
+                print_refreshes(refreshes)
+                return 0
+            parser.error("usage: lop services {status|restart}")
+            return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:
             # they install nothing from a network, so they never consult PyPI.

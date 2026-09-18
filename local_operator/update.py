@@ -3864,7 +3864,37 @@ def _print_current_generation() -> None:
         print(f"current install: {generation}")
 
 
-def _generation_upgrade(total: int) -> int:
+def _services_stage(*, wait_s: float | None = None) -> None:
+    """Bring the non-runtime fleet onto the build the pointer now names.
+
+    THE STEP THAT MAKES AN UPDATE ACTUALLY AN UPDATE. Replacing the install used
+    to leave every ``lop serve`` daemon serving the build it had loaded — for as
+    long as it ran, by design (``server/retire`` refuses to exit on a marker) — so
+    a desktop app's "update server" button moved the tree and left the backend
+    where it was, then reported exactly that. ``local_operator.services`` owns the
+    sentence and :mod:`local_operator.server.reload` the mechanism; this function
+    exists only to call it and to word a failure as a warning on a successful
+    update.
+
+    Imported function-locally because ``services`` reaches the serve registry and
+    ``update`` is on ``lop``'s startup path — the same rule that keeps this module
+    free of uvicorn (``tests/unit/test_import_graph.py``).
+    """
+    from local_operator.services import print_refreshes, restart_services
+
+    try:
+        refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
+    except Exception as exc:  # noqa: BLE001 — the install already succeeded
+        print(
+            f"warning: the installed services could not be moved onto the new build: {exc}; "
+            "run `lop services restart` when this is resolved",
+            file=sys.stderr,
+        )
+        return
+    print_refreshes(refreshes)
+
+
+def _generation_upgrade(total: int, *, services: bool = True) -> int:
     """The tail every successful install shares: report, prune, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
@@ -3872,15 +3902,23 @@ def _generation_upgrade(total: int) -> int:
     :func:`prune_notice_lines`, the one renderer both front ends use, and it prints
     AFTER ``current install:`` — the removal reported where it belongs rather than
     as a bare record above the lines that explain it (design review D4).
+
+    ``services=False`` (``lop update --no-services``) stops after the supervised
+    daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
+    that wants the trees and nothing else is a caller that has its own reason for
+    leaving a daemon where it is.
     """
     _print_current_generation()
     for line in prune_notice_lines(prune_generations(referenced=referenced_install_roots())):
         print(line)
-    _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    if services:
+        _services_stage()
+    else:
+        _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return total
 
 
-def _snapshot_command(value: str) -> int:
+def _snapshot_command(value: str, *, services: bool = True) -> int:
     """``lop update --from-snapshot <dir-or-ref>``: install a local build.
 
     The in-repo half of what the out-of-tree ``lop-update`` script does today,
@@ -3937,11 +3975,15 @@ def _snapshot_command(value: str) -> int:
             # and leaving 136 MB of tree per install in TMPDIR is how a machine
             # with a small /tmp dies on a day nobody is looking.
             _remove_tree(snapshot.path)
-    return _generation_upgrade(0)
+    return _generation_upgrade(0, services=services)
 
 
 def update_command(
-    *, check: bool = False, refresh_daemons: bool = False, from_snapshot: str | None = None
+    *,
+    check: bool = False,
+    refresh_daemons: bool = False,
+    from_snapshot: str | None = None,
+    services: bool = True,
 ) -> int:
     """``lop update``, ``lop update --check``, ``--from-snapshot`` and the repair.
 
@@ -3965,7 +4007,7 @@ def update_command(
         if check:
             print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
             return 1
-        return _snapshot_command(from_snapshot)
+        return _snapshot_command(from_snapshot, services=services)
 
     result = check_latest(force=True)
     if result.latest is None:
@@ -4019,5 +4061,8 @@ def update_command(
     _print_current_generation()
     for line in pruned:
         print(line)
-    _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    if services:
+        _services_stage()
+    else:
+        _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return 0
