@@ -1,0 +1,559 @@
+[
+ {
+  "frame": "several.svg",
+  "size": [
+   98,
+   28
+  ],
+  "case": "several",
+  "kind": "picker",
+  "settled_after_one_pause": true,
+  "second_frame": null,
+  "before_frame": "several-transcript.svg",
+  "opened": [],
+  "virtual": [
+   98,
+   28
+  ],
+  "screen_vscroll": false,
+  "screen_padding": null,
+  "transcript": {
+   "region": [
+    1,
+    1,
+    98,
+    23
+   ],
+   "size": [
+    97,
+    21
+   ],
+   "virtual": [
+    96,
+    21
+   ],
+   "vscroll": false,
+   "scroll_y": 0.0
+  },
+  "notices": [],
+  "card": {
+   "region": [
+    31,
+    10,
+    37,
+    9
+   ],
+   "styles_height": "auto",
+   "styles_width": "auto",
+   "padding": "Spacing(top=1, right=2, bottom=1, left=2)",
+   "drawable": true,
+   "row_budget": 3,
+   "card_width": 33,
+   "content_size": [
+    98,
+    28
+   ],
+   "body_region": [
+    33,
+    11,
+    33,
+    7
+   ],
+   "body_size": [
+    33,
+    7
+   ],
+   "selected": 0,
+   "offset": 0,
+   "targets": [
+    "https://one.test/a",
+    "https://two.test/b",
+    "https://three.test/c"
+   ]
+  },
+  "rows": [
+   {
+    "plain": "Open a link",
+    "cells": 11,
+    "runs": [
+     {
+      "text": "Open a link",
+      "ink": "#e9e5db",
+      "cells": 11
+     }
+    ]
+   },
+   {
+    "plain": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "ink": "#4a4539",
+      "cells": 33
+     }
+    ]
+   },
+   {
+    "plain": "\u276f https://one.test/a        agent",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "\u276f ",
+      "ink": "#38c96a",
+      "cells": 2
+     },
+     {
+      "text": "https://one.test/a",
+      "ink": "#e9e5db",
+      "cells": 18
+     },
+     {
+      "text": "agent",
+      "ink": "#4a4539",
+      "cells": 5
+     }
+    ]
+   },
+   {
+    "plain": "  https://two.test/b        agent",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "  ",
+      "ink": "#4a4539",
+      "cells": 2
+     },
+     {
+      "text": "https://two.test/b",
+      "ink": "#837c6d",
+      "cells": 18
+     },
+     {
+      "text": "agent",
+      "ink": "#4a4539",
+      "cells": 5
+     }
+    ]
+   },
+   {
+    "plain": "  https://three.test/c      agent",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "  ",
+      "ink": "#4a4539",
+      "cells": 2
+     },
+     {
+      "text": "https://three.test/c",
+      "ink": "#837c6d",
+      "cells": 20
+     },
+     {
+      "text": "agent",
+      "ink": "#4a4539",
+      "cells": 5
+     }
+    ]
+   },
+   {
+    "plain": "",
+    "cells": 0,
+    "runs": []
+   },
+   {
+    "plain": "\u2191\u2193 move \u00b7 enter open \u00b7 esc cancel",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "\u2191\u2193",
+      "ink": "#837c6d",
+      "cells": 2
+     },
+     {
+      "text": " move",
+      "ink": "#4a4539",
+      "cells": 5
+     },
+     {
+      "text": " \u00b7 ",
+      "ink": "#4a4539",
+      "cells": 3
+     },
+     {
+      "text": "enter",
+      "ink": "#837c6d",
+      "cells": 5
+     },
+     {
+      "text": " open",
+      "ink": "#4a4539",
+      "cells": 5
+     },
+     {
+      "text": " \u00b7 ",
+      "ink": "#4a4539",
+      "cells": 3
+     },
+     {
+      "text": "esc",
+      "ink": "#837c6d",
+      "cells": 3
+     },
+     {
+      "text": " cancel",
+      "ink": "#4a4539",
+      "cells": 7
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "frame": "long.svg",
+  "size": [
+   98,
+   28
+  ],
+  "case": "long",
+  "kind": "picker",
+  "settled_after_one_pause": true,
+  "second_frame": null,
+  "before_frame": "long-transcript.svg",
+  "opened": [],
+  "virtual": [
+   98,
+   28
+  ],
+  "screen_vscroll": false,
+  "screen_padding": null,
+  "transcript": {
+   "region": [
+    1,
+    1,
+    98,
+    23
+   ],
+   "size": [
+    97,
+    21
+   ],
+   "virtual": [
+    96,
+    21
+   ],
+   "vscroll": false,
+   "scroll_y": 0.0
+  },
+  "notices": [],
+  "card": {
+   "region": [
+    1,
+    11,
+    98,
+    8
+   ],
+   "styles_height": "auto",
+   "styles_width": "auto",
+   "padding": "Spacing(top=1, right=2, bottom=1, left=2)",
+   "drawable": true,
+   "row_budget": 2,
+   "card_width": 94,
+   "content_size": [
+    98,
+    28
+   ],
+   "body_region": [
+    3,
+    12,
+    94,
+    6
+   ],
+   "body_size": [
+    94,
+    6
+   ],
+   "selected": 0,
+   "offset": 0,
+   "targets": [
+    "https://example.test/reports/2026/09/very-long-segment/very-long-segment/very-long-segment/very-long-segment/index.html",
+    "https://example.test/short"
+   ]
+  },
+  "rows": [
+   {
+    "plain": "Open a link",
+    "cells": 11,
+    "runs": [
+     {
+      "text": "Open a link",
+      "ink": "#e9e5db",
+      "cells": 11
+     }
+    ]
+   },
+   {
+    "plain": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "cells": 94,
+    "runs": [
+     {
+      "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "ink": "#4a4539",
+      "cells": 94
+     }
+    ]
+   },
+   {
+    "plain": "\u276f https://example.test/reports/2026/09/very-long-segment/very-long-segment/very-long-segment/\u2026",
+    "cells": 94,
+    "runs": [
+     {
+      "text": "\u276f ",
+      "ink": "#38c96a",
+      "cells": 2
+     },
+     {
+      "text": "https://example.test/reports/2026/09/very-long-segment/very-long-segment/very-long-segment/\u2026",
+      "ink": "#e9e5db",
+      "cells": 92
+     }
+    ]
+   },
+   {
+    "plain": "  https://example.test/short                                                             agent",
+    "cells": 94,
+    "runs": [
+     {
+      "text": "  ",
+      "ink": "#4a4539",
+      "cells": 2
+     },
+     {
+      "text": "https://example.test/short",
+      "ink": "#837c6d",
+      "cells": 26
+     },
+     {
+      "text": "agent",
+      "ink": "#4a4539",
+      "cells": 5
+     }
+    ]
+   },
+   {
+    "plain": "",
+    "cells": 0,
+    "runs": []
+   },
+   {
+    "plain": "\u2191\u2193 move \u00b7 enter open \u00b7 esc cancel",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "\u2191\u2193",
+      "ink": "#837c6d",
+      "cells": 2
+     },
+     {
+      "text": " move",
+      "ink": "#4a4539",
+      "cells": 5
+     },
+     {
+      "text": " \u00b7 ",
+      "ink": "#4a4539",
+      "cells": 3
+     },
+     {
+      "text": "enter",
+      "ink": "#837c6d",
+      "cells": 5
+     },
+     {
+      "text": " open",
+      "ink": "#4a4539",
+      "cells": 5
+     },
+     {
+      "text": " \u00b7 ",
+      "ink": "#4a4539",
+      "cells": 3
+     },
+     {
+      "text": "esc",
+      "ink": "#837c6d",
+      "cells": 3
+     },
+     {
+      "text": " cancel",
+      "ink": "#4a4539",
+      "cells": 7
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "frame": "narrow44.svg",
+  "size": [
+   42,
+   22
+  ],
+  "case": "narrow44",
+  "kind": "picker",
+  "settled_after_one_pause": true,
+  "second_frame": null,
+  "before_frame": "narrow44-transcript.svg",
+  "opened": [],
+  "virtual": [
+   42,
+   22
+  ],
+  "screen_vscroll": false,
+  "screen_padding": null,
+  "transcript": {
+   "region": [
+    1,
+    1,
+    42,
+    17
+   ],
+   "size": [
+    41,
+    15
+   ],
+   "virtual": [
+    40,
+    15
+   ],
+   "vscroll": false,
+   "scroll_y": 0.0
+  },
+  "notices": [],
+  "card": {
+   "region": [
+    1,
+    8,
+    42,
+    7
+   ],
+   "styles_height": "auto",
+   "styles_width": "auto",
+   "padding": "Spacing(top=1, right=2, bottom=1, left=2)",
+   "drawable": true,
+   "row_budget": 1,
+   "card_width": 38,
+   "content_size": [
+    42,
+    22
+   ],
+   "body_region": [
+    3,
+    9,
+    38,
+    5
+   ],
+   "body_size": [
+    38,
+    5
+   ],
+   "selected": 0,
+   "offset": 0,
+   "targets": [
+    "https://example.test/reports/2026/09/very-long-segment/very-long-segment/very-long-segment/very-long-segment/index.html"
+   ]
+  },
+  "rows": [
+   {
+    "plain": "Open a link",
+    "cells": 11,
+    "runs": [
+     {
+      "text": "Open a link",
+      "ink": "#e9e5db",
+      "cells": 11
+     }
+    ]
+   },
+   {
+    "plain": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "cells": 38,
+    "runs": [
+     {
+      "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+      "ink": "#4a4539",
+      "cells": 38
+     }
+    ]
+   },
+   {
+    "plain": "\u276f https://example.test/reports/2026/0\u2026",
+    "cells": 38,
+    "runs": [
+     {
+      "text": "\u276f ",
+      "ink": "#38c96a",
+      "cells": 2
+     },
+     {
+      "text": "https://example.test/reports/2026/0\u2026",
+      "ink": "#e9e5db",
+      "cells": 36
+     }
+    ]
+   },
+   {
+    "plain": "",
+    "cells": 0,
+    "runs": []
+   },
+   {
+    "plain": "\u2191\u2193 move \u00b7 enter open \u00b7 esc cancel",
+    "cells": 33,
+    "runs": [
+     {
+      "text": "\u2191\u2193",
+      "ink": "#837c6d",
+      "cells": 2
+     },
+     {
+      "text": " move",
+      "ink": "#4a4539",
+      "cells": 5
+     },
+     {
+      "text": " \u00b7 ",
+      "ink": "#4a4539",
+      "cells": 3
+     },
+     {
+      "text": "enter",
+      "ink": "#837c6d",
+      "cells": 5
+     },
+     {
+      "text": " open",
+      "ink": "#4a4539",
+      "cells": 5
+     },
+     {
+      "text": " \u00b7 ",
+      "ink": "#4a4539",
+      "cells": 3
+     },
+     {
+      "text": "esc",
+      "ink": "#837c6d",
+      "cells": 3
+     },
+     {
+      "text": " cancel",
+      "ink": "#4a4539",
+      "cells": 7
+     }
+    ]
+   }
+  ]
+ }
+]
