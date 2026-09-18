@@ -895,6 +895,18 @@ _FRONTEND_LOCAL_SLASHES = {
     # Remote access is enrolled using this frontend computer's OAuth store and
     # service manager; routing to the runtime would expose another host.
     "mobile",
+    # FRONTEND-LOCAL because BOTH halves are facts about this machine: the
+    # unread completions it lists come from the store this frontend's own
+    # sidebar paints from (`config_dir()/attention.db`), and the receipt it
+    # writes clears the marks on the screen the user is looking at. Routed to
+    # the runtime it would list and clear the RUNTIME host's marks while the
+    # sidebar beside it kept showing this one's -- the same wrong-machine split
+    # `/info` and `/settings` refuse. This is also what keeps it out of
+    # `session/runtime/serving.py::_slash_result`: every registry entry NOT in
+    # this set is advertised `authoritative_session`, and that advertisement
+    # FAILS `tests/unit/session/runtime/test_capability_surface.py` unless the
+    # runtime dispatches it.
+    "notifications",
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
     # paste prompt on the runtime host's screen, which nobody is looking at. This is

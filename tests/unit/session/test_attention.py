@@ -1570,3 +1570,268 @@ async def test_a_witnessed_cut_off_reaches_the_row_the_daemon_cannot_classify(
     finally:
         owner.kill()
         owner.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# `acknowledge_many`: the bulk half, and the rules a sweep would break
+#
+# The operation exists because a gesture means "these" (a sidebar's clear-all,
+# the TUI's `/notifications read`), so every test here is about the boundary
+# between acknowledging what a surface ENUMERATED and sweeping what it did not.
+# ---------------------------------------------------------------------------
+
+
+def _bulk_store(tmp_path: Path) -> AttentionStore:
+    """A store with one conversation published, plus its token."""
+    store = AttentionStore(tmp_path / "attention.db")
+    store.publish("session/a", str(uuid.uuid4()), "anchor-a", "complete")
+    return store
+
+
+def test_a_bulk_receipt_reports_a_verdict_per_item_in_input_order(tmp_path: Path) -> None:
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, "anchor-a", "complete")
+
+    results = store.acknowledge_many(
+        [
+            ("session/a", token),
+            ("session/b", str(uuid.uuid4())),
+            ("session/c", token),
+        ]
+    )
+
+    assert [result["status"] for result in results] == ["read", "unknown", "unknown"]
+    assert [result["conversation_id"] for result in results] == [
+        "session/a",
+        "session/b",
+        "session/c",
+    ]
+    # Only a `read` item carries a state, and it is the store's own post-write
+    # state -- the same dict the list route publishes for that row.
+    assert results[0]["state"]["unseen"] is False
+    assert results[0]["state"]["completion_token"] == token
+    assert results[1]["state"] is None and results[2]["state"] is None
+    assert store.state("session/a")["unseen"] is False
+
+
+def test_a_superseded_item_in_a_batch_leaves_that_conversation_unread(tmp_path: Path) -> None:
+    """R1 at the store layer: the batch is token-bound, so a newer completion wins.
+
+    The conversation completed twice between the caller's render and its click.
+    The token it holds is real and no longer current, so nothing is written and
+    no state is returned -- the caller must re-read the token that is current.
+    """
+    store = AttentionStore(tmp_path / "attention.db")
+    observed = str(uuid.uuid4())
+    store.publish("session/a", observed, "anchor-1", "complete")
+    newer = str(uuid.uuid4())
+    store.publish("session/a", newer, "anchor-2", "complete")
+    settled = str(uuid.uuid4())
+    store.publish("session/b", settled, "anchor-b", "complete")
+
+    results = store.acknowledge_many([("session/a", observed), ("session/b", settled)])
+
+    assert [result["status"] for result in results] == ["superseded", "read"]
+    assert results[0]["state"] is None
+    state = store.state("session/a")
+    assert state["unseen"] is True and state["completion_token"] == newer
+    assert state["revision"][1] == 0, "a refused receipt must not move the watermark"
+
+
+def test_a_bulk_receipt_touches_no_delivery_no_mutation_and_no_completion(tmp_path: Path) -> None:
+    """R2 and the no-flood rule: reading is not notifying, and not a heal."""
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, "anchor-a", "complete")
+    assert store.claim_delivery("session/a", token, "tui") is True
+    superseded = str(uuid.uuid4())
+    store.publish("session/b", superseded, "anchor-b", "error")
+    store.acknowledge("session/b", superseded)
+    store.publish("session/b", str(uuid.uuid4()), "anchor-b2", "complete")
+
+    with sqlite3.connect(tmp_path / "attention.db") as conn:
+        before = {
+            table: conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            for table in ("deliveries", "mutations", "supersede_log", "completions")
+        }
+    revision = store.revision()
+
+    results = store.acknowledge_many([("session/a", token), ("session/b", superseded)])
+    assert [result["status"] for result in results] == ["read", "superseded"]
+
+    with sqlite3.connect(tmp_path / "attention.db") as conn:
+        after = {
+            table: conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            for table in ("deliveries", "mutations", "supersede_log", "completions")
+        }
+    assert after == before, "a read must not notify, heal, or publish anything"
+    # `deliveries` in particular: an already-delivered banner stays delivered.
+    assert after["deliveries"], "the delivery claim under test was never written"
+    # term 3 is the supersede counter, and MAX(sequence) is the publish clock.
+    assert store.revision()[0] == revision[0]
+
+
+def test_a_failed_bulk_batch_writes_nothing_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: one transaction, so an observer sees all of the batch or none of it.
+
+    The failure is injected INSIDE the batch, after the first receipt has already
+    been written in the transaction -- which is precisely the state a per-item
+    transaction would have committed. The whole batch must roll back and the
+    store must be left exactly as it was.
+    """
+    store = AttentionStore(tmp_path / "attention.db")
+    tokens = {}
+    for name in ("a", "b", "c"):
+        tokens[name] = str(uuid.uuid4())
+        store.publish(f"session/{name}", tokens[name], f"anchor-{name}", "complete")
+    before = store.revision()
+    original = AttentionStore._state
+    calls: list[str] = []
+
+    def exploding_state(conn: sqlite3.Connection, conversation: str) -> dict[str, Any]:
+        calls.append(conversation)
+        if len(calls) > 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original(conn, conversation)
+
+    monkeypatch.setattr(AttentionStore, "_state", staticmethod(exploding_state))
+    with pytest.raises(sqlite3.Error):
+        store.acknowledge_many([(f"session/{name}", tokens[name]) for name in ("a", "b", "c")])
+    monkeypatch.setattr(AttentionStore, "_state", original)
+
+    assert len(calls) == 2, "the failure did not land inside the batch"
+    assert store.revision() == before
+    for name in ("a", "b", "c"):
+        assert store.state(f"session/{name}")["unseen"] is True, name
+
+
+def test_a_bulk_receipt_is_idempotent_and_a_rerun_moves_no_revision(tmp_path: Path) -> None:
+    store = _bulk_store(tmp_path)
+    token = store.state("session/a")["completion_token"]
+    first = store.acknowledge_many([("session/a", token)])
+    assert first[0]["status"] == "read"
+    revision = store.revision()
+
+    again = store.acknowledge_many([("session/a", token)])
+    # Already read is still `read` -- a delayed or duplicate receipt converges --
+    # and it moves nothing, which is what makes a re-run free.
+    assert again[0]["status"] == "read" and again[0]["state"]["unseen"] is False
+    assert store.revision() == revision
+
+
+def test_a_bulk_receipt_against_a_missing_store_creates_nothing(tmp_path: Path) -> None:
+    """An arbitration read must not materialise the database it could not find."""
+    store = AttentionStore(tmp_path / "nested" / "attention.db")
+    results = store.acknowledge_many([("session/a", str(uuid.uuid4()))])
+
+    assert [result["status"] for result in results] == ["unknown"]
+    assert results[0]["state"] is None
+    assert not store.path.exists()
+    assert not store.path.parent.exists()
+    assert store.acknowledge_many([]) == []
+
+
+def test_duplicate_items_in_one_batch_are_evaluated_in_order(tmp_path: Path) -> None:
+    """No dedupe, one policy site: the second item is judged against the first's write."""
+    store = AttentionStore(tmp_path / "attention.db")
+    older = str(uuid.uuid4())
+    store.publish("session/a", older, "anchor-1", "complete")
+    newer = str(uuid.uuid4())
+    store.publish("session/a", newer, "anchor-2", "complete")
+
+    stale_first = store.acknowledge_many([("session/a", older), ("session/a", newer)])
+    assert [result["status"] for result in stale_first] == ["superseded", "read"]
+    assert store.state("session/a")["unseen"] is False
+
+    # The other order, on a fresh conversation: the stale token is judged AFTER
+    # the conversation became read, which is the already-read arm of the rule --
+    # so it is `read`, not `superseded`, and it moves nothing.
+    stale = str(uuid.uuid4())
+    current = str(uuid.uuid4())
+    store.publish("session/b", stale, "anchor-b1", "complete")
+    store.publish("session/b", current, "anchor-b2", "complete")
+    fresh_first = store.acknowledge_many([("session/b", current), ("session/b", stale)])
+    assert [result["status"] for result in fresh_first] == ["read", "read"]
+    assert fresh_first[1]["state"]["unseen"] is False
+
+
+def _batch_call_sites(symbol: str) -> dict[str, list[str]]:
+    """Every reference to `symbol`, as ``{file: [outermost def, ...]}``.
+
+    A REFERENCE rather than a call, deliberately: the TUI hands the bound method
+    to `asyncio.to_thread` instead of calling it, and a matcher that only saw
+    `Call` nodes would have reported that tree as having no batch write in it at
+    all -- the exact blind spot a reader of this test would trust it for.
+
+    Source-level on purpose: R9 is a claim about WHO may reach the batch write,
+    and the way a claim like that rots is a new caller in a poll or a blur
+    handler -- a shape no behavioural test can enumerate, because the test would
+    have to know the timer in advance. Read from the syntax tree rather than from
+    a grep, so a mention in a comment, a docstring or a string cannot satisfy it.
+
+    Attributed to the OUTERMOST enclosing def, which is the fact that matters
+    here: "the desktop route's worker hop" and "the TUI command" are the answers
+    R9 wants, while an inner helper's name would say nothing about which surface
+    reached the write.
+    """
+    import ast
+
+    import local_operator
+
+    root = Path(local_operator.__file__).parent
+    sites: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), str(path))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == symbol
+        ]
+        if not calls:
+            continue
+        parents: dict[int, ast.AST] = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
+        owners: list[str] = []
+        for call in calls:
+            names: list[str] = []
+            node = parents.get(id(call))
+            while node is not None:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.append(node.name)
+                node = parents.get(id(node))
+            owners.append(names[-1] if names else "<module>")
+        sites[path.relative_to(root).as_posix()] = owners
+    return sites
+
+
+def test_only_a_user_gesture_can_reach_the_batch_operation() -> None:
+    """R9: no timer, poll or focus hook may acknowledge anything in bulk.
+
+    A surface that clears marks without being asked is the hazard this whole
+    design exists to prevent -- a receipt that moved by itself is a result nobody
+    read. The batch operation is therefore reachable from exactly two callers:
+    the desktop facade's worker hop (whose own only caller is the HTTP route a
+    user's click reaches), and the TUI command the user TYPES.
+
+    Driven off the syntax tree, so a call added from `_poll_completion_attention`
+    or from a window-blur handler fails here BY NAME, rather than passing because
+    the test only knew the old callers.
+    """
+    import local_operator
+
+    definition = Path(local_operator.__file__).parent / "session" / "attention.py"
+    assert "def acknowledge_many(" in definition.read_text(), (
+        "the batch operation was renamed or removed; this test's expectations " "describe nothing"
+    )
+    assert _batch_call_sites("acknowledge_many") == {
+        "server/utils/desktop_sessions.py": ["acknowledge_attention_many"],
+        "tui/app.py": ["_notifications_receipt"],
+    }
+    assert _batch_call_sites("acknowledge_attention_many") == {
+        "server/routes/desktop_sessions.py": ["seen_many"],
+    }

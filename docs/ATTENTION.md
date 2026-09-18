@@ -187,6 +187,63 @@ prevent acknowledgement of a complete result. If a capped result cannot be
 hydrated in full on the phone, it remains unread until a full surface views it;
 this contract does not add a new full-text mobile viewer.
 
+### A gesture may acknowledge what a surface ENUMERATES (R10)
+
+The rule above is per result. Clearing a whole pile is the one place it is
+deliberately relaxed, and the relaxation is narrow enough to state:
+
+**An explicit user gesture may acknowledge the completions a surface
+enumerates, token-bound; no automatic path may acknowledge anything.** The
+surface sends the completions it actually rendered — one `(conversation,
+token)` pair each — and the store compares every pair against that
+conversation's CURRENT completion inside one write transaction. A completion
+published after the render is not in the batch, so it stays unread, and the
+caller learns which items did not clear (`superseded`, `unknown`) rather than a
+success that moved a watermark no surface can see. Clearing is therefore not a
+sweep of "everything unread": it is the same observed-token rule applied to a
+list, and `acknowledge_all()` does not exist on the store for exactly that
+reason.
+
+The explicit half is load-bearing too. A timer, a poll, a subscription or a
+focus change may never reach the batch operation, and nothing here changes the
+per-result rule for the surfaces that acknowledge one at a time. The TUI's
+`/notifications read` renders the set it is about to clear — one catalogue read,
+painted before the write — and acknowledges exactly that read's pairs, so the
+rows a user clears are rows they were shown, including the one that finished
+while they were typing; the desktop clears the rows its sidebar holds, and only
+with its window in the foreground (`guardForegroundReceipts` covers the op by
+name). Reading is still not notifying: `deliveries`, the supersede log and the
+completion rows are untouched by a bulk acknowledgement, so an already-delivered
+banner stays delivered and nothing read can be resurrected as unread.
+
+Two more things this relaxation depends on, both stated because they are easy to
+re-derive differently:
+
+- **A store that could not be READ is not an empty pile.** The empty states
+  (`No unread completions.`, `Nothing unread.`) are findings, and a failed read
+  supports neither. Both surfaces therefore branch on ONE classification —
+  `session/store_failures.py`, consumed by the desktop ladder and by the TUI —
+  whose codes and log levels decide the condition and the ink (contention is
+  retryable; a full disk and an unopenable store are not). The SENTENCE is
+  composed per surface AND per route, deliberately: the classifier's strings are
+  the send path's ("the message could not be written", "send it again") and are
+  false about a receipt clear, which has no message in it — so both the TUI's
+  command and BOTH desktop routes that clear receipts (`POST
+  /v1/desktop/sessions/{session_id}/seen` and `POST /v1/desktop/attention/seen`,
+  through `receipts_refusal`) compose their own. All three
+  surfaces say the same things — which condition they met, what could not happen,
+  and whether retrying is the remedy. A failed read also means no write: an acknowledgement that cannot be
+  verified is not a receipt.
+- **The word is `unread` on both surfaces, and `unseen` is the store's field.**
+  The TUI's sidebar tooltip for the same mark says "Unseen completion"
+  (`CatalogEntry.status`), so one app spells the state twice. That is recorded
+  rather than fixed here: `unread` is the word the desktop half ships in its
+  control, its receipts and its row tooltip (and the word this document uses for
+the watermark a human read), while `unseen` is the column an `AttentionState`
+  carries. Two words with one meaning, owned by two layers, is a smaller defect
+  than three surfaces renaming a status string — but it is a defect, and this is
+  where a future round should look before it moves either one.
+
 ## Upgrade boundaries
 
 Initial historical bootstrap compares known legacy `mobile-seen.json` stamps

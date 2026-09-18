@@ -579,6 +579,13 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # offer beside the iteration count and the goal text, not a gate in
         # front of them.
         "loop": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/rename`: bare `/notifications` LISTS the unread
+        # completions, so Enter on the word already answers and the space is an
+        # offer of the one clearing form (`read`) rather than a gate in front of
+        # it. Deliberately not REQUIRED — that would make the listing
+        # unreachable from the completion path, which is the `/login` line this
+        # sits on the other side of.
+        "notifications": ArgumentMode.OPTIONAL,
     }
     # `/provider` was the third candidate and is deliberately not here: it takes
     # no argument at all — `_cmd_providers` ignores what follows it — so a list

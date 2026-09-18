@@ -419,6 +419,7 @@ readings.
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
+| POST `/v1/desktop/attention/seen` | `{items:[{session_id,completion_token}]}`, 1..500 items | `{read:[<store state>], superseded:[session_id], unknown:[session_id]}`; cold, 200 even when nothing cleared |
 
 `POST .../{id}/seen` is the read receipt, and **a 2xx from it means this
 conversation is read**: `unseen: false`, the receipt advanced through the token's
@@ -432,6 +433,81 @@ is for the caller to re-read its own attention state and acknowledge the token
 that names, which is the projection it is already subscribed to. The receipt
 contract itself, including the anchors and the mobile parity, is in
 [ATTENTION.md](ATTENTION.md).
+
+#### Clearing a pile (`POST /v1/desktop/attention/seen`)
+
+The bulk sibling of that receipt, for the sidebar gesture that clears every
+mark at once. The body carries the completions the CLIENT rendered — one
+`{session_id, completion_token}` per row — and the server derives the
+conversation identity from the session id, so a caller cannot write a receipt
+for a conversation it could not enumerate. There is no "mark everything read"
+form; the sweep is refused by construction rather than by policy (see
+ATTENTION.md, R10).
+
+Per item, in input order, inside ONE write transaction:
+
+| Verdict | Meaning | What the caller may claim |
+|---|---|---|
+| `read` | the token is this conversation's current completion (or it was already read); listed in `read` with that conversation's post-write state | that row is read |
+| `superseded` | a real completion of that conversation that a newer one has replaced; nothing written | nothing — the row stays unread, and the receipt names it |
+| `unknown` | no such completion: a session this machine has no directory for, a foreign root, or a token never published | nothing |
+
+**No silent partial success.** The three buckets are the answer, so a batch
+that clears nothing is still `200` — a non-2xx would make a client discard the
+partial result it did get — while a per-item failure is `unknown` for that item
+rather than a 404 for the call. A store failure (`sqlite3.Error`) goes through the
+shared classifier (`session/store_failures.py` — the same module the TUI's
+`/notifications` consumes, so one store cannot be described two ways), which
+splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503`,
+a full volume `507` `store_out_of_space`, and a store this process cannot read or
+open `500` `store_unavailable`. Each call writes inside a single transaction, so
+no refusal can describe a partial result: the contention and full-volume arms say
+in those words that nothing was written, and the unreadable-store arm says the
+write could not be made.
+
+**Both receipt routes compose their own sentence** (`receipts_refusal`) rather
+than publishing the classifier's — this one and the per-session
+`POST /v1/desktop/sessions/{session_id}/seen` beside it: the classifier's copy
+belongs to the send path ("the message could not be written", "send it again"),
+and a receipt clear has no message in it and sends nothing. The codes, the
+statuses and the log levels are the shared ones — a client keys on the code — and
+the sentence says what the route was doing, condition by condition:
+
+| condition | status / code | message |
+| --- | --- | --- |
+| contention | `503` `store_busy` | `Read state is busy right now, so nothing was written. Try again in a moment.` |
+| volume full | `507` `store_out_of_space` | `This computer is out of disk space, so nothing was written. Free some space on the volume holding <root>, then try again.` |
+| unreadable store | `500` `store_unavailable` | `The read state could not be written. Retrying will not help; check <root> and the disk it is on.` |
+
+`422` covers the malformed bodies: empty, more
+than 500 items, a session id that is not 12 lowercase hex characters, a
+token that is not a UUID, and any unknown field (`extra="forbid"`, like every
+other body in this module).
+
+Each `read` entry is the store's own state dict — byte for byte what
+`GET /v1/desktop/sessions` publishes as a row's `attention` — and deliberately
+**not** `AttentionState`: that model defaults `supported` to `null`, and the
+renderer's merge honours only `undefined` as "inherit what you were told", so a
+`null` would switch off its visible-read receipt for a row this batch just
+cleared. The store's dict has no such key, so the wire omits it and the merge
+inherits.
+
+The renderer performs the whole gesture in two steps, and neither is a refresh:
+send the rows whose `attention.unseen` is true and that carry a
+`completion_token`, then merge `result.read` into the store. It does not wait
+for a feed frame and does not re-fetch the catalogue — a `sessions.list` costs a
+per-row preview scan, which is the cost the feed exists to remove. Every other
+window and surface converges on its own (the feed's `attention` frames, the
+TUI's catalogue poll, the phone's revision scan), because a bulk write moves the
+same `SUM(acknowledged)` term of the store revision every other acknowledgement
+does.
+
+Gated by `features.completion_ack_bulk == 1`, a key of its own rather than a
+bump of `completion_ack`: a client that does not see it must neither draw the
+control nor send the op, while the per-session receipt has to keep working
+against a backend that lacks the batch route. The desktop app's native IPC gate
+covers the op by name (`guardForegroundReceipts`), because a read receipt stays
+a foreground act: a hidden or minimised window may not clear marks.
 
 Create/message/command `request_id` is a canonical lowercase UUID string, reused
 for a retry of the **same** operation. Answer `request_id` is instead the pending

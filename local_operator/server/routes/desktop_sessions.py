@@ -10,7 +10,7 @@ import pathlib
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import Annotated, Any, Callable, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -67,7 +67,10 @@ from local_operator.server.utils.desktop_sessions import (
     resolve_working_directory,
 )
 from local_operator.server.utils.store_failures import (
+    STORE_BUSY,
+    STORE_OUT_OF_SPACE,
     StoreFailure,
+    display_root,
     sqlite_store_failure,
     store_failure,
 )
@@ -994,7 +997,69 @@ def store_root(request: Request) -> pathlib.Path:
     return config_dir()
 
 
-def _store_refusal(request: Request, failure: StoreFailure, error: BaseException) -> HTTPException:
+#: Composes a route's refusal sentence from a classified store failure and the
+#: volume the store lives on. ``None`` means the classifier's own sentence, which
+#: is what every route that carries a MESSAGE gets -- see :func:`_store_refusal`.
+StoreRefusalCopy = Callable[[StoreFailure, pathlib.Path | None], str]
+
+
+def receipts_refusal(failure: StoreFailure, root: pathlib.Path | None) -> str:
+    """The receipt routes' own refusal sentence.
+
+    Both of them: ``POST /v1/desktop/sessions/{session_id}/seen`` clears one
+    conversation's receipt and ``POST /v1/desktop/attention/seen`` clears a batch,
+    and neither sends a message. A composer passed to one and not the other is how
+    this defect shipped twice (review round 4, M1), so the pins below are
+    handler-level on each route rather than on this function alone.
+
+    WHY THESE ROUTES COMPOSE THEIR OWN COPY (QA round 2, Q1). The classifier's
+    sentences are the SEND path's and were written for a request carrying a
+    message: on a full volume both routes answered "the message could not be
+    written ... and send it again" about a receipt clear, which has no message in
+    it and sends nothing, and both answered "it will catch up on its own" to a
+    write the user had just asked for. That is the defect this PR already fixed on
+    the TUI (agent review round 1 F1 / UX round 1 U8), left standing on this
+    surface; the fix has the same shape: the CLASSIFICATION stays shared, the
+    SENTENCE says what the route was doing.
+
+    Three conditions, three answers, because they need three different actions:
+    contention is retryable and the remedy is to ask again -- the desktop client
+    paints this sentence and reads the retry case from the CODE, so the sentence
+    still has to carry the instruction; a full volume needs space freed on the
+    volume this store lives on, then the request again; anything else needs the
+    machine looked at and will not clear by retrying.
+
+    ``root`` is the config root :func:`store_root` resolved, and it is named for
+    the same reason the classifier names it: a machine has several volumes, and
+    "check the disk" with no destination is not an instruction. No exception text
+    is composed in here -- a store error names file paths, the rule
+    :func:`_store_refusal` states at length.
+
+    The shape follows the arm above it: the ``SessionStoreUnavailable`` arm
+    already composes its own sentence rather than taking the exception's, and
+    carries its own code. This is the same move for the same reason, one arm
+    down.
+    """
+    where = display_root(root)
+    if failure.code == STORE_BUSY:
+        return "Read state is busy right now, so nothing was written. Try again in a moment."
+    if failure.code == STORE_OUT_OF_SPACE:
+        return (
+            "This computer is out of disk space, so nothing was written. "
+            f"Free some space on the volume holding {where}, then try again."
+        )
+    return (
+        "The read state could not be written. Retrying will not help; "
+        f"check {where} and the disk it is on."
+    )
+
+
+def _store_refusal(
+    request: Request,
+    failure: StoreFailure,
+    error: BaseException,
+    copy: StoreRefusalCopy | None = None,
+) -> HTTPException:
     """Log what really happened, and build the client's vetted refusal.
 
     THE LOG RECORD IS THE DELIVERABLE, not a courtesy. This ladder used to raise
@@ -1005,6 +1070,12 @@ def _store_refusal(request: Request, failure: StoreFailure, error: BaseException
     other times. The exception is logged where it is still live, with the route
     and the session, because the client's copy may never carry it (a store error
     names file paths -- the rule the ConnectionError arm below states at length).
+
+    ``copy`` is the route's own sentence composer, and ``None`` is every route that
+    carries a message and can say so honestly: those keep the shared classifier's
+    sentence, which a client paints verbatim rather than keeping a second copy of.
+    The arms that need their own nouns say why at their own composer --
+    :func:`receipts_refusal` today, because a receipt clear is not a message send.
     """
     session_id = request.path_params.get("session_id")
     logger.log(
@@ -1020,17 +1091,31 @@ def _store_refusal(request: Request, failure: StoreFailure, error: BaseException
         # reading (review round 1, R5). The line itself is emitted either way.
         exc_info=error if failure.traceback else None,
     )
-    return HTTPException(failure.status, {"code": failure.code, "message": failure.message})
+    return HTTPException(
+        failure.status,
+        {
+            "code": failure.code,
+            "message": failure.message if copy is None else copy(failure, store_root(request)),
+        },
+    )
 
 
 @asynccontextmanager
-async def errors(request: Request) -> AsyncIterator[None]:
+async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> AsyncIterator[None]:
     """The control plane's shared failure ladder.
 
     ``request`` is taken rather than reached for, the way ``host(request)`` and
     ``receipts(request)`` beside it are: two arms below must name the route they
     failed on and the volume the store lives on, and a ladder shared by six
     route modules cannot invent either.
+
+    ``copy`` is the calling ROUTE's sentence composer for a classified store
+    failure, and it is optional because almost every route here carries a message
+    and can let the classifier speak for it. The routes that cannot pass their
+    own: the two receipt routes (``POST /v1/desktop/sessions/{session_id}/seen``
+    and ``POST /v1/desktop/attention/seen``) clear read receipts, so the send
+    path's nouns are false about them (QA round 2, Q1; review round 4, M1, for
+    passing it to one and not the other -- see :func:`receipts_refusal`).
     """
     try:
         yield
@@ -1146,13 +1231,16 @@ async def errors(request: Request) -> AsyncIterator[None]:
         # None`` and logged nowhere. On a full volume that told the operator a
         # read state was momentarily busy and would heal itself, over the one
         # condition no amount of retrying clears -- and the client's hint is
-        # exactly "send it again". ``server/utils/store_failures`` owns the
+        # exactly "send it again". ``session/store_failures`` owns the
         # classification and the copy; ``_store_refusal`` owns the log record.
         #
         # The text is still NOT echoed for the reason the ConnectionError arm
-        # below refuses to echo: a store error can name file paths.
+        # below refuses to echo: a store error can name file paths. ``copy`` is
+        # the calling route's own sentence where it has one -- a receipt clear is
+        # not a message send, and saying so is the route's job rather than the
+        # classifier's (QA round 2, Q1).
         raise _store_refusal(
-            request, sqlite_store_failure(error, store_root(request)), error
+            request, sqlite_store_failure(error, store_root(request)), error, copy
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
@@ -2000,8 +2088,75 @@ async def answer(session_id: str, body: Answer, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[AttentionState])
 async def seen(session_id: str, body: Seen, request: Request):
-    async with errors(request):
+    # Same composer as the bulk sibling: BOTH receipt routes clear read receipts
+    # and neither sends a message, so the classifier's send-path nouns are false
+    # about both (review round 4, M1 — this route is the shipped ``sessions.seen``
+    # contract and was left on the classifier's copy).
+    async with errors(request, receipts_refusal):
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
+
+
+class SeenItem(Input):
+    """One completion the caller RENDERED, named by session id and token.
+
+    Both halves are identity, not content: the id selects a session (the
+    conversation identity ``session/<id>`` is DERIVED server-side, so a caller
+    cannot name an identity it could not enumerate), and the token is the
+    specific completion it was showing. A mark without a token is not ackable
+    and must not be sent -- a timestamp or a caller's own epoch could clear a
+    later, unseen result.
+    """
+
+    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    completion_token: RequestID
+
+
+class SeenMany(Input):
+    #: 1..500, and the bound is the CATALOGUE's own maximum page
+    #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
+    #: send every row it holds in one call and never has to chunk a single user
+    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: limit.
+    items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
+
+
+@router.post("/v1/desktop/attention/seen", response_model=CRUDResponse[dict[str, Any]])
+async def seen_many(body: SeenMany, request: Request):
+    """Clear the unread completion receipts a client enumerated, in ONE write.
+
+    The bulk sibling of ``POST .../{session_id}/seen``, for the sidebar gesture
+    that clears the whole pile rather than opening each conversation. Same cold
+    contract, same store rule -- only the shape is additive.
+
+    NOT A SWEEP: the body carries the completions the caller actually rendered,
+    and the store compares each against the conversation's CURRENT token inside
+    one write transaction, so a completion published after that render stays
+    unread. A batch that clears nothing is still 200 -- the three verdict buckets
+    ARE the answer, and a non-2xx would make a client throw away the partial
+    result it did get -- while a per-item failure (a dead or foreign session) is
+    ``unknown`` for that item rather than a 404 for the call.
+
+    ``read`` is ``list[dict[str, Any]]`` and deliberately NOT
+    ``AttentionState``: that model defaults ``supported`` to ``None``, so
+    serialising through it would put ``"supported": null`` on the wire, and the
+    renderer's attention merge honours only ``undefined`` as "inherit what you
+    were told" -- a ``null`` would replace a known ``supported: true`` and
+    silently disable its visible-read receipt. The store's own state dict has no
+    such key, so the wire omits it and the merge inherits.
+
+    The path cannot collide with ``GET /v1/desktop/sessions/{session_id}`` or
+    with the per-session ``/seen`` at any registration order, hence the noun in
+    the middle rather than a ``/v1/desktop/sessions/seen`` that the path
+    parameter could shadow.
+    """
+    # This route composes its own refusal copy: a bulk read receipt has no
+    # message in it and sends nothing, so the classifier's send-path sentences
+    # are false about it (see ``receipts_refusal``).
+    async with errors(request, receipts_refusal):
+        result = await host(request).acknowledge_attention_many(
+            [(item.session_id, item.completion_token) for item in body.items]
+        )
+        return CRUDResponse(status=200, message="Completion receipts marked read.", result=result)
 
 
 @router.post(
