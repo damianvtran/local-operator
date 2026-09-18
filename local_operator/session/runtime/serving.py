@@ -3238,6 +3238,15 @@ class ServingSessionHandle(SessionHandle):
             return
         try:
             loop = asyncio.get_running_loop()
+            # CONTRACT, read from outside: the successor is stored in
+            # `_completion_task` BEFORE this rung returns, and there is exactly ONE
+            # chain per slot. A reader can then tell "exhausted" from "still
+            # running" by a slot that still holds the task that just finished —
+            # `tests/unit/session/test_runtime_completion_announce.py`'s
+            # `_ladder_exhausted` waits on exactly that, because the alternative
+            # (counting banner calls) reads the claim before this attempt releases
+            # it. Build a successor without storing it, or keep a second chain
+            # alive, and that reader sees a ladder which ended after one rung.
             self._completion_task = loop.create_task(
                 self._run_completion_announce(attempt + 1, _COMPLETION_RETRY_DELAYS_S[attempt])
             )
