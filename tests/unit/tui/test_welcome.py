@@ -1333,12 +1333,13 @@ def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
     while it is being read, over 15 s a short session only ever sees one.
     """
     # The ceiling moved 12 -> 15 when the three KEYED tips were added, and
-    # 15 -> 17 when the classification layer's switch and login commands were,
-    # and the reason for each is recorded in full on the pool itself: those
+    # 15 -> 17 when the classification layer's off switch and login commands
+    # were, and the reason for each is recorded in full on the pool itself: those
     # entries teach facts with no second discovery route (a remappable key has no
-    # picker, unlike every slash command in the pool, and a layer that is off by
-    # default and silent when it has nothing to say stays invisible to a user
-    # who does not already know the setting exists). The dilution argument
+    # picker, unlike every slash command in the pool, and a layer that ships ON,
+    # spends per message and is silent whenever it has nothing to say stays
+    # invisible to a user who never goes looking for a setting they have not
+    # heard of). The dilution argument
     # still governs everything else — a further slash-command tip takes a slot
     # rather than adding one.
     assert 8 <= len(TIPS) <= 17
