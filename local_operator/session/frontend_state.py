@@ -801,6 +801,12 @@ _FRONTEND_LOCAL_SLASHES = {
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
+    # The same three facts as `/copy` above, one step further out: the transcript
+    # it reads is painted by this frontend, the picker is painted by this
+    # frontend, and the BROWSER is on the machine the user is sitting at. Routed
+    # to an authoritative runtime it would open a page on the runtime's host,
+    # where nobody is looking, for a transcript this frontend owns.
+    "links",
     "new",
     "reload",
     "update",

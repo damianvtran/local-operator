@@ -82,6 +82,9 @@ PREFIXES_TEXT_POLICY = {
     # WHICH message is chosen in the picker the command opens, so there is
     # nothing typed for the command to own.
     "copy": False,
+    # Takes no argument at all, for `/copy`'s reason: WHICH url is chosen in the
+    # picker the command opens.
+    "links": False,
     "new": False,
     "reload": False,
     "update": False,
@@ -186,6 +189,7 @@ ARGUMENT_SHAPE_POLICY = {
     "exit": ArgumentShape.NONE,
     "clear": ArgumentShape.NONE,
     "copy": ArgumentShape.NONE,
+    "links": ArgumentShape.NONE,
     "update": ArgumentShape.NONE,
     "sidebar": ArgumentShape.NONE,
     "failovers": ArgumentShape.NONE,
