@@ -7821,7 +7821,7 @@ def main() -> int:
             from local_operator.cli_style import ERROR, paint
 
             # The PREFIX carries the colour, the diagnostic does not (design
-            # round 1, D1): the whole 654 bytes painted bold red is nine wrapped
+            # round 1, D1): the whole 646 bytes painted bold red is nine wrapped
             # lines of alarm for a message whose content is "you took the wrong
             # route", and the exec path prints the same bytes with no colour at
             # all — one sentence must not render two ways depending on which

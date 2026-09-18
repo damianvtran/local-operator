@@ -344,40 +344,56 @@ def test_the_fork_window_drops_the_marker() -> None:
             and arg.value.id == "os"
         )
 
-    # Names bound in the method to a proper call, so the bound-name refactor is
-    # accepted while a rebinding is not — the LAST binding wins, as it would at
-    # runtime.
-    bound: dict[str, bool] = {}
+    # EVERY binding of a name in the method must come from the helper. Order- and
+    # scope-insensitive on purpose, and that is the correction round 6 asked for:
+    # the spawn sits inside a `try:`, so its bindings are not direct children of
+    # the method body, and `ast.walk` yields a nested function's body after the
+    # method's own statements — so a shadowing binding that never runs, or a
+    # rebinding after the first, could mark a name stripped while the spawn
+    # received the raw environment. Conjunction rather than last-wins: a name
+    # bound to anything else, anywhere, is not trusted at the spawn.
+    helper_values: dict[str, bool] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    bound[target.id] = strips_the_marker(node.value)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+            for target in targets:
+                names = target.elts if isinstance(target, ast.Tuple) else [target]
+                for name in names:
+                    if isinstance(name, ast.Name):
+                        prior = helper_values.get(name.id, True)
+                        helper_values[name.id] = prior and strips_the_marker(node.value)
 
     def drops_the_marker(env: ast.expr) -> bool:
+        """The environment the spawn is handed is stripped, inline or via a name."""
         if strips_the_marker(env):
             return True
-        return isinstance(env, ast.Name) and bound.get(env.id, False)
+        return isinstance(env, ast.Name) and helper_values.get(env.id, False)
 
     # Both shapes a spawn can take: the threaded dispatch, and a direct
     # `backend.spawn(launch, env)` — the environment is the LAST argument each way.
     dispatches: list[ast.expr] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if not isinstance(node, ast.Call) or not node.args:
             continue
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread":
-            first = node.args[0] if node.args else None
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        if func.attr == "to_thread":
+            first = node.args[0]
             if isinstance(first, ast.Attribute) and first.attr == "spawn":
                 dispatches.append(node.args[-1])
-        elif isinstance(node.func, ast.Attribute) and node.func.attr == "spawn":
+        elif func.attr == "spawn":
             dispatches.append(node.args[-1])
 
     assert dispatches, "the fork window's spawn must be pinned here"
+    problems: list[str] = []
     for env in dispatches:
-        assert drops_the_marker(env), (
-            "the fork window inherits the session's environment, so the marker has "
-            "to be dropped at the spawn: pass `without_agent_shell_marker(os.environ)`"
-        )
+        if not drops_the_marker(env):
+            problems.append(ast.dump(env))
+    assert not problems, (
+        "the fork window inherits the session's environment, so the marker has to be "
+        f"dropped at the spawn: pass `without_agent_shell_marker(os.environ)`, got {problems}"
+    )
 
 
 def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Path) -> None:
@@ -500,9 +516,12 @@ async def test_the_factory_leaves_a_resumed_conversation_alone(
     try:
         directory = first._transcript.directory
         session_id = first.session_id
-        # A real turn, because an unused session has no transcript and is not
-        # resumable (`resume_dir` refuses it) — the control case has to be a
-        # conversation the operator could actually reopen.
+        # A real turn, so the control is a conversation with something in it.
+        # NOT a resumability requirement — under the adopt flag set below the
+        # resolver returns before `resume_dir` is reached, and the property this
+        # control needs is the one the adopt branch keys on: its directory
+        # already exists (review round 5, F2; round 6 re-raised it because the
+        # first fix was claimed in the commit message and never landed).
         await first.prompt("the operator's own turn")
     finally:
         await first.dispose()
