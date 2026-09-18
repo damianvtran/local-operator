@@ -300,7 +300,17 @@ def reload_serve_daemons(
         if _serves_current_build(record, stamp):
             refreshes.append(ServiceRefresh(name, lines=(f"{name} is already on {_label(stamp)}",)))
             continue
-        if not getattr(record, "reloadable", False):
+        # ONE WAY TO BE UNMOVABLE, TWO REASONS — and the platform is one of them
+        # (serve-reload review round 9, R9-1; found by the test that also covers
+        # R8-1's arm). Removing R8-1's early return was right for the REPORT and
+        # wrong for the SIGNAL: it left the decision resting on the record's
+        # `reloadable`, so a daemon whose record claims the capability — a record
+        # written by a build from before this change, or a hand-edited one — would be
+        # sent a signal this platform does not have, with `None` reaching `os.kill`.
+        # The per-daemon report R8-1 asked for is kept; the signal is decided here,
+        # where it cannot be delegated to a field.
+        unmovable = serve_reload.RELOAD_SIGNAL is None or not getattr(record, "reloadable", False)
+        if unmovable:
             # The capability is absent for every daemon built before this
             # existed, and for a --reload child whose port belongs to uvicorn's
             # supervisor. Sending the signal anyway is NOT harmless: SIGUSR1's

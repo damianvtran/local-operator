@@ -215,8 +215,37 @@ def test_a_daemon_that_cannot_reload_is_reported_and_never_signalled(
     assert kills == []
     assert len(out) == 1
     assert out[0].lines == ()
-    assert "predates in-place reload" in out[0].warnings[0]
+    # The sentence names a REASON, and which reason depends on the platform — see the
+    # sibling test below, which is what covers the no-SIGUSR1 arm. Asserting the
+    # POSIX-only wording here made this test fail on a platform that has no such
+    # signal (serve-reload review round 9, R9-1).
+    assert "cannot move itself" in out[0].warnings[0]
     assert "restart that server by hand" in out[0].warnings[0]
+
+
+def test_a_platform_without_the_signal_still_reports_every_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+    pointer: dict[str, Any],
+) -> None:
+    """serve-reload R8-1's arm, with the only coverage it has.
+
+    On a platform with no SIGUSR1 the capability is absent for EVERY daemon, so the
+    whole fleet looks unmovable. The early return that used to replace the per-daemon
+    report with a single sentence is gone: the operator must still be told which
+    daemons are running and what each needs, and the reason must be the true one —
+    the platform, not "it predates in-place reload".
+    """
+    monkeypatch.setattr(services.serve_reload, "RELOAD_SIGNAL", None)
+    stale = _record()
+    already = _record(version=NEW.version, source_ref=NEW.source_ref, instance_id="instance-two")
+    kills: list[tuple[int, int]] = []
+    out = _run([stale, already], kills=kills, wait_s=0.0)
+    assert kills == [], "nothing may be signalled where the signal does not exist"
+    warnings = " ".join(warning for refresh in out for warning in refresh.warnings)
+    assert "this platform has no SIGUSR1" in warnings
+    lines = " ".join(line for refresh in out for line in refresh.lines)
+    assert "is already on" in lines, "the daemons that need nothing must still be reported"
+    assert any("cannot move itself" in w for refresh in out for w in refresh.warnings)
 
 
 def test_a_stale_daemon_is_asked_and_reported_once_it_republishes(pointer: dict[str, Any]) -> None:
