@@ -138,6 +138,22 @@ async def test_a_successful_call_carries_the_vendor_the_cost_and_the_block(
     assert legs["radient"].calls[0].state["request"] == "deploy core to qa"
 
 
+async def test_a_leg_that_reports_no_counts_leaves_them_absent(manager, install_legs) -> None:
+    """A 200 whose vendor omitted ``usage`` must not become a fabricated zero.
+
+    The whole point of the cost line is that its figures can be believed, and
+    ``tokens=0/0`` beside a real ``cost=`` is not a figure a reader can act on.
+    The service therefore carries the vendor's absence through as absence — the
+    leg's own default response here is the usage-less shape
+    (``DecisionResponse`` with no counts set).
+    """
+    subject, _ = service(manager, install_legs, radient={})
+    recommendation = await subject.recommend_resources(request())
+    assert recommendation.skipped is None
+    assert recommendation.input_tokens is None
+    assert recommendation.output_tokens is None
+
+
 async def test_one_question_is_asked_per_kind_with_candidates(manager, install_legs) -> None:
     subject, legs = service(manager, install_legs, radient={})
     await subject.recommend_resources(request())

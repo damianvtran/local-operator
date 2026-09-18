@@ -164,7 +164,7 @@ CIRCUIT_FAILURE_THRESHOLD = 3
 CACHE_SIZE = 64
 
 
-def _cache_key(request: RecommendationRequest, limit: int | None = None) -> str:
+def _cache_key(request: RecommendationRequest, limit: int | None) -> str:
     """``sha256(user_message + candidates_digest)`` over the roster AS SENT.
 
     The digest covers the roster's names, URLs and descriptions, so a session
@@ -186,13 +186,25 @@ def _cache_key(request: RecommendationRequest, limit: int | None = None) -> str:
     to roster changes the request cannot carry: one more skill on disk moved the
     key while the body stayed byte-identical, and the session paid for a second
     call to re-ask a question it had already answered. Keying on the capped roster
-    is what makes this a digest of what is sent, which is the property a session
-    cache on a paid call is supposed to have.
+    is what makes the ROSTER half of the key a digest of the ROSTER half of the
+    body.
+
+    WHAT IS STILL OUTSIDE THE KEY, since this docstring is a future caller's only
+    warning. The key is ``user_message`` plus this digest, so two other body
+    inputs are not covered: ``context`` (a state field when a caller supplies
+    one — none does today) and the ladder rung that ``maxStateChars`` selects, a
+    session setting whose change moves the body without moving the key. Both are
+    benign while the first caller-side half is unbuilt, and closing them belongs
+    with whoever builds it rather than with the roster fix.
 
     It stays a plain function taking the limit rather than reading the settings
     itself, because the caller is the one that knows which limit its request
     builder will apply — and the two must agree, or the key covers a different
-    roster than the body.
+    roster than the body. ``limit`` has no default for that reason: a caller that
+    forgot it would key on the DEFAULT cap while its body carried the configured
+    one, and a configured cap ABOVE the default would then answer a changed
+    roster out of cache — a false hit, which is the expensive direction of this
+    mistake.
     """
     roster = select_candidates(request.candidates, limit)
     payload = f"{request.user_message}\n{candidates_digest(roster)}"

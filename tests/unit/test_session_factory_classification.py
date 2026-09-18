@@ -796,10 +796,13 @@ def test_the_cost_line_carries_the_vendors_own_figures(
 def test_a_call_that_reports_no_counts_prints_none_rather_than_a_zero(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A missing or cleared count is ``-``: ``0`` would claim a call returned no input.
+    """A missing or cleared count is ``-``: ``0`` would claim a call reported zero.
 
-    Two shapes reach this: a seam that publishes no counts at all, and the
-    package's own cache hit, which clears them because that call spent nothing.
+    Three shapes reach this: a seam that publishes no counts at all, the
+    package's own cache hit (which clears them because that call spent nothing),
+    and a 200 whose vendor omitted ``usage`` (``vendors._count`` turns that
+    absence into ``None``). Both calls below must render ``-`` — asserted by
+    COUNTING the placeholder lines, so a single accidental match cannot pass this.
     """
     with caplog.at_level("INFO", logger="local_operator.session_factory"):
         session_factory._log_classification_cost(
@@ -809,7 +812,7 @@ def test_a_call_that_reports_no_counts_prints_none_rather_than_a_zero(
             _Recommendation(vendor="typesafe", cost_usd=None, latency_s=0.1)
         )
 
-    assert "tokens=-/-" in caplog.text
+    assert caplog.text.count("tokens=-/-") == 2
 
 
 def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -> None:

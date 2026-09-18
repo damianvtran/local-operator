@@ -2240,13 +2240,15 @@ def _log_classification_cost(recommendation: Any) -> None:
 
 
 def _token_count(value: Any) -> str:
-    """One token figure for the cost line: the count, or ``-`` when nothing was spent.
+    """One token figure for the cost line: the count, or ``-`` when there is no figure.
 
-    ``-`` covers three shapes that are all "this call bought no tokens": a seam
-    that publishes no counts, a field set to ``None`` (a cache hit clears it, see
-    ``ClassificationService._recommend``), and a non-integer. Printing ``None``
-    would read as a figure; printing ``0`` would claim a call that returned no
-    input at all, which is not a thing a vendor does.
+    ``-`` covers three shapes that all mean "nothing to report": a seam that
+    publishes no counts, a field set to ``None`` (a cache hit, which spent
+    nothing, and a 200 whose vendor omitted ``usage``), and a non-integer.
+    Printing ``None`` would read as a figure. Printing ``0`` would be worse: a
+    vendor CAN report zero — the Radient route bills with output tokens zero — so
+    a real zero has to stay distinguishable from an absent one. That distinction
+    is made in ``vendors._count`` (absent → ``None``), not here.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         return "-"

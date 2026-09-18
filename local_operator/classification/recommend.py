@@ -138,9 +138,10 @@ class Recommendation:
     #: line is built from THIS object (``session_factory._log_classification_cost``),
     #: and without them that line printed ``tokens=-/-``: the one figure that says how
     #: much of a paid call was input — the whole bill, at Jev's pricing — was the one
-    #: figure the operator could not see. ``None`` means "no call" (a cache hit, or a
-    #: skipped pass), never "zero tokens", which is why a hit clears them exactly as
-    #: it clears ``cost_usd``.
+    #: figure the operator could not see. ``None`` means "no figure", which covers a
+    #: cache hit (nothing was spent: ``latency_s`` is 0 on those, and that is what
+    #: distinguishes them), a skipped pass, and a call whose vendor sent no
+    #: ``usage`` — it never means "zero tokens", which a vendor can and does report.
     input_tokens: int | None = None
     output_tokens: int | None = None
     latency_s: float = 0.0
