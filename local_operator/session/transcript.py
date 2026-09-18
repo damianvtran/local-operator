@@ -519,10 +519,12 @@ def validate_page_request(before_id: str | None, through_id: str | None, limit: 
 #: The window is a COST bound, not a correctness one, and the trade it makes is
 #: between two measured shapes: a cursor inside it costs what it reads (~7 ms
 #: for this window on a 262 MB journal), a cursor outside costs one whole-file
-#: byte pass either way (~115 ms). 16 MiB is ~1,400 rows of a large journal,
-#: i.e. the first ~13 pages of desktop scroll-back, which is the run of pagination
-#: a reader actually performs; past it the pass is flat in depth, so a larger
-#: window only buys a little and lengthens the miss path it precedes.
+#: byte pass either way (~115 ms). 16 MiB is ~2,800 rows of a large journal —
+#: measured read-only on the largest in the operator's store (251 MiB): 2,870
+#: newline-terminated rows in its last 16 MiB, ~179 rows/MiB — i.e. the first
+#: ~28 pages of desktop scroll-back, which is the run of pagination a reader
+#: actually performs; past it the pass is flat in depth, so a larger window only
+#: buys a little and lengthens the miss path it precedes.
 _PAGE_LOCATE_WINDOW_BYTES = 16 << 20
 
 
