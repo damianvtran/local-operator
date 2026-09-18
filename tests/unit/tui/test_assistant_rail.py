@@ -106,7 +106,6 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
 )
 from tests.unit.tui.conftest import StyledTranscriptApp
-from tests.unit.tui.test_app_pilot import _factory
 from tests.unit.tui.test_band_panels import FakeSession
 from tests.unit.tui.test_subagent_view import (
     TRAJECTORY,
@@ -1143,7 +1142,7 @@ async def test_the_live_path_rails_the_answer_only_once_its_message_ends() -> No
     a reader watching a live stream actually gets — and the rail has to be
     absent from it and present on the next.
     """
-    app = OperatorApp(lambda: _factory(FakeSession()))
+    app = OperatorApp(_async_factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         for _ in range(40):
             await pilot.pause()
