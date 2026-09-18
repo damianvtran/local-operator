@@ -161,3 +161,42 @@ async def test_a_scheduling_failure_is_also_swallowed() -> None:
 
     assert died == []
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_the_claim_is_remembered_on_the_facade_for_a_redial() -> None:
+    """The away claim outlives the connection that carried it.
+
+    The claim is per CONNECTION: a fresh socket defaults to displaying, so a
+    parked source that redialed would resume suppressing its owner's
+    parked-gate notification. `AttachedSession._attach` re-asserts from this
+    field, which only helps if the field is written here (independent review
+    round 4, F1b).
+    """
+    app, scheduled, _ = _app_with_capture()
+    source = _source(raising=False)
+
+    OperatorApp._note_viewer_watching(app, source, displaying=False)
+    assert source.session._viewer_displaying is False
+    await scheduled[0]["work"]
+
+    OperatorApp._note_viewer_watching(app, source, displaying=True)
+    assert source.session._viewer_displaying is True
+
+
+@pytest.mark.asyncio
+async def test_the_claim_is_recorded_even_with_no_client_to_send_it() -> None:
+    """An away claim raised while the socket is down must still be remembered.
+
+    This is precisely the window the redial re-assert covers, so recording the
+    claim only when a client exists would lose the one case that needs it.
+    """
+    app, scheduled, died = _app_with_capture()
+    source = Mock()
+    source.session._client = None
+
+    OperatorApp._note_viewer_watching(app, source, displaying=False)
+
+    assert source.session._viewer_displaying is False
+    assert scheduled == [], "there is no connection to send it on"
+    assert died == []

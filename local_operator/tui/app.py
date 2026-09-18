@@ -5803,6 +5803,16 @@ class OperatorApp(App[None]):
             source.controller.set_parked(True)
             source.controller.subscribe()
             self._watch_source_frontend(source)
+            # A PREWARMED SOURCE IS NOT ON SCREEN AND NEVER HAS BEEN, so the
+            # owner has to be told here rather than on a switch edge it will
+            # never reach: the away edge fires in
+            # `_park_switched_away_source`, which only runs for a source that
+            # WAS displayed. Without this a gate parking in a session the
+            # sidebar merely prewarmed is suppressed exactly as #1244
+            # described -- the attach is live, nothing is showing it, and the
+            # row is not even flagged needs-you because `detached` stays False
+            # (independent review round 4, F1a).
+            self._note_viewer_watching(source, displaying=False)
             return source
         except BaseException:
             if remote is not self._session:
@@ -7229,6 +7239,16 @@ class OperatorApp(App[None]):
         same reason the surrounding method is best-effort at all.
         """
         session = getattr(source, "session", None)
+        # REMEMBERED ON THE FACADE FIRST, and deliberately before the reachability
+        # check below: the claim is per connection, so a redial re-asserts it from
+        # here (``AttachedSession._attach``). Recording it only when a client
+        # happens to exist would lose exactly the away claims raised while a
+        # socket was down -- the window the re-assert exists to cover.
+        if session is not None:
+            try:
+                session._viewer_displaying = displaying
+            except Exception:  # noqa: BLE001 -- a facade without the field is older, not broken
+                logger.debug("could not record the viewer display claim", exc_info=True)
         client = getattr(session, "_client", None)
         watch = getattr(client, "viewer_watch", None)
         if watch is None:
