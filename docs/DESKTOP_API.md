@@ -456,12 +456,13 @@ Per item, in input order, inside ONE write transaction:
 that clears nothing is still `200` — a non-2xx would make a client discard the
 partial result it did get — while a per-item failure is `unknown` for that item
 rather than a 404 for the call. A store failure (`sqlite3.Error`) goes through the
-shared ladder (`server/utils/store_failures`), which splits it by condition:
-contention (`SQLITE_BUSY`) answers the retryable `503` — the sentence the
-frozen design names — while a store this process cannot read or open answers
-`500` with code `store_unavailable` and a message saying retrying will not
-help. Because the batch is one transaction, **both** refusals promise nothing
-was written. `422` covers the malformed bodies: empty, more
+shared classifier (`session/store_failures.py` — the same module the TUI's
+`/notifications` consumes, so one store cannot be described two ways), which
+splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503` —
+the sentence the frozen design names — while a store this process cannot read or
+open answers `500` with code `store_unavailable` and a message saying retrying
+will not help. Because the batch is one transaction, **both** refusals promise
+nothing was written. `422` covers the malformed bodies: empty, more
 than 500 items, a session id that is not 12 lowercase hex characters, a
 token that is not a UUID, and any unknown field (`extra="forbid"`, like every
 other body in this module).

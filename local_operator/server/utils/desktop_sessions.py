@@ -2685,7 +2685,7 @@ class DesktopSessions:
         per-item validation is a directory stat, so doing it per item on the
         event loop would be a blocking ladder, while splitting the write would
         expose a partially applied batch. A ``sqlite3.Error`` propagates to the
-        shared failure ladder (``server/utils/store_failures``), which splits it
+        shared failure ladder (``session/store_failures``), which splits it
         by condition -- contention answers the retryable 503, an unreadable or
         corrupt store the 500 that says retrying will not help -- and the single
         transaction guarantees nothing was written on either path.

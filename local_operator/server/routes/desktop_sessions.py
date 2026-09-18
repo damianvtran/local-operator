@@ -1123,7 +1123,7 @@ async def errors(request: Request) -> AsyncIterator[None]:
         # None`` and logged nowhere. On a full volume that told the operator a
         # read state was momentarily busy and would heal itself, over the one
         # condition no amount of retrying clears -- and the client's hint is
-        # exactly "send it again". ``server/utils/store_failures`` owns the
+        # exactly "send it again". ``session/store_failures`` owns the
         # classification and the copy; ``_store_refusal`` owns the log record.
         #
         # The text is still NOT echoed for the reason the ConnectionError arm

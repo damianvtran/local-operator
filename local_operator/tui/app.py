@@ -376,6 +376,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.notifications import ComposedNotification, NotificationKind
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
+    from local_operator.session.store_failures import StoreFailure
     from local_operator.skills.discovery import Skill
     from local_operator.tui.widgets.info_panel import InfoScreen
     from local_operator.tui.widgets.session_panel import (
@@ -33684,10 +33685,16 @@ class OperatorApp(App[None]):
         if word not in ("", "read"):
             self._system_notice(
                 f"/notifications takes no such argument — got {arg!r}. "
-                "Send /notifications to list them, or /notifications read to clear them.",
+                "Send /notifications to list them, or /notifications read to mark them read.",
                 "warning",
             )
             return
+        # The scan can take seconds on a large store, and the refusal leg is the
+        # slow one (it waits out a writer holding the store). One line up front,
+        # the way ``/update`` prints "checking for updates…": without it the
+        # transcript shows nothing between the keystroke and the answer, so a
+        # working command and a wedged one look the same (UX round 1, U3).
+        self._system_notice("reading receipts…")
         # NOT exclusive, and that is a correctness choice rather than a
         # preference. Cancelling a worker does not stop the thread it is
         # awaiting, so an ``exclusive`` second press would abort the FIRST
@@ -33705,13 +33712,32 @@ class OperatorApp(App[None]):
         )
 
     async def _notifications_receipt(self, clear: bool) -> None:
-        """Read the local catalogue off the loop, then clear it if asked.
+        """Read the local catalogue off the loop, render it, then clear it if asked.
 
         The scan is the blocking read the sidebar's own poll makes, so it runs in
         a thread for the same reason: ``load_catalog`` walks the session store and
         stats the transcripts in the window. The receipt is written AFTER
         ``acknowledge_many`` returns, never before — a line naming a number this
         call did not get back would be a receipt for a write nobody can verify.
+
+        ONE READ FOR BOTH FORMS, and the clearing form RENDERS the set it is
+        about to write (UX round 1, U1). The listing and the clear used to be two
+        independent catalogue scans, so ``read`` acknowledged whatever was unread
+        when IT ran: a completion published between the two typed commands was
+        cleared without ever having been painted, which is exactly the case R10
+        refuses ("a completion published after the render is not in the batch").
+        Acting on this read's own ``(conversation, token)`` pairs makes the
+        listing a render of the batch rather than a sibling of it, and it is why
+        ``read`` paints the rows before it writes — a user who typed the space and
+        two Enters has seen the pile they are clearing.
+
+        A store the catalogue could not READ is not an empty pile (UX round 1,
+        U2). ``load_catalog`` stamps ``DECORATION_ATTENTION`` on its rows when the
+        attention read fails, and this handler then refuses to answer for the
+        user's receipts at all: no listing, no write, and a sentence that names
+        the condition and says it is not a verdict about what is unread. The
+        empty-pile strings are reachable only when the store was consulted and
+        had nothing.
 
         Never raises, because its worker is created with
         ``exit_on_error=False``: an escaping exception would leave the user with a
@@ -33724,60 +33750,93 @@ class OperatorApp(App[None]):
             AttentionStore,
             conversation_identity,
         )
+        from local_operator.session.catalog import DECORATION_ATTENTION
+        from local_operator.session.store_failures import store_failure
         from local_operator.tui.session_catalog import load_catalog
 
         root = config_dir()
         try:
             entries = await asyncio.to_thread(load_catalog, root)
-            unread = [entry for entry in entries if entry.unseen]
-            if not clear:
-                self._append_block(
-                    NoticeBlock(
-                        _notifications_listing(
-                            unread,
-                            # The budget the BLOCK paints at, not the view's — see
-                            # ``_stop_all``'s note: a caller-side approximation
-                            # misses by the transcript's padding cell and the
-                            # glyph gutter, and a row that wraps spends a second
-                            # row of the listing's bound.
-                            NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1)),
-                        ),
-                        "note",
-                    )
-                )
-                return
-            items = [
-                (
-                    conversation_identity(root / "sessions" / entry.id),
-                    entry.completion_token,
-                )
-                for entry in unread
-                if entry.completion_token
-            ]
-            if not items:
-                # No store call AT ALL when nothing is unread: the empty case is
-                # answered from the catalogue read above, so it cannot open a
-                # database (or create one) to acknowledge nothing. Same tier as
-                # the clearing receipt -- it is the answer to what the user just
-                # typed, not background chrome.
-                self._notice("Nothing unread.", "note")
-                return
+        except Exception as error:  # noqa: BLE001 — report, never leave a silent no-op
+            # The store itself could not be walked, which the catalogue raises for
+            # rather than reporting as "you have no conversations". The exception's
+            # own text is never echoed — it can name file paths and this text lands
+            # in a transcript that gets screenshotted — so the SENTENCE comes from
+            # the shared classifier and the diagnostic goes to the log.
+            logger.exception("notifications: the session catalogue could not be read")
+            body, kind = _notifications_store_failure(
+                store_failure(error, root), root, clearing=clear
+            )
+            self._notice(body, kind)
+            return
+        if any(DECORATION_ATTENTION in entry.row.degraded for entry in entries):
+            failure = await asyncio.to_thread(_receipts_failure, root)
+            logger.warning("notifications: the receipt read was degraded (%s)", failure)
+            body, kind = _notifications_store_failure(failure, root, clearing=clear)
+            self._notice(body, kind)
+            return
+        # Ordered by the completion's own age, which is the column the receipt
+        # prints (design round 1, D5). The catalogue's rank is a conversation
+        # question — newest conversations first — so a months-old conversation
+        # that finished a minute ago used to be what "…N more" hid, and an age
+        # column that is not the sort key reads as if it were.
+        unread = sorted(
+            (entry for entry in entries if entry.unseen),
+            key=lambda entry: entry.row.mtime,
+            reverse=True,
+        )
+        # The budget the BLOCK paints at, not the view's — see ``_stop_all``'s
+        # note: a caller-side approximation misses by the transcript's padding
+        # cell and the glyph gutter, and a row that wraps spends a second row of
+        # the listing's bound. Computed once, because both forms paint through it.
+        budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
+        if not clear:
+            self._append_block(NoticeBlock(_notifications_listing(unread, budget), "note"))
+            return
+        items = [
+            (
+                conversation_identity(root / "sessions" / entry.id),
+                entry.completion_token,
+            )
+            for entry in unread
+            if entry.completion_token
+        ]
+        if not items:
+            # No store call AT ALL when nothing is unread: the empty case is
+            # answered from the catalogue read above, so it cannot open a
+            # database (or create one) to acknowledge nothing. Same tier as the
+            # clearing receipt -- it is the answer to what the user just typed,
+            # not background chrome.
+            self._notice("Nothing unread.", "note")
+            return
+        # The pile goes up BEFORE the write, so a write that then fails leaves the
+        # user looking at what did not get cleared rather than at nothing.
+        self._append_block(NoticeBlock(_notifications_listing(unread, budget), "note"))
+        try:
             results = await asyncio.to_thread(
                 AttentionStore(root / "attention.db").acknowledge_many, items
             )
-        except sqlite3.Error:
-            # The same condition the route answers 503 for, and the same promise:
-            # the batch is ONE transaction, so nothing was written and a retry is
-            # the whole remedy. The store's own wording is deliberately not echoed
-            # here for the reason the route refuses to echo it — it can name file
-            # paths, and this text lands in a transcript that gets screenshotted.
-            self._notice(
-                "Read state is busy right now, so nothing was cleared. Try again in a moment.",
-                "warning",
+        except (sqlite3.Error, OSError) as error:
+            # Three conditions, three answers — this arm used to flatten all of
+            # them into the contention sentence, so a full volume or an
+            # unopenable store told the operator to send it again (agent review
+            # round 1, R1). The classification and the copy are the shared
+            # module's, so this surface and the desktop ladder cannot drift; the
+            # exception itself is logged, never echoed.
+            logger.exception("notifications: the receipt write failed")
+            body, kind = _notifications_store_failure(
+                store_failure(error, root), root, clearing=True
             )
+            self._notice(body, kind)
             return
-        except Exception as error:  # noqa: BLE001 — report, never leave a silent no-op
-            self._notice(f"/notifications could not read the receipts: {error}", "error")
+        except Exception:  # noqa: BLE001 — report, never leave a silent no-op
+            # Anything the classifier does not own still gets a vetted sentence:
+            # interpolating the exception would leak a path into a transcript.
+            logger.exception("notifications: the receipt write failed")
+            self._notice(
+                "/notifications could not clear the receipts, and nothing was cleared.",
+                "error",
+            )
             return
         read = sum(1 for result in results if result["status"] == "read")
         superseded = sum(1 for result in results if result["status"] == "superseded")
@@ -37116,7 +37175,13 @@ class OperatorApp(App[None]):
         # the toast the one-shot edge), and the kill switch is exactly what a
         # user interrupted by a default-on feature goes looking for.
         notify_note = Text()
-        notify_note.append("notifications".ljust(name_width), style=muted)
+        # Labelled "desktop toasts" rather than "notifications" (UX round 1, U6):
+        # this block is printed BELOW the slash-command table, where
+        # ``/notifications`` is a row of its own, so the bare word used to be two
+        # unrelated hits on one screen with nothing saying they were different
+        # features. The setting's own name is still spelled out in the shell hint
+        # beside it, so nothing is lost by naming the feature instead of the key.
+        notify_note.append("desktop toasts".ljust(name_width), style=muted)
         notify_note.append(
             # Both halves of this used to be wrong for the detached path
             # (round 3, D13). "when a turn finishes" overstated it — the
@@ -42407,11 +42472,17 @@ NOTIFICATIONS_LISTING_ROWS = 10
 def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
     """The unread-completion receipt ``/notifications`` prints.
 
-    ``budget`` is the text-column width the notice paints at (``NoticeBlock.
-    body_budget``); a row is truncated to it rather than allowed to wrap, so the
-    count of painted rows is the count of listed rows. Zero-width (or zero) falls
-    back to the untruncated name, exactly as ``/stop all``'s listing does — an
-    unknown budget must not turn a name into an empty cell.
+    THE SAME BLOCK IN BOTH FORMS, including the clearing one: ``/notifications
+    read`` renders the set it is about to write through this function, so the
+    user who typed the space and two Enters has seen the pile (UX round 1, U1 and
+    U4). One composition, because a second one for the clearing form would be
+    free to describe a different set.
+
+    ``entries`` arrives ordered by completion age — the column the rows print —
+    and bounded by the caller's read; this function only composes. ``budget`` is
+    the text-column width the notice paints at (``NoticeBlock.body_budget``); a
+    row is truncated to it rather than allowed to wrap, so the count of painted
+    rows is the count of listed rows.
 
     The mark comes from ``COMPLETION_MARKERS`` — the same table the sidebar and
     the picker paint from — so one completion kind cannot gain a second glyph
@@ -42425,7 +42496,8 @@ def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
 
     if not entries:
         return "No unread completions."
-    lines = [f"{len(entries)} unread completion{'' if len(entries) == 1 else 's'}:"]
+    total = len(entries)
+    lines = [f"{total} unread completion{'' if total == 1 else 's'}:"]
     for entry in entries[:NOTIFICATIONS_LISTING_ROWS]:
         mark = COMPLETION_MARKERS.get(entry.completion_kind, COMPLETION_MARKERS["complete"])[0]
         lead = f"  {mark} "
@@ -42436,12 +42508,28 @@ def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
         room = budget - len(lead) - len(tail)
         # The name is the only variable-width cell, so it absorbs the whole
         # budget: a row that cannot fit its own name is still a row, and one that
-        # wraps is not.
+        # wraps is not. ``max(1, room)`` rather than a ``room > 0`` guard: the
+        # guard was true-or-false over a value that goes NEGATIVE in a narrow
+        # split, and its false arm emitted the untruncated name into a budget too
+        # small for the tail alone — the one outcome the rule above forbids
+        # (agent review round 1, R4). A budget of zero is still "no opinion" and
+        # keeps the untruncated name, exactly as ``/stop all``'s listing does.
         label = entry.row.name or "Untitled conversation"
-        lines.append(f"{lead}{truncate_cells(label, room) if room > 0 else label}{tail}")
-    if len(entries) > NOTIFICATIONS_LISTING_ROWS:
-        lines.append(f"  …{len(entries) - NOTIFICATIONS_LISTING_ROWS} more")
-    lines.append("/notifications read clears these")
+        name = truncate_cells(label, max(1, room)) if budget > 0 else label
+        lines.append(f"{lead}{name}{tail}")
+    if total > NOTIFICATIONS_LISTING_ROWS:
+        # The count AND the route to the rest: the bound is honest about how many
+        # it hides and used to leave the user no way to those rows at all (UX
+        # round 1, U5). The drawer paints the pile this receipt is a page of, so
+        # the pointer goes where the reader already is.
+        lines.append(f"  …{total - NOTIFICATIONS_LISTING_ROWS} more — ctrl+b opens the sidebar")
+        # "all N" once the bound bites, "these" only when every row is on screen:
+        # at 38 unread the short form named the ten rows above it while the write
+        # covered all 38, one Enter away from a permanent clear of rows nobody
+        # had seen (design round 1, D2).
+        lines.append(f"/notifications read marks all {total} read")
+    else:
+        lines.append("/notifications read marks these read")
     return "\n".join(lines)
 
 
@@ -42467,12 +42555,100 @@ def _notifications_cleared(read: int, superseded: int, unknown: int) -> str:
             else " 1 has a newer result and stays unread."
         )
     if unknown:
+        # "could not be found on this machine" rather than "is no longer in the
+        # receipt store": the second is internal vocabulary with no referent for
+        # the user, and "no longer" asserts a past this bucket does not establish
+        # -- the row may be a conversation whose receipts live on another root
+        # (design round 1, D3).
         text += (
-            f" {unknown} are no longer in the receipt store and stay unread."
+            f" {unknown} could not be found on this machine and stay unread."
             if unknown != 1
-            else " 1 is no longer in the receipt store and stays unread."
+            else " 1 could not be found on this machine and stays unread."
         )
     return text
+
+
+def _notifications_store_failure(
+    failure: StoreFailure | None, root: Path, *, clearing: bool
+) -> tuple[str, NoticeKind]:
+    """What ``/notifications`` says when the receipts could not be read or written.
+
+    THE THREE CONDITIONS KEEP THEIR THREE ANSWERS, which is why this takes a
+    classification rather than an exception (agent review round 1, R1): the TUI
+    answered every ``sqlite3.Error`` with the contention sentence, so a full
+    volume or an unopenable store told the operator to send it again -- the exact
+    misreport the desktop ladder was split to end, and both ``SQLITE_FULL`` and
+    ``SQLITE_CANTOPEN`` are reachable here because ``AttentionStore._connect``
+    creates its directory and file before any statement runs. The sentences are
+    the shared classifier's own strings, so the two surfaces cannot say different
+    things about the same store.
+
+    THE VERDICT CLAUSE IS THE OTHER HALF, and it is honesty rather than register:
+    a read that failed is not a finding that the pile is empty (UX round 1, U2).
+    An operator whose store is unreadable, told "No unread completions.", has
+    been told a falsehood by omission -- so both forms name the fact they do not
+    have, and which of the three conditions they met decides whether retrying is
+    the remedy.
+
+    ``None`` means the classifier did not own the exception, or the store answers
+    again by the time it is asked: a sentence with no retry claim and no cause
+    invented for it. The ink follows the same split as the desktop: contention is
+    a warning, everything else is an error.
+    """
+    from local_operator.session.store_failures import (
+        BUSY_MESSAGE,
+        STORE_BUSY,
+        STORE_OUT_OF_SPACE,
+        STORE_UNAVAILABLE,
+        out_of_space_message,
+        unavailable_message,
+    )
+
+    state = "nothing was cleared" if clearing else "nothing was listed"
+    if failure is None:
+        body = f"The read receipts could not be read, and {state}."
+        kind: NoticeKind = "error"
+    else:
+        if failure.code == STORE_BUSY:
+            body = failure.message
+            kind = "warning"
+        elif failure.code == STORE_OUT_OF_SPACE:
+            body = out_of_space_message(root)
+            kind = "error"
+        elif failure.code == STORE_UNAVAILABLE:
+            body = unavailable_message(root)
+            kind = "error"
+        else:  # pragma: no cover — the classifier names every condition it returns
+            body = failure.message or BUSY_MESSAGE
+            kind = "error"
+        body = f"{body} {state.capitalize()}."
+    return f"{body} This is not a verdict about what is unread.", kind
+
+
+def _receipts_failure(root: Path) -> StoreFailure | None:
+    """Classify the condition behind a receipts read the catalogue already lost.
+
+    Called only when ``load_catalog`` reported its attention decoration degraded,
+    and READ-ONLY by construction: ``AttentionStore.revision`` opens the file
+    ``mode=ro`` and answers ``(0, 0, 0)`` for a path that is not there, so the
+    probe cannot create a store or write to one -- a command answering "the
+    receipts could not be read" must not be the thing that changed the store.
+
+    ``None`` is not "no failure": it means the store answers now, which is a
+    sentence of its own (the read failed a moment ago and this is not a verdict),
+    and inventing a cause from a probe that succeeded would be the same
+    misattribution in the other direction.
+    """
+    import sqlite3
+
+    from local_operator.session.attention import AttentionStore
+    from local_operator.session.store_failures import store_failure
+
+    try:
+        AttentionStore(root / "attention.db").revision()
+    except (sqlite3.Error, OSError) as error:
+        return store_failure(error, root)
+    return None
 
 
 def _tree_listing(

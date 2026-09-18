@@ -17,6 +17,7 @@ command wired to nothing.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ import pytest
 
 from local_operator.session.attention import AttentionStore
 from local_operator.tui import session_catalog
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, _notifications_listing
 from local_operator.tui.session_interaction import SessionInteraction
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -152,8 +153,12 @@ async def test_the_listing_names_the_count_and_stops_at_ten_rows(config_root: Pa
     lines = text.splitlines()
     assert lines[0] == "13 unread completions:"
     assert len([line for line in lines if "✓" in line]) == 10
-    assert lines[-2] == "  …3 more"
-    assert lines[-1] == "/notifications read clears these"
+    assert lines[-2] == "  …3 more — ctrl+b opens the sidebar"
+    # "all 13" rather than "these": at the bound the short form named the ten
+    # rows on screen while the write covered every one of them (design round 1,
+    # D2). The short form is what the unbounded case prints, where "these" is
+    # literally the whole set.
+    assert lines[-1] == "/notifications read marks all 13 read"
     # A row carries the row's own name, kind and age — the same three facts the
     # picker's row shows, in the order a reader scans them.
     assert any("conversation 12" in line and "— complete ·" in line for line in lines)
@@ -356,3 +361,319 @@ async def test_the_command_answers_where_a_source_has_no_authority(
         # Still refused where a refusal is the truth: a command that needs an
         # owner is not a saved-local one.
         assert app.composer_submission_blocked("/model gpt-4o") is True
+
+
+# -- round 1 remediation: the write is bounded by a render, and a failed store is
+# -- never reported as an empty pile --------------------------------------------
+
+
+def _entry(
+    session_id: str,
+    name: str,
+    mtime: float,
+    *,
+    unseen: bool = False,
+    kind: str = "complete",
+    token: str = "",
+):
+    """One catalogue entry, built by hand so a test can pin a row's age or token.
+
+    The real construction site is ``catalog.entry_for``; this mirrors its field
+    order and nothing else, which is what a test of the LISTING's own logic wants
+    — the catalogue's derivation is pinned where it lives.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import CatalogEntry
+
+    return CatalogEntry(SessionRow(session_id, mtime, name), unseen, kind, token, "anchor", "")
+
+
+def _sqlite_error(message: str, errorname: str):
+    """A real ``sqlite3.Error`` wearing the errorname a condition raises.
+
+    ``sqlite_errorname`` is the shared classifier's input on both surfaces, so a
+    test that wants "contention" has to supply that attribute rather than
+    whichever sentence it hopes to see.
+    """
+    import sqlite3
+
+    error = sqlite3.OperationalError(message)
+    error.sqlite_errorname = errorname
+    return error
+
+
+@pytest.mark.asyncio
+async def test_the_clearing_form_paints_the_set_it_writes(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U1 and U4: the batch is a render the user can see, in the SAME call.
+
+    The clearing form used to be a second, independent catalogue scan. A fourth
+    completion published between ``/notifications`` and ``/notifications read``
+    was therefore acknowledged having never been painted, and a user who typed
+    the space and two Enters cleared a whole pile that was never on screen. Both
+    are one defect seen from two sides, and the property that closes them is one
+    fact: at the instant of the write, the transcript already carries the rows,
+    and the batch is exactly those rows.
+
+    Captured from INSIDE ``acknowledge_many``, because a receipt checked
+    afterwards cannot tell a render that preceded the write from one that
+    followed it — and the order is the point. The extra completion is injected
+    inside the catalogue read itself, which is the window U1 named.
+    """
+    settled = ["00000000000a", "00000000000b", "00000000000c"]
+    latecomer = "00000000000d"
+    for index, session_id in enumerate(settled):
+        _unread_session(config_root, session_id, f"conversation {index}")
+    _make_session(config_root, latecomer, "finished while you read")
+
+    real_catalog = session_catalog.load_catalog
+
+    def load_then_publish(root, *args, **kwargs):
+        entries = real_catalog(root, *args, **kwargs)
+        _publish(config_root, latecomer)
+        return entries
+
+    monkeypatch.setattr(session_catalog, "load_catalog", load_then_publish)
+
+    holder: dict[str, Any] = {}
+    at_write: list[tuple[list[str], list[tuple[str, str]]]] = []
+    real_ack = AttentionStore.acknowledge_many
+
+    def observed(self, items):  # noqa: ANN001 — mirrors the bound method's shape
+        at_write.append((_notices(holder["app"]), list(items)))
+        return real_ack(self, items)
+
+    monkeypatch.setattr(AttentionStore, "acknowledge_many", observed)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    holder["app"] = app
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        receipt = _notices(app)[-1]
+
+    assert len(at_write) == 1, "the clearing form must write exactly once"
+    painted, items = at_write[0]
+    block = painted[-1]
+    assert block.splitlines()[0] == "3 unread completions:", block
+    assert {identity.split("/", 1)[1] for identity, _token in items} == set(settled)
+    # The latecomer is not in the batch and is not on the rows either: the write
+    # covered what was rendered, and the completion that arrived after that render
+    # stays unread for the next listing.
+    assert latecomer not in {identity for identity, _token in items}
+    assert "finished while you read" not in block
+    assert _store(config_root).state(f"session/{latecomer}")["unseen"] is True
+    assert receipt == "Marked 3 completions read."
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_store_is_not_an_empty_pile(config_root: Path) -> None:
+    """U2: ``No unread completions.`` is a finding, and a failed read is not one.
+
+    Three genuinely unread completions behind a store this process cannot read
+    (the file is there and is not a database — a truncated write). Both forms used
+    to answer from an empty attention state the catalogue had swallowed, so the
+    operator was told their pile was empty; the clearing form must additionally
+    write NOTHING, because a write it cannot verify is not a receipt.
+    """
+    for index in range(3):
+        _unread_session(config_root, f"{index + 1:012x}", f"conversation {index}")
+    (config_root / "attention.db").write_bytes(b"not a database")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications")
+        listing = _notices(app)[-1]
+        await _run(pilot, app, "/notifications read")
+        clearing = _notices(app)[-1]
+
+    for text, did in ((listing, "listed"), (clearing, "cleared")):
+        assert text != "No unread completions." and text != "Nothing unread."
+        assert "could not be read" in text, text
+        assert "Retrying will not help" in text, text
+        assert f"Nothing was {did}." in text, text
+        assert "not a verdict about what is unread" in text, text
+    # The store is exactly as unreadable as it was: no schema repair, no write,
+    # not even a reread that could have recreated it.
+    assert (config_root / "attention.db").read_bytes() == b"not a database"
+
+
+@pytest.mark.asyncio
+async def test_the_write_names_the_condition_it_met(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: three conditions, three answers, and the copy is the shared module's.
+
+    The handler used to flatten every ``sqlite3.Error`` into the contention
+    sentence, so a full volume or an unopenable store told the operator to send
+    it again — the misreport the desktop ladder was split to end. Both arms below
+    drive the same call path the real store takes; only the errorname differs,
+    which is what the shared classifier reads. The pile is on screen BEFORE the
+    write either way, so a failure leaves the user looking at what did not clear.
+    """
+    _unread_session(config_root, "00000000000a", "still unread")
+    monkeypatch.setattr(session_catalog, "load_catalog", session_catalog.load_catalog)
+
+    # Busy: retryable, warning ink, the sentence the desktop shows for the same
+    # condition.
+    def busy(self, items):  # noqa: ANN001
+        raise _sqlite_error("database is locked", "SQLITE_BUSY")
+
+    monkeypatch.setattr(AttentionStore, "acknowledge_many", busy)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        notices = _notices(app)
+
+    assert "Read state is busy right now" in notices[-1]
+    assert "Nothing was cleared." in notices[-1]
+    assert "not a verdict about what is unread" in notices[-1]
+    assert notices[-2].splitlines()[0] == "1 unread completion:", notices[-2]
+    assert _store(config_root).state("session/00000000000a")["unseen"] is True
+
+    # Unopenable: NOT retryable, and the sentence says so.
+    def unopenable(self, items):  # noqa: ANN001
+        raise _sqlite_error("unable to open database file", "SQLITE_CANTOPEN")
+
+    monkeypatch.setattr(AttentionStore, "acknowledge_many", unopenable)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        text = _notices(app)[-1]
+
+    assert "Retrying will not help" in text, text
+    assert "busy right now" not in text, "the contention sentence leaked into the other arm"
+    assert "not a verdict about what is unread" in text, text
+    assert _store(config_root).state("session/00000000000a")["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_store_failure_never_echoes_the_exception_text(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: the arm the rule is written for is the one that used to break it.
+
+    The handler states three lines above its catch-all that the store's own
+    wording is never echoed because it can name file paths — and then
+    interpolated the exception into the transcript. An unexpected failure gets a
+    vetted sentence; the diagnostic survives in the log, which is where the
+    route's own ladder puts it.
+    """
+    _unread_session(config_root, "00000000000a", "still unread")
+    secret_path = str(config_root / "attention.db")
+
+    def explode(self, items):  # noqa: ANN001
+        raise RuntimeError(f"[Errno 28] No space left: {secret_path}")
+
+    monkeypatch.setattr(AttentionStore, "acknowledge_many", explode)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        text = _notices(app)[-1]
+
+    assert "attention.db" not in text, text
+    assert "Errno" not in text, text
+    assert "and nothing was cleared." in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_that_is_not_here_is_named_without_store_vocabulary(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: the bucket is a fact about THIS machine, not a past tense.
+
+    A listed row whose token the store does not hold (another root's receipt, a
+    store that was replaced) used to be described as "no longer in the receipt
+    store" — internal vocabulary, and a claim the bucket does not establish.
+    """
+    from dataclasses import replace
+
+    _make_session(config_root, "00000000000a", "foreign receipt")
+    real = session_catalog.load_catalog
+
+    def load_foreign(root, *args, **kwargs):
+        return [
+            replace(
+                entry, unseen=True, completion_kind="complete", completion_token=str(uuid.uuid4())
+            )
+            for entry in real(root, *args, **kwargs)
+        ]
+
+    monkeypatch.setattr(session_catalog, "load_catalog", load_foreign)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications read")
+        text = _notices(app)[-1]
+
+    assert "could not be found on this machine and stays unread." in text, text
+    assert "receipt store" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_the_rows_are_ordered_by_the_age_they_print(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D5: the printed column IS the sort key, so the bound hides the oldest.
+
+    The catalogue ranks by conversation — newest first — while the row prints the
+    completion's age. At the bound that meant the ten newest CONVERSATIONS, so the
+    rows "…N more" hid were not the oldest receipts. Ordered by the age the row
+    shows, the listing and its bound say the same thing.
+    """
+    now = time.time()
+    entries = [
+        _entry("00000000000a", "oldest conversation", now - 7200, unseen=True),
+        _entry("00000000000b", "middle conversation", now - 600, unseen=True),
+        _entry("00000000000c", "newest conversation", now - 5, unseen=True),
+    ]
+    monkeypatch.setattr(session_catalog, "load_catalog", lambda *a, **k: list(entries))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications")
+        text = _notices(app)[-1]
+
+    rows = [line for line in text.splitlines() if line.startswith("  ✓")]
+    assert [line.split(" — ")[0].strip("  ✓") for line in rows] == [
+        "newest conversation",
+        "middle conversation",
+        "oldest conversation",
+    ], text
+
+
+def test_a_name_is_truncated_rather_than_wrapped_at_a_narrow_budget() -> None:
+    """R4: the fallback was a superset of its neighbour's, and it wrapped.
+
+    ``room`` goes negative in a narrow split, and the guard ``room > 0`` then
+    emitted the UNTRUNCATED name — the one outcome the docstring above it rules
+    out, in the one case where the budget cannot hold the tail either. Matched to
+    ``/stop all``'s condition for the unknown budget, and clamped above it.
+    """
+    entry = _entry("00000000000a", "reconcile the desktop attention receipts", 1_700_000_000.0)
+
+    narrow = _notifications_listing([entry], 8)
+    assert "reconcile the desktop attention receipts" not in narrow, narrow
+    assert "…" in narrow, narrow
+    # A budget of zero is still "no opinion" (the caller could not measure), and
+    # that arm keeps the whole name rather than truncating to a single cell.
+    assert "reconcile the desktop attention receipts" in _notifications_listing([entry], 0)
+
+
+@pytest.mark.asyncio
+async def test_a_pending_line_precedes_the_scan(config_root: Path) -> None:
+    """U3: the slow leg is the refusal one, and a silent command looks wedged.
+
+    Measured at 4.1 s from Enter to the refusal while another writer held the
+    store, with nothing on screen in between. One line, before the scan, the way
+    ``/update`` prints "checking for updates…".
+    """
+    _unread_session(config_root, "00000000000a", "still unread")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications")
+        notices = _notices(app)
+
+    assert notices[0] == "reading receipts…", notices
+    assert notices[-1].startswith("1 unread completion:"), notices[-1]

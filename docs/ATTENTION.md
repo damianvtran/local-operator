@@ -207,12 +207,35 @@ reason.
 The explicit half is load-bearing too. A timer, a poll, a subscription or a
 focus change may never reach the batch operation, and nothing here changes the
 per-result rule for the surfaces that acknowledge one at a time. The TUI's
-`/notifications read` lists the completions its own sidebar is painting and
-clears exactly that set; the desktop clears the rows its sidebar holds, and only
+`/notifications read` renders the set it is about to clear — one catalogue read,
+painted before the write — and acknowledges exactly that read's pairs, so the
+rows a user clears are rows they were shown, including the one that finished
+while they were typing; the desktop clears the rows its sidebar holds, and only
 with its window in the foreground (`guardForegroundReceipts` covers the op by
 name). Reading is still not notifying: `deliveries`, the supersede log and the
 completion rows are untouched by a bulk acknowledgement, so an already-delivered
 banner stays delivered and nothing read can be resurrected as unread.
+
+Two more things this relaxation depends on, both stated because they are easy to
+re-derive differently:
+
+- **A store that could not be READ is not an empty pile.** The empty states
+  (`No unread completions.`, `Nothing unread.`) are findings, and a failed read
+  supports neither. Both surfaces therefore branch on one classification —
+  `session/store_failures.py`, consumed by the desktop ladder and by the TUI —
+  and both say which of the three conditions they met (contention is retryable;
+a full disk and an unopenable store are not) with the sentence that condition
+  owns. A failed read also means no write: an acknowledgement that cannot be
+  verified is not a receipt.
+- **The word is `unread` on both surfaces, and `unseen` is the store's field.**
+  The TUI's sidebar tooltip for the same mark says "Unseen completion"
+  (`CatalogEntry.status`), so one app spells the state twice. That is recorded
+  rather than fixed here: `unread` is the word the desktop half ships in its
+  control, its receipts and its row tooltip (and the word this document uses for
+the watermark a human read), while `unseen` is the column an `AttentionState`
+  carries. Two words with one meaning, owned by two layers, is a smaller defect
+  than three surfaces renaming a status string — but it is a defect, and this is
+  where a future round should look before it moves either one.
 
 ## Upgrade boundaries
 
