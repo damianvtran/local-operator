@@ -723,6 +723,25 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.PROVIDER,
         desktop_destination="auth.logout",
     ),
+    # The listing is the receipt, and the argument is a WORD the command reads
+    # (`read`), never model text -- so no echo, and no prompt to consume.
+    # `desktop_destination` is deliberately UNSET, following `/mobile` above: the
+    # desktop's affordance for this is its own sidebar control, and a
+    # destination the renderer has no adapter for is an offered-but-broken row.
+    #
+    # 50 cells, inside the /help wrap budget (74 at 80 columns). The word
+    # `notifications` is long enough that the description has to stay short or
+    # the composed row wraps and the tail lands in the glyph gutter.
+    SlashCommand(
+        "notifications",
+        "Unread completions; /notifications read clears all",
+        arguments=ArgumentMode.OPTIONAL,
+        # The vocabulary is one word (`read`). Declared `WORD` rather than
+        # `NONE` because the trailing text IS read by the handler, which is the
+        # criterion `ArgumentShape` states: a second word is refused by name
+        # rather than silently run as the clearing form.
+        argument_shape=ArgumentShape.WORD,
+    ),
     # Uses this computer's Radient login and user service. The final setup or
     # status notice is its receipt, so the command has no model-facing echo.
     #

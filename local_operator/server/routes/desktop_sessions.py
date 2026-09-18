@@ -1981,6 +1981,66 @@ async def seen(session_id: str, body: Seen, request: Request):
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
 
 
+class SeenItem(Input):
+    """One completion the caller RENDERED, named by session id and token.
+
+    Both halves are identity, not content: the id selects a session (the
+    conversation identity ``session/<id>`` is DERIVED server-side, so a caller
+    cannot name an identity it could not enumerate), and the token is the
+    specific completion it was showing. A mark without a token is not ackable
+    and must not be sent -- a timestamp or a caller's own epoch could clear a
+    later, unseen result.
+    """
+
+    session_id: Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+    completion_token: RequestID
+
+
+class SeenMany(Input):
+    #: 1..500, and the bound is the CATALOGUE's own maximum page
+    #: (``GET /v1/desktop/sessions?limit=``, ``le=500``), so a client can always
+    #: send every row it holds in one call and never has to chunk a single user
+    #: gesture. The worst-case body is ~30 KB against the 900 KB control-frame
+    #: limit.
+    items: Annotated[list[SeenItem], Field(min_length=1, max_length=500)]
+
+
+@router.post("/v1/desktop/attention/seen", response_model=CRUDResponse[dict[str, Any]])
+async def seen_many(body: SeenMany, request: Request):
+    """Clear the unread completion receipts a client enumerated, in ONE write.
+
+    The bulk sibling of ``POST .../{session_id}/seen``, for the sidebar gesture
+    that clears the whole pile rather than opening each conversation. Same cold
+    contract, same store rule -- only the shape is additive.
+
+    NOT A SWEEP: the body carries the completions the caller actually rendered,
+    and the store compares each against the conversation's CURRENT token inside
+    one write transaction, so a completion published after that render stays
+    unread. A batch that clears nothing is still 200 -- the three verdict buckets
+    ARE the answer, and a non-2xx would make a client throw away the partial
+    result it did get -- while a per-item failure (a dead or foreign session) is
+    ``unknown`` for that item rather than a 404 for the call.
+
+    ``read`` is ``list[dict[str, Any]]`` and deliberately NOT
+    ``AttentionState``: that model defaults ``supported`` to ``None``, so
+    serialising through it would put ``"supported": null`` on the wire, and the
+    renderer's attention merge honours only ``undefined`` as "inherit what you
+    were told" -- a ``null`` would replace a known ``supported: true`` and
+    silently disable its visible-read receipt. The store's own state dict has no
+    such key, so the wire omits it and the merge inherits.
+
+    The path cannot collide with ``GET /v1/desktop/sessions/{session_id}`` or
+    with the per-session ``/seen`` at any registration order, hence the noun in
+    the middle rather than a ``/v1/desktop/sessions/seen`` that the path
+    parameter could shadow.
+    """
+    async with errors(request):
+        result = await host(request).acknowledge_attention_many(
+            [(item.session_id, item.completion_token) for item in body.items]
+        )
+        return CRUDResponse(status=200, message="Completion receipts marked read.", result=result)
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/notified", response_model=CRUDResponse[NotificationClaim]
 )

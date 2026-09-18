@@ -508,6 +508,63 @@ def test_an_acknowledgement_publishes_an_attention_frame_that_clears_the_mark(tm
     assert attention[-1]["payload"]["unseen"] is False
 
 
+def test_a_bulk_acknowledgement_publishes_one_attention_frame_per_changed_session(tmp_path):
+    """The machine-wide half of "clear the pile": every other window learns.
+
+    The response to the batch is the primary path for the client that SENT it;
+    every other window and surface converges through this feed, so a bulk write
+    that moved two receipts has to publish two `attention` frames and no more.
+    The count matters as much as the content: one frame per changed session is
+    what keeps a sidebar's per-row merge honest, and a frame for a session that
+    did NOT change would repaint a row whose mark is still there.
+
+    Deliberately no `notification` frame anywhere in the log. Clearing a pile is
+    not an announcement, and a bulk clear that toasted N banners would make the
+    gesture that removes attention the loudest thing in the app.
+    """
+    root = tmp_path
+    first, second, untouched = "7" * 12, "8" * 12, "9" * 12
+    for session_id in (first, second, untouched):
+        _session(root, session_id)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    store = AttentionStore(root / "attention.db")
+    tokens = {session_id: _publish(root, session_id) for session_id in (first, second, untouched)}
+    _tick(feed)
+    # Clear the PUBLICATION frames first. By this point the queue already holds
+    # one `attention` frame per published completion, and the log under test is
+    # the one the BULK WRITE produces -- reading both together would pass on two
+    # frames whether the acknowledgement emitted any or not.
+    #
+    # Drained through `_queued`, NOT through `_collect`: `_collect` iterates
+    # `feed.events()`, and CANCELING that reader unsubscribes the subscription,
+    # so an acknowledgement committed afterwards is queued to nobody (measured
+    # with this exact test before the change).
+    published = _queued(subscription)
+    assert {frame["session_id"] for frame in published if frame["type"] == "attention"} == {
+        first,
+        second,
+        untouched,
+    }
+
+    results = store.acknowledge_many(
+        [(f"session/{first}", tokens[first]), (f"session/{second}", tokens[second])]
+    )
+    assert [result["status"] for result in results] == ["read", "read"]
+    _tick(feed)
+
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    attention = [frame for frame in frames if frame["type"] == "attention"]
+    assert sorted(frame["session_id"] for frame in attention) == sorted([first, second]), frames
+    for frame in attention:
+        assert frame["payload"]["unseen"] is False
+    assert untouched not in {frame["session_id"] for frame in attention}
+    assert _notified(frames) == [], "clearing a receipt announced something"
+
+
 def test_a_subagent_child_is_never_announced(tmp_path):
     """A machine's delegated run is not a conversation to banner about."""
     root = tmp_path

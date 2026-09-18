@@ -12,12 +12,13 @@ import asyncio
 import contextlib
 import sqlite3
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from local_operator.server.routes import desktop_sessions
+from local_operator.server.routes import capabilities, desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
 
@@ -249,13 +250,27 @@ async def test_concurrent_receipts_and_publications_converge(tmp_path):
     assert store.acknowledge(f"session/{sid}", second)["unseen"] is False
 
 
+def _hold_write_lock(root):
+    """Hold the store's write lock from a second connection.
+
+    REAL contention rather than a simulated error, and deterministic *because*
+    the lock is held for the whole attempt: the store's own busy timeout expires
+    against this holder and raises ``SQLITE_BUSY``, which the shared classifier
+    answers with the retryable 503. Nothing races here -- the outcome is fixed
+    by the fact that this connection never lets go until the caller does.
+    """
+    conn = sqlite3.connect(root / "attention.db", timeout=5)
+    conn.execute("BEGIN IMMEDIATE")
+    return conn
+
+
 def _break_store(root) -> None:
     """Drop the table a read needs, leaving a file that still opens.
 
-    Real contention (`database is locked` past the 2 s timeout) cannot be
-    scheduled deterministically in a test; a missing table raises the same
-    `sqlite3.Error` family through the identical call path, which is what the
-    guards are written against.
+    The UNCLASSIFIED store failure: an error the classifier cannot name as
+    contention, a full disk or a missing file, so it takes the deliberate
+    default -- 500 ``store_unavailable``, "retrying will not help". Contention
+    is exercised for real by :func:`_hold_write_lock` instead.
     """
     import sqlite3 as _sqlite3
 
@@ -383,3 +398,237 @@ async def test_a_degraded_store_never_breaks_opening_or_listing(tmp_path):
         # Omitted rather than fabricated: absent state is "not ackable" on the
         # client, which is correct. A false "read" would not be.
         assert "attention" not in rows[0]
+
+
+# ---------------------------------------------------------------------------
+# The bulk route: POST /v1/desktop/attention/seen
+#
+# Same cold contract as the per-session route above, reached by a gesture that
+# means "these" rather than "this one". The wire shape is frozen in the design
+# (`DESIGN.md` §3.1), so these tests pin the SHAPE as well as the behaviour --
+# including the two things a caller depends on and cannot re-derive: which
+# bucket an item landed in, and that a `read` entry is the store's own state
+# dict rather than a response model that would add a `supported: null`.
+# ---------------------------------------------------------------------------
+
+TOKEN_ENV = "LOCAL_OPERATOR_DESKTOP_TOKEN"
+
+
+@contextlib.asynccontextmanager
+async def _bulk_client(tmp_path, monkeypatch):
+    """A real ASGI client over the real router, at an isolated config root."""
+    monkeypatch.setenv(TOKEN_ENV, "bulk-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer bulk-token"},
+    ) as client:
+        yield client, pool
+
+
+async def _session_with_completion(pool, tmp_path, anchor: str) -> tuple[str, str]:
+    session_id = await pool.create(str(tmp_path))
+    return session_id, _publish(tmp_path, session_id, anchor)
+
+
+@pytest.mark.asyncio
+async def test_the_bulk_route_reports_a_verdict_per_item(tmp_path, monkeypatch):
+    """One call, three buckets, and every item answered -- including the misses.
+
+    A batch that clears nothing is still 200: the verdicts ARE the answer, and a
+    non-2xx would make the renderer discard the partial result it did get.
+    """
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+        superseded_id, superseded_token = await _session_with_completion(pool, tmp_path, "result-2")
+        _publish(tmp_path, superseded_id, "result-2b")
+        absent = "0123456789ab"
+
+        response = await client.post(
+            "/v1/desktop/attention/seen",
+            json={
+                "items": [
+                    {"session_id": sid, "completion_token": token},
+                    {"session_id": superseded_id, "completion_token": superseded_token},
+                    {"session_id": absent, "completion_token": str(uuid.uuid4())},
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["message"] == "Completion receipts marked read."
+        assert body["status"] == 200
+        assert body["result"]["superseded"] == [superseded_id]
+        assert body["result"]["unknown"] == [absent]
+        assert len(body["result"]["read"]) == 1
+        state = body["result"]["read"][0]
+        assert state["conversation_id"] == f"session/{sid}"
+        assert state["completion_token"] == token and state["unseen"] is False
+        # R8: the store's own dict, never `AttentionState`. That model defaults
+        # `supported` to None, and the renderer treats `null` as "you know this
+        # one" rather than "inherit" -- which would switch off its visible-read
+        # receipt for the conversation this batch just cleared.
+        assert "supported" not in state, state
+        # And the store really moved, for the one item that was ackable.
+        store = AttentionStore(tmp_path / "attention.db")
+        assert store.state(f"session/{sid}")["unseen"] is False
+        assert store.state(f"session/{superseded_id}")["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_clears_nothing_is_still_a_200(tmp_path, monkeypatch):
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, _token = await _session_with_completion(pool, tmp_path, "result-1")
+        response = await client.post(
+            "/v1/desktop/attention/seen",
+            json={"items": [{"session_id": sid, "completion_token": str(uuid.uuid4())}]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"] == {"read": [], "superseded": [], "unknown": [sid]}
+
+
+@pytest.mark.asyncio
+async def test_the_bulk_route_refuses_a_malformed_batch_with_422(tmp_path, monkeypatch):
+    """The admission rules, one per arm, all of them before any store call."""
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+        item = {"session_id": sid, "completion_token": token}
+        cases = {
+            "empty": {"items": []},
+            "missing": {},
+            "over the cap": {"items": [item] * 501},
+            "short id": {"items": [dict(item, session_id="abc")]},
+            "uppercase id": {"items": [dict(item, session_id=sid.upper())]},
+            "non-uuid token": {"items": [dict(item, completion_token="now")]},
+            # `extra="forbid"` like every other Input in this module: a
+            # conversation identity is DERIVED, so a caller cannot name one.
+            "caller-named identity": {"items": [dict(item, conversation_id="session/x")]},
+            "unknown top-level field": {"items": [item], "all": True},
+        }
+        for name, payload in cases.items():
+            response = await client.post("/v1/desktop/attention/seen", json=payload)
+            assert response.status_code == 422, (name, response.status_code, response.text)
+        assert AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_bulk_route_is_cold_and_never_acquires_a_bridge(tmp_path, monkeypatch):
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("a bulk read receipt must not acquire a session bridge")
+
+        monkeypatch.setattr(DesktopSessions, "session", forbidden)
+        response = await client.post(
+            "/v1/desktop/attention/seen",
+            json={"items": [{"session_id": sid, "completion_token": token}]},
+        )
+        assert response.status_code == 200, response.text
+        assert not (tmp_path / "sessions" / sid / ".session.pid").exists()
+        assert not pool.bridges
+
+
+@pytest.mark.asyncio
+async def test_the_bulk_route_requires_the_desktop_credential(tmp_path, monkeypatch):
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+        payload = {"items": [{"session_id": sid, "completion_token": token}]}
+        # An EMPTY Authorization rather than no header at all: this client sets a
+        # default bearer, and httpx merges per-request headers over it, so an
+        # absent key would keep the fixture's own token and assert nothing.
+        for headers in ({"Authorization": ""}, {"Authorization": "Bearer wrong-token"}):
+            response = await client.post(
+                "/v1/desktop/attention/seen", json=payload, headers=headers
+            )
+            assert response.status_code == 401, headers
+        # The refusal happens before the handler: nothing was cleared.
+        assert AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_bulk_capability_is_advertised_with_its_own_key(tmp_path, monkeypatch):
+    """`completion_ack_bulk`, beside `completion_ack` rather than on top of it.
+
+    The renderer gates the control on this key, so a key that never reaches the
+    wire is a feature no client can discover. It is deliberately NOT a bump of
+    `completion_ack`: the per-session ack must keep working against a backend
+    that lacks the batch route, which is why the two versions answer different
+    questions and why nothing else may be gated on either.
+    """
+    async with _bulk_client(tmp_path, monkeypatch) as (client, _pool):
+        features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+        assert features["completion_ack_bulk"] == 1
+        assert features["completion_ack"] == 1, "the per-session ack keeps its version"
+
+
+@pytest.mark.asyncio
+async def test_store_contention_costs_the_whole_batch_and_writes_nothing(tmp_path, monkeypatch):
+    """R4 end to end: the 503 promises nothing moved, and one transaction keeps it.
+
+    The retryable arm. Contention is created by a second connection holding the
+    write lock for the whole attempt, so the store's own busy timeout raises
+    ``SQLITE_BUSY`` through the identical call path a busy daemon would -- not a
+    patched exception that only proves the test's own stub.
+    """
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+        other, other_token = await _session_with_completion(pool, tmp_path, "result-2")
+        holder = _hold_write_lock(tmp_path)
+        try:
+            response = await client.post(
+                "/v1/desktop/attention/seen",
+                json={
+                    "items": [
+                        {"session_id": sid, "completion_token": token},
+                        {"session_id": other, "completion_token": other_token},
+                    ]
+                },
+            )
+        finally:
+            holder.rollback()
+            holder.close()
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "store_busy", response.text
+        assert "busy" in response.json()["detail"]["message"]
+        with contextlib.closing(sqlite3.connect(tmp_path / "attention.db")) as conn:
+            receipts = conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
+        assert receipts == 0, "a refused batch left a receipt behind"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_store_costs_the_whole_batch_and_writes_nothing(tmp_path, monkeypatch):
+    """R4's other arm: the store failure the classifier cannot name as transient.
+
+    ``server/utils/store_failures`` splits the three sqlite conditions rather
+    than answering all of them with the contention sentence; this route must
+    inherit that split instead of flattening it, so an unreadable store answers
+    the 500 that says retrying will not help. The batch-wide guarantee is the
+    same in both arms: nothing was written.
+    """
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+        other, other_token = await _session_with_completion(pool, tmp_path, "result-2")
+        _break_store(tmp_path)
+
+        response = await client.post(
+            "/v1/desktop/attention/seen",
+            json={
+                "items": [
+                    {"session_id": sid, "completion_token": token},
+                    {"session_id": other, "completion_token": other_token},
+                ]
+            },
+        )
+        assert response.status_code == 500, response.text
+        assert response.json()["detail"]["code"] == "store_unavailable", response.text
+        with contextlib.closing(sqlite3.connect(tmp_path / "attention.db")) as conn:
+            receipts = conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
+        assert receipts == 0, "a refused batch left a receipt behind"

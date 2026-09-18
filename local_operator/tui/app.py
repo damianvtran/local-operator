@@ -13845,8 +13845,19 @@ class OperatorApp(App[None]):
     #: ``_finish_session_transition`` re-checks ``requested_id``, so a navigation
     #: in flight resolves to the session the user asked for, and a command frame
     #: is ended by the transition instead of raced with it.
+    #:
+    #: ``/notifications`` is here because it never needs the owner at all: both
+    #: halves read and write THIS machine's own receipt store (``config_dir()``),
+    #: and the listing is computed from the same local catalogue the sidebar
+    #: paints (``load_catalog``). Asking a source for permission first would
+    #: refuse a command that cannot fail for the reason the gate exists — the
+    #: ``/copy`` class, one step further from the transcript. Measured rather
+    #: than assumed: without the entry, a ``display_only`` source (the state a
+    #: follower sits in while it binds) answers Enter with "until connected" and
+    #: the handler never runs, while the marks it lists are on disk in front of
+    #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/sidebar", "/help", "/settings", "/resume"}
+        {"/copy", "/links", "/sidebar", "/help", "/settings", "/resume", "/notifications"}
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -28969,6 +28980,8 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/failovers":
             self._cmd_failovers(notice)
+        elif command == "/notifications":
+            self._cmd_notifications(arg, notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
         elif command == "/analytics":
@@ -33626,6 +33639,154 @@ class OperatorApp(App[None]):
         if rows:
             self._append_block(RichBlock(_tree_listing(rows, "failover cascade")))
 
+    def _cmd_notifications(self, arg: str, notice: NoticeFn) -> None:
+        """``/notifications`` — the unread completions this app is painting.
+
+        Two forms, and the split is the answer to "what does the bare word do":
+        ``/notifications`` LISTS what this terminal's sidebar has marked, and
+        ``/notifications read`` clears exactly the set that listing is computed
+        from. One set, one command, so the receipt and the action can never
+        describe different piles.
+
+        THE SET IS THE CATALOGUE'S, deliberately not the receipt store's whole
+        unread population. On the operator's own machine that population is
+        6,392 conversations, 4,659 of which still have a directory and none of
+        which this app renders: the report this command answers is the pile the
+        sidebar SHOWS, and a gesture that quietly cleared thousands of marks
+        nobody was ever offered would be a watermark sweep in all but name. The
+        store-side rule lives in ``AttentionStore.acknowledge_many``; the rule
+        this command adds is that listing and clearing are one set.
+
+        BOTH HALVES ARE LOCAL, and the divergence is stated rather than implied.
+        The listing comes from THIS machine's catalogue and the clear writes THIS
+        machine's store, so on a follower attached to a runtime on another host
+        the two still agree: the marks being listed are the ones this frontend
+        paints. What does NOT happen is a forwarded acknowledgement — an owner
+        sharing this config root converges through its own poll (the sidebar's
+        2 s catalog poll, the desktop's 1 s attention poll), and an owner on a
+        different root has no row here at all, so those items answer ``unknown``
+        and keep their mark until the conversation is actually read. That is the
+        honest outcome: a receipt for a write this machine cannot perform would
+        claim a clear that did not happen.
+
+        A ``busy``/``wedged``/``pending`` row is listed when it is ``unseen``
+        even though the sidebar paints its LIVE state rather than the mark
+        (``CatalogEntry.shows_completion_mark``). This is a receipt of unread
+        completions, not a copy of the glyph column: the mark below it is the
+        one that comes back the moment the row stops being busy.
+
+        NO NEW KEY BINDING, and deliberately: acknowledging a receipt cannot be
+        undone (nothing in the product withdraws one), so clearing stays a typed
+        gesture or the desktop's own button, never a keystroke anyone reaches by
+        accident.
+        """
+        word = arg.strip().casefold()
+        if word not in ("", "read"):
+            self._system_notice(
+                f"/notifications takes no such argument — got {arg!r}. "
+                "Send /notifications to list them, or /notifications read to clear them.",
+                "warning",
+            )
+            return
+        # NOT exclusive, and that is a correctness choice rather than a
+        # preference. Cancelling a worker does not stop the thread it is
+        # awaiting, so an ``exclusive`` second press would abort the FIRST
+        # ``read``'s receipt while its ``acknowledge_many`` still committed — a
+        # clear that happened with nothing on screen to say so, the one outcome
+        # this receipt exists to rule out. Overlapping workers each report the
+        # truth instead (the store is idempotent, so the second says "Nothing
+        # unread." if it loses the race).
+        self.run_worker(
+            self._notifications_receipt(word == "read"),
+            group="notifications",
+            thread=False,
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _notifications_receipt(self, clear: bool) -> None:
+        """Read the local catalogue off the loop, then clear it if asked.
+
+        The scan is the blocking read the sidebar's own poll makes, so it runs in
+        a thread for the same reason: ``load_catalog`` walks the session store and
+        stats the transcripts in the window. The receipt is written AFTER
+        ``acknowledge_many`` returns, never before — a line naming a number this
+        call did not get back would be a receipt for a write nobody can verify.
+
+        Never raises, because its worker is created with
+        ``exit_on_error=False``: an escaping exception would leave the user with a
+        command that silently did nothing, which is worse than the failure.
+        """
+        import sqlite3
+
+        from local_operator.paths import config_dir
+        from local_operator.session.attention import (
+            AttentionStore,
+            conversation_identity,
+        )
+        from local_operator.tui.session_catalog import load_catalog
+
+        root = config_dir()
+        try:
+            entries = await asyncio.to_thread(load_catalog, root)
+            unread = [entry for entry in entries if entry.unseen]
+            if not clear:
+                self._append_block(
+                    NoticeBlock(
+                        _notifications_listing(
+                            unread,
+                            # The budget the BLOCK paints at, not the view's — see
+                            # ``_stop_all``'s note: a caller-side approximation
+                            # misses by the transcript's padding cell and the
+                            # glyph gutter, and a row that wraps spends a second
+                            # row of the listing's bound.
+                            NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1)),
+                        ),
+                        "note",
+                    )
+                )
+                return
+            items = [
+                (
+                    conversation_identity(root / "sessions" / entry.id),
+                    entry.completion_token,
+                )
+                for entry in unread
+                if entry.completion_token
+            ]
+            if not items:
+                # No store call AT ALL when nothing is unread: the empty case is
+                # answered from the catalogue read above, so it cannot open a
+                # database (or create one) to acknowledge nothing. Same tier as
+                # the clearing receipt -- it is the answer to what the user just
+                # typed, not background chrome.
+                self._notice("Nothing unread.", "note")
+                return
+            results = await asyncio.to_thread(
+                AttentionStore(root / "attention.db").acknowledge_many, items
+            )
+        except sqlite3.Error:
+            # The same condition the route answers 503 for, and the same promise:
+            # the batch is ONE transaction, so nothing was written and a retry is
+            # the whole remedy. The store's own wording is deliberately not echoed
+            # here for the reason the route refuses to echo it — it can name file
+            # paths, and this text lands in a transcript that gets screenshotted.
+            self._notice(
+                "Read state is busy right now, so nothing was cleared. Try again in a moment.",
+                "warning",
+            )
+            return
+        except Exception as error:  # noqa: BLE001 — report, never leave a silent no-op
+            self._notice(f"/notifications could not read the receipts: {error}", "error")
+            return
+        read = sum(1 for result in results if result["status"] == "read")
+        superseded = sum(1 for result in results if result["status"] == "superseded")
+        unknown = sum(1 for result in results if result["status"] == "unknown")
+        self._notice(_notifications_cleared(read, superseded, unknown), "note")
+        # The sidebar repaints off its own 2 s poll; this only shortens the wait,
+        # through the same call that poll makes.
+        self._refresh_sidebar()
+
     def _clock_ms(self) -> float:
         import time
 
@@ -34980,6 +35141,31 @@ class OperatorApp(App[None]):
                 [ArgumentChoice("--clear", "Clear the standing goal", alert=True)]
                 if getattr(self._session, "goal", "")
                 else []
+            )
+            picker.set_notice("")
+            return
+        if message.command == "notifications":
+            # ONE row, and it is the clearing form — the bare command (which
+            # lists) is what pressing Enter without a space already does, so
+            # offering it here would be a row that restates the submit key.
+            #
+            # `alert=True` for the `/goal --clear` reason, and it matters more
+            # here: the row is pre-selected and the only match, so without the
+            # flag `_picker_choice_is_unambiguous` RUNS it on one Enter — turning
+            # `/notifications ` + Enter, the keystroke a user reaches when they
+            # want to SEE the pile, into a clear. Acknowledging a receipt cannot
+            # be undone, so the first Enter fills `/notifications read` and the
+            # second runs it; a deliberate down-arrow onto the row keeps its one
+            # press, because the editor already treats a move as unambiguous.
+            #
+            # NOT gated on there being anything unread, unlike the `/goal` and
+            # `/loop` rows: that gate is a live-state read they already hold, and
+            # the equivalent here is a catalogue scan per keystroke after the
+            # space — a store walk to decide whether to draw one row. The
+            # ungated clear is not a dead end either: `Nothing unread.` is the
+            # command's own honest answer, the case `_cmd_notifications` names.
+            picker.set_choices(
+                [ArgumentChoice("read", "Mark every unread completion read", alert=True)]
             )
             picker.set_notice("")
             return
@@ -42208,6 +42394,85 @@ class _TreeRow(Text):
                 row.append("  ", style=self._detail_style)
             row.append_text(line)
         yield row
+
+
+#: Rows ``/notifications`` prints before it stops and counts the rest. Ten is a
+#: bound rather than a preference: the notice is one block in the transcript, and
+#: a machine with hundreds of unread completions would otherwise spend the whole
+#: viewport on a listing whose last line — the form that CLEARS them — the user
+#: cannot see.
+NOTIFICATIONS_LISTING_ROWS = 10
+
+
+def _notifications_listing(entries: Sequence[CatalogEntry], budget: int) -> str:
+    """The unread-completion receipt ``/notifications`` prints.
+
+    ``budget`` is the text-column width the notice paints at (``NoticeBlock.
+    body_budget``); a row is truncated to it rather than allowed to wrap, so the
+    count of painted rows is the count of listed rows. Zero-width (or zero) falls
+    back to the untruncated name, exactly as ``/stop all``'s listing does — an
+    unknown budget must not turn a name into an empty cell.
+
+    The mark comes from ``COMPLETION_MARKERS`` — the same table the sidebar and
+    the picker paint from — so one completion kind cannot gain a second glyph
+    here. Its INK is deliberately unused: a notice is tinted by its kind as one
+    statement, and a second colour ramp inside it would be a claim about urgency
+    the listing does not make.
+    """
+    from local_operator.resume import format_age
+    from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    if not entries:
+        return "No unread completions."
+    lines = [f"{len(entries)} unread completion{'' if len(entries) == 1 else 's'}:"]
+    for entry in entries[:NOTIFICATIONS_LISTING_ROWS]:
+        mark = COMPLETION_MARKERS.get(entry.completion_kind, COMPLETION_MARKERS["complete"])[0]
+        lead = f"  {mark} "
+        # The kind is dropped rather than left empty when the store's row predates
+        # the taxonomy: "✓ name —  · 2h" would read as a missing column.
+        kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
+        tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
+        room = budget - len(lead) - len(tail)
+        # The name is the only variable-width cell, so it absorbs the whole
+        # budget: a row that cannot fit its own name is still a row, and one that
+        # wraps is not.
+        label = entry.row.name or "Untitled conversation"
+        lines.append(f"{lead}{truncate_cells(label, room) if room > 0 else label}{tail}")
+    if len(entries) > NOTIFICATIONS_LISTING_ROWS:
+        lines.append(f"  …{len(entries) - NOTIFICATIONS_LISTING_ROWS} more")
+    lines.append("/notifications read clears these")
+    return "\n".join(lines)
+
+
+def _notifications_cleared(read: int, superseded: int, unknown: int) -> str:
+    """What ``/notifications read`` says it did, quoting no clean sweep it missed.
+
+    The leftovers are NAMED, per bucket, because a count that silently dropped
+    them would be the "silent partial success" this design refuses: the row stays
+    unread, so the receipt has to say so. Truncation is not the alternative — a
+    receipt covering a bound the user then has to re-derive from a badge is the
+    same defect one layer out.
+
+    Number agreement is spelled per bucket rather than papered over with a
+    plural-only sentence: these lines are the operator-facing copy, and "Marked 1
+    completions read" is what a receipt that never fires with a count of one
+    looks like.
+    """
+    text = f"Marked {read} completion{'s' if read != 1 else ''} read."
+    if superseded:
+        text += (
+            f" {superseded} have newer results and stay unread."
+            if superseded != 1
+            else " 1 has a newer result and stays unread."
+        )
+    if unknown:
+        text += (
+            f" {unknown} are no longer in the receipt store and stay unread."
+            if unknown != 1
+            else " 1 is no longer in the receipt store and stays unread."
+        )
+    return text
 
 
 def _tree_listing(
