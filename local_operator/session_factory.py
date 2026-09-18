@@ -2679,12 +2679,23 @@ def _make_system_blocks_provider(
 
 def _transcript_dir_and_agent_id(
     agent: AgentData | None, args: argparse.Namespace, agent_registry: AgentRegistry
-) -> tuple[Path, str]:
+) -> tuple[Path, str, bool]:
     """Pick where this session's JSONL transcript lives (CL-02).
 
     ``--resume <id>`` wins over every rule below: it names an existing session
     directory, and reusing it is what makes the transcript replay (the same
     mechanism ``--train`` uses for an agent directory).
+
+    The THIRD element is ``is_new``: this call brings a SESSION directory into
+    existence — a conversation the operator has not been using. It is returned
+    rather than recomputed by the caller because only this frame sees the directory
+    at the moment before anything creates it — the adopt branch below creates it
+    itself, and the lease the caller takes creates it too, so a `not path.exists()`
+    read one frame later answers "no" for every session (review round 3, F1: that is
+    exactly how the escape stamp silently never fired on the phone's first message
+    and the desktop draft). `False` for an ``agents/`` directory, which is not a
+    session at all and which the branch below may well create itself (review round
+    4, F4: the wording is "a session directory", not "any directory").
 
     Legacy ``--train`` semantics:
 
@@ -2730,36 +2741,49 @@ def _transcript_dir_and_agent_id(
             if requested in ("", ".", "..") or Path(requested).name != requested:
                 raise ValueError(f"not a session id: {requested!r}")
             adopted = config_dir / "sessions" / requested
+            # Read BEFORE the mkdir below: the answer belongs to this moment, and
+            # `is_new` is what the escape stamp turns on (see the docstring).
+            is_new = not adopted.exists()
             # Under `LOP_RUNTIME_DEFER_MATERIALISE` the directory is NOT
             # created here: a speculative warm engage (a viewer's first
             # keystroke, before the user has committed to a message) must
             # leave nothing on disk when the draft is abandoned. The first
             # real write materialises it — see `Transcript.__init__`.
             defer = os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1"
-            if not adopted.exists() and not defer:
+            if is_new and not defer:
                 # `parents` because a fresh config dir has no sessions/ yet;
                 # `exist_ok` because two contenders may race here and the
                 # lease, not this mkdir, is what arbitrates between them.
                 adopted.mkdir(parents=True, exist_ok=True)
-            return adopted, str(agent.id) if agent is not None else "main"
+            # `is_new` is true for a deferred engage too: the directory is still
+            # this run's to create, and a harness that asked for the run has its
+            # stamp written. The stamp does not decide whether the directory
+            # exists — `acquire_session_lease` and `claim_session` materialise it
+            # below either way (measured: an unmarked warm engage leaves an empty
+            # `sessions/<id>/`) — it adds `origin.json` inside it, which is what
+            # keeps a harness's engage out of the operator's listings.
+            return adopted, str(agent.id) if agent is not None else "main", is_new
         resumed = resume_dir(config_dir, str(resume))
-        return resumed, str(agent.id) if agent is not None else "main"
+        # `resume_dir` only answers an EXISTING conversation, so this is the
+        # operator's own work by construction.
+        return resumed, str(agent.id) if agent is not None else "main", False
     train = bool(getattr(args, "train", False))
     if agent is not None:
         agent_id = str(agent.id)
         if train:
-            return config_dir / "agents" / agent_id, agent_id
-        session_dir = uuid.uuid4().hex[:12]
-        return config_dir / "sessions" / session_dir, agent_id
+            return config_dir / "agents" / agent_id, agent_id, False
+        session_dir = config_dir / "sessions" / uuid.uuid4().hex[:12]
+        return session_dir, agent_id, True
     if train:
         try:
             autosave = agent_registry.create_autosave_agent()
             agent_id = str(autosave.id)
-            return config_dir / "agents" / agent_id, agent_id
+            return config_dir / "agents" / agent_id, agent_id, False
         except Exception:  # noqa: BLE001 — fall through to ephemeral
             pass
-    session_dir = uuid.uuid4().hex[:12]
-    return config_dir / "sessions" / session_dir, "main"
+    session_dir = config_dir / "sessions" / uuid.uuid4().hex[:12]
+    # A fresh id: nothing can exist there yet, which is what makes it new.
+    return session_dir, "main", True
 
 
 #: The one store-maintenance pass this process will run, or ``None`` before the
@@ -3054,7 +3078,13 @@ async def _prepare(
     )
     yolo = bool(getattr(args, "yolo", False))
 
-    transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
+    transcript_dir, agent_id, is_new = _transcript_dir_and_agent_id(agent, args, agent_registry)
+
+    # Whether no conversation existed at this path before this call, read from
+    # the frame that resolves the id — `_transcript_dir_and_agent_id`'s own
+    # docstring says why recomputing it here answers "no" for every session.
+    # Consumed by the escape stamp further down.
+    fresh_directory = is_new
 
     from local_operator.session.retention import claim_session
     from local_operator.session_lease import acquire_session_lease
@@ -3083,6 +3113,19 @@ async def _prepare(
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
     if transcript_dir.parent.name == "sessions":
+        # A session opened by a harness under the escape hatch
+        # (`agent_shell.py`) is marked as machine-started, so it can never be
+        # offered as a chat the operator opened. HERE rather than in the exec
+        # path, where it started: this is the one place every session gets its
+        # directory — foreground exec, the detached worker, the interactive
+        # viewer's runtime, the server — and the exec-only version left the
+        # interactive path unstamped while the docs promised it (review round
+        # 2, F1). ``fresh_directory`` keeps `--resume` honest: adopting the
+        # operator's own conversation must not hide their chat.
+        from local_operator.agent_shell import stamp_escaped_session
+
+        stamp_escaped_session(transcript_dir, created_here=fresh_directory)
+
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the
         # one place the harness knows it is writing into its own store —
