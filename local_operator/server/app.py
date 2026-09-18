@@ -33,6 +33,7 @@ from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import registry as serve_registry
+from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
 from local_operator.server.desktop import desktop_posture, require_desktop
 from local_operator.server.routes import (
@@ -224,6 +225,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # channel and therefore nothing to retire into (see the branch below).
     retire_task: asyncio.Task[None] | None = None
     retire_stop: asyncio.Event | None = None
+    # The reload task: None when the reload could not be armed (a --reload child,
+    # a boot with no listener of its own, a platform without asyncio signal
+    # handlers), which is a refusal rather than a fault — the daemon then serves
+    # the build it loaded for as long as it runs, exactly as it did before this
+    # existed. It shares ``retire_stop`` because there is one event that means
+    # "this daemon is going away" and two tasks that must observe it.
+    reload_task: asyncio.Task[None] | None = None
+    reload_stop: asyncio.Event | None = None
     if announced is not None:
         # THE BUILD WATCH'S BASELINE IS SAMPLED HERE, BEFORE THE RECORD EXISTS —
         # and the ordering is load-bearing rather than incidental. The baseline
@@ -237,8 +246,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # evidence driver. `LOP_BUILD_PREFIX` is the e2e-only override the
         # reader honours; production reads `sys.prefix`.
         boot_build = buildwatch.boot_build()
+        # ARMED BEFORE THE RECORD EXISTS, and the order is load-bearing rather
+        # than tidy. The record PUBLISHES the capability, so a record written
+        # before the handler was installed would invite a caller to send SIGUSR1
+        # to a process whose default answer to that signal is death. "Armed"
+        # means the handler is in place; the task that acts on a request is
+        # started further down, once the scheduler is up and the record exists.
+        reload_stop = asyncio.Event()
+        reload_watch = serve_reload.install(app, stop=reload_stop)
         serve_record = serve_registry.build_record(
-            instance_id=app.state.instance_id, announced=announced
+            instance_id=app.state.instance_id,
+            announced=announced,
+            # The capability the record publishes and the handler just installed
+            # are ONE decision, so the record is told what `install` actually
+            # did rather than what the process looks like: a --reload child, a
+            # boot with no listener of its own and a platform without asyncio
+            # signal handlers all answer None, and all three would be lying if
+            # this read `listener_fd is not None` instead.
+            reloadable=reload_watch is not None,
         )
         # The config root resolved above, passed explicitly: the publisher pins
         # the directory it publishes into for its whole life, so a heartbeat can
@@ -288,6 +313,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.serve_retire = retire_task
             app.state.serve_retire_stop = retire_stop
 
+            # A REQUESTED reload, which is a different question from the
+            # announcement above and deliberately not part of its poll. The poll
+            # answers "is another build on disk" and must never act on it alone
+            # (a marker proves neither a ready successor nor that
+            # scheduler-owned work can stop). A reload answers "an operator asked
+            # this daemon to move onto the build the pointer names", and it CAN
+            # act, because it keeps this pid, this socket, this cwd and this
+            # environment: there is no successor to be ready, and nothing outside
+            # this process has to bring it back. `serve_reload`'s module docstring
+            # carries the whole argument and the fail-closed rules.
+            #
+            # `reload_watch` is None on every boot that could not be armed, and
+            # that is exactly the set of daemons whose record published
+            # `reloadable: false` — so the capability a reader sees and the task
+            # it can wake are the same decision, made once.
+            if reload_watch is not None:
+                reload_task = asyncio.create_task(reload_watch.run())
+                reload_task.add_done_callback(serve_reload.observe_reload)
+                app.state.serve_reload = reload_task
+
     yield
     try:
         # Clean up on shutdown
@@ -336,6 +381,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # its check sleep, where the event is not what it awaits.
         if retire_stop is not None:
             retire_stop.set()
+        if reload_stop is not None:
+            reload_stop.set()
+        if reload_task is not None:
+            reload_task.cancel()
+            await asyncio.gather(reload_task, return_exceptions=True)
         if retire_task is not None:
             retire_task.cancel()
             await asyncio.gather(retire_task, return_exceptions=True)
@@ -346,6 +396,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.serve_retiring = False
         app.state.serve_retire = None
         app.state.serve_retire_stop = None
+        app.state.serve_reload = None
+        app.state.serve_reload_pending = False
         if serve_heartbeat is not None and serve_publisher is not None:
             serve_heartbeat.cancel()
             await asyncio.gather(serve_heartbeat, return_exceptions=True)
