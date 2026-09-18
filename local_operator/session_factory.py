@@ -2368,15 +2368,17 @@ async def _classification_recommendation(
     try:
         recommendation = await asyncio.wait_for(asyncio.shield(task), timeout=wait_s)
     except asyncio.TimeoutError:
-        # NOT a failure and NOT an empty answer: whatever the call is doing — asking a
-        # vendor, or still resolving the credentials that decide whether there is a vendor
-        # to ask — it is still in flight and the turn is not waiting any longer. The prompt
-        # is unchanged either way (§7), so the only thing worth saying is that something is
-        # still running and where its answer would go.
+        # NOT a failure and NOT an empty answer: whatever the budgeted task is doing —
+        # asking a vendor, or still resolving the credentials that decide whether there is
+        # a vendor to ask — the turn is not waiting any longer. The prompt is unchanged
+        # either way (§7), so the line says only that there is no recommendation yet and
+        # where one would go if it came: it must not assert a call in flight or an answer
+        # owed, because on the slow-resolution-no-provider path neither is true
+        # (review round 3, N1).
         logger.info(
-            "classification: no recommendation within %.0f ms; the call is still in flight "
-            "and the turn continues without one (its answer is delivered to this turn's next "
-            "step, or — if the turn ends first — to the next user message)",
+            "classification: no recommendation within %.0f ms; the turn continues without "
+            "one (an answer that arrives later is delivered to this turn's next step, or — "
+            "if the turn ends first — to the next user message)",
             wait_s * 1000,
         )
         return None
