@@ -118,6 +118,13 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
+from local_operator.scratchpad import (
+    SCRATCHPAD_NAMESPACE,
+    SCRATCHPAD_SCHEME,
+    SCRATCHPAD_UNAVAILABLE,
+    ScratchpadPathError,
+    parse_scratchpad_url,
+)
 from local_operator.tools import group_reaper
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
@@ -1060,6 +1067,40 @@ def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
     return f"run: {_display_target(command)}" if command else ""
 
 
+#: A scheme-shaped target, anchored: `scheme://`. A PATH is allowed to contain
+#: `://` (`~/x://y`), where the workspace verdict still applies — but the pattern
+#: is CASE-INSENSITIVE, because the tools dispatch on the scheme case-insensitively
+#: (`_has_scratchpad_scheme`) and the parser is where the spelling is corrected.
+#: Matching only lower-case here made `C://tmp/x.txt` and `SCRATCHPAD://x.md`
+#: prompt as an in-workspace PATH that the tool then refuses (round 2, MINOR-1).
+_SCHEME_SHAPED_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+
+
+def _scratchpad_display_target(url: str, context: ToolContext | None) -> str | None:
+    """The absolute path a scratchpad URL will touch, for the approval prompt.
+
+    Best-effort by design: a stranger scheme, an unavailable root, or a URL the
+    parser refuses all answer ``None``, and the prompt then names only the URL.
+    An approval prompt that GUESSES a path is worse than one that shows less —
+    the tool's own error reports the refusal.
+    """
+    if not _has_scratchpad_scheme(url):
+        return None
+    root = _scratchpad_root(context)
+    if root is None:
+        return None
+    try:
+        target = parse_scratchpad_url(url, root)
+    except ScratchpadPathError:
+        return None
+    # A DIRECTORY target is refused by every caller of this describer (``write`` and
+    # ``edit`` take a file, and the bare ``scratchpad://`` names the root), so naming
+    # its folder would ask a person to approve a write that cannot happen and touches
+    # nothing. The fallback — the URL alone — is what the "never a guessed path"
+    # contract already promises (round 2, D9).
+    return None if target.directory else str(target.path)
+
+
 def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeFn:
     """``<action>: <resolved path>``, marked when the path leaves the workspace.
 
@@ -1067,9 +1108,15 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
     uses, so the sentence the user answers names the file the tool will touch —
     `../../etc/hosts` and `~/x` are the two forms where the raw string and the
     target genuinely differ.
+
+    The describer also takes the turn's ``context`` when the host offers it (see
+    ``AgentLoop._approval_summary``), because a ``scratchpad://`` target has
+    no path to resolve without the session's root — and a prompt that names only
+    the URL is asking the user to authorise a file it will not name (design
+    round 1, D5).
     """
 
-    def describe(args: dict[str, Any], cwd: str) -> str:
+    def describe(args: dict[str, Any], cwd: str, context: ToolContext | None = None) -> str:
         # NOT stripped: `execute_write` and `execute_edit` pass the raw string to
         # the resolver, and " notes.md" and "notes.md" are different files on a
         # POSIX filesystem. A prompt that quietly normalises names a file the tool
@@ -1077,6 +1124,24 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
         raw = str(args.get(key) or "")
         if not raw.strip():
             return ""
+        if _SCHEME_SHAPED_RE.match(raw.strip()):
+            # A URL is not a path, so the workspace resolver must not judge it:
+            # it would resolve ``scratchpad://x.md`` — or any stranger scheme —
+            # as the relative path ``<cwd>/scratchpad:/x.md`` and mark it
+            # ``[outside workspace]``. That is a false escalation on a target
+            # which is either the session's own (``scratchpad://``, already
+            # proved contained by the parser) or one the tool will refuse
+            # outright. The URL is the decision here, so the prompt names it —
+            # AND, when the scratchpad root is available, the file it lands on,
+            # exactly as an ordinary path prompt names its target.
+            #
+            # Matched on the scheme SHAPE, not on `"://" in raw`: a PATH can
+            # contain that substring (`~/x://y`), and skipping resolution for it
+            # dropped the `[outside workspace]` marker from a target that really
+            # is outside (review round 1, R3).
+            shown = _display_target(raw.strip())
+            resolved = _scratchpad_display_target(raw.strip(), context)
+            return f"{action}: {shown} -> {resolved}" if resolved else f"{action}: {shown}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw, cwd or ".")
         except (OSError, ValueError, RuntimeError):
@@ -1212,6 +1277,11 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         raw_path = str(args.get("path") or "")
         if not raw_path.strip():
             return "screenshot to a temporary file"
+        if _SCHEME_SHAPED_RE.match(raw_path.strip()):
+            # This tool resolves no scheme, so the call will be refused: naming
+            # the mangled relative path ``<cwd>/scratchpad:/shot.png`` the
+            # resolver would invent would describe a write that never happens.
+            return f"screenshot: {_display_target(raw_path.strip())}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
@@ -2849,7 +2919,7 @@ class ReadParams(BaseModel):
             "File path (absolute or relative to the working directory), or an "
             "internal URL: skill://<name> (its reference files via "
             "skill://<name>/<relpath>, listed at the end of the skill body — "
-            "never via a raw filesystem path), or spill://<id> to expand an "
+            "never via a raw filesystem path), spill://<id> to expand an "
             "output that was truncated (append '?q=<regex>' to search inside "
             "it instead of paging through it)."
         )
@@ -2935,7 +3005,9 @@ def _fits_output_budget(body: str) -> bool:
     return len(body) <= READ_OUTPUT_LIMIT_CHARS
 
 
-def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
+def _clamp_file_body(
+    body: str, path: Path, start: int, total: int, *, display: str | None = None
+) -> str:
     """Hold one ``read`` result inside the char budget.
 
     A file needs no spill entry: the file IS the store, it is already on disk,
@@ -2947,6 +3019,13 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     by line and the model chose the offset, so the useful continuation is
     "carry on from where this stopped"; splicing in a tail would break the
     contiguity that makes a numbered listing readable.
+
+    ``display`` is the caller's own spelling of the file, and the continuation
+    suggests THAT rather than the resolved absolute path. For a scratchpad file
+    the two are the difference between a continuation that costs nothing and one
+    that is outside the workspace: the absolute path is a read the write/read
+    gate escalates to an approval prompt, while ``scratchpad://big.md`` is the
+    same continuation the caller already made (QA round 1, Q3).
     """
     if _fits_output_budget(body):
         return body
@@ -2958,7 +3037,7 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     return (
         f"{clipped}\n\n[truncated at {READ_OUTPUT_LIMIT_CHARS} chars; "
         f"{total - next_line + 1} of {total} lines not shown. Continue with "
-        f'read(path="{path}", range="{next_line}-{next_line + 200}") '
+        f'read(path="{display or path}", range="{next_line}-{next_line + 200}") '
         f"or narrow with grep]"
     )
 
@@ -3625,13 +3704,18 @@ def _structural_summary_result(
     return _text(tool_call_id, "read", header + "\n" + body + footer, details=details)
 
 
-def _list_dir_entries(path: Path) -> list[str]:
+def _list_dir_entries(path: Path, *, skip_dotfiles: bool = False) -> list[str]:
     """One directory's entries, directories marked with a trailing ``/``.
 
     Synchronous by design: ``asyncio.to_thread`` is the only caller, and the
     shape is exactly what the loop-bound listing used to build inline.
+
+    ``skip_dotfiles`` serves the scratchpad listing, whose reader refuses dotfiles
+    by name (``parse_scratchpad_url``): advertising a name that cannot be read is the
+    own-goal ``skills/protocol.py`` warns about, so the two rules agree here.
     """
-    return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+    entries = (p for p in path.iterdir() if not (skip_dotfiles and p.name.startswith(".")))
+    return sorted(p.name + ("/" if p.is_dir() else "") for p in entries)
 
 
 def _read_file_snapshot(path: Path) -> tuple[int, ImageInfo | None, bytes | None]:
@@ -3980,21 +4064,34 @@ async def execute_read(
             is_error=is_error,
         )
 
+    # ``scratchpad://`` is served HERE (not by the resolver): it is a real
+    # directory in the session's own folder, addressed by a scheme, and one
+    # scheme covers read, write and edit. Above the catch-all below, which would
+    # otherwise answer every scratchpad URL with "the resolver does not handle
+    # this URL" — the exact misleading error this branch exists to remove. Below
+    # ``spill://`` and http(s), whose prefixes cannot collide.
+    if _has_scratchpad_scheme(target):
+        return await _read_scratchpad(tool_call_id, target, params, context)
+
     # Internal URLs (skill://...) go through the session-installed resolver.
-    if "://" in target and not target.startswith(("http://", "https://", "file://")):
+    if "://" in target and not target.startswith(("http://", "https://")):
         resolver = getattr(context, "resolve_internal_url", None) if context else None
         if resolver is None:
             return _error(
                 tool_call_id,
                 "read",
-                f"Cannot resolve '{target}': no internal URL resolver is available.",
+                f"Cannot resolve '{target}': no internal URL resolver is available. "
+                "read takes a filesystem path, or one of its own internal URLs — "
+                f"{SCRATCHPAD_SCHEME}<name> is this session's own scratch area.",
             )
         content = resolver(target)
         if content is None:
             return _error(
                 tool_call_id,
                 "read",
-                f"Cannot resolve '{target}': the resolver does not handle this URL.",
+                f"Cannot resolve '{target}': the resolver does not handle this URL. "
+                "read takes a filesystem path, or one of its own internal URLs — "
+                f"{SCRATCHPAD_SCHEME}<name> is this session's own scratch area.",
             )
         # Deliberately NO supersede_key here. This path serves internal URLs
         # (skill://, guide://, mcp://), and skill reads are exempt from pruning
@@ -4012,6 +4109,284 @@ async def execute_read(
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
+    return await _read_path(
+        tool_call_id, params, context, path=path, inside=inside, resolvable=resolvable
+    )
+
+
+# ---------------------------------------------------------------------------
+# URL schemes in path arguments
+# ---------------------------------------------------------------------------
+
+
+def _has_scratchpad_scheme(raw: str) -> bool:
+    """True when ``raw`` spells the scratchpad scheme, in any case.
+
+    Dispatch is case-INSENSITIVE here and the parser is case-SENSITIVE (see
+    ``parse_scratchpad_url``): ``SCRATCHPAD://x`` has to reach the parser to be
+    told the scheme is written lower-case, instead of being refused here as a
+    stranger scheme and answering a question the caller did not ask. Two rules
+    for one string is how the contradiction in review round 1 (R7) happened.
+    """
+    return raw.strip().lower().startswith(SCRATCHPAD_SCHEME)
+
+
+def _scheme_refusal(
+    tool_call_id: str,
+    tool_name: str,
+    raw: str,
+    *,
+    serves: str | None = None,
+    remedy: str | None = None,
+) -> ToolResult | None:
+    """Refuse a URL scheme THIS tool does not serve, or ``None`` to proceed.
+
+    Without this, a path argument carrying ANY scheme falls through to the
+    workspace resolver, which reads it as a RELATIVE path: ``notes://x.py``
+    resolves to ``<cwd>/notes:/x.py``, and ``write`` then creates a literal
+    ``notes:`` directory inside the user's working directory. That is silent
+    litter — no approval, because a fresh path inside the workspace reads as
+    ordinary — and it is what a model does out of habit or from a typo.
+
+    ``serves`` is the one scheme the CALLING tool resolves itself, and it is a
+    parameter rather than a blanket allowance for ``scratchpad://``: a tool that
+    cannot serve the scheme must refuse it too, or the refusal text itself
+    ("the one URL scheme grep takes is ``scratchpad://<name>``") walks the
+    caller into the bug it is warning about — ``grep path=scratchpad://perf.md``
+    then reads ``<cwd>/scratchpad:/perf.md``, and ``browser`` WROTE a screenshot
+    to ``<cwd>/scratchpad:/shot.png`` and reported success (round 1, R1/Q1).
+    """
+    stripped = raw.strip()
+    if "://" not in stripped:
+        return None
+    if serves is not None and stripped.lower().startswith(serves):
+        return None
+    scheme = stripped.split("://", 1)[0]
+    if serves is not None:
+        return _invalid_arguments(
+            tool_call_id,
+            tool_name,
+            f"{scheme}:// is not a scheme {tool_name} can resolve, so nothing was written: "
+            f"'{raw}' is a URL, not a path. The one URL scheme {tool_name} takes is "
+            f"{serves}<name> (this session's own scratch area); every other "
+            "argument is a plain filesystem path.",
+        )
+    # This tool serves NO scheme, so the remedy is a path — and the way to get one
+    # for a file in the session's scratch area is usually to read it with the scheme
+    # and use the absolute path that result prints. A caller that cannot USE such a
+    # path passes its own remedy instead: ``glob`` searches the working directory
+    # and refuses absolute patterns, so "pass the absolute path" is a dead end
+    # there (round 2, Q7).
+    remedy_text = remedy or (
+        "For a file in this session's scratch area, read it first with "
+        f'read(path="{SCRATCHPAD_SCHEME}<name>") and pass the absolute path that result prints.'
+    )
+    return _invalid_arguments(
+        tool_call_id,
+        tool_name,
+        f"{scheme}:// is a URL, and {tool_name} takes only filesystem paths: reading '{raw}' "
+        f"as one would walk the relative path '{scheme}:' plus the rest, under the working "
+        "directory, so it is refused and nothing was touched. " + remedy_text,
+    )
+
+
+# ---------------------------------------------------------------------------
+# scratchpad:// — the session's own scratch area
+# ---------------------------------------------------------------------------
+
+
+def _scratchpad_root(context: ToolContext | None) -> Path | None:
+    """The scratchpad root off the context, or ``None``. ``""`` reads as ``None``.
+
+    ``""`` is treated as absent rather than as a path: ``Path("")`` is the cwd,
+    which would silently make the whole working directory listable through the
+    scheme.
+    """
+    raw = getattr(context, "scratchpad_dir", None) if context else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    return Path(raw)
+
+
+def _scratchpad_address(result: ToolResult, url: str, path: Path) -> ToolResult:
+    """Put the RESOLVED ABSOLUTE PATH into the result TEXT.
+
+    The result text is the only signal BOTH consumers get: the agent, which
+    needs a path ``bash``/``ls``/``grep``/``eval`` can take (they cannot resolve
+    a scheme), and the desktop Files panel, which infers its tiles from
+    transcript text and needs an absolute path to open one. Placed at the HEAD,
+    because the 8 KiB output clamp keeps the head.
+    """
+    if result.is_error or not result.content:
+        return result
+    first = result.content[0]
+    if not isinstance(first, TextContent):
+        return result
+    return result.model_copy(
+        update={
+            "content": [TextContent(text=f"{url} -> {path}\n{first.text}"), *result.content[1:]]
+        }
+    )
+
+
+def _scratchpad_listing(
+    tool_call_id: str, url: str, directory: Path, context: ToolContext | None
+) -> ToolResult:
+    """The one directory level ``url`` names, in the shape the file listing uses.
+
+    The header is ``<url> -> <absolute path> (<n> entries):`` — the URL as
+    typed, then where it resolved. It deliberately does NOT name the scheme
+    again ("scratchpad listing scratchpad://…" wraps a 100-column pane and says
+    the same thing twice), and the count is singular for one file, because a
+    "1 entries" header is the kind of seam that makes a reader distrust the
+    number beside it (design round 1).
+
+    Entries stay RELATIVE, which is the deliberate trade: an absolute path per
+    entry would cost ~30 tokens on every listing to buy a Files-panel tile for a
+    name the agent can see anyway.
+    """
+    entries = _list_dir_entries(directory, skip_dotfiles=True) if directory.is_dir() else []
+    count = len(entries)
+    header = f"{url} -> {directory} ({count} {'entry' if count == 1 else 'entries'}):"
+    if entries:
+        body = f"{header}\n" + "\n".join(entries)
+    else:
+        # The extra line appears only when there is nothing to list: that is the
+        # state where the agent needs its next move, and a non-empty listing
+        # needs nothing but its names.
+        body = (
+            f"{header}\n"
+            f"(nothing here yet; write one with "
+            f'write(path="{SCRATCHPAD_SCHEME}name.md", content="…"))'
+        )
+    # Bounded like every other read outcome: a wide directory cannot inject an
+    # unbounded result into the transcript.
+    text, spill = spill_truncate(body, "read", context, READ_OUTPUT_LIMIT_CHARS)
+    # ``path`` and never ``url``: ``details['url']`` means "an internal URL the
+    # resolver served" (the contract the catch-all branch documents), and
+    # compaction's supersede keys read ``path`` first.
+    return _text(tool_call_id, "read", text, details={"path": str(directory), **(spill or {})})
+
+
+def _scratchpad_target(
+    tool_call_id: str, tool_name: str, url: str, context: ToolContext | None
+) -> Path | ToolResult:
+    """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
+
+    Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
+    cannot forget part of: no scratchpad root, a malformed URL, and a URL that
+    names a directory. A scratchpad file needs a file name —
+    ``write(path="scratchpad://")`` is a refusal, not a silent write to the
+    directory's own path.
+    """
+    root = _scratchpad_root(context)
+    if root is None:
+        return _error(tool_call_id, tool_name, SCRATCHPAD_UNAVAILABLE)
+    try:
+        target = parse_scratchpad_url(url, root)
+    except ScratchpadPathError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
+    if target.directory:
+        # ``scratchpad://`` rstrips to ``scratchpad:`` — the scheme separator IS
+        # the trailing slash — so the root example is spelled out rather than
+        # derived from a string that has already lost the only marker that
+        # mattered.
+        stem = url.rstrip("/")
+        example = (
+            f"{SCRATCHPAD_SCHEME}name.md"
+            if stem == SCRATCHPAD_SCHEME.rstrip("/")
+            else f"{stem}/name.md"
+        )
+        return _invalid_arguments(
+            tool_call_id,
+            tool_name,
+            f"A {SCRATCHPAD_NAMESPACE} URL must name a file, not the folder itself: {url} "
+            f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. '{example}'; "
+            f'read(path="{url}") lists what is already there.',
+        )
+    # The root is created lazily by the write itself (``path.parent``), so a
+    # scratchpad directory that does not exist yet is a normal first write.
+    return target.path
+
+
+async def _read_scratchpad(
+    tool_call_id: str, url: str, params: ReadParams, context: ToolContext | None
+) -> ToolResult:
+    """Serve ``scratchpad://``: a listing, or one file through the file ladder.
+
+    Deliberately NOT routed through ``ToolContext.resolve_internal_url``: a
+    resolver returns ONE opaque string, so it cannot express a listing, cannot
+    express a RANGE, and could never serve a WRITE — and one scheme covering
+    read, write and edit is the whole point of ``scratchpad://``.
+    """
+    root = _scratchpad_root(context)
+    if root is None:
+        return _error(tool_call_id, "read", SCRATCHPAD_UNAVAILABLE)
+    try:
+        target = parse_scratchpad_url(url, root)
+    except ScratchpadPathError as exc:
+        return _invalid_arguments(tool_call_id, "read", str(exc))
+    # A URL that named a directory, and one that names a directory on disk
+    # without saying so (``scratchpad://logs``), both list. One level, like the
+    # file listing; ``read scratchpad://logs/`` descends explicitly.
+    if target.directory and target.path.is_file():
+        # The trailing slash says directory and the disk says file. Listing it
+        # answered "0 entries … nothing here yet" for a file the caller can
+        # plainly see (round 1, R6).
+        return _invalid_arguments(
+            tool_call_id,
+            "read",
+            f"{url} names a directory, but it is a file: drop the trailing '/' to read it.",
+        )
+    if target.directory or target.path.is_dir():
+        return _scratchpad_listing(tool_call_id, url, target.path, context)
+    if not target.path.exists():
+        return _error(
+            tool_call_id,
+            "read",
+            f"Scratchpad file does not exist: {url}. Write it first with "
+            f'write(path="{url}", content="…").',
+        )
+    # ``inside=True`` unconditionally: the scratchpad root is outside the
+    # working directory by construction, and ``parse_scratchpad_url`` has
+    # already proved this path contained in it — so the ``[outside workspace]``
+    # escalation, which exists to flag a path that left the workspace, would be
+    # false here and must not fire.
+    result = await _read_path(
+        tool_call_id,
+        params,
+        context,
+        path=target.path,
+        inside=True,
+        resolvable=True,
+        display_path=url,
+    )
+    return _scratchpad_address(result, url, target.path)
+
+
+async def _read_path(
+    tool_call_id: str,
+    params: ReadParams,
+    context: ToolContext | None,
+    *,
+    path: Path,
+    inside: bool,
+    resolvable: bool,
+    display_path: str | None = None,
+) -> ToolResult:
+    """The file half of ``read``: one path, every classification and bound.
+
+    Split out of :func:`execute_read` so the scratchpad scheme reuses THIS
+    ladder rather than growing a second one. Deliberately NOT decorated with
+    ``_guard``: its only caller is the guarded ``execute_read``, and a second
+    guard would turn one unexpected raise into two "read failed unexpectedly"
+    results.
+
+    ``display_path`` is the caller's own spelling of ``path`` (the URL, for a
+    scratchpad file) and is used ONLY in the continuation hint — the result text
+    still carries the resolved absolute path, which is what the agent's other
+    tools and the desktop Files panel both need.
+    """
     if not path.exists():
         message = f"Path does not exist: {path}"
         # Skills are virtual resources, not files on disk. Point the agent to
@@ -4106,7 +4481,7 @@ async def execute_read(
                 # exact total with a count-only pass over the same bytes
                 # whenever the rendered head does not fit this budget.
                 assert total is not None
-                rendered = _clamp_file_body(body, path, start, total)
+                rendered = _clamp_file_body(body, path, start, total, display=display_path)
             return _text(
                 tool_call_id,
                 "read",
@@ -4194,14 +4569,18 @@ async def execute_read(
         return _text(
             tool_call_id,
             "read",
-            _clamp_file_body(body, path, 1, len(lines))
+            _clamp_file_body(body, path, 1, len(lines), display=display_path)
             + f"\n\n[{remaining} more lines in file. Use range to continue]",
             details={"path": str(path)},
         )
     return _text(
         tool_call_id,
         "read",
-        _clamp_file_body(_number_lines(lines, 1), path, 1, len(lines)) if lines else "(empty file)",
+        (
+            _clamp_file_body(_number_lines(lines, 1), path, 1, len(lines), display=display_path)
+            if lines
+            else "(empty file)"
+        ),
         details={"path": str(path)},
     )
 
@@ -5258,9 +5637,39 @@ async def execute_edit(
             "nothing to edit: pass 'edits' (preferred) or old_text/new_text.",
         )
 
-    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
+    raw = params.path
+    # A scheme is refused before the resolver sees it (see ``_scheme_refusal``),
+    # and ``scratchpad://`` is resolved here rather than through the workspace
+    # resolver, which would treat the scheme as a relative path and hand the
+    # approval prompt a nonsense target under the cwd. The unstripped string
+    # still goes to the resolver for every other path: " x.md" and "x.md" are
+    # different files, and normalising names a file the caller did not ask for.
+    refusal = _scheme_refusal(tool_call_id, "edit", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is not None:
+        return refusal
+    url = raw.strip()
+    if _has_scratchpad_scheme(url):
+        scratchpad_target = _scratchpad_target(tool_call_id, "edit", url, context)
+        if isinstance(scratchpad_target, ToolResult):
+            return scratchpad_target
+        path = scratchpad_target
+    else:
+        path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
     if not path.is_file():
-        return _error(tool_call_id, "edit", f"File does not exist: {path}")
+        # Name the URL when the caller used one: the raw string is what the
+        # model typed, and echoing the mangled filesystem path the scheme would
+        # have resolved to is a name it never used.
+        return _error(
+            tool_call_id,
+            "edit",
+            (
+                f"Scratchpad file does not exist: {url}. Write it first with "
+                f'write(path="{url}", content="…").'
+                if _has_scratchpad_scheme(url)
+                else f"File does not exist: {path}. Write it first with "
+                f'write(path="{path}", content="…"), or check the path with a listing read.'
+            ),
+        )
 
     # Read/match/replace/write/diff in a thread. Main's multi-hunk edit grew
     # substantially after the first liveness fix, but its contract is the
@@ -5273,10 +5682,14 @@ async def execute_edit(
     if isinstance(outcome, str):
         return _error(tool_call_id, "edit", outcome)
     total_replacements, details = outcome
+    # The URL is echoed for a scratchpad file so the result text reads as the
+    # address the agent used, followed by where it landed
+    # (see ``_scratchpad_address``).
+    where = f"{url} -> {path}" if _has_scratchpad_scheme(url) else str(path)
     return _text(
         tool_call_id,
         "edit",
-        f"Edited {path}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
+        f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
         details=details,
     )
 
@@ -5588,8 +6001,23 @@ async def execute_write(
         return _validation_error(tool_call_id, "write", exc)
     if not params.path.strip():
         return _error(tool_call_id, "write", "path must be a non-empty string")
-    # Write-tier approval is the loop's gate; see execute_bash.
-    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
+    # Write-tier approval is the loop's gate; see execute_bash. Same split as
+    # ``execute_edit``, and for the same reason: a scheme must not reach the
+    # workspace resolver, whose verdict feeds the approval prompt — and an
+    # UNRECOGNISED scheme must not silently become a relative path, which is how
+    # ``notes://x.py`` would create a literal ``notes:`` directory here.
+    raw = params.path
+    refusal = _scheme_refusal(tool_call_id, "write", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is not None:
+        return refusal
+    url = raw.strip()
+    if _has_scratchpad_scheme(url):
+        scratchpad_target = _scratchpad_target(tool_call_id, "write", url, context)
+        if isinstance(scratchpad_target, ToolResult):
+            return scratchpad_target
+        path = scratchpad_target
+    else:
+        path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
 
     # The read-modify-write-diff block runs in a thread: the loop this
     # coroutine rides is the SAME loop that renders the TUI, and a previous
@@ -5599,10 +6027,21 @@ async def execute_write(
     # intermittent whole-screen freeze; off it, the frame keeps animating.
     existed, details = await asyncio.to_thread(_write_file_result, path, params.content)
     verb = "Overwrote" if existed else "Created"
+    # ``_write_file_result_locked`` creates parents, so a nested scratchpad file
+    # (``scratchpad://runs/deep.csv``) needs no special case here.
+    is_scratchpad = _has_scratchpad_scheme(url)
+    where = f"{url} -> {path}" if is_scratchpad else str(path)
+    # The lifetime is a PERSON's concern — the agent is told once, in the guide —
+    # so it is stated where a person reads it: the receipt that announces a NEW
+    # file to whoever is watching the transcript or the Files panel. Only on the
+    # create, because the store is session-scoped: every file in it was created
+    # in this session, so the create receipt already covers all of them, and an
+    # overwrite receipt would restate the same fact on every edit (UX round 1, U1).
+    lifetime = " — deleted with the session" if is_scratchpad and not existed else ""
     return _text(
         tool_call_id,
         "write",
-        f"{verb} {path} ({len(params.content)} chars).",
+        f"{verb} {where} ({len(params.content)} chars){lifetime}.",
         details=details,
     )
 
@@ -5936,6 +6375,31 @@ async def execute_glob(
     pattern = params.pattern.strip()
     if not pattern:
         return _error(tool_call_id, "glob", "pattern must be a non-empty string")
+    # A scheme in a PATTERN is a URL, and this tool resolves none: it would match
+    # nothing (a glob is relative to the working directory, and a scheme is not a
+    # path component), so the caller reads "No paths matched pattern
+    # 'scratchpad://*.md'" as "the file is not there" rather than "this tool
+    # cannot be addressed that way" — the same misleading-answer class the other
+    # path-taking tools refuse. Found while sweeping for the tools that take a
+    # path string (round 1, per-tool refusal).
+    if "://" in pattern:
+        # Its own remedy, not the shared one: this tool's patterns are relative to
+        # the working directory and an absolute pattern is refused below, so
+        # "pass the absolute path read prints" is a route glob cannot take
+        # (round 2, Q7).
+        refusal = _scheme_refusal(
+            tool_call_id,
+            "glob",
+            pattern,
+            remedy=(
+                "glob searches the working directory with a relative pattern, so it cannot be "
+                f'pointed at a scratchpad file at all: read it with read(path="{SCRATCHPAD_SCHEME}'
+                '<name>"), or search inside it with grep(path=<the absolute path that read '
+                "prints>)."
+            ),
+        )
+        if refusal is not None:
+            return refusal
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
         message = (
             "pattern must be a relative glob within the working directory "
@@ -6338,6 +6802,14 @@ async def execute_grep(
         # Malformed: `pattern` is typed `string`, so an unbalanced group passes
         # schema validation and only fails here. The model could have known.
         return _invalid_arguments(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
+
+    # A URL argument is refused before resolution: `grep <pattern> path=notes://x.py`
+    # would otherwise walk the bogus relative path `<cwd>/notes:/x.py`. ``grep``
+    # serves no scheme at all, ``scratchpad://`` included — it cannot resolve one,
+    # and the absolute path its results print is what this tool takes.
+    refusal = _scheme_refusal(tool_call_id, "grep", params.path)
+    if refusal is not None:
+        return refusal
 
     cwd = _safe_cwd(context)
     target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
@@ -8796,6 +9268,9 @@ async def _browser_screenshot(
         # `call.raw_arguments` and resolution was invisible to the person
         # answering.) `inside` is deliberately unused: unlike read/grep this tool
         # has no read-tier to escalate FROM, and `write` already always prompts.
+        refusal = _scheme_refusal(tool_call_id, "browser", raw_path)
+        if refusal is not None:
+            return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
     else:
@@ -10382,6 +10857,9 @@ async def _bridge_action(
     # The extension returns bytes, never a filesystem path. The Python tool
     # keeps path resolution, PNG validation and write approval in one place.
     if params.path:
+        refusal = _scheme_refusal(tool_call_id, "browser", params.path)
+        if refusal is not None:
+            return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
         target = str(resolved)
     else:

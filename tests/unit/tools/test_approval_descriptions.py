@@ -55,10 +55,12 @@ class _Scheduler:
         return None
 
 
-def _summary(tool, arguments: dict[str, object], cwd: str = ".") -> str:
+def _summary(
+    tool, arguments: dict[str, object], cwd: str = ".", context: ToolContext | None = None
+) -> str:
     """The exact string the loop hands the approval prompt."""
     call = ToolCall(id="c1", name=tool.name, arguments=arguments, raw_arguments="")
-    return AgentLoop._approval_summary(tool, call, cwd)
+    return AgentLoop._approval_summary(tool, call, cwd, context)
 
 
 def test_every_write_exec_tool_describes_its_own_approval() -> None:
@@ -519,3 +521,143 @@ def test_a_dotted_path_inside_the_workspace_is_not_called_outside_it() -> None:
     # A real escape still says what it is.
     escaped = _summary(build_write_tool(), {"path": "/etc/hosts"}, "/tmp/ws")
     assert escaped.startswith(OUTSIDE_MARKER)
+
+
+def test_a_url_argument_is_named_without_a_false_outside_workspace_escape(
+    tmp_path: Path,
+) -> None:
+    """A scratchpad URL points into the session's own folder, which is outside the
+    working directory by construction — so the workspace resolver, which is what
+    produces the hazard marker, must not be run on a URL at all. Left to it,
+    `scratchpad://runs/perf.md` resolves as the relative path
+    `<cwd>/scratchpad:/runs/perf.md` and the prompt reads `[outside workspace]
+    write: …/scratchpad:/runs/perf.md`: a false escalation on a target the parser
+    has already proved contained, about a path that does not exist, which the
+    user is then asked to weigh as an escape.
+
+    A stranger scheme (`notes://…`) gets the same treatment for a different
+    reason: the tool refuses it outright, so the prompt must not dress it up as a
+    path either.
+    """
+    for tool in (build_write_tool(), build_edit_tool()):
+        for url in (
+            "scratchpad://perf.md",
+            "scratchpad://runs/deep.csv",
+            "notes://perf.md",
+        ):
+            described = _summary(tool, {"path": url}, str(tmp_path))
+            assert described == f"{tool.name}: {url}", described
+            assert OUTSIDE_MARKER not in described
+            assert UNRESOLVABLE_MARKER not in described
+
+    # The marker this replaces is still doing its job for a real escape.
+    escaped = _summary(build_write_tool(), {"path": "/etc/hosts"}, str(tmp_path))
+    assert escaped.startswith(OUTSIDE_MARKER)
+
+
+# ---------------------------------------------------------------------------
+# URL targets in a path argument: what the prompt names
+# ---------------------------------------------------------------------------
+
+
+def test_a_path_that_merely_contains_a_scheme_is_still_judged(tmp_path: Path) -> None:
+    """The first version skipped resolution for any argument containing ``://``,
+    which silently dropped the hazard marker from a PATH that has one in its
+    NAME: ``~/x://y`` is an outside-the-workspace write and was prompting as
+    ``write: ~/x://y`` with no ``[outside workspace]`` (review round 1, R3)."""
+    tool = AgentTool(
+        name="write",
+        approval_tier="write",
+        execute=_unused_execute,
+        describe_approval=builtin._describe_path_approval("write"),
+    )
+    described = _summary(tool, {"path": "~/x://y"}, str(tmp_path))
+    assert described.startswith(OUTSIDE_MARKER), described
+
+
+def test_a_scratchpad_target_names_the_file_it_will_touch(tmp_path: Path) -> None:
+    """A URL target used to be echoed as a URL, so a person authorising a
+    scratchpad write was never told WHICH file appears — while an ordinary write
+    names its resolved destination. The describer gets the turn's context (opt-in
+    by parameter name) and resolves it the way the tool itself will (D5)."""
+    pad = tmp_path / "sessions" / "s" / "scratchpad"
+    context = ToolContext(cwd=str(tmp_path), session_id="s", scratchpad_dir=str(pad))
+    tool = AgentTool(
+        name="write",
+        approval_tier="write",
+        execute=_unused_execute,
+        describe_approval=builtin._describe_path_approval("write"),
+    )
+
+    described = _summary(tool, {"path": "scratchpad://run/perf.md"}, str(tmp_path), context)
+    assert described == f"write: scratchpad://run/perf.md -> {pad / 'run' / 'perf.md'}"
+
+    # No root (a host with no session), an unparseable URL, or a stranger scheme:
+    # the URL alone, never a guessed path.
+    assert _summary(tool, {"path": "scratchpad://perf.md"}, str(tmp_path)) == (
+        "write: scratchpad://perf.md"
+    )
+    assert _summary(tool, {"path": "scratchpad://../x.md"}, str(tmp_path), context) == (
+        "write: scratchpad://../x.md"
+    )
+    assert _summary(tool, {"path": "notes://perf.md"}, str(tmp_path), context) == (
+        "write: notes://perf.md"
+    )
+
+    # A URL in ANY case is named as a URL, not resolved as an in-workspace PATH:
+    # the pattern is case-insensitive because the tools dispatch that way, and a
+    # prompt that showed `<cwd>/C:/tmp/x.txt` described a path the tool refuses
+    # (round 2, MINOR-1).
+    assert _summary(tool, {"path": "C://tmp/x.txt"}, str(tmp_path), context) == (
+        "write: C://tmp/x.txt"
+    )
+    assert _summary(tool, {"path": "SCRATCHPAD://x.md"}, str(tmp_path), context) == (
+        "write: SCRATCHPAD://x.md"
+    )
+
+    # The bare scheme names the ROOT, which ``write`` then refuses: naming the
+    # resolved folder would ask a person to approve a write that cannot happen
+    # (round 2, D9).
+    bare = _summary(tool, {"path": "scratchpad://"}, str(tmp_path), context)
+    assert bare == "write: scratchpad://"
+
+
+def test_a_screenshot_to_a_scheme_url_names_the_url_not_a_mangled_path(tmp_path: Path) -> None:
+    """This tool resolves no scheme, so the call is refused — and a prompt that
+    named ``<cwd>/scratchpad:/shot.png`` would describe a write that never
+    happens."""
+    tool = AgentTool(
+        name="browser",
+        approval_tier="write",
+        execute=_unused_execute,
+        describe_approval=builtin._describe_browser_approval,
+    )
+    described = _summary(tool, {"action": "screenshot", "path": "scratchpad://shot.png"})
+    assert described == "screenshot: scratchpad://shot.png"
+
+
+def test_only_describers_that_ask_for_the_context_receive_one() -> None:
+    """Opt-in by parameter NAME, the way a gate's ``job_id`` is resolved: every
+    describer written before this existed takes ``(args, cwd)`` and must keep
+    being called that way — passing a third positional argument to one of them
+    raises inside the describer, which the loop swallows into a JSON dump."""
+    seen: list[tuple[str, object]] = []
+
+    def two_arg(args: dict[str, object], cwd: str) -> str:
+        seen.append(("two", cwd))
+        return "two-arg ok"
+
+    def with_context(args: dict[str, object], cwd: str, context=None) -> str:
+        seen.append(("three", context))
+        return "context ok"
+
+    context = ToolContext(cwd=".", session_id="s")
+    for describe, expected in ((two_arg, "two-arg ok"), (with_context, "context ok")):
+        tool = AgentTool(
+            name="demo",
+            approval_tier="write",
+            execute=_unused_execute,
+            describe_approval=describe,
+        )
+        assert _summary(tool, {"path": "x"}, ".", context) == expected
+    assert seen == [("two", "."), ("three", context)]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -34,6 +35,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "mobile",
         "peer-messaging",
         "qwencloud",
+        "scratchpad",
         "teams",
         "tunnel",
     ]
@@ -191,6 +193,49 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     assert "lop mobile install" in body
     assert "Show it once" not in body
     assert "context window" in body
+
+
+def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
+    """The properties that belong to the guide: the lifetime (claimed once),
+    the text-only rule, that a one-off SCRIPT and a data file are as much at
+    home here as a note, the naming rule the desktop canvas depends on, the
+    fallback when the host has no session folder, and the fact that every
+    result carries the absolute path a shell needs.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+
+    assert body is not None
+    assert body.count("deleted with the session") == 1
+    assert "one-off script" in body
+    assert "Data you are still shaping" in body
+    assert "real extension" in body
+    assert "absolute path" in body
+    assert "mktemp" in body
+    assert "do not put scratch in the user's" in body
+    # The guide is the authority on the five calls, and must list five.
+    assert "Five calls" in body
+    assert body.count("| `") == 5
+
+
+def test_scratchpad_guide_prints_no_absolute_path_shaped_example() -> None:
+    """A guide is prompt text that lands in a transcript, and the desktop Files
+    panel infers its tiles from absolute paths found in transcript text. An
+    ELIDED or templated path in prose therefore produced phantom tiles on the
+    real app — two of them reproduced from a guide's own example lines
+    (measured against the desktop build). So examples are URL-shaped, and a
+    resolved path is described in words rather than templated.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    assert "/…" not in body
+    assert "<id>" not in body
+    # No bare absolute path of any kind: every example must carry the scheme.
+    assert (
+        re.search(r"(?<![\w./:-])/(Users|home|tmp|var|private|sessions|scratchpad)/", body) is None
+    )
 
 
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:

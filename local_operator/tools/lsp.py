@@ -50,6 +50,7 @@ from local_operator.tools.builtin import (
     _guard,
     _resolve_workspace_path,
     _safe_cwd,
+    _scheme_refusal,
     _text,
     _validation_error,
     spill_truncate,
@@ -646,6 +647,15 @@ async def execute_lsp(
         root = Path(cwd).expanduser().resolve()
     except RuntimeError:
         root = Path(cwd).resolve()
+    # A scheme in ``path`` is a URL, and this tool resolves none: without the
+    # refusal it would be read as the RELATIVE path ``<cwd>/scratchpad:/x.py``
+    # and the answer would be "Path does not exist" for a file that is there and
+    # readable — the same misleading answer ``grep`` and ``glob`` refuse, and the
+    # flow this feature creates reaches it directly (write a scratch script, then
+    # analyse it). Added in round 2 (D6).
+    refusal = _scheme_refusal(tool_call_id, "lsp", params.path)
+    if refusal is not None:
+        return refusal
     path, inside, resolvable = _resolve_workspace_path(params.path, cwd)
     if not inside:
         description = _approval_description(path, inside, "lsp", resolvable)

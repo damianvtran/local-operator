@@ -8593,6 +8593,26 @@ class Session:
         task.add_done_callback(_on_done)
         return task
 
+    def _scratchpad_dir(self) -> str | None:
+        """This session's ``scratchpad://`` root as a path string, or ``None``.
+
+        Derived from the TRANSCRIPT's directory, which is the one place that
+        already owns the session-directory layout, and derived HERE rather
+        than taken as a constructor argument so it cannot be "set by the host
+        and forgotten on the way to the executor" — the drop the parity test
+        exists to catch, avoided by never letting a host configure it at all.
+
+        Defensive about a transcript with no usable ``.directory``, matching
+        how the id derivation tolerates one: a host with no session has no
+        scratch area, and that is a ``None`` rather than an exception on the
+        path every turn walks. Cost is one join and one ``parent.name`` compare.
+        """
+        from local_operator.scratchpad import scratchpad_root
+
+        bound = getattr(self._transcript, "directory", None)
+        root = scratchpad_root(bound if isinstance(bound, (str, Path)) else None)
+        return None if root is None else str(root)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -8603,6 +8623,8 @@ class Session:
         # work, and for teardown to be able to close the tab.
         return ToolContext(
             cwd=self._cwd,
+            # Derived, never configured: see :meth:`_scratchpad_dir`.
+            scratchpad_dir=self._scratchpad_dir(),
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
