@@ -20,6 +20,7 @@ import pytest
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.command_picker import (
+    CommandPicker,
     CompletionMode,
     PickerMode,
     completion_for,
@@ -676,13 +677,24 @@ async def _click_at(editor: Editor, pilot, offset: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_paste_into_the_second_reference_lists_THAT_tokens_directory(workspace) -> None:
-    """D1, the paste-shaped arrival: the rows must describe the CARET's token.
+async def test_a_caret_move_into_the_second_reference_lists_THAT_tokens_directory(
+    workspace,
+) -> None:
+    """D1, the caret-only arrival: the rows must describe the CARET's token.
 
-    `load_text` then a caret move to the end is one plain paste, and before the
+    `load_text` then a caret move to the end is a CARET-ONLY move — it is what a
+    history recall does, because `up` runs exactly ``self.text = entry`` then
+    ``move_cursor(end)``, and what a click and `home`/`end` do too. Before the
     fix it left the caret in `@src/` while the rows were the FIRST token's
     (`README.md`) — the phase went `file -> file`, so the phase-only gate never
     re-derived. ``dir_latch`` is the witness: it still named the old directory.
+
+    NOT a paste, and this docstring used to say it was. A paste is a TEXT
+    mutation, so the picker re-derives at the caret the paste leaves behind and
+    is already correct on the base commit: a paste-shaped test of this defect
+    PASSES on `59c435739` and would read as though the defect had been
+    imaginary. Only the caret-only move discriminates, so build any further case
+    for this shape out of a caret move, never out of `events.Paste`.
 
     The consequence asserted here is the harmful one rather than the cosmetic
     one. Enter on a stale row cannot be accepted at this caret
@@ -729,6 +741,50 @@ async def test_a_click_into_an_earlier_reference_relists_its_directory(workspace
         assert editor._file_choices_requested == "", "the list still latches the other token"
         assert "README.md" in _rows(editor), "the root's own row is missing"
         assert "app.py" not in _rows(editor), "a row from the token the caret LEFT"
+
+
+@pytest.mark.asyncio
+async def test_a_caret_move_between_two_tokens_in_ONE_directory_swaps_the_rows(
+    workspace,
+) -> None:
+    """D1/R1: the key must carry the caret token's QUERY, not only its directory.
+
+    The two shapes above move the caret between two DIRECTORY roots, so a key of
+    ``(phase, directory)`` cleared them. Two tokens in the SAME directory are one
+    directory and two different row sets — the rows come from the directory's
+    scan matched against the caret token's NAME query — so that key was a no-op
+    there, and the list went on offering the token the caret had LEFT under the
+    caret's own token. `src/editor.py` exists only for this: the `ed` query has
+    to select a DIFFERENT row than `app` while sharing its directory.
+
+    Both halves of the consequence are asserted, because the cosmetic half is not
+    the one that hurts. With the stale rows up, a real mouse click on the row
+    that used to be highlighted rewrites the reference the CARET is in —
+    ``@src/app.py and @src/ed`` became ``@src/editor.py and @src/ed`` — silently,
+    with nothing sent and no notice.
+    """
+    (workspace / "src" / "editor.py").write_text("editor\n")
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "@src/app.py and @src/ed")
+        assert editor.picker.mode is PickerMode.FILE, "premise: the list is live"
+        assert editor._file_choices_requested == "src/", "premise: the caret sits in `src/`"
+        assert _rows(editor) == ["editor.py"], "premise: the rows are the `ed` match"
+
+        await _click_at(editor, pilot, 4)  # caret-only: back into the earlier token
+
+        assert editor._caret_offset() <= 10, "premise: the click landed in `@src/app.py`"
+        assert _rows(editor) == ["app.py"], "a row from the token the caret LEFT"
+        assert editor.picker.highlighted_name() == "app.py", "the highlight is the old one"
+
+        text_before = editor.text
+        await pilot.click(CommandPicker, offset=(4, 0))
+        for _ in range(3):
+            await pilot.pause()
+
+        assert editor.text == text_before, "the click rewrote the caret's own reference"
+        assert session.prompts == [], "the click submitted the draft"
 
 
 @pytest.mark.asyncio

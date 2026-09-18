@@ -2178,13 +2178,14 @@ class Editor(TextArea):
         self._slash_runs_cache: (
             tuple[tuple[object, ...], tuple[int, list[tuple[int, int, str]]] | None] | None
         ) = None
-        # Per-render-pass memo for :meth:`_reference_runs` (design round 1, D2).
-        # Same shape and same reason as `_slash_runs_cache` above: `render_line`
-        # runs once per visible screen row, and the reference spans are identical
-        # for every row of a frame. Keyed on every input the resolution reads —
-        # text, cwd, kill switch — so a `/move` or a flipped switch cannot leave
-        # ink standing that was decided against somewhere else. ``None`` until the
-        # first row of the first frame that asks.
+        # Memo for :meth:`_reference_runs` (design round 1, D2), deduping the
+        # `stat` a `@` token costs across the rows of one frame — `render_line`
+        # runs once per visible screen row and the reference spans are identical
+        # for every row of a frame. Keyed on the inputs that DECIDE the spans
+        # (text, cwd, kill switch) and not on the one it cannot see, whether the
+        # paths exist right now: see `_reference_runs` for why that is left
+        # stale on purpose and what it bounds. ``None`` until the first row of
+        # the first frame that asks.
         self._reference_runs_cache: (
             tuple[tuple[object, ...], dict[int, list[tuple[int, int]]]] | None
         ) = None
@@ -2193,15 +2194,16 @@ class Editor(TextArea):
         # BEFORE ``super().__init__`` because TextArea's constructor loads the
         # initial document through ``load_text`` → ``_sync_picker``.
         self._suspend_picker_sync = False
-        # Last (phase, directory) pair `_sync_picker` settled on, compared by
+        # Last (phase, query) pair `_sync_picker` settled on, compared by
         # `_sync_picker_if_phase_changed`. BOTH halves are in the key, and the
-        # directory is the one that was missing: the rows a `@` list offers are
-        # a function of the caret token's DIRECTORY, and a caret move that
-        # starts and ends inside `@` tokens is `"file" -> "file"` — so a key of
-        # the phase alone let the previous token's rows stand under the caret's
-        # token, with Enter then rewriting the draft into a path that does not
-        # exist or sending it (design round 1, D1). A motion that stays in one
-        # phase AND one directory — the case the phase gate exists for — is
+        # second one is the caret `@` TOKEN rather than the phase: a caret move
+        # that starts and ends inside `@` tokens is `"file" -> "file"`, so a key
+        # of the phase alone let the previous token's rows stand under the
+        # caret's token, with Enter then rewriting the draft into a path that
+        # does not exist or sending it (design round 1, D1). The DIRECTORY alone
+        # was still too coarse when two tokens share one (round 1, R1), which is
+        # why the key carries the whole query — see `_picker_sync_key`. A motion
+        # that stays inside ONE token — the case the phase gate exists for — is
         # still a no-op, which is what keeps Esc a dismissal.
         #
         # Set BEFORE ``super().__init__`` because that constructor syncs.
@@ -4680,11 +4682,29 @@ class Editor(TextArea):
         `at_token` and `split_token` arrive: one rule, one question about where a
         token starts and ends.)
 
-        Memoized on every input the answer depends on: the text, the cwd and the
-        kill switch. Cached at all because `render_line` runs once per visible
-        row and each `@` token costs a `stat`; per-frame rather than per-row is
-        the difference between one stat per token per frame and one per token per
-        screen row.
+        Memoized on the inputs the PARSE reads — the text, the cwd and the kill
+        switch — and deliberately not re-derived per render pass. The one
+        remaining input the answer depends on is whether each path exists NOW,
+        and the key cannot carry it: nothing signals a filesystem change (there
+        is no watcher) and `render_line` is handed a row index rather than a
+        frame identity, so a `time.monotonic()` bucket is the only mechanical
+        alternative — and it would make the ink's appearance depend on paint
+        timing instead of on state a test can set, which is exactly the property
+        D2's evidence relies on (the ink appears when the token starts naming a
+        file). Cached at all because `render_line` runs once per visible row and
+        each `@` token costs a `stat`: the memo is what makes that one `stat`
+        per token per FRAME rather than one per token per screen row.
+
+        The staleness is therefore INTENDED, and this is its bound. While the
+        text, the cwd and the switch are all unchanged, a path appearing or
+        disappearing under an untouched draft does not move the ink until the
+        next text mutation — any keystroke, a paste, or a submit clearing the
+        buffer. The ink can lag by exactly one draft edit, in either direction,
+        and nothing else depends on it: `expand_references` re-stats at submit,
+        so a stale reference ink never expands a path that is gone — measured,
+        the prompt carries the token verbatim — and a stale prose ink never
+        blocks a path that does exist. The ink is a hint about what the resolver
+        will do; the resolver's own verdict, not the hint, decides what is sent.
         """
         cwd = self._reference_cwd()
         enabled = at_references_enabled()
@@ -7679,38 +7699,64 @@ class Editor(TextArea):
         return False
 
     def _picker_sync_key(self) -> tuple[str | None, str | None]:
-        """The parse state a picker re-derivation is a function of: (phase, DIRECTORY).
+        """The parse state a picker re-derivation is a function of: (phase, QUERY).
 
         The phase alone is not that state, and this function exists because
-        assuming it was one is design round 1's D1. What the `@` list offers is
-        a function of the caret token's DIRECTORY: `@README.md` and `@src/` are
-        both phase ``"file"``, so a caret that moves between them is
+        assuming it was one is design round 1's D1. `@README.md` and `@src/`
+        are both phase ``"file"``, so a caret that moves between them is
         ``"file" -> "file"``, and a gate reading only the phase left the
         previous token's rows on screen under the caret's token. Enter then
         acted on a row that cannot be accepted at this caret —
         ``_file_row_is_already_in_the_buffer`` is False — so control fell
         through to the ordinary submit and the draft went out; the same staleness
-        on the paste-shaped arrival rewrote the draft into ``@src/README.md``, a
-        path that does not exist, silently.
+        on a caret-only move into the second token (a click, `home`/`end`, or an
+        `up`-recall, none of which is a paste — a paste re-derives at the caret
+        it leaves) rewrote the draft into ``@src/README.md``, a path that does
+        not exist, silently.
 
-        Both halves are already computed here — the parse that answers the phase
-        answers the directory — so the key costs no new parse and no new state,
-        which is why this is the smallest change that clears it rather than the
-        start of a second notion of staleness.
+        The QUERY rather than the directory it contains, because the directory
+        is only half of what the rows are a function of: `sync_files` fills them
+        from the directory's scan and then matches them against
+        `split_token(token.query)[1]`, the caret token's NAME query
+        (`command_picker.py:1848`). A directory-only key — this function's first
+        form, and round 1's R1 — left a second, narrower no-op: two tokens in
+        the SAME directory are one directory and two different row sets. Typed
+        `@src/app.py and @src/ed`, then a caret-only move back into
+        `@src/app.py`, is ``"file" -> "file"`` and ``"src/" -> "src/"``, so the
+        gate stayed shut and the list went on offering `editor.py` — the token
+        the caret LEFT — under a caret inside `app.py`. A mouse click on one of
+        those rows then rewrote the reference the caret was in
+        (`@src/editor.py and @src/ed`), silently, with nothing sent and no
+        notice. The query answers both halves, so one parse still answers the
+        whole key.
 
-        ``None`` for the directory outside an `@` token, which is every other
+        It is also the axis the picker itself dismisses on: for FILE mode
+        `_apply` is handed `split_token(token.query)[1]`, the NAME part, and
+        clears Esc's "not now" when that moves. So the gate is now at least as
+        fine as the question the widget answers — it cannot be coarser than the
+        thing it is guarding — and the one case where it is finer (same name,
+        different directory) resolves the way the picker already wanted: the
+        dismissal is kept rather than undone.
+
+        CONTAINMENT is what keeps a dismissal a dismissal, and it survives:
+        the query is the token's TEXT, not the caret's offset within it, so a
+        motion inside one token does not move the key. Only crossing into a
+        token whose text differs does — a different question, not a dismissal
+        being undone.
+
+        ``None`` for the query outside an `@` token, which is every other
         phase: the three slash parses and the `@` parse are mutually exclusive
         by construction (`_picker_phase` asks `at_token` FIRST and returns
         ``"file"`` whenever it matches), so a non-`@` phase cannot hide a
-        directory and a `@` phase cannot hide behind one.
+        query and a `@` phase cannot hide behind one.
         """
         token = at_token(self.text, self._caret_offset())
         if token is not None:
-            return "file", split_token(token.query)[0]
+            return "file", token.query
         return self._picker_phase(), None
 
     def _sync_picker_if_phase_changed(self) -> None:
-        """Re-sync the picker only when the caret crossed a parse phase OR directory.
+        """Re-sync the picker only when the caret crossed a parse phase, or an `@` token.
 
         The #393 reopen (`end` after `home` on `/mcp `) is a phase change:
         column 0 is outside the argument, the end of the line is inside
@@ -7719,13 +7765,14 @@ class Editor(TextArea):
         :meth:`_sync_picker`, because that helper treats a matching query
         as "show the list" and would undo Esc.
 
-        The DIRECTORY is in the key for the reason :meth:`_picker_sync_key`
-        records: a caret move that stays inside `@` tokens is a phase no-op and
-        a directory change at the same time, and the rows follow the directory.
-        The Esc property above is unaffected — arrows inside one word of one
-        token change neither half of the key, and crossing a `/` inside the
-        token moves the caret into a genuinely different candidate set, which is
-        a new question rather than a dismissal being undone.
+        The caret's `@` TOKEN is in the key for the reason
+        :meth:`_picker_sync_key` records: a caret move that stays inside `@`
+        tokens is a phase no-op, and the rows follow the token's directory AND
+        its name query — so the key is the query, which answers both.
+        The Esc property above is unaffected — arrows inside one token change no
+        half of the key, and crossing into a token with different text moves the
+        caret into a genuinely different candidate set, which is a new question
+        rather than a dismissal being undone.
         """
         if self._picker_sync_key() == self._picker_key_at_last_sync:
             self._sync_ghost()
@@ -8029,7 +8076,7 @@ class Editor(TextArea):
         # Recorded after both list branches so a later caret-only move can
         # tell whether the parse PHASE changed (#393 reopen vs. an
         # Esc-dismissed list that must stay closed) — and, inside `@`, whether
-        # the DIRECTORY under the caret did (see `_picker_sync_key`).
+        # the caret token's QUERY did (see `_picker_sync_key`).
         self._picker_key_at_last_sync = self._picker_sync_key()
 
     def _on_picker_highlight(self, name: str | None) -> None:
