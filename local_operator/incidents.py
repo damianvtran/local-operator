@@ -435,12 +435,23 @@ CUT_OFF_CAUSES: dict[str, str] = {
         # is decidable now in a way it was not before the durable marker
         # existed: "disappeared without exiting cleanly" describes what the
         # PROCESS did, and a reader one row under a deliberate stop needs the
-        # other half — that nothing recorded anyone asking for it. Without the
-        # clause the two rows differ only in the word above them, and "asked
-        # for" versus "never asked" is exactly the distinction this taxonomy
-        # was extended to draw (design round 1, D4).
+        # other half — that nobody ASKED for it. Without the clause the two rows
+        # differ only in the word above them, and "asked for" versus "never
+        # asked" is exactly the distinction this taxonomy was extended to draw
+        # (design round 1, D4).
+        #
+        # THE CLAUSE SAYS "ASKED FOR", NOT "RECORDED A STOP", and the change is
+        # the involuntary markers' doing: while the ladder was the only writer,
+        # "nothing recorded a stop" was true of every death on this arm. It stops
+        # being true the moment a party that merely ACTS on a runtime (a prune
+        # removing the install generation under it, an in-place install rewriting
+        # it) records what it is about to do — the artifact then says "nothing
+        # recorded a stop (its install generation was pruned by lop install prune)",
+        # which contradicts itself where the operator reads it. What is true of
+        # BOTH is the discriminator the clause exists for: no stop of this runtime
+        # was asked for. The attribution parenthetical says who acted instead.
         "the runtime disappeared without exiting cleanly while this turn was running, "
-        "and nothing recorded a stop"
+        "and no stop was asked for"
     ),
     "install-mid-update": (
         "a local-operator install was being replaced on disk while this turn was running"
@@ -459,6 +470,83 @@ CUT_OFF_CAUSES: dict[str, str] = {
 #: runtime's token reaching an older viewer. Naming the gap is honest; guessing
 #: a cause would not be, and a refusal to render would hide the cut-off.
 CUT_OFF_UNKNOWN = "the turn was cut off and the cause could not be determined"
+
+#: What a ``runtime-killed`` verdict says when NO actor was recorded for the act.
+#:
+#: WHY THE WORD EXISTS AT ALL, in the operator's own requirement: "nothing should
+#: kill runtimes en masse, ever; and if it does happen, it must be attributable."
+#: The 2026-09-18 event killed 25 runtimes in 13 seconds and the artifacts could
+#: not name a single process, because the only markers existed for stops the USER
+#: asked for. A death whose marker names its actor now renders that actor; a death
+#: whose evidence proves only that a turn was in flight and nobody recorded an act
+#: says ``unattributed`` — an affirmative statement about the GAP rather than the
+#: old shrug, and the one word that turns "we lost 25 runtimes and cannot say why"
+#: into "none of these 25 had a recorded actor", which is a fact an investigation
+#: can act on.
+KILL_UNATTRIBUTED = "unattributed"
+
+#: What an INVOLUNTARY act on a runtime is called, in the operator's words.
+#:
+#: Keyed by the ``mechanism`` token the writer stamps into the marker
+#: (``control.note_involuntary_stop``), which is why the labels are clauses rather
+#: than agentless nouns: they are rendered as ``<label> by <actor>``, the same shape
+#: :func:`render_stop_attribution` uses, so the two kinds of attribution read alike
+#: on the one surface that shows both.
+#:
+#: A mechanism this build does not know renders as the actor alone (see
+#: :func:`render_involuntary_attribution`) rather than leaking a raw token — the
+#: rule :data:`STOP_RUNG_UNKNOWN` already states for a future rung, for the same
+#: reason: the writer's spelling must not reach a surface that cannot explain it.
+INVOLUNTARY_MECHANISM_LABELS: dict[str, str] = {
+    "generation-prune": "its install generation was pruned",
+    "in-place-install": "its install was being replaced in place",
+}
+
+
+def render_involuntary_attribution(
+    *, mechanism: str = "", actor: str = "", killer_pid: object = None
+) -> str:
+    """The parenthetical an INVOLUNTARY kill's reason carries, or ``""``.
+
+    Scalar arguments rather than the marker dict, for the reason
+    :func:`render_stop_attribution` gives: the schema belongs to its writer, and a
+    field renamed on one side must not silently empty the sentence on the other.
+
+    Nothing named at all returns ``""`` — the caller then says
+    :data:`KILL_UNATTRIBUTED`, because "no actor recorded" is a different fact
+    from "an actor we cannot print" and only one of them is a gap.
+    """
+    label = INVOLUNTARY_MECHANISM_LABELS.get(mechanism, "") if mechanism else ""
+    who = actor or ""
+    if killer_pid is not None and str(killer_pid).strip():
+        who = f"{who}, {KILLER_PID_LABEL} {killer_pid}".lstrip(", ")
+    if label and who:
+        return f" ({label} by {who})"
+    if label:
+        return f" ({label})"
+    if who:
+        return f" (by {who})"
+    return ""
+
+
+def involuntary_kill_detail(
+    *, mechanism: str = "", actor: str = "", killer_pid: object = None
+) -> str:
+    """The detail a ``runtime-killed`` reason carries for an INVOLUNTARY act.
+
+    ONE decision point rather than the same ``or`` at each arm that needs it: the
+    reader's question is "who was recorded", and the answer is either an
+    attribution or :data:`KILL_UNATTRIBUTED` — never a blank where a reader
+    expects the sentence to say which of the two it is.
+
+    The parenthetical always OPENS with a space so
+    :func:`render_cut_off_reason` treats it as an aside (its separator rule) — the
+    shape ``attention._record_detail`` already hands over.
+    """
+    return (
+        render_involuntary_attribution(mechanism=mechanism, actor=actor, killer_pid=killer_pid)
+        or f" ({KILL_UNATTRIBUTED})"
+    )
 
 
 def is_cut_off_cause(cause: str) -> bool:

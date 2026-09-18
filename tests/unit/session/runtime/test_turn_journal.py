@@ -308,7 +308,7 @@ def test_note_exit_normalizes_both_writers_to_one_token(tmp_path: Path) -> None:
     the signal drain reaches ``_clean_exit`` with a sentence (``leaving after
     SIGTERM``). The reader keys on the token, so without one vocabulary the
     escalated-sweep rung would hold only by which writer happened to run last —
-    and it would answer ``runtime-killed`` ("nothing recorded a stop") for a
+    and it would answer ``runtime-killed`` ("no stop was asked for") for a
     death where a signal WAS recorded.
     """
     directory = _session_directory(tmp_path, "sess-writer")
