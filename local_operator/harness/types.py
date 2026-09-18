@@ -1208,6 +1208,15 @@ ToolExecuteFn = Callable[
 #: buried between quoting and irrelevant fields, and no amount of clever
 #: truncation in the UI can recover which end of a JSON blob matters. Only the
 #: tool knows which of its arguments IS the decision.
+#:
+#: A describer may declare a third, keyword-only ``context`` parameter. It is
+#: OPT-IN by name (``LocalOperator._approval_summary`` resolves it the way
+#: ``harness/approval.py`` resolves a gate's ``job_id``) precisely so that the
+#: plain ``(args, cwd)`` form every existing describer uses keeps working
+#: untouched: the only describer that needs more is the path one, and the only
+#: thing it needs is the session's roots — a ``scratchpad://`` target has no
+#: path to name until the scratchpad root is known, and an approval prompt must
+#: name the file the user is authorising.
 ApprovalDescribeFn = Callable[[dict[str, Any], str], str]
 
 

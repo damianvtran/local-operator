@@ -136,6 +136,17 @@ def parse_scratchpad_url(url: str, root: Path) -> ScratchpadTarget:
     # error that reads as nonsense.
     if parts.scheme != SCRATCHPAD_NAMESPACE:
         raise ScratchpadPathError(f"Invalid scratchpad URL '{url}': not a {SCRATCHPAD_SCHEME} URL")
+    if not url.startswith(SCRATCHPAD_SCHEME):
+        # ONE case rule, and it is the caller's: this harness dispatches on the
+        # typed prefix (`str.startswith` in the tools), so a URL that only
+        # *parses* as the right scheme — ``SCRATCHPAD://x``, which urlsplit
+        # lower-cases — is refused HERE naming the spelling it should have used,
+        # rather than being accepted here and then rejected elsewhere as a
+        # stranger scheme, which read as a contradiction (review round 1, R7).
+        raise ScratchpadPathError(
+            f"Invalid scratchpad URL '{url}': the scheme must be written exactly "
+            f"'{SCRATCHPAD_SCHEME}' — lower-case, with the '//'"
+        )
     if parts.query or parts.fragment:
         # A '?' or '#' would silently truncate the name, so the file the agent
         # asked for and the file it got would differ with no signal.
@@ -168,20 +179,27 @@ def parse_scratchpad_url(url: str, root: Path) -> ScratchpadTarget:
         raise ScratchpadPathError(
             f"Invalid scratchpad URL '{url}': escapes the scratchpad directory"
         )
-    return ScratchpadTarget(target, directory=not segments or parts.path.endswith("/"))
+    # The directory marker is read off the UNQUOTED string, not off
+    # ``parts.path``: ``scratchpad://logs%2F`` is a directory URL whose last
+    # character is not a slash until it is unquoted, so testing the quoted form
+    # silently answered "that file does not exist" for a folder (R6).
+    return ScratchpadTarget(target, directory=not segments or raw.endswith("/"))
 
 
 def _resolve_scratchpad(path: Path, url: str) -> Path:
-    """``Path.resolve()`` with both failure modes folded into the parse error.
+    """``Path.resolve()`` with every failure mode folded into the parse error.
 
     A symlink loop raises ``RuntimeError`` on 3.12/3.13 and returns an
-    unresolved path on 3.14, and a missing parent raises nothing at all — so the
-    failure the containment check must not miss has to be normalised here rather
-    than allowed to escape as a bare ``OSError`` from inside ``read``.
+    unresolved path on 3.14, a missing parent raises nothing at all, and a NUL
+    byte in a segment raises ``ValueError`` — so the failure the containment
+    check must not miss is normalised HERE rather than allowed to escape as a
+    bare ``OSError`` (or, for the NUL, a traceback and an execution fault) from
+    inside ``read``. ``_resolve_workspace_path`` catches the same triple for the
+    same reason (review round 1, R2/Q2).
     """
     try:
         return path.resolve()
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ScratchpadPathError(
             f"Invalid scratchpad URL '{url}': cannot be resolved ({exc})"
         ) from exc

@@ -199,3 +199,37 @@ def test_scratchpad_root_tolerates_a_non_path_argument() -> None:
     """A host that passed something path-like-but-not must lose its scratch
     area, not raise on the path every turn walks."""
     assert scratchpad_root(1234) is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# The scheme rule: one spelling, one case, and no crash on a hostile name
+# ---------------------------------------------------------------------------
+
+
+def test_the_scheme_spelling_is_case_sensitive_and_says_which_case(root: Path) -> None:
+    """``SCRATCHPAD://x`` parses as the right scheme (urlsplit lower-cases it) but
+    is not the prefix the tools dispatch on, so the parser is where the caller
+    hears about it — a stranger-scheme refusal here would answer a question
+    nobody asked (review round 1, R7). The message names the exact spelling."""
+    with pytest.raises(ScratchpadPathError) as caught:
+        parse_scratchpad_url("SCRATCHPAD://perf.md", root)
+    message = str(caught.value)
+    assert "lower-case" in message
+    assert SCRATCHPAD_SCHEME in message
+
+
+def test_a_nul_byte_is_a_parse_error_not_a_crash(root: Path) -> None:
+    """``Path.resolve()`` raises ``ValueError`` for a NUL, which is NOT an
+    ``OSError``: uncaught it escapes the parser as an execution fault with a
+    traceback instead of a refusal the model can act on (review round 1, R2)."""
+    with pytest.raises(ScratchpadPathError) as caught:
+        parse_scratchpad_url("scratchpad://a%00b", root)
+    assert "cannot be resolved" in str(caught.value)
+
+
+def test_an_encoded_separator_keeps_the_directory_marker(root: Path) -> None:
+    """``scratchpad://logs%2F`` is a directory URL: the marker is in the unquoted
+    string, so reading it off the quoted one called a folder a missing file."""
+    (root / "logs").mkdir()
+    assert parse_scratchpad_url("scratchpad://logs%2F", root).directory is True
+    assert parse_scratchpad_url("scratchpad://logs", root).directory is False
