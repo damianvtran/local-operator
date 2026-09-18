@@ -1598,9 +1598,12 @@ async def _drain_inbox_into(handle: object) -> int:
     # drain runs before the socket listens, which is also before the owner's
     # first turn. Leaving the file alone is what makes the delivery happen
     # instead at that first turn (``Session._drain_spooled_peer_inbox``, once
-    # the owner IS engaged), so nothing is lost and nothing opens the history.
-    # The engaged case — including the handover, where a draining runtime spools
-    # for a successor — drains exactly as it always did.
+    # the owner IS engaged), and THAT drain runs after the turn's own messages
+    # are durable, so the deferred rows land behind the owner's opening prompt
+    # rather than opening the history (review round 1, F-2: an earlier revision
+    # of this comment claimed that ordering while the drain still ran at the top
+    # of the turn pipeline). The engaged case — including the handover, where a
+    # draining runtime spools for a successor — drains exactly as it always did.
     from local_operator.session.runtime.engagement import (
         TRANSCRIPT_FILENAME,
         durable_conversation_path,

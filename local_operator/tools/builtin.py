@@ -8085,12 +8085,14 @@ async def execute_send(
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, _stored_error = await asyncio.to_thread(
+        stored_id, stored_candidates, stored_error = await asyncio.to_thread(
             resolve_stored_target, params.target
         )
-        # ``_stored_error`` is deliberately unread: the resolver returns ""
-        # for a no-match by contract (see its docstring) and the refusal that
-        # reaches the user is composed below, where the live miss is known.
+        # ``stored_error`` is read here, unlike a plain no-match (which returns
+        # "" by contract, because the refusal for THAT is composed below from
+        # both searches): a row that answered to the name but was withheld for
+        # never having been engaged comes back as its own refusal, and printing
+        # "no session matches" over it would be false (review round 1, F-4).
         if stored_candidates:
             lines = [
                 f"{len(stored_candidates)} stored sessions match; drop `target` and "
@@ -8100,6 +8102,8 @@ async def execute_send(
             return _error(tool_call_id, "send", "\n".join(lines))
         if stored_id:
             cold_session_id = stored_id
+        elif stored_error:
+            error = stored_error
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             error = f"no session matches {params.target!r} (searched live and stored sessions)"

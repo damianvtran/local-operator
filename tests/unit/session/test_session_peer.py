@@ -594,6 +594,60 @@ async def test_a_wake_peer_message_that_opens_the_first_turn_starts_the_session(
 
 
 @pytest.mark.asyncio
+async def test_the_first_turn_writes_its_own_row_before_a_leftover_spool(tmp_path):
+    """THE ORDER, not just the delivery (review round 1, F-2 / QA Q1).
+
+    A spooled row is written to the transcript at the moment it is delivered,
+    so draining the inbox at the TOP of the pipeline put the peer note ABOVE
+    the owner's opening prompt — the peer message became the first row of a
+    conversation its owner had just started, which is the reported symptom in
+    the one corner the unengaged gate cannot cover (a spool written by a build
+    that predates the gate). The drain now runs after this turn's own messages
+    are durable, and this pins the resulting order: own rows first, the
+    deferred peer row after, with the same turn's request still carrying it.
+    """
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    directory = session._transcript.directory
+    assert append_inbox(
+        directory,
+        InboxLine(text="late peer note", sender={"pid": 7}, mode="mailbox", written_at=0.0),
+    )
+
+    await session.prompt("first real prompt")
+    await wait_for(lambda: bool(stream.requests))
+
+    kinds = [
+        (entry.type, entry.payload.get("custom_type") or entry.payload.get("role"))
+        for entry in session._transcript.entries()
+    ]
+    # Bookkeeping custom rows precede any message (``attention_started``, the
+    # model selection). What matters is the inverse of the reported symptom: the
+    # FIRST message row in the history is the owner's own prompt, not the peer
+    # note — the peer row is durable immediately after it.
+    message_rows = [entry for entry in kinds if entry[0] == "message"]
+    assert message_rows[0] == ("message", "user"), kinds
+    own_index = kinds.index(("message", "user"))
+    peer_index = next(
+        index for index, (_t, kind) in enumerate(kinds) if kind == PEER_MESSAGE_MESSAGE_TYPE
+    )
+    assert own_index < peer_index, kinds
+
+    # Still delivered to the MODEL, and that half is measured rather than
+    # assumed: the note is in live context once the turn settles (the parked
+    # append flushes at the continuation/yield boundary), so the next model call
+    # carries it. It is NOT in this turn's FIRST request — that was true of the
+    # old position too (the loop drains steering only from its second inner
+    # iteration), so moving the drain costs no visibility.
+    live = json.dumps([message.model_dump(mode="json") for message in session._context.messages])
+    assert "late peer note" in live, "the deferred row never reached live context"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_first_real_turn_consumes_a_leftover_spool(tmp_path):
     """Q1 belt-and-braces: rows already sitting in the session's inbox (written
     by an older sender, or before a live record existed) are consumed by the
