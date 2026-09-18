@@ -35,6 +35,10 @@ are stable across machines and do not leak the operator's real paths into an
 image attached to a PR. The suggestions are assembled by the real
 ``suggest_targets`` over that tree, which is what makes the frame evidence
 rather than decoration: only the code under test can change what it shows.
+
+The seeded prose is a fixture, not a subject: it is mounted without
+``finalize_text()``, so it is a STREAMING block and deliberately paints no rail
+(``AssistantBlock._rail_cols``) — a missing bar beside it is that, not a defect.
 """
 
 from __future__ import annotations
