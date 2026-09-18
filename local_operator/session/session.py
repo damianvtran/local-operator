@@ -93,6 +93,7 @@ from local_operator.harness.message_types import (
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
+from local_operator.harness.redaction import current_tool_source
 
 # Hoisted to the harness so the evaluation runner can render a transcript
 # through this same function without importing session code. Only these two
@@ -2368,6 +2369,20 @@ class Session:
         #: drain, pipeline exit, prompt entry, dispose) in the manner of
         #: ``_pending_shell_records``.
         self._pending_context_journal: list[CustomMessage] = []
+        #: Tool results whose text the credential-SHAPE pass rewrote, awaiting
+        #: their incident row: ``(tool name, shape labels, argument summary)``.
+        #:
+        #: Queued rather than journalled at the point of masking because that
+        #: point is INSIDE a tool batch, where appending a message would produce
+        #: ``assistant(tool_use) -> user -> tool_result`` and brick the session
+        #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
+        #: next to the other parked notices.
+        self._pending_shape_incidents: list[tuple[str, list[str], str]] = []
+        #: ``(tool, labels)`` already reported this session. A command that
+        #: echoes the same credential ten times, or a poller that prints the
+        #: same DSN every tick, is ONE fact about the session; reporting it per
+        #: result would bury the transcript in identical rows.
+        self._reported_shape_incidents: set[tuple[str, tuple[str, ...]]] = set()
         #: Serialises the ASYNC journal notices so they reach the live context in
         #: the order their hooks fired, not in the order they happen to finish.
         #:
@@ -5250,6 +5265,10 @@ class Session:
             # holder must reach the model before this prompt's request is built,
             # or the switch it announces goes unmentioned for another turn.
             self._flush_context_journal()
+            # A shape report queued by a surface that ran outside a turn (the
+            # live stream, a background job's peek) reaches the model before the
+            # request this prompt is about to build.
+            await self._flush_shape_incidents()
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
             # ...and any earlier boundary cancel, for the same reason: the
@@ -7996,6 +8015,11 @@ class Session:
             # aborted turn still hands the notice to the next one instead of
             # stranding it until the session is disposed.
             self._flush_context_journal()
+            # And the credential-shape reports queued by the result hook: the
+            # same boundary, for the same reason, plus one of its own — the
+            # operator's rotation ticket has to exist even when the turn that
+            # leaked the credential is the one being aborted.
+            await self._flush_shape_incidents()
             # LAST, by design: ``_run_turn``'s own ``finally`` has already
             # cleared ``_is_streaming`` on the way out of the await above, and
             # ``_flush_held_end`` has delivered the end event, so a reader
@@ -8185,7 +8209,7 @@ class Session:
                 # in-memory and session-scoped, so this is the one place a
                 # credential can be turned back into plain text for the model.
                 redact_tool_result=(
-                    self._variables.redact if self._variables is not None else None
+                    self._redact_tool_result_text if self._variables is not None else None
                 ),
                 # Tool-call outcomes into the shared ledger, so /session can
                 # report this model's tool-call validity. Supplied as a closure
@@ -9112,6 +9136,95 @@ class Session:
         # shows nothing after a restart. Mirrors the transient model-switch
         # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
+
+    def _redact_tool_result_text(self, text: str) -> str:
+        """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.
+
+        The masking half is :meth:`VariableStore.redact_with_hits`: exact values
+        first, then the credential-SHAPE pass, with every matched credential
+        registered back as a value to scrub for the rest of the session.
+
+        The reporting half is the shape labels, and it exists because a shape
+        match is the ONLY signal that a credential the session never knew about
+        reached a tool result — a live production DSN was found in a transcript
+        with nothing anywhere saying it had happened, and every such miss today
+        is discovered by accident. One :data:`SESSION_INCIDENT_MESSAGE_TYPE` row
+        names the tool and the shapes, so it becomes a rotation ticket rather
+        than a footnote. Labels only: a notice carrying the credential would be
+        the leak it exists to report.
+
+        Called with text alone, so the tool identity rides
+        :func:`local_operator.harness.redaction.current_tool_source` — published
+        by the loop around the redaction of each result.
+
+        Never raises: this is on the result path, and a redaction fault must not
+        turn a tool result into a tool crash. A host with no variable store (a
+        minimal embedder) keeps the untouched text, which is the pre-existing
+        behaviour for a session built without one.
+        """
+        store = self._variables
+        if store is None:
+            return text
+        try:
+            scrubbed, labels = store.redact_with_hits(text)
+        except Exception:  # noqa: BLE001 — see the docstring's never-raises note
+            logger.warning("credential shape pass failed; withholding this text", exc_info=True)
+            return "[output withheld: this session's credential redaction sink could not be read]"
+        if labels:
+            self._queue_shape_incident(labels)
+        return scrubbed
+
+    def _queue_shape_incident(self, labels: list[str]) -> None:
+        """Record one shape-masked result for the boundary flush. Never raises."""
+        try:
+            tool, summary = current_tool_source()
+            key = (tool, tuple(labels))
+            if key in self._reported_shape_incidents:
+                return
+            self._reported_shape_incidents.add(key)
+            self._pending_shape_incidents.append((tool, labels, summary))
+        except Exception:  # noqa: BLE001 — reporting must not break the turn
+            logger.debug("shape incident queue failed", exc_info=True)
+
+    async def _flush_shape_incidents(self) -> None:
+        """Journal the queued shape reports. Called at the turn boundary."""
+        pending, self._pending_shape_incidents = self._pending_shape_incidents, []
+        for tool, labels, summary in pending:
+            try:
+                await self.journal_shape_incident(tool, labels, summary)
+            except Exception:  # noqa: BLE001 — a notice is not worth a turn
+                logger.warning("could not journal a credential-shape incident", exc_info=True)
+
+    async def journal_shape_incident(self, tool: str, labels: list[str], summary: str) -> None:
+        """Tell the model (and the transcript) that a result was masked.
+
+        Rendered rather than classified: this is not a FAILURE, and running it
+        through :func:`~local_operator.incidents.classify_incident` would attach
+        a failure category and a "this is why the previous turn ended" tail to a
+        turn that ended for its own reasons — the same reason a credential
+        change and a model switch carry their own formatter.
+
+        Persisted, unlike an MCP recovery: what it records (a credential reached
+        a tool result, it is contained for this session, and it must be rotated)
+        is still true in a resumed session, and the value stays contained
+        because the store re-registers it from the transcript's own redaction.
+        """
+        from local_operator.incidents import format_shape_incident_message
+
+        if self._disposed:
+            return
+        text = format_shape_incident_message(tool, labels, summary)
+        message = CustomMessage(
+            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text, "tool": tool, "shapes": list(labels), "summary": summary},
+        )
+        try:
+            async with self._journal_lock:
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal a credential-shape incident", exc_info=True)
 
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was broken is usable again.
