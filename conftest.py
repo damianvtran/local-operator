@@ -562,6 +562,19 @@ def _in_agent_shell() -> bool:
     try:
         from local_operator.agent_shell import in_agent_shell
     except Exception:  # noqa: BLE001 — collection must not fail on this import
+        # LOUD, not silent (review round 2, N1): the fallback reads the variable
+        # the old way, so it restores exactly the presence-vs-truthiness drift
+        # this function exists to remove. Losing a worker or two is survivable;
+        # losing it without a word is not, because the next reader concludes the
+        # hook and the guard still agree.
+        import sys as _sys
+
+        print(
+            f"pytest worker cap: {_AGENT_SHELL_ENV} could not import "
+            "local_operator.agent_shell; falling back to a PRESENCE test, which "
+            f"reads any non-empty value (including '0') as ON",
+            file=_sys.stderr,
+        )
         return bool(os.environ.get(_AGENT_SHELL_ENV))
     return in_agent_shell()
 

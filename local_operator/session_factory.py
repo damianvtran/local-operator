@@ -3040,6 +3040,14 @@ async def _prepare(
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
+    # Whether THIS call is the one that creates the directory, read before
+    # anything below can create it — the lease takes its lock there and the
+    # claim after that creates it outright. Only this frame can answer it, and
+    # only early: once the lease has run, an empty directory a moment old and
+    # the operator's week-old conversation look identical. Consumed by the
+    # escape stamp further down.
+    fresh_directory = not transcript_dir.exists()
+
     from local_operator.session.retention import claim_session
     from local_operator.session_lease import acquire_session_lease
 
@@ -3067,6 +3075,19 @@ async def _prepare(
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
     if transcript_dir.parent.name == "sessions":
+        # A session opened by a harness under the escape hatch
+        # (`agent_shell.py`) is marked as machine-started, so it can never be
+        # offered as a chat the operator opened. HERE rather than in the exec
+        # path, where it started: this is the one place every session gets its
+        # directory — foreground exec, the detached worker, the interactive
+        # viewer's runtime, the server — and the exec-only version left the
+        # interactive path unstamped while the docs promised it (review round
+        # 2, F1). ``fresh_directory`` keeps `--resume` honest: adopting the
+        # operator's own conversation must not hide their chat.
+        from local_operator.agent_shell import stamp_escaped_session
+
+        stamp_escaped_session(transcript_dir, created_here=fresh_directory)
+
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the
         # one place the harness knows it is writing into its own store —

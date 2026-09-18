@@ -90,9 +90,10 @@ deliberately NOT named in the refusal text (that text is model-facing and its jo
 is to route the reader to `task`/`hub`/`wake`; obscurity, not secrecy — this
 file and `AGENTS.md` both name it), and script harnesses declare themselves with
 `agent_shell.harness_child_env()` rather than copying the variable by hand. It is
-not a silent equivalent either: a session opened under it is stamped
+not a silent equivalent either: a session it OPENS is stamped
 `origin.json` = `agent-shell`, so it stays out of the `/resume` picker, the
-desktop sidebar and the phone's list. Isolating the run
+desktop sidebar and the phone's list (a conversation it merely RESUMES is the
+operator's own work and is left alone). Isolating the run
 (`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a test off the
 operator's own store; the stamp is the seatbelt for the run that forgets.
 

@@ -7808,11 +7808,14 @@ def main() -> int:
         # above — so this ONE check covers `lop`, `lop --resume ID`, `--tui` and
         # every future interactive flag together, and it sits FIRST so a refused
         # run has written nothing: no config override, no registry row for an
-        # autosave agent. Refused with no escape, unlike the exec path: a
-        # terminal is what the operator opens, and a session that reaches here
-        # is opening one on their behalf. A session restarting its OWN front end
-        # is not that case; `reexec.replace_self` drops the marker before it
-        # re-execs, which is where that distinction lives.
+        # autosave agent. It honours the SAME escape as the exec path (the rule
+        # is `nested_session_refusal`'s, in one place, on purpose), because a
+        # pty harness drives this front end exactly as a bench drives exec.
+        # What differs between the two paths is only who DROPS the marker: the
+        # three places a session opens a conversation for its user — the TUI
+        # restart, `/fork`'s window, a notification click's terminal — pass
+        # `agent_shell.without_agent_shell_marker`, since those are the user's
+        # gestures and not an agent's command.
         refusal = nested_session_refusal()
         if refusal is not None:
             from local_operator.cli_style import ERROR, paint

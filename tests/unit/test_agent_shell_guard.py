@@ -17,11 +17,9 @@ escape hatch for real-CLI testing from being a silent one.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -243,9 +241,80 @@ def test_a_harness_declares_itself_to_its_children() -> None:
     assert harness_child_env()[ALLOW_NESTED_SESSION_ENV] == "1"
 
 
-def _session_on(directory: Path) -> SimpleNamespace:
-    """The one seam the stamp reads: the session's own directory."""
-    return SimpleNamespace(transcript=SimpleNamespace(directory=directory))
+def test_the_click_rungs_do_not_hand_a_child_the_marker(
+    in_agent: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CALLERS, not just the helper (review round 2, F4).
+
+    The suite's click recorder records argv and stdin and never the child env,
+    so a silent regression to `dict(os.environ)` at either rung would keep every
+    test green — which is exactly what round 2's F1 was. Both rungs are driven:
+    the terminal one through the backend it hands the environment to, and the
+    desktop one through `Popen`, where its launcher lands.
+    """
+    import subprocess
+
+    from local_operator.tui import resume_click
+
+    # The suite's ambient fixture sets this deliberately — the launch ladder
+    # finds the maintainer's installed app and would start it — so a test that
+    # drives the rung clears it, which is the documented opt-in.
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", raising=False)
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.envs: list[dict[str, str]] = []
+
+        def spawn(self, launch, env):  # noqa: ANN001
+            self.envs.append(dict(env))
+            return True
+
+    backend = _Backend()
+    monkeypatch.setattr("local_operator.spawn.registry.active_backend", lambda *a, **k: backend)
+    assert resume_click._spawn_terminal("a1b2c3d4e5f6") is True
+
+    launched: list[dict[str, str]] = []
+
+    class _Process:
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda argv, **kwargs: launched.append(dict(kwargs.get("env") or {})) or _Process(),
+    )
+    assert resume_click._launch_desktop("a1b2c3d4e5f6") is True
+
+    assert backend.envs, "the terminal rung must have handed a backend an env"
+    assert launched, "the desktop rung must have launched something"
+    for env in (*backend.envs, *launched):
+        assert AGENT_SHELL_ENV not in env
+        # The strip drops ONE key: a copy that also dropped PATH would break the
+        # spawn in a way no assertion here would otherwise notice.
+        assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_the_fork_window_drops_the_marker() -> None:
+    """The third caller, pinned at the source.
+
+    `/fork`'s spawn needs a real session factory, a real backend and a running
+    app, so it is asserted as the call that must be there rather than as a pilot
+    run — the shape `tests/unit/test_fork.py` already uses for the fork paths it
+    cannot drive. What it catches is a regression to `dict(os.environ)`, which
+    is the defect the round-2 finding named.
+    """
+    import inspect
+
+    from local_operator.tui.app import OperatorApp
+
+    source = inspect.getsource(OperatorApp._on_fork_complete)
+    assert "without_agent_shell_marker(" in source, (
+        "the fork window inherits the session's environment, so it must drop the "
+        "agent-shell marker, or a /fork in a harness-driven session opens a "
+        "window that dies on the refusal"
+    )
+    assert "dict(os.environ)" not in source, "the raw copy is the regression"
 
 
 def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Path) -> None:
@@ -257,7 +326,7 @@ def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Pa
     keeps it out of the picker, the sidebar and the phone's list.
     """
     directory = tmp_path / "sessions" / "abc123"
-    assert stamp_escaped_session(_session_on(directory)) is True
+    assert stamp_escaped_session(directory, created_here=True) is True
     assert session_origin(directory) == ORIGIN_AGENT_SHELL
     assert is_user_session(directory) is False
     # Distinct from a `task` child's stamp: this session carries no parent job
@@ -268,71 +337,113 @@ def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Pa
 def test_an_ordinary_run_is_not_marked(tmp_path: Path) -> None:
     """The operator's own `lop exec` keeps its plain user-session shape."""
     directory = tmp_path / "sessions" / "def456"
-    assert stamp_escaped_session(_session_on(directory)) is False
+    assert stamp_escaped_session(directory, created_here=True) is False
     assert not (directory / ORIGIN_NAME).exists()
     assert is_user_session(directory) is True
 
 
-def test_a_storeless_session_is_skipped(monkeypatch: pytest.MonkeyPatch, escaped: None) -> None:
-    """A reduced host builds sessions with no directory; marking is best-effort."""
-    assert stamp_escaped_session(SimpleNamespace(transcript=None)) is False
-
-
-def test_run_session_stamps_a_fresh_escaped_run_but_never_a_resume(
-    escaped: None, monkeypatch: pytest.MonkeyPatch
+def test_a_directory_this_call_did_not_create_is_never_re_marked(
+    escaped: None, tmp_path: Path
 ) -> None:
-    """The call site, not just the helper.
+    """`--resume` adopts the operator's conversation; hiding it is the mirror bug.
 
-    `--resume` adopts a directory that may be the operator's OWN conversation,
-    so hiding it would be the mirror image of the bug this marks against. The
-    stamp is observed by intercepting the run at its next step, which is also
-    what keeps this test out of the model path.
+    Only the caller can tell a directory it just made from one the operator has
+    been using, which is why `created_here` is passed rather than guessed from
+    the marker's absence.
     """
-    from local_operator import exec_session
+    existing = tmp_path / "sessions" / "the-operator-session"
+    existing.mkdir(parents=True)
+    (existing / "transcript.jsonl").write_text("the operator's work\n")
 
-    stamped: list[object] = []
-    monkeypatch.setattr(
-        "local_operator.agent_shell.stamp_escaped_session",
-        lambda session: stamped.append(session) or True,
+    assert stamp_escaped_session(existing, created_here=False) is False
+    assert not (existing / ORIGIN_NAME).exists()
+    assert is_user_session(existing) is True
+
+
+def _factory_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: object):
+    """Build a session the way every entry point does, through the factory."""
+    import argparse
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import create_session
+
+    config_dir = tmp_path / ".local-operator"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    args = argparse.Namespace(
+        hosting="test",
+        model="test-model",
+        agent_name=None,
+        agent_id=None,
+        yolo=True,
+        train=False,
+        **overrides,
+    )
+    return create_session(
+        args,
+        ConfigManager(config_dir),
+        CredentialManager(config_dir),
+        AgentRegistry(config_dir),
     )
 
-    async def stop(*a, **k):
-        raise _Intercepted
 
-    monkeypatch.setattr("local_operator.session.runtime.exec_control.start_exec_control", stop)
+@pytest.mark.asyncio
+async def test_the_factory_stamps_the_session_an_escape_opens(
+    escaped: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stamp is not exec-only — round 2's major, pinned where it lives.
 
-    def args(resume):
-        return SimpleNamespace(
-            resume=resume,
-            yolo=False,
-            control=False,
-            goal=None,
-            clear_goal=False,
-            loop=None,
-            loop_goal=None,
-            name=None,
-            profile=None,
-            team=None,
-            effort=None,
-        )
-
-    async def drive(resume: str | None) -> None:
-        session = SimpleNamespace(dispose=_noop)
-        with pytest.raises(_Intercepted):
-            await exec_session.run_session(session, "review it", args(resume), None)
-
-    asyncio.run(drive(None))
-    assert len(stamped) == 1
-    asyncio.run(drive("some-user-session"))
-    assert len(stamped) == 1, "a resumed conversation must not be re-marked"
+    It began in `exec_session.run_session`, which the interactive path never
+    reaches: a pty harness driving the TUI under the escape produced an
+    UNSTAMPED session while both documents promised otherwise. The factory is
+    the one place every entry point gets its directory (foreground exec, the
+    detached worker, the interactive viewer's runtime, the server), so the
+    guarantee is asserted through IT rather than through any single caller. The
+    mock provider keeps this offline.
+    """
+    session = await _factory_session(tmp_path, monkeypatch)
+    try:
+        directory = session.transcript.directory
+        assert session_origin(directory) == ORIGIN_AGENT_SHELL
+        assert is_user_session(directory) is False
+    finally:
+        await session.dispose()
 
 
-async def _noop() -> None:
-    return None
+@pytest.mark.asyncio
+async def test_the_factory_leaves_a_resumed_conversation_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: resuming the operator's own chat must not hide it.
 
+    Built WITHOUT the escape first, so it is an ordinary user session, then
+    reopened with it — the shape a harness re-entering an existing conversation
+    has, and the one where a careless stamp would make the operator's own work
+    vanish from their picker.
+    """
+    monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    monkeypatch.delenv(ALLOW_NESTED_SESSION_ENV, raising=False)
+    first = await _factory_session(tmp_path, monkeypatch)
+    try:
+        directory = first.transcript.directory
+        session_id = first.session_id
+        # A real turn, because an unused session has no transcript and is not
+        # resumable (`resume_dir` refuses it) — the control case has to be a
+        # conversation the operator could actually reopen.
+        await first.prompt("the operator's own turn")
+    finally:
+        await first.dispose()
+    assert session_origin(directory) == "", "the control case starts as the user's"
 
-class _Intercepted(Exception):
-    """Ends the run at the first step after the stamp."""
+    monkeypatch.setenv(AGENT_SHELL_ENV, "1")
+    monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
+    resumed = await _factory_session(tmp_path, monkeypatch, resume=session_id)
+    try:
+        assert session_origin(directory) == "", "a resumed conversation is not re-marked"
+        assert is_user_session(directory) is True
+    finally:
+        await resumed.dispose()
 
 
 # --- a session restarting its own front end ----------------------------------

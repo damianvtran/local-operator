@@ -68,7 +68,6 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 #: Set by the ``bash`` tool on every command it runs. Names the one fact this
 #: module acts on: the process descended from an agent's tool call.
@@ -190,7 +189,7 @@ def nested_session_refusal() -> str | None:
     return refusal_message()
 
 
-def stamp_escaped_session(session: Any) -> bool:
+def stamp_escaped_session(directory: Path, *, created_here: bool) -> bool:
     """Mark an escaped run's session as machine-started. Returns whether it did.
 
     The seatbelt under the escape hatch, and the reason the hatch is not silent:
@@ -200,20 +199,24 @@ def stamp_escaped_session(session: Any) -> bool:
     ``is_user_session`` hides anything that is not the user's — and the value
     ``agent-shell`` distinguishes it from a ``task`` child.
 
-    Best-effort by contract, like :func:`local_operator.resume.mark_session_origin`
-    itself: the session already exists and is about to do real work, so failing
-    to write bookkeeping about it must not take that work down. Called from
-    :func:`local_operator.exec_session.run_session` — the one place both exec
-    shapes (foreground and the detached worker) hold the built session — rather
-    than at session construction, because ``--resume`` can adopt a directory
-    that is already the user's and must not be re-marked as this module's.
+    ``created_here`` is the caller's answer to "did this call make the
+    directory", and it is not decoration: `--resume` adopts a directory that
+    may be the operator's OWN conversation, and marking one of those would hide
+    their chat — the mirror image of the bug this marks against. Only the
+    caller can answer it (an empty directory a moment old and one from last
+    week look identical from here), so it is passed rather than guessed.
+
+    Called from :func:`local_operator.session_factory._prepare`, which is
+    the one place every session — foreground exec, the detached worker, the
+    interactive viewer's runtime, the server — gets its directory. It began in
+    ``exec_session.run_session`` and moved up after review round 2: the exec
+    path stamped, the interactive path did not, and the docs promised both
+    (F1 of that round). Best-effort by contract, like
+    :func:`local_operator.resume.mark_session_origin` itself: the session is
+    about to do real work, and failing to write bookkeeping about it must not
+    take that work down.
     """
-    if not escaped_agent_shell_run():
-        return False
-    directory = getattr(getattr(session, "transcript", None), "directory", None)
-    if directory is None:
-        # A reduced host with an in-memory store: there is no directory to
-        # mark, which is also no store for a picker to mis-offer.
+    if not created_here or not escaped_agent_shell_run():
         return False
     from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
 
