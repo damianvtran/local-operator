@@ -514,6 +514,139 @@ def validate_page_request(before_id: str | None, through_id: str | None, limit: 
         raise ValueError("limit must be at least 1")
 
 
+#: How far back from EOF the page reader searches for a requested cursor in RAW
+#: BYTES before it gives up on the windowed search and scans the whole file.
+#: The window is a COST bound, not a correctness one, and the trade it makes is
+#: between two measured shapes: a cursor inside it costs what it reads (~7 ms
+#: for this window on a 262 MB journal), a cursor outside costs one whole-file
+#: byte pass either way (~115 ms). 16 MiB is ~1,400 rows of a large journal,
+#: i.e. the first ~13 pages of desktop scroll-back, which is the run of pagination
+#: a reader actually performs; past it the pass is flat in depth, so a larger
+#: window only buys a little and lengthens the miss path it precedes.
+_PAGE_LOCATE_WINDOW_BYTES = 16 << 20
+
+
+def _cursor_needle(cursor_id: str) -> bytes:
+    """The byte sequence a row carrying ``cursor_id`` OPENS with.
+
+    ``TranscriptEntry.to_json`` writes the id first with compact separators, so
+    every row this format produces starts ``{"id":"<id>"``. A payload can also
+    contain an unescaped ``{"id":…}`` — nested objects in a checkpoint's state
+    are real, and one was measured echoing a cursor — which is why a hit is only
+    ever a CANDIDATE: :func:`_verified_row_end` re-reads the row and checks the
+    parsed id before the locator believes it.
+    """
+    return b'{"id":"' + cursor_id.encode("utf-8") + b'"'
+
+
+def _byte_before(handle: BinaryIO, offset: int) -> bytes:
+    """The single byte at ``offset - 1``, or ``b""`` at the file's start.
+
+    Its own seek because both locators scan by reading windows and are done with
+    the window by the time a candidate is checked; one extra read per CANDIDATE
+    (not per row) is what keeping them loop-free costs.
+    """
+    if offset <= 0:
+        return b""
+    handle.seek(offset - 1)
+    return handle.read(1)
+
+
+def _verified_row_end(handle: BinaryIO, start: int, cursor_id: str) -> int | None:
+    """The offset just past the row at ``start``, if that row is the cursor's.
+
+    ``None`` means ``start`` is not a row carrying ``cursor_id`` — either the
+    candidate was an echo inside a payload's nested object, or the bytes there
+    are torn. Returning the END offset rather than the start is what lets the
+    caller hand it straight to :func:`_iter_complete_lines_backward` as its
+    ``end_of_file``: the walk then yields exactly the cursor's row first and
+    continues into the older rows, which is the same sequence it produced after
+    passing the newer ones.
+    """
+    handle.seek(start)
+    raw = handle.readline()
+    entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+    if entry is None or entry.id != cursor_id:
+        return None
+    return start + len(raw)
+
+
+def _locate_cursor_row_in_bytes(
+    handle: BinaryIO, end_of_file: int, cursor_id: str, window: int | None
+) -> int | None:
+    """The newest cursor row whose start lies within ``window`` bytes of EOF.
+
+    Reading BACKWARD is what keeps the documented "an id that appears more than
+    once resolves to the newest occurrence" rule, and it is the reason this is
+    the only locator: the first candidate found scanning from the end IS the
+    newest, whereas a scan from the head finds the OLDEST and would leave the
+    same cursor resolving differently depending on which one answered it. The
+    newest occurrence may sit anywhere above the cursor, so this is also the only
+    direction in which "stop early" is an exact optimisation — hence one
+    function, run twice, rather than two locators with two rules.
+
+    NO PER-ROW WORK: candidates are found with ``rfind`` over raw bytes, and a
+    row is read only where a candidate actually starts a line. That is what makes
+    the deep page bounded rather than proportional to the rows above it — the
+    whole-journal case is one byte pass (~80-200 ms on the operator's 262 MB
+    journal) instead of the ~4 s of JSON-decoding-plus-pydantic the walk paid for
+    the same 21 000 skipped rows (measured: 3.4-4.5 s before, and the same walk
+    with the cursor located in bytes is 3.9 ms when the cursor is inside the
+    window and one pass otherwise).
+
+    Windows overlap by the needle's length so an occurrence straddling a boundary
+    is still seen; it is seen twice at worst, and verification is idempotent.
+    """
+    low = 0 if window is None else max(0, end_of_file - window)
+    position = end_of_file
+    overlap = len(_cursor_needle(cursor_id)) - 1
+    needle = _cursor_needle(cursor_id)
+    while position > low:
+        start = max(low, position - _BACKWARD_CHUNK_BYTES)
+        read_start = max(low, start - overlap)
+        handle.seek(read_start)
+        buf = handle.read(position - read_start)
+        index = buf.rfind(needle)
+        while index != -1:
+            hit = read_start + index
+            # A LINE START is the cheap necessary condition, and it rejects the
+            # payload echoes that make this a search rather than a lookup:
+            # nested ``{"id": …}`` objects (checkpoint state carries them) sit
+            # after a comma or a bracket, never at the start of a row. The parse
+            # below is the sufficient one.
+            if _byte_before(handle, hit) in (b"", b"\n"):
+                row_end = _verified_row_end(handle, hit, cursor_id)
+                if row_end is not None:
+                    return row_end
+            index = buf.rfind(needle, 0, index)
+        position = start
+    return None
+
+
+def _locate_cursor_row(handle: BinaryIO, end_of_file: int, cursor_id: str) -> int | None:
+    """Where the NEWEST row carrying ``cursor_id`` ends, or ``None``.
+
+    The windowed search first, because the pages a reader actually waits on —
+    the open's own tail follow-ups and the first scrolls back, ~1,400 rows of a
+    large journal at ``_PAGE_LOCATE_WINDOW_BYTES`` — have their cursor inside it
+    and are answered without reading the rest of the file. The unbounded pass
+    then covers a genuinely deep cursor, so the cost of ANY page is bounded by
+    one byte pass over the journal rather than by how far back the reader has
+    scrolled. (The index that would make it O(page) is deliberately not built:
+    it would have to be invalidated whenever ``compact_file`` replaces the file
+    and when another process appends, which is the invalidation surface
+    ``page_cache`` needs a file IDENTITY for — see :class:`TranscriptPage`.)
+
+    ``None`` is not "the cursor does not exist": it means no row carrying it
+    could be located in bytes, and the caller then walks from EOF exactly as it
+    always did — the only path that can answer whether the cursor exists at all.
+    """
+    located = _locate_cursor_row_in_bytes(handle, end_of_file, cursor_id, _PAGE_LOCATE_WINDOW_BYTES)
+    if located is not None:
+        return located
+    return _locate_cursor_row_in_bytes(handle, end_of_file, cursor_id, None)
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
@@ -525,7 +658,7 @@ def read_transcript_page(
 
     The read runs BACKWARD from EOF in chunks, one
     :func:`_iter_complete_lines_backward` pair at a time, so its cost is the page
-    plus the distance from EOF to a requested cursor. It used to scan forward
+    plus whatever it takes to reach the requested cursor. It used to scan forward
     from byte 0 and JSON-decode every row: on a real 243 MB conversation the
     desktop open path spent 1.7 s and read the whole file to produce the same
     100 rows this returns in milliseconds, and every ``loadOlder`` page re-paid
@@ -535,20 +668,46 @@ def read_transcript_page(
 
     WHICH PAGES THAT MAKES CHEAP, stated so this cannot read as a promise the
     code does not keep. The tail page — no cursor, which is what an open asks
-    for — costs the chunk that carries it. A ``before_id`` page costs the bytes
-    between its cursor and EOF, because locating an id without an index means
-    walking to it, and the walk starts at the end. So a cursor near the file's
-    HEAD costs the whole journal read backward, which is exactly the read the
-    forward scan performed (0.011 s -> 4.05 s on the 70 MB copy in the PR's own
-    table, and a reviewer's 20 000-row journal: 0.000 s -> 0.453 s). That is the
-    mirror image of the reader this replaces, per-page worst case for per-page
-    worst case: paging from the tail to the top costs the same bytes in total
-    either way (Σ(EOF − cursor) ≈ Σ(cursor) over symmetric page positions).
-    What changed is WHICH pages are cheap, and the ones a reader pays are the
-    tail and the first scrolls back. A bounded walk with a forward fallback, or
-    a cursor->offset index, would fix the deep case; the index would have to be
-    maintained across ``compact_file`` rewriting the file, so it is deliberately
-    not built here and the worst case is named instead.
+    for — costs the chunk that carries it. An early ``before_id`` page costs the
+    chunk between its cursor and EOF. A DEEP one used to cost the whole journal
+    read backward: locating an id without an index meant walking to it, and the
+    walk starts at the end (measured on the operator's 262 MB journal: 8 ms at
+    98% depth, but 3.3-4.5 s at 2-75%, whether each row was parsed or only
+    scanned).
+
+    THE CURSOR IS NOW LOCATED BY BYTES, then the same walk runs from there (see
+    :func:`_locate_cursor_row`). That is what makes a deep page bounded: the
+    locator does no per-row work, and the walk it hands off to traverses one
+    chunk plus the page instead of everything above the cursor. Cost becomes
+    min(bytes from EOF to the cursor, one byte pass over the file) + the page,
+    where both terms are C-level ``rfind`` over chunks rather than one
+    JSON-decode into a pydantic model per row skipped — so the cost stops being
+    proportional to the cursor's DEPTH, which is the property the deep case
+    lacked. Measured on the operator's 262 MB journal, best of 5 (this host runs
+    many agents at once, so absolute ms move ±40% and the ratios are the signal):
+    98% depth 1.5-6 ms — unchanged, the tail pages were always cheap — and
+    115-260 ms at 2%, 25%, 50% and 75%, against 1 762 ms at 2%, 1 451 ms at 25%,
+    1 211 ms at 50% and 1 146 ms at 75% before. The residual is one byte pass over
+    the file (~115 ms standalone on this box, and the same ~115 ms whether the
+    cursor is 2% or 75% of the way in), so the reader's cost is now flat in the
+    cursor's depth rather than linear in it.
+
+    NO INDEX IS BUILT, deliberately, and the reason is the one the cursor's own
+    type already carries: ``compact_file`` REPLACES the file, so a persisted
+    id->offset map is a cache with an invalidation surface, one that a second
+    process appending to the journal invalidates too — this reader is stateless
+    on purpose (see the class docstring above), and the field it would be
+    derived from is the whole file.
+
+    The locator can only ever make this reader FASTER, never wrong, which is why
+    it is allowed to be an optimisation at all. A hit is accepted only when the
+    byte before it ends a line and the row parses with that exact id, so a
+    payload that happens to echo an id (nested ``{"id": …}`` objects are real —
+    checkpoint states carry them) is rejected and the search continues. If no row
+    can be located — an id written by a build whose row layout this needle does
+    not match, say — the walk falls back to today's full backward walk from EOF
+    and the answer is the one it always was; the locator is never asked to decide
+    whether the cursor exists.
 
     Contract, unchanged from the forward implementation: ``before_id`` is
     EXCLUDED and the page is the one immediately before it; ``through_id`` is
@@ -596,7 +755,18 @@ def read_transcript_page(
     skipping = before_id is not None or through_id is not None
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
-        for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
+        end_of_file = handle.tell()
+        cursor_id = through_id if through_id is not None else before_id
+        if cursor_id is not None:
+            # THE CURSOR FIRST, in bytes, so the walk below starts next to it
+            # instead of next to EOF. A ``None`` here is not "not found": it
+            # means neither byte search could vouch for a row, and the walk then
+            # runs from EOF exactly as it always did — the only path that can
+            # answer whether the cursor exists at all.
+            located = _locate_cursor_row(handle, end_of_file, cursor_id)
+            if located is not None:
+                end_of_file = located
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
             for raw in lines:
                 if not raw.strip():
                     continue
