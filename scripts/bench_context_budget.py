@@ -139,7 +139,24 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the second will call ``web_fetch`` instead and pay a network round trip for
 #: every page. Headroom at 27,800 is 71 tokens, and the next context reduction
 #: tightens it.
-BUDGET_BILLED_TOKENS = 27_800
+#: RAISED 27,800 -> 28,100 for the ``scratchpad://`` pointer in ``system.md``,
+#: stated here because the guard exists to make this an explicit decision.
+#: Measured with this script on the branch's base (``origin/main`` ba225070) the
+#: figure was 27,835 and on the branch 27,998 — a +163-token delta, which is the
+#: whole of the increase: five lines naming the scheme, the output-elsewhere
+#: half of the rule, the three tools that take it, the absolute path they print,
+#: the lifetime, and ``guide://scratchpad``. The alternative to paying it is not
+#: a smaller number: an agent that does not know the scheme's existence has
+#: nowhere to put its own scratch work, and puts it in the user's working
+#: directory, where it is indistinguishable from an output they asked for. The
+#: pointer is the only discovery channel that costs nothing extra (the guide body
+#: is progressive disclosure and never rides the start context; its description
+#: only rides a turn that selects it). Local measurement runs ~35 tokens above
+#: CI's on this machine (27,835 on base locally, past the old ratchet, while
+#: main's CI is green), so 100 tokens of slack is left for that unattributed gap
+#: rather than sizing the ceiling to a local reading; on CI the headroom is
+#: nearer 170. The next context reduction tightens it either way.
+BUDGET_BILLED_TOKENS = 28_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
