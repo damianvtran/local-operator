@@ -239,16 +239,18 @@ because the entire point is to be cheap: a recommendation that costs more than t
 saves is a net loss.
 
 MEASURED AT CATALOGUE SCALE (2026-09-18, this branch, defaults for `maxStateChars` and
-`maxCandidates`, a 537-resource roster — 500 skills, 30 guides, 7 servers — each carrying a
-realistic ~85-character description, and an 8×-repeated user message): state 3 525 chars,
-question options 3 431 chars, question instructions 449 chars, i.e. **7 405 chars ≈ 1 851 tokens
-≈ 5.6% of the 32 768-token window**. What bounds this is the candidate cap, not the window: at
-`maxCandidates: 40` the same roster produces 14 184 chars ≈ 3 546 tokens ≈ 10.8%. Hundreds of
+`maxCandidates`, a 537-resource roster — 500 skills, 30 guides, 7 servers — each skill and guide
+carrying a realistic ~85-character description, and an 8×-repeated user message): state 3 294
+chars, question options 3 200 chars, question instructions 449 chars, i.e. **6 943 chars ≈ 1 735
+tokens ≈ 5.3% of the 32 768-token window**. What bounds this is the candidate cap, not the window:
+at `maxCandidates: 40` the same roster produces 13 953 chars ≈ 3 488 tokens ≈ 10.6%. Hundreds of
 skills are affordable, and `maxCandidates` is the operator's lever.
 
-(The first cut of these figures used toy one-line descriptions and read ~2x lower; a review round
-caught that the assertions built on them accepted a 5x regression, so the numbers above are the
-DESCRIPTION-REALISTIC ones and the tests assert against them tightly.)
+THE SAME ROSTER IS BUILT IN THE TEST, and the figures above are that test's own measurements:
+`tests/unit/classification/test_context.py` builds those 537 rows and asserts tight bounds against
+them, so a drift in either the code or this paragraph fails a test. (Two review rounds were spent
+getting that right: the first cut used toy one-line descriptions with a `<= 3000` bound that
+accepted a 5× regression, and the second found the doc and the test quoting different rosters.)
 
 Non-negotiable: **the transcript is never sent.** Not the history, not the compaction summary,
 not tool results. What goes out is:
@@ -438,15 +440,22 @@ Sequence per user message:
 
    TWO CONSEQUENCES OF THE LINE ALWAYS PAINTING (design review round 1, 2026-09-18). While the layer
    shipped off, the notice's ink and height were only ever seen by operators who opted in; on by
-   default they are everybody's. (1) **Ink**: the line is delivered as `note`, not `info`. `info` maps
-   to the theme's `dim` token, measured at 3.77:1 on the light theme — below the 4.5:1 AA floor — and
-   13 of the 16 light builtins sit under it; `note` maps to `muted` (7.18:1 on paper, 8.63:1 on the
-   dark ground) and is the ink the ladder already reserves for a receipt the user is meant to read,
-   which is the same call `tui/session_presentation.py` made for a replayed marker. The glyph is
-   unchanged (`·` for both kinds). (2) **Height**: the row count is a function of
+   default they are everybody's. (1) **Height**: the row count is a function of
    `maxRecommendations` (3 by default, so 2 rows at 100 columns and 3 at 80), which is now a default
    surface rather than an opt-in one — `maxRecommendations` is the lever for that, exposed beside
-   `maxCandidates` in `/settings`.
+   `maxCandidates` in `/settings`. (2) **Ink — a recorded EXCEPTION, and the fix is NOT in this
+   layer.** The line is delivered as `info`, which maps to the theme's `dim` token: measured 3.77:1
+   on the light theme, below the 4.5:1 AA floor, with 13 of the 16 light builtins under it. `note`
+   (`muted`: 7.18:1 on paper, 8.63:1 on the dark ground) is the right ink — it is what
+   `tui/session_presentation.py` already chose for a replayed marker — and delivering it that way
+   was implemented and then WITHDRAWN: ``NoticeEvent.kind`` is
+   ``Literal["info", "warning", "error"]``, so a real `Session` rejects the event with a pydantic
+   ``ValidationError`` that `_deliver_classification_notice`'s own guard swallows as a WARNING while
+   still reporting the notice as delivered — the line never painted on the TUI, CLI or server, and
+   the "last announced" key then suppressed the repeat (agent review round 2, blocker). Adding
+   `note` to the event contract, the server's kind allowlists and the session's annotations is its
+   own cross-surface change and does not belong inside a default flip; §12 carries it as an open
+   item, and the glyph (`·`) is shared by both kinds so the ink is the only difference.
 
 Rendered block (this is the whole token cost — target ≤ 6 lines):
 
@@ -608,6 +617,12 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
   matrix mid-session is not affordable on a message path — so a brand-new skill is REACHABLE (the
   classifier offers it, and `skill://` resolves it through the miss-path rescan) but does not
   appear in the embedder's top-k until the session restarts.
+- **The notice line's ink on light themes** (design review round 1, D1): `info` → `dim` measures
+  3.77:1 on the light theme, below AA, and 13 of the 16 light builtins sit under it. Delivering it
+  as `note` (`muted`, 7.18:1) is the right fix and needs `note` added to ``NoticeEvent.kind``
+  (`harness/types.py`) plus the server's kind allowlists and the session's own annotations — a
+  cross-surface change of its own, deliberately not folded into a default flip (§7 records the
+  measurement, and the attempt that had to be withdrawn).
 - §5's `context` half is UNBUILT on the caller side: the contract suggests "the newest compaction
   summary line or the last assistant message's first line", and the wiring always passes
   `context=None` (argued in `session_factory._RecommendationRequest`). Benign for an advisory

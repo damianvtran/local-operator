@@ -357,11 +357,12 @@ async def test_the_notice_rides_the_session_notice_path_once_per_message() -> No
     first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     # Same task, tool continuation: frozen, so no second call and no second line.
     await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    # "note", not "info": design review round 1 (D1) measured the `info` ink at
-    # 3.77:1 on the light theme (below AA) and moved the line to the ink the
-    # ladder already reserves for a receipt the user is meant to read. The glyph
-    # is unchanged — both kinds use `·`.
-    assert delivered == [("Suggestion added for this message: guide://tunnel", "note")]
+    # "info", and the pinned kind is the point: the design round's D1 proposed
+    # `note` for its contrast (`info`'s `dim` ink measures 3.77:1 on the light
+    # theme), and `note` is NOT a legal ``NoticeEvent.kind`` — a real Session
+    # rejects it and the line never reaches the user (agent review round 2,
+    # blocker). This assertion is what would catch that attempt again.
+    assert delivered == [("Suggestion added for this message: guide://tunnel", "info")]
     assert "guide://tunnel" in first
 
     # The SAME set on the next message: the prompt still gains the block, the line

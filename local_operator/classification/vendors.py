@@ -495,6 +495,13 @@ class _HttpDecisionVendor:
         self._clock = clock
         self._key: SecretStr | None = None
         self._key_expires_at = 0.0
+        #: When the last resolve SETTLED — a value or, deliberately, a nothing.
+        #: ``None`` until the first resolve. This is what "the memo lapsed" is
+        #: measured against (:meth:`credential`), and it is why it is a timestamp of
+        #: its own rather than a check on ``_key``: a walk that ends with no
+        #: credential at all is exactly the case a re-login has to be able to undo,
+        #: and a ``_key is not None`` test cannot see it (agent review round 2).
+        self._memo_settled_at: float | None = None
         #: The tier index the NEXT resolve starts at, and the tier the current
         #: memo came from. Both are per SERVICE, like the memo: they exist so the
         #: 401/403 ladder in :meth:`decide` can move past a dead tier instead of
@@ -561,23 +568,36 @@ class _HttpDecisionVendor:
         if self._key is not None and self._clock() < self._key_expires_at:
             return self._key
         now = self._clock()
-        if self._key is not None and self._tier:
-            # A MEMO EXPIRY IS THE WALK'S ONLY RESET, and it is what makes the
+        lapsed = (
+            self._memo_settled_at is not None
+            and now >= self._memo_settled_at + self._credential_ttl_s
+        )
+        if self._tier and lapsed:
+            # A LAPSED MEMO IS THE WALK'S ONLY RESET, and it is what makes the
             # fallback reversible: the tier index only advances on a refusal, so
             # without this a session that fell back once would never consult the
             # preferred login row again — `lop login` could not revive a running
             # session, and a bare 403 (quota or entitlement rather than a dead
-            # credential) would downgrade the rest of it (agent review round 1).
-            # The TTL is where a re-read is already happening, so the retry is free
-            # of extra requests and still bounded: at most one walk per TTL period.
+            # credential) would downgrade the rest of it (agent review rounds 1-2).
+            #
+            # "LAPSED", not "expired", and measured on its own timestamp: the walk
+            # can end with NO credential at all (every tier refused, or the fallback
+            # tier empty), and a reset keyed on the memo still holding a value would
+            # never fire for that session. The retry costs the preferred tier's
+            # refusals again — up to two refused POSTs per TTL period, not zero — and
+            # it cannot fire on the INVALIDATION path, which resolves again within
+            # the same call and so has not lapsed.
             logger.info(
-                "classification: %s credential memo expired; re-starting at the "
+                "classification: %s credential memo lapsed; re-starting at the "
                 "preferred tier (%s)",
                 self.name,
                 self.credential_tiers[0],
             )
             self._tier = 0
         self._key, self._key_tier = await self._resolve_key(manager)
+        self._memo_settled_at = now
+        self._key_expires_at = now + self._credential_ttl_s
+        return self._key
         self._key_expires_at = now + self._credential_ttl_s
         return self._key
 

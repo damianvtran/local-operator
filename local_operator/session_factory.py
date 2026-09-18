@@ -2514,8 +2514,20 @@ async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: An
         return False
     if not line:
         return False
+    # The kind is "info", NOT "note". Design review round 1 (D1) measured `info`'s
+    # `dim` ink at 3.77:1 on the light theme (below the 4.5:1 AA floor, 13 of the 16
+    # light builtins under it) and offered two resolutions; the `note` route was taken
+    # first and had to be WITHDRAWN, because ``NoticeEvent.kind`` is
+    # ``Literal["info", "warning", "error"]`` — a real Session rejects the event with
+    # a pydantic ``ValidationError`` that this function's own guard swallows as a
+    # WARNING while still reporting the notice as delivered, so the line never painted
+    # on the TUI, CLI or server and the "last announced" key then suppressed the
+    # repeat (agent review round 2, blocker). Adding `note` to the event contract and
+    # to the server's kind allowlists is its own cross-surface change; the contrast is
+    # recorded as a documented exception in ``docs/design/classification-layer.md``
+    # §7 and §12 instead.
     try:
-        delivered = sink(str(line), "note")
+        delivered = sink(str(line), "info")
         if inspect.isawaitable(delivered):
             await delivered
     except Exception:  # noqa: BLE001 — a notice is never worth a turn
