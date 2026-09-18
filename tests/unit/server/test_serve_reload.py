@@ -228,14 +228,16 @@ def test_exec_hands_over_the_fd_the_new_interpreter_and_a_safe_path(
     missing ``-P`` each produces a daemon that looks healthy from the outside and
     either serves the old code or has no listener at all.
     """
-    seen: dict[str, Any] = {}
-    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: seen.update(fd=fd, flag=flag))
+    seen: dict[str, Any] = {"inherit": []}
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: seen["inherit"].append((fd, flag)))
     monkeypatch.setattr(
         os, "execve", lambda path, argv, env: seen.update(path=path, argv=argv, env=env)
     )
     plan = _watch(_app(fd=13)).plan()
     serve_reload._exec(plan)
-    assert seen["fd"] == 13 and seen["flag"] is True
+    # The fd is made inheritable for the exec and put BACK afterwards, because a
+    # stubbed exec leaves this process serving (review round 1, NIT-2).
+    assert seen["inherit"] == [(13, True), (13, False)]
     assert seen["path"] == str(plan.interpreter)
     assert seen["argv"] == [
         str(plan.interpreter),
@@ -265,6 +267,111 @@ async def test_install_arms_the_handler_and_the_signal_sets_the_flag(
     os.kill(os.getpid(), serve_reload.RELOAD_SIGNAL)
     await asyncio.sleep(0.05)
     assert watch.pending is True
+
+
+def test_exec_ignores_the_signal_across_the_replace(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: the successor must be DEAF until it is ready to listen.
+
+    For the successor's whole boot the last published record is still live and
+    still advertising ``reloadable``, while the process it names has not reached
+    ``add_signal_handler`` — so SIGUSR1 is still at its default disposition of
+    terminate. Review reproduced the consequence end to end: a second request
+    1.45 s after the first left the pid gone and the port dead, with nothing
+    logged. ``SIG_IGN`` survives ``execve``, which is what closes the window.
+    """
+    import signal as signal_mod
+
+    seen: dict[str, Any] = {}
+
+    def _capture(path: str, argv: list[str], env: dict[str, str]) -> None:
+        # Read INSIDE the exec call: this is the disposition the successor
+        # inherits, which is the only place the claim can be checked.
+        seen["disposition"] = signal_mod.getsignal(serve_reload.RELOAD_SIGNAL)
+
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
+    monkeypatch.setattr(os, "execve", _capture)
+    before = signal_mod.getsignal(serve_reload.RELOAD_SIGNAL)
+    serve_reload._exec(_watch(_app(fd=17)).plan())
+    assert seen["disposition"] == signal_mod.SIG_IGN
+    # And this process is NOT left deaf: the exec was stubbed, so it kept
+    # serving, and a daemon that ignored the signal forever could never be
+    # asked to reload again.
+    assert signal_mod.getsignal(serve_reload.RELOAD_SIGNAL) == before
+
+
+def test_a_build_that_cannot_import_refuses_the_reload(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5: the one refusal that has to happen BEFORE the exec to be worth anything.
+
+    Every other refusal keeps the daemon serving what it loaded. An exec into a
+    build that cannot start leaves a dead daemon, a dead port and no process left
+    to log it, so the target is asked to import its own CLI first.
+    """
+    import subprocess as subprocess_mod
+
+    def _broke(argv: list[str], **kwargs: Any) -> Any:
+        return subprocess_mod.CompletedProcess(
+            argv, 1, stdout="", stderr="ModuleNotFoundError: no module named 'local_operator'"
+        )
+
+    monkeypatch.setattr(subprocess_mod, "run", _broke)
+    with pytest.raises(serve_reload.ReloadRefusal, match="cannot import its own CLI"):
+        serve_reload._smoke(Path("/opt/gen/new/bin/python3"))
+
+
+def test_a_smoke_check_that_could_not_run_proceeds(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "We could not ask" is not "the build is bad".
+
+    The same rule ``retire`` applies to its own probes: a machine where the probe
+    cannot run is a machine where refusing would strand the daemon on the old
+    build for that reason alone.
+    """
+    import subprocess as subprocess_mod
+
+    def _cannot_run(argv: list[str], **kwargs: Any) -> Any:
+        raise OSError("no such file or directory")
+
+    monkeypatch.setattr(subprocess_mod, "run", _cannot_run)
+    serve_reload._smoke(Path("/opt/gen/new/bin/python3"))
+
+
+def test_an_adopted_listener_keeps_its_address_family() -> None:
+    """R1-3: ``fromfd`` needs the right family or it misreads the address bytes.
+
+    A hardcoded ``AF_INET`` reinterprets an IPv6 listener's bytes as IPv4 — the
+    daemon still serves, which is exactly why review found it by reading log
+    lines (`::24:b503:100:0:61963` for a peer that an ordinary bind reports as
+    `::1:62246`) rather than by a failure. This asserts the family the reload
+    would have used against a REAL bound IPv6 socket.
+    """
+    import socket as socket_mod
+
+    from local_operator.cli import adopt_serve_socket
+
+    try:
+        donor = socket_mod.socket(socket_mod.AF_INET6, socket_mod.SOCK_STREAM)
+        donor.bind(("::1", 0))
+    except OSError:  # pragma: no cover - no IPv6 on this host
+        pytest.skip("this host has no usable IPv6 loopback")
+    try:
+        donor.set_inheritable(True)
+        # ``detach`` rather than handing over `.fileno()`: the helper CLOSES the fd
+        # it is given (it is the inherited one, and the dup it makes is what
+        # survives), so a Python socket object still tracking that fd would close
+        # it a second time. Detaching says "the helper owns this now".
+        adopted = adopt_serve_socket(donor.detach(), "::1")
+        try:
+            assert adopted.family == socket_mod.AF_INET6
+            assert adopted.getsockname()[0] == "::1"
+        finally:
+            adopted.close()
+    finally:
+        donor.close()
 
 
 def test_install_refuses_a_boot_with_no_listener(install: dict[str, Any]) -> None:

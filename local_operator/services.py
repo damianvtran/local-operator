@@ -53,16 +53,68 @@ logger = logging.getLogger("local_operator.services")
 
 #: How long one daemon has to come back on the new build before it is reported.
 #:
-#: Sized from measurement rather than taste: a reload is a drain (bounded at
-#: ``reload.DRAIN_BUDGET_S``, 10 s, and normally milliseconds because the standing
-#: relays are not waited for) plus an interpreter start and a record publish,
-#: which the suite measures in the low hundreds of milliseconds. Thirty seconds
-#: is several times the worst honest case and short enough that an operator
-#: watching the command sees the answer in the same breath as the install.
+#: Sized against the three things this wait has to cover, MEASURED rather than
+#: assumed (review round 1, NIT-3: an earlier draft of this comment credited the
+#: boot half with "low hundreds of milliseconds", which the end-to-end rig
+#: contradicts) — the drain (milliseconds in the ordinary case, because the
+#: standing relays are deliberately not waited for), the pre-exec smoke check on
+#: a cold import, and the successor's interpreter start plus record publish. On
+#: the reporting host a full reload is ~1.5-2 s, so thirty seconds is an order of
+#: magnitude of headroom and short enough that an operator sees the answer in the
+#: same breath as the install.
 RELOAD_WAIT_S = 30.0
 
 #: The poll period while waiting for a daemon's replacement to publish.
 RELOAD_POLL_S = 0.2
+
+#: How long the identity probe before a signal is given.
+#:
+#: One loopback round trip to a daemon that is answering right now; the timeout is
+#: the same order as ``update._mobile_healthz_answers``'s, for the same reason —
+#: the answer is either immediate or it is not an answer.
+HEALTH_TIMEOUT_S = 1.0
+
+
+def _answers_as_record(record: Any) -> str | None:
+    """Why this record must NOT be trusted, or ``None`` when it is proven.
+
+    THE RECORD IS NOT PROOF OF WHO IS LISTENING (review round 1, R1-4). It is a
+    file whose name is a pid, and a pid is recycled: review constructed a live
+    ``sleep`` named by a hand-written live, ``reloadable: true`` record, and
+    ``reload_serve_daemons`` signalled it — rc ``-30``, a process killed by a
+    command whose entire purpose is to NOT kill anything. The ``/health``
+    ``instance_id`` is the one value that ties the address to the process, which
+    is the check daemon discovery already performs for the same reason
+    (``server/registry``'s module docstring: "a 200 alone is not
+    identification").
+
+    FAIL-CLOSED, and asymmetrically so against the rule that governs the
+    DAEMON's own probes: there, an unreadable probe means "stay" because leaving
+    is the irreversible act. Here the irreversible act is SIGNALLING somebody
+    else's process, so an unreadable answer means "do not signal" — the daemon
+    keeps serving and the operator is told the address did not identify itself.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{[record.host] if ':' in record.host else record.host}:{record.port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=HEALTH_TIMEOUT_S) as response:
+            import json
+
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        return f"{record.host}:{record.port} did not identify itself ({exc})"
+    if not isinstance(payload, dict):  # pragma: no cover - a non-object body
+        return f"{record.host}:{record.port} answered with something that is not a health report"
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    served = result.get("instance_id") if isinstance(result, dict) else None
+    if not served or served != record.instance_id:
+        return (
+            f"{record.host}:{record.port} is answering as {served or 'no instance'}, "
+            f"not the {record.instance_id[:8]}… this record names"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -147,6 +199,7 @@ def reload_serve_daemons(
     sleep: Callable[[float], None] = time.sleep,
     scan: Callable[[], list[Any]] = live_serve_daemons,
     kill: Callable[[int, int], None] = os.kill,
+    probe: Callable[[Any], str | None] = _answers_as_record,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> list[ServiceRefresh]:
     """Ask every stale ``serve`` daemon to move itself onto the current build.
@@ -190,6 +243,21 @@ def reload_serve_daemons(
             )
             continue
         try:
+            # PROVE THE PROCESS BEFORE TOUCHING IT (review round 1, R1-4). A pid
+            # is not an identity, and the request is a signal whose default
+            # disposition is death.
+            mismatch = probe(record)
+            if mismatch is not None:
+                refreshes.append(
+                    ServiceRefresh(
+                        name,
+                        warnings=(
+                            f"warning: {name} was not asked to reload — {mismatch}. "
+                            "Nothing was signalled.",
+                        ),
+                    )
+                )
+                continue
             kill(record.pid, serve_reload.RELOAD_SIGNAL)
         except OSError as exc:
             refreshes.append(
