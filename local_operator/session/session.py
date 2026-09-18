@@ -169,6 +169,7 @@ from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
 )
+from local_operator.references import expand_references
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -2456,6 +2457,12 @@ class Session:
         # persistence — needs it between events, and the stream fn is an
         # optional capability some hosts construct sessions without.
         self._active_fallback: ModelSpec | None = None
+        # A ``time.monotonic()`` deadline until which ``_errand_model`` must
+        # not prefer the ``lo`` tier, because an errand already ASKED that tier
+        # and it could not answer. ``0.0`` means "not blocked" — the tier is
+        # preferred as usual. Set only by ``complete_once``, and only after a
+        # request that actually went out on the tier's route.
+        self._errand_tier_blocked_until: float = 0.0
         # The pin itself — (selector, the chain entry's own effort or None) —
         # kept beside the derived spec above because the spec is a SNAPSHOT:
         # an `/effort` change while a fallback serves has to re-derive the
@@ -5117,9 +5124,23 @@ class Session:
         on-demand compaction holds, which the rejection names. ``_is_streaming``
         is then re-checked under the lock to close the race where streaming was
         set between the lock probe and the acquire.
+
+        ``@path`` expansion sits BETWEEN those two points, and that placement
+        is part of the contract rather than an implementation detail: a
+        rejected prompt must not have read a referenced file or raised an
+        approval card on its way to the raise.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
+        # THE PROBE COMES FIRST, ahead of anything that can touch the disk or a
+        # human. Expansion reads every referenced file and can raise a live
+        # approval card, so with the probe below it a caller that arrives
+        # mid-turn (`serving`, `attached`, `mobile/tui_handle`, `goal_loop`,
+        # `subagent`) had the operator's files read — and a card for a
+        # referenced `.env` ANSWERED — for a prompt this method then rejects.
+        # `locked()` does not await, so nothing here can deadlock, and the
+        # verdict is the one the probe always produced: what moves is only the
+        # work that used to happen before it.
         if self._turn_lock.locked():
             # An on-demand compaction holds the same lock a turn does, and for
             # the same reason — it is rewriting the history a request would be
@@ -5130,6 +5151,49 @@ class Session:
                 if self._compacting
                 else "session is already streaming; use steer() to inject mid-turn"
             )
+        # `@path` expansion, and it runs HERE — after the probe, before the
+        # lock, not inside it. An approval can park on a human indefinitely, and
+        # in the TUI the app awaiting this prompt is the same one that would
+        # draw the approval card; awaiting a person while holding `_turn_lock`
+        # also blocks the compaction that shares it, which is a deadlock-shaped
+        # risk rather than a slow turn. Expanding before `acquire()` costs
+        # nothing and removes the shape entirely.
+        #
+        # This one call is what gives EVERY composer surface the feature: CLI,
+        # headless, server, scheduler, mobile, subagents and the TUI's own
+        # submit exits all funnel through `prompt`. The TUI does NOT expand
+        # earlier — that pass was removed, because awaiting an approval card
+        # inside a Textual message handler deadlocks the composer (the pump
+        # awaits the handler to completion, and the card is mounted AND
+        # answered through that same pump; `on_editor_submitted` records the
+        # probe). So this is the first and only expansion of a composer draft,
+        # and the transcript row stays the typed line because the row is built
+        # from it, not because a second pass declined to touch it.
+        #
+        # THREE entry paths predate the feature and bypass `prompt`, so an
+        # `@path` in them stays inert prose: `steer` (queues the message
+        # directly — and `_submit_prompt` routes a draft typed while a turn
+        # runs there, so the TUI's own submit exit is on both lists), a wake
+        # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
+        # which adopts the TYPED question — `_aside_worker` expands only the
+        # text it hands the model, and the panel keeps the typed one).
+        #
+        # IDEMPOTENCE is still a hard requirement with a single expansion site,
+        # because this pass runs on text it did not type: a subagent launch
+        # forwards the manager's own prompt into `child.prompt`, and a manager
+        # that quoted an already-expanded block out of its context would have
+        # it doubled here.
+        expansion = await expand_references(
+            text,
+            self._cwd,
+            request_approval=None if self._yolo else self._request_approval,
+        )
+        # Notices are discarded deliberately: `prompt` has no channel back to a
+        # UI, and no surface pre-expands a composer draft, so an unresolved
+        # token on a submit exit is sent verbatim and silently — the accepted
+        # cost `on_editor_submitted` records. The aside is the one path that
+        # paints its notices, from its own call in `_aside_worker`.
+        text = expansion.sent
         await self._turn_lock.acquire()
         try:
             # Close the narrow completion-after-final-flush race: a shell
@@ -6464,9 +6528,16 @@ class Session:
         cancel as an error — the one misclassification this taxonomy calls
         worse than the bug it fixes.
 
-        A no-op on an idle session: the cause is consumed only by an
-        ``AgentEndEvent`` for the turn that was running, and it is cleared at
-        the head of the next one.
+        A no-op on an idle session, and the disposal now ENFORCES that rather
+        than assuming it: a cause is consumed by the next ``AgentEndEvent``, and
+        the event that carries it must be one ``_classify_cut_off`` can arm —
+        ``aborted``, i.e. a turn this session watched end involuntarily. A run
+        left UNSETTLED by a turn that stopped somewhere else is NOT that shape:
+        the teardown could synthesise an end for it and the note would brand
+        work this exit never cut, which is the ``error`` row the operator's own
+        ``attention.db`` is full of (2026-09-17). See
+        ``Session.disposal_cuts_a_turn`` and
+        ``ServingSessionHandle._note_retirement_cut_off``.
 
         FIRST WRITER WINS. An exit is a sequence of rungs (a retirement latch,
         then the stop rung, then the dispose), and the EARLIEST note is the
@@ -6511,6 +6582,22 @@ class Session:
         The ``cut_off``/``cut_off_cause`` fields ride along so a NEW viewer can
         name the cause precisely without re-deriving it from the vocabulary.
 
+        THE EVENT MUST SAY IT WAS ABORTED, and the shape this guard exists for
+        is the DISPOSAL's synthesised end. The reachable ordering is
+        latch -> dispose -> orphan: ``begin_retire`` refuses while anything
+        would be lost (``may_refresh``), so a run carrying a build retirement's
+        cause is one nothing was in flight for. What a latch CAN arm is a turn
+        the disposal is about to abort (the signal drain's ``runtime-shutdown``
+        latch, or no latch at all — see
+        ``Session.disposal_cuts_a_turn``), plus ``install-mid-update`` when a
+        lazy import meets a half-replaced tree mid-turn
+        (``Session._note_import_failure``). Every one of those ends says
+        ``aborted=True``; a normally-completed end keeps its ``aborted=False``
+        and is left exactly as it was, which is the whole point — without this
+        guard an armed cause rewrote a completed turn's outcome to an error the
+        moment any retirement latch had run (2026-09-17; the durable rows are in
+        ``attention.db``).
+
         A turn that ALREADY ended with a real provider/tool error is left alone:
         that error is a more specific diagnosis than "the runtime went away",
         and overwriting it would throw away the only text that names the actual
@@ -6526,6 +6613,8 @@ class Session:
         """
         cause = self._cut_off_cause
         if not cause:
+            return event
+        if not event.aborted:
             return event
         if event.error:
             return event
@@ -6775,6 +6864,80 @@ class Session:
         if cut_off:
             await self._journal_cut_off_once(token, reason, cause)
         self.refresh_frontend_state()
+
+    async def _settle_run_without_an_outcome(self) -> None:
+        """Settle a run this exit ended WITHOUT publishing a verdict for it.
+
+        THE THIRD DISPOSITION, and the one the operator's report needed. A
+        disposal can meet a run that never published an outcome and that this
+        exit did NOT cut: the latch that commits a runtime to leaving
+        (``serving.ServingSessionHandle.begin_retire``) refuses while any work
+        would be lost, so a retirement exit cannot be the party that ended a
+        turn, and the disposal's own cut records a cause
+        (:meth:`disposal_cuts_a_turn`). What is left is a run that stopped
+        without an outcome being recorded — this host's shape, where a run's
+        last turn row preceded its ``error`` row by hours and the conversation
+        then continued normally.
+
+        WHY NOTHING IS PUBLISHED, rather than one of the three kinds:
+
+        * ``error`` is what the disposal used to write (``runtime-retired`` from
+          the build rungs, then ``runtime-shutdown``), and it is a claim this
+          exit cannot support. It is the operator's exact complaint — "an
+          update that catches nothing must produce no error trace" — whose
+          receipt is the durable rows in ``~/.local-operator/attention.db``.
+        * ``interrupted`` is the taxonomy's DELIBERATE verdict, whose one cause
+          is ``user-stop``: publishing it either names the user for a stop
+          nobody recorded (the quiet rung's false claim, agent review round 1
+          MAJOR-2) or coins a second meaning for the kind every surface paints
+          as "Interrupted".
+        * ``complete`` is the opposite claim again, and this run did not report
+          it. (On this host the run had in fact finished, which is exactly why
+          the exit must not choose between the three.)
+
+        SO THE SETTLEMENT ASSERTS NOTHING, and closing the run's TOKEN is the
+        point rather than tidiness. Leaving the marker open for the successor —
+        the alternative agent review round 1 offered — is not neutral here:
+        ``attention._classify_orphaned_run`` answers from the run record and
+        the turn journal, and for this shape the process has exited cleanly, so
+        there is no dead record and no open row, which drops it to its last rung
+        and publishes ``error`` with ``CUT_OFF_UNKNOWN`` — the same mystery
+        cut-off the six ``idle-exit`` rows already render from. The exit is the
+        only party that ever knew nothing was in flight, so it is the party that
+        must close the question.
+
+        The marker is the one a completed run with nothing to show already
+        writes (``eligible: False``), so no reader is taught a new shape, and a
+        LATER real outcome for the same token still supersedes it: every reader
+        takes the LAST marker of this type (``_import_transcript_outcome``,
+        ``Session.refresh_attention``).
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            conversation_identity,
+        )
+
+        token = self._attention_run_token
+        if token is None:
+            return
+        self._attention_run_settled = True
+        # Logged because the settlement is deliberately silent everywhere else:
+        # no attention row, no card, no notice. An investigation asking "what
+        # happened to that run" gets its answer here rather than nowhere.
+        logger.info(
+            "session %s: run %s left no outcome and this exit cut no turn; "
+            "settled with no verdict",
+            getattr(self, "session_id", "?"),
+            token,
+        )
+        await self._transcript.append_custom(
+            ATTENTION_CUSTOM_TYPE,
+            {
+                "conversation_id": conversation_identity(self._transcript.directory),
+                "token": token,
+                "eligible": False,
+            },
+        )
 
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
@@ -10645,6 +10808,17 @@ class Session:
     #: session stays unnamed.
     ERRAND_MAX_TOKENS = 1024
 
+    #: How long ``_errand_model`` stops preferring the ``lo`` tier after an
+    #: errand on it failed. The ceiling is borrowed from
+    #: ``MAX_CREDENTIAL_BLOCK_MS`` (``local_operator/providers/auth_store.py``),
+    #: which caps any per-credential block at one hour. A weekly token-plan
+    #: exhaustion is NOT representable in that store — and the store is
+    #: per-credential and unreachable from here anyway — so this is a
+    #: session-scoped memo carrying the same bound, not an attempt to model the
+    #: real reset. Session-scoped on purpose: a new session re-tries the tier
+    #: immediately, so an operator who fixes the tier does not wait out a clock.
+    ERRAND_TIER_BLOCK_S = 3600.0
+
     async def complete_once(self, system: str, prompt: str) -> str:
         """One CHEAP, ISOLATED, near-single-attempt provider call for a host errand.
 
@@ -10676,9 +10850,71 @@ class Session:
           has configured one, otherwise this session's model — either way
           clamped to the lowest reasoning effort the spec accepts, because that
           token cap counts thinking tokens as well as the title.
+        * a tier that RESOLVES but cannot ANSWER is demoted for
+          ``ERRAND_TIER_BLOCK_S`` and the call is retried ONCE on this session's
+          model. That is the third case: the operator's preference is still
+          asked first, but a dead tier no longer means no title at all, and the
+          next errand within the hour skips it instead of paying for it again.
+          ``isolated`` is UNCHANGED by this — the retry is a second request that
+          also carries it, so each request still gets at most two auth attempts
+          *on the model it names*. What is new is that the errand may name a
+          second model, which is the sound fallback of its own that
+          ``_resolve_subagent_model``'s leniency already assumed this caller
+          had.
         """
         model = self._errand_model()
-        request = ChatRequest(
+        # Asked BEFORE the request so the answer is not re-derived inside an
+        # ``except`` block, where the block this failure is about to set would
+        # change it.
+        from_tier = self._errand_tier_in_use()
+        try:
+            return await self._drain_errand(self._errand_request(model, system, prompt))
+        except Exception as exc:  # noqa: BLE001 — see below: ANY dead tier, not just a 429.
+            # Deliberately bare ``Exception`` and not ``ProviderError``: a tier
+            # that is misconfigured, decommissioned (404), missing a credential
+            # (401) or quota-dead (429) all present identically to naming — the
+            # tier route cannot answer and the session route can. Keying on
+            # "the tier failed" covers every one of them without importing
+            # provider classification into this decision.
+            #
+            # ``asyncio.CancelledError`` derives from ``BaseException`` on 3.12,
+            # so it does NOT land here: a cancel is not a failure and must
+            # neither be swallowed nor charge the tier a block.
+            if not from_tier:
+                raise
+            self._errand_tier_blocked_until = time.monotonic() + self.ERRAND_TIER_BLOCK_S
+            session_spec = self._lowest_effort(self.effective_model)
+            logger.warning(
+                "naming errand tier %s/%s failed (%s: %s); demoting to %s/%s for %.0fs",
+                model.provider,
+                model.model_id,
+                type(exc).__name__,
+                exc,
+                session_spec.provider,
+                session_spec.model_id,
+                self.ERRAND_TIER_BLOCK_S,
+            )
+            if (session_spec.provider, session_spec.model_id) == (model.provider, model.model_id):
+                # The tier and the session model are the same route: there is
+                # nowhere to fall back TO, and a second identical request would
+                # only burn another wire attempt for the same answer. The block
+                # above still stands — the route is dead either way.
+                raise
+            # Exactly one retry, inside the caller's existing ``wait_for``
+            # budget (``naming.py``'s TITLE_TIMEOUT_S). No loop, no backoff: a
+            # second failure propagates to ``_ask_for_title``, which already
+            # logs it and returns CALL_FAILED.
+            return await self._drain_errand(self._errand_request(session_spec, system, prompt))
+
+    def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
+        """The errand's request shape, in ONE place.
+
+        Extracted so the fallback retry in ``complete_once`` cannot drift from
+        the first attempt: both attempts are built here, so both carry
+        ``isolated``, ``replayable=False``, the token cap and the empty tool
+        surface by construction rather than by two field lists staying in sync.
+        """
+        return ChatRequest(
             model=model,
             purpose="naming",
             system_blocks=[system],
@@ -10708,11 +10944,32 @@ class Session:
             replayable=False,
             isolated=True,
         )
+
+    async def _drain_errand(self, request: ChatRequest) -> str:
+        """Run one errand request to completion and return its text."""
         parts: list[str] = []
         async for event in self._stream_fn(request, None):
             if isinstance(event, StreamTextDelta):
                 parts.append(event.delta)
         return "".join(parts)
+
+    def _errand_tier_in_use(self) -> bool:
+        """Whether the spec ``_errand_model`` just returned came from the tier.
+
+        Deliberately NON-comparative: it re-asks the same two questions
+        ``_errand_model`` asks, in the same order, rather than comparing the
+        returned spec against ``effective_model``. A configured tier and the
+        session model can name the SAME route and still be different
+        ``ModelSpec`` objects (``build_model_spec`` seeds a context window the
+        session's spec need not share), so both a tuple comparison and an object
+        comparison answer this question wrongly on one of those cases. This
+        agrees with ``_errand_model`` by construction.
+        """
+        if time.monotonic() < self._errand_tier_blocked_until:
+            # The block is in force, so ``_errand_model`` never consulted the
+            # tier — whatever it returned came from the session.
+            return False
+        return self._resolve_subagent_model("task", "lo") is not None
 
     def _errand_model(self) -> ModelSpec:
         """The cheapest spec this session can reach for a decorative errand,
@@ -10740,7 +10997,18 @@ class Session:
         configured ``lo`` tier used to reach the wire unclamped. Naming is a
         formatting job, not a thinking job. A model with no effort knob is
         unaffected.
+
+        A tier that RESOLVES but cannot ANSWER is skipped for
+        ``ERRAND_TIER_BLOCK_S`` after ``complete_once`` sees it fail. The
+        leniency ``_resolve_subagent_model`` grants this caller was only ever
+        honoured when the CONFIG READ failed; a quota-dead tier resolved
+        perfectly well and got no fallback at all, which pinned naming to a dead
+        route for as long as the quota lasted. While the block is in force the
+        tier is not even resolved — skipping the config read is the point, the
+        tier is known bad — and the session's own model answers instead.
         """
+        if time.monotonic() < self._errand_tier_blocked_until:
+            return self._lowest_effort(self.effective_model)
         tier = self._resolve_subagent_model("task", "lo")
         return self._lowest_effort(tier if tier is not None else self.effective_model)
 
@@ -13151,6 +13419,46 @@ class Session:
         except Exception:
             logger.warning("closing the browser surface failed", exc_info=True)
 
+    def _disposal_turn(self) -> asyncio.Task[None] | None:
+        """The live turn THIS disposal is about to abort, or ``None``.
+
+        ONE DEFINITION OF "this exit cut something", shared by the note, the
+        abort that follows it, and the runtime handle that asks before it
+        notes. Three terms, and every one of them is load-bearing:
+
+        * a live ``_turn_task`` — the turn is still running, so ending it is a
+          cut rather than bookkeeping;
+        * an abort signal, because the abort below is what actually stops it
+          and the disposal cannot cut a turn it cannot abort;
+        * and the task not DONE, so a turn that finished while the caller was
+          getting here is not relabelled after the fact.
+
+        WHAT THIS IS NOT: a test of whether a RUN is unsettled. A run can be
+        left without an outcome by a turn cancelled somewhere else entirely
+        (``Session.dispose``'s synthesis comment names the socket case), and
+        that run is not work this exit ended. The two questions were conflated
+        by the note this change corrects: a disposal that cut nothing branded
+        the leftover run anyway, which is how a backend update put an error row
+        under a conversation that had gone quiet (2026-09-17).
+        """
+        turn = self._turn_task
+        if turn is None or turn.done() or self._signal is None:
+            return None
+        return turn
+
+    def disposal_cuts_a_turn(self) -> bool:
+        """Whether ``dispose`` is about to abort a LIVE turn.
+
+        The PUBLIC form of :meth:`_disposal_turn`, for
+        ``ServingSessionHandle``: the cut-off note a retirement may write is
+        only honest when this disposal is the party ending work, and the handle
+        has to ask before it notes rather than infer it from its own latch (a
+        retirement latch REFUSES while anything is in flight, so a latched
+        retirement is proof of the opposite — see
+        ``serving.ServingSessionHandle._note_retirement_cut_off``).
+        """
+        return self._disposal_turn() is not None
+
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -13164,14 +13472,26 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
-        # In-process disposal is a cut-off for whatever turn is running: this
+        # In-process disposal is a cut-off for whatever turn is RUNNING: this
         # path is reached by a host tearing a session down directly (the
         # runtime's own handle disposes through ``ServingSessionHandle``, which
-        # notes its more specific cause FIRST, and first-wins keeps that one).
-        # Harmless when nothing is in flight — the cause is consumed only by the
-        # running turn's end event — and suppressed outright after a deliberate
-        # stop, so a user's own cancel is never relabelled.
-        self.note_cut_off("disposed")
+        # notes its more specific cause FIRST, and first-wins keeps that one),
+        # and suppressed outright after a deliberate stop, so a user's own
+        # cancel is never relabelled.
+        #
+        # A TURN MUST ACTUALLY BE RUNNING, and the evidence is the same one the
+        # abort below keys on (``disposal_cuts_a_turn``). The note used to be
+        # written unconditionally on the grounds that it is "consumed only by the
+        # running turn's end event" and therefore harmless when nothing is in
+        # flight — which is exactly what stops being true when a run is left
+        # UNSETTLED: the synthesis further down used to fabricate an end for it,
+        # so an unconditional note branded a run whose turn had already ended.
+        # Measured on the reporting host as durable ``error`` rows against runs
+        # whose last turn row preceded them by minutes (six with the retirement
+        # label, more with this one), each rendered as a cut-off of work that had
+        # finished (2026-09-17).
+        if self.disposal_cuts_a_turn():
+            self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -13198,8 +13518,8 @@ class Session:
         try:
             # HC-14: abort the in-flight turn and await its completion (bounded)
             # before flushing — its persistence must land on a live transcript.
-            turn = self._turn_task
-            if turn is not None and not turn.done() and self._signal is not None:
+            turn = self._disposal_turn()
+            if turn is not None:
                 self.abort("session disposed")
                 try:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
@@ -13225,11 +13545,27 @@ class Session:
                 # through the SAME classifier and publisher, so the
                 # deliberate/error split is still decided in one place.
                 try:
-                    if self._attention_outcome is None:
-                        self._attention_outcome = self._classify_cut_off(
-                            AgentEndEvent(messages=[], aborted=True)
-                        )
-                    await self._publish_attention_outcome()
+                    # WHETHER THIS RUN'S FATE HAS ANY EVIDENCE BEHIND IT, read
+                    # before the synthesis invents the end the publisher needs.
+                    # A cause (noted by the disposal's own cut, or by a
+                    # mid-turn import failure) and a recorded deliberate stop
+                    # are the two things that make an outcome assertable; the
+                    # synthesis exists for exactly the second one, whose run
+                    # leaves no end event when it is cancelled at a tool await.
+                    # With neither, this run stopped without anyone recording
+                    # why and WITHOUT this exit cutting it — see
+                    # ``_settle_run_without_an_outcome`` for why the honest
+                    # disposition there is to publish nothing at all.
+                    if self._attention_outcome is None and not (
+                        self._cut_off_cause or self._deliberate_stop_noted
+                    ):
+                        await self._settle_run_without_an_outcome()
+                    else:
+                        if self._attention_outcome is None:
+                            self._attention_outcome = self._classify_cut_off(
+                                AgentEndEvent(messages=[], aborted=True)
+                            )
+                        await self._publish_attention_outcome()
                 except Exception:  # noqa: BLE001 — teardown must always proceed
                     logger.warning("could not publish a disposed turn's outcome", exc_info=True)
             # The browser surface is session-scoped and lives in the user's own

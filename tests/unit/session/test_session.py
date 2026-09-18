@@ -7,6 +7,7 @@ import asyncio
 import base64
 import io
 import sys
+import time
 import types
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
@@ -3098,6 +3099,187 @@ async def test_the_errand_model_follows_a_pinned_fallback(tmp_path, monkeypatch)
     session._active_fallback = rescue
     errand = session._errand_model()
     assert (errand.provider, errand.model_id) == ("xai", "grok-4.6")
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_errand_tier_is_not_asked_again(tmp_path, monkeypatch):
+    """A tier that already failed must not be re-resolved for the rest of the block.
+
+    Without the block check, ``_errand_model`` keeps preferring a tier the
+    session has ALREADY watched fail — so every auto-title and every
+    ``/title --refresh`` for the rest of the week pays the dead route's full
+    latency to learn what the session learned on the first call.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, {"models": {"lo": "openai/gpt-5-mini"}})
+    session = make_session(
+        tmp_path, ScriptedStream([]), model=build_model_spec("anthropic", "claude-opus-5")
+    )
+    session._errand_tier_blocked_until = time.monotonic() + 60.0
+
+    spec = session._errand_model()
+    assert (spec.provider, spec.model_id) == (
+        "anthropic",
+        "claude-opus-5",
+    ), "a blocked tier was asked again"
+    assert (spec.provider, spec.model_id) != ("openai", "gpt-5-mini")
+    # The clamp still applies on the route the block forces us onto.
+    # `claude-opus-5` seeds at 'high' and its ladder bottoms at 'low', so this
+    # is a real state change an unclamped spec cannot fake.
+    assert spec.reasoning_effort == "low"
+
+    # And the tier is genuinely reachable in this fixture, so the assertion
+    # above is the block doing work rather than a misconfigured test.
+    session._errand_tier_blocked_until = 0.0
+    unblocked = session._errand_model()
+    assert (unblocked.provider, unblocked.model_id) == ("openai", "gpt-5-mini")
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_errand_tier_blocks_itself_for_the_hour(tmp_path, monkeypatch):
+    """The failure that triggers the fallback must also MEMO the dead tier.
+
+    Retrying without the memo fixes the call the user typed and nothing else:
+    every later naming call would still open with a doomed request on the same
+    route. This pins that the block is set, is bounded by
+    ``ERRAND_TIER_BLOCK_S``, and survives the call that set it.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, {"models": {"lo": "openai/gpt-5-mini"}})
+    seen: list[ModelSpec] = []
+    calls = {"n": 0}
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        seen.append(request.model)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ProviderError(429, "rate limit or quota exceeded", retryable=True)
+
+        async def gen():
+            yield StreamTextDelta(delta="<title>a title</title>")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = make_session(
+        tmp_path, stream_fn, model=build_model_spec("anthropic", "claude-opus-5")
+    )
+    await session.complete_once("name this", "some prompt")
+
+    assert session._errand_tier_blocked_until > time.monotonic(), "the dead tier was not blocked"
+    assert session._errand_tier_blocked_until <= time.monotonic() + Session.ERRAND_TIER_BLOCK_S
+    assert Session.ERRAND_TIER_BLOCK_S == 3600.0
+
+    # The block survives the call that set it: the next errand opens on the
+    # session model instead of re-asking the tier.
+    seen.clear()
+    await session.complete_once("name this", "another prompt")
+    await session.dispose()
+
+    assert len(seen) == 1, "the blocked tier was asked again, costing a wire attempt"
+    assert (seen[0].provider, seen[0].model_id) == ("anthropic", "claude-opus-5")
+    assert (seen[0].provider, seen[0].model_id) != ("openai", "gpt-5-mini")
+
+
+@pytest.mark.asyncio
+async def test_a_dead_errand_tier_falls_back_once_and_answers(tmp_path, monkeypatch):
+    """The bug's regression test: a quota-dead ``lo`` tier left naming with no
+    route at all, so ``/title --refresh`` rendered "could not reach the model"
+    forever while ordinary turns answered fine on the session's own model.
+
+    The errand is ``isolated``, which buys it no fallback chain of its own — so
+    the fallback has to live here. On unfixed code this raises ``ProviderError``
+    instead of returning a title.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    _config_dir_with(tmp_path, monkeypatch, {"models": {"lo": "openai/gpt-5-mini"}})
+    captured: list[ChatRequest] = []
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        captured.append(request)
+        if request.model.model_id == "gpt-5-mini":
+            raise ProviderError(429, "rate limit or quota exceeded", retryable=True)
+
+        async def gen():
+            yield StreamTextDelta(delta="<title>the login redirect loop</title>")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = make_session(
+        tmp_path, stream_fn, model=build_model_spec("anthropic", "claude-opus-5")
+    )
+    text = await session.complete_once("name this conversation", "fix the login redirect loop")
+    await session.dispose()
+
+    assert text == "<title>the login redirect loop</title>", "the errand never answered"
+    assert len(captured) == 2, "exactly one fallback attempt, no loop"
+    assert captured[0].model.model_id == "gpt-5-mini", "the operator's tier is still asked first"
+    assert (captured[1].model.provider, captured[1].model.model_id) == (
+        "anthropic",
+        "claude-opus-5",
+    )
+    # The retry is a SECOND isolated request, not a relaxation of the first:
+    # every flag the first one carries, the fallback carries too.
+    assert captured[1].isolated is True, "the fallback reached the wire un-isolated"
+    assert captured[1].replayable is False
+    assert captured[1].max_tokens == Session.ERRAND_MAX_TOKENS
+    assert captured[1].tools == [] and captured[1].tool_choice == "none"
+    # And the effort clamp survives the fallback route.
+    assert captured[1].model.reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_an_errand_on_the_session_model_does_not_retry_itself(tmp_path, monkeypatch):
+    """Falling back to the route that just failed buys a second wire attempt for
+    the same answer, and blocking a tier that was never in play would demote
+    naming for an hour over a failure the tier had nothing to do with.
+
+    Two shapes, same request count, opposite block state — which is what
+    distinguishes them.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    def raising_stream(captured: list[ChatRequest]):
+        def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+            captured.append(request)
+            raise ProviderError(429, "rate limit or quota exceeded", retryable=True)
+
+        return stream_fn
+
+    # A: no tier at all. The session model failed; nothing is blocked, nothing
+    # is retried, and the error reaches `_ask_for_title` as it always did.
+    _config_dir_with(tmp_path, monkeypatch, None)
+    bare: list[ChatRequest] = []
+    session = make_session(tmp_path, raising_stream(bare))
+    with pytest.raises(ProviderError):
+        await session.complete_once("s", "p")
+    assert len(bare) == 1, "the session model was asked twice for the same answer"
+    assert session._errand_tier_blocked_until == 0.0, "a tier that was never used got blocked"
+    await session.dispose()
+
+    # B: a tier that resolves to the SAME route as the session model. There is
+    # nowhere to fall back to, so no retry — but the route is dead either way,
+    # so the block IS charged.
+    _config_dir_with(tmp_path, monkeypatch, {"models": {"lo": "test/m"}})
+    same: list[ChatRequest] = []
+    session = make_session(tmp_path, raising_stream(same))
+    assert (MODEL.provider, MODEL.model_id) == ("test", "m"), "this setup needs the same route"
+    assert build_model_spec("test", "m") != MODEL, (
+        "the specs differ as OBJECTS while naming one route — which is why "
+        "provenance is non-comparative and the guard compares tuples"
+    )
+    with pytest.raises(ProviderError):
+        await session.complete_once("s", "p")
+    assert len(same) == 1, "the same route was asked twice for the same answer"
+    assert (
+        session._errand_tier_blocked_until > time.monotonic()
+    ), "the tier failed; the block is charged even with no retry available"
     await session.dispose()
 
 

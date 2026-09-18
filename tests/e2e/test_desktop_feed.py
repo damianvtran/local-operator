@@ -46,6 +46,7 @@ import uvicorn
 from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
+from local_operator.session.creation import CREATED_AT_NAME
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     delivery_dir,
@@ -663,3 +664,210 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
             reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reader
+
+
+@pytest.mark.asyncio
+async def test_a_completion_inside_active_reorders_the_list_and_is_announced(
+    desktop_server, workspace: Path
+):
+    """THE REPORTED SYMPTOM, end to end: a session that is ALREADY Active finishes.
+
+    ``CatalogEntry.active`` is section membership; the order the sidebar renders is
+    ``CatalogEntry.rank``. A working row (tier 4) that finishes becomes an unread
+    completion (tier 1) with ``active`` True -> True, so the feed's section
+    comparison published nothing at all — measured on the real backend as ZERO
+    catalogue frames in 15 s, and still zero across ~100 ticks with the probes
+    accelerated 20x, while the backend's own list read had already moved the row —
+    and the client kept the last list's order until some OTHER row's section move
+    refetched it (5-10 s on this machine, which is what the operator reported).
+
+    Everything here is the production stack over loopback HTTP: the real app, the
+    real SSE stream, the real discovery-record write, a real completion in the
+    attention store. The claim is two-sided, and the second half is what makes the
+    first worth anything: the frame arrives on the doorbell's own clock, AND the
+    list read it triggers leads with the completed row.
+    """
+    root, client = desktop_server
+    elder = await _create(client, workspace, "55555555-5555-4555-8555-555555555501")
+    completer = await _create(client, workspace, "55555555-5555-4555-8555-555555555502")
+
+    # PIN THE BIRTHS. The ORDER KEY's third term is the session's canonical birth,
+    # read from ``created_at.json`` by ``session_created_at``, and two POSTs land
+    # inside the same second — without this the ordering assertion would be about
+    # the id tiebreak rather than about the resort under test.
+    for session_id, at in ((elder, 1_700_000_000.0), (completer, 1_700_000_600.0)):
+        (root / "sessions" / session_id / CREATED_AT_NAME).write_text(
+            json.dumps(at), encoding="utf-8"
+        )
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        await _next_frame(lines, lambda f: f["type"] == "open")
+
+        # The machine state the operator described: an older unread completion
+        # (tier 1, Active) and a session WORKING (tier 4, Active), so both are in
+        # "Active chats" with the working one second.
+        await asyncio.to_thread(_publish, root, elder)
+        await asyncio.to_thread(_publish_record, root, completer, busy=True)
+        # The working edge is DRAINED before the completion is driven: otherwise
+        # the completion would be that row's FIRST edge, which invalidates for a
+        # different reason and would leave this test proving nothing.
+        await _next_frame(
+            lines,
+            lambda f: f["type"] == "session_status"
+            and f["session_id"] == completer
+            and f["payload"]["code"] == "busy",
+        )
+        # The working edge is ALSO a section move — the row is cold until a runtime
+        # reports it — so it publishes an invalidation of its own. Drained here, so
+        # the frame asserted below cannot be this one.
+        working_edge = await _next_frame(lines, lambda f: f["type"] == "catalogue")
+        assert working_edge["payload"]["revision"] >= 1
+
+        before = (await client.get("/v1/desktop/sessions", params={"limit": 50})).json()["result"]
+        before_ids = [row["id"] for row in before["sessions"]]
+        assert before_ids.index(elder) < before_ids.index(completer), before_ids
+        assert all(row["active"] for row in before["sessions"]), before["sessions"]
+
+        # IT FINISHES: the record goes quiet and the completion lands. The section
+        # stays "Active chats"; only the row's position inside it changes.
+        await asyncio.to_thread(_publish_record, root, completer)
+        await asyncio.to_thread(_publish, root, completer, "complete")
+        # The 2 s is a hang backstop, not the assertion: the frame itself is what
+        # is waited on, and the doorbell's clock is 100 ms.
+        frames = await _frames_until(lines, lambda f: f["type"] == "catalogue", timeout=2.0)
+        catalogues = [frame for frame in frames if frame["type"] == "catalogue"]
+        assert len(catalogues) == 1, frames
+        kinds = [frame["type"] for frame in frames]
+        # AFTER the status frame, so the client paints the checkmark and then
+        # re-reads a list that already agrees with it.
+        assert kinds.index("catalogue") > kinds.index("session_status"), kinds
+
+    # ...and the read that frame triggers is the one that leads with the completed
+    # row. Both rows are still Active: this is the resort, not a section move.
+    listed = await client.get("/v1/desktop/sessions", params={"limit": 50})
+    assert listed.status_code == 200, listed.text
+    after = listed.json()["result"]["sessions"]
+    assert after[0]["id"] == completer, after
+    assert (after[0]["active"], after[1]["active"]) == (True, True), after
+    assert (after[0]["status"]["code"], after[0]["status"]["label"]) == (
+        "complete",
+        "Unseen completion",
+    ), after[0]
+
+
+@pytest.mark.asyncio
+async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
+    desktop_server, workspace: Path
+):
+    """THE CROSS-SURFACE DOORBELL, over the real stack.
+
+    A pin made in the TUI has to reach the desktop app with no manual refresh, and
+    the only vehicle for that is the ``catalogue`` frame this feed publishes — the
+    sidebar re-runs its catalogue fetch once per frame. So the pin file is in the
+    probe's invalidation token, and this is the test that says the token actually
+    moves: a unit test of the key string cannot, because the failure it guards
+    against (a probe that never notices, leaving the app on its 30 s safety poll)
+    lives entirely in the timing between a write and a frame.
+
+    Three claims, each needing the HTTP layer:
+
+    1. a pin WRITE publishes exactly one catalogue frame, within the probe interval;
+    2. a QUIET window publishes none — otherwise the feed would refetch every
+       sidebar on the machine once a second for nothing;
+    3. a client connecting AFTER the write is not REPLAYED it, because the frame is
+       an invalidation and the newcomer's ``open`` snapshot already carries the
+       counter it would have announced.
+    """
+    root, client = desktop_server
+    session_id = await _create(client, workspace, "44444444-4444-4444-8444-444444444401")
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        opened = await _next_frame(lines, lambda f: f["type"] == "open")
+        assert opened["payload"]["catalogue_revision"] is not None
+
+        # A READER TASK, not a bounded read per window: cancelling an
+        # `aiter_lines()` iteration closes the response it is reading, so a
+        # windowed read tears the subscription down and every later window reads
+        # nothing at all — a harness failure that reads exactly like the product
+        # bug under test. The same idiom the presence matrix below uses.
+        streamed: list[dict[str, Any]] = []
+
+        async def pump() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed.append(json.loads(line[6:]))
+
+        reader = asyncio.create_task(pump())
+
+        def catalogues(since: int) -> list[dict[str, Any]]:
+            return [frame for frame in streamed[since:] if frame["type"] == "catalogue"]
+
+        try:
+            # The feed's own first probe publishes one catalogue frame as the
+            # token is established, so it is DRAINED rather than asserted away:
+            # the windows below have to be attributable to the pin.
+            await asyncio.sleep(2.5)
+
+            # (2) A quiet window publishes NOTHING catalogue-shaped.
+            quiet_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert catalogues(quiet_from) == [], streamed[quiet_from:]
+
+            # (1) The write, and the frame it owes within the probe interval plus
+            # slack (a little over 2 x CATALOGUE_PROBE_INTERVAL_S).
+            pinned = await client.post(
+                f"/v1/desktop/sessions/{session_id}/pin", json={"pinned": True}
+            )
+            assert pinned.status_code == 200, pinned.text
+            assert (root / "sidebar-pins.json").read_text() == json.dumps([session_id])
+
+            wrote_from = len(streamed)
+            await asyncio.sleep(2.5)
+            published = catalogues(wrote_from)
+            assert len(published) == 1, streamed[wrote_from:]
+            revision = published[0]["payload"]["revision"]
+
+            # ...and nothing follows it while the pin file sits still.
+            after_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert catalogues(after_from) == [], streamed[after_from:]
+        finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader
+
+    # (3) A LATER subscriber is not replayed the invalidation: its own `open`
+    # snapshot is the answer, and a replayed frame would make every reconnecting
+    # client refetch a catalogue nothing has changed.
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        streamed_later: list[dict[str, Any]] = []
+
+        async def pump_later() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed_later.append(json.loads(line[6:]))
+
+        later_reader = asyncio.create_task(pump_later())
+        try:
+            # Read the open frame out of the PUMP's list rather than off `lines`:
+            # two concurrent iterations of one async generator is a RuntimeError,
+            # and the `open` snapshot is the only frame this leg wants to see.
+            for _ in range(200):
+                if streamed_later:
+                    break
+                await asyncio.sleep(0.05)
+            assert streamed_later and streamed_later[0]["type"] == "open", streamed_later
+            await asyncio.sleep(2.5)
+        finally:
+            later_reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await later_reader
+
+    assert streamed_later[0]["payload"]["catalogue_revision"] == revision
+    assert [frame for frame in streamed_later if frame["type"] == "catalogue"] == []

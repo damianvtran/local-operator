@@ -29,7 +29,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_USER_TURN_KEY,
     RENDERED_INJECTION_KEY,
 )
-from local_operator.harness.types import TextContent
+from local_operator.harness.types import AgentTool, TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
     _latest_user_query,
@@ -959,11 +959,15 @@ class FakeMcpManager:
         settling: bool = False,
         startup_failures: dict[str, str] | None = None,
         network_failures: list[str] | None = None,
+        preload: set[str] | None = None,
     ):
         self.disconnected = 0
         self.callback: Callable[[list[Any]], Any] | None = None
         self._configured = list(configured or [])
         self._connected = list(connected or [])
+        #: Servers that declare ``preload_tools``. Empty by default, which is the
+        #: flag's own default and keeps every existing test on the lazy path.
+        self._preload = set(preload or ())
         self.tools: list[Any] = []
         self.meta: dict[str, dict[str, Any]] = {}
         self._settling = settling
@@ -1009,7 +1013,15 @@ class FakeMcpManager:
     def get_server_config(self, name: str):
         if name not in self._configured:
             return None
-        return SimpleNamespace(model_extra={}, url=f"https://{name}.example/mcp", command=None)
+        # ``preload_tools`` is reported per server through the same accessor the
+        # real manager exposes, so the wiring's opt-in path is exercised through
+        # production's own seam rather than a test-only side channel.
+        return SimpleNamespace(
+            model_extra={},
+            url=f"https://{name}.example/mcp",
+            command=None,
+            preload_tools=name in self._preload,
+        )
 
     def get_tools(self) -> list[Any]:
         return list(self.tools)
@@ -4135,3 +4147,159 @@ def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
     )
 
     assert _latest_user_query(transcript) == "fix the login redirect loop"
+
+
+async def _noop_execute(*args, **kwargs):
+    """A never-called execute, for a tool that only needs to be PRESENT.
+
+    ``async`` and RAISING on purpose, matching the ``never_execute`` helpers the
+    neighbouring tests already use: ``AgentTool.execute`` is typed
+    ``ToolExecuteFn``, which must return an awaitable ``ToolResult``. A sync
+    lambda fails the first requirement and an async one that returns ``None``
+    fails the second; a function that raises satisfies both, and is the honest
+    shape here because reaching it means the test's premise is wrong.
+    """
+    raise AssertionError("this tool is only ever present, never executed")
+
+
+def _preload_tool(name: str, server: str, raw: str):
+    """One AgentTool plus the manager meta that ties it to a server origin."""
+
+    async def never_execute(*args, **kwargs):
+        raise AssertionError("preload must not execute the MCP tool")
+
+    tool = AgentTool(
+        name=name,
+        description=f"{raw} on {server}",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    return tool, {"server_name": server, "mcp_tool_name": raw, "deferred": False}
+
+
+@pytest.mark.asyncio
+async def test_preload_tools_is_per_server_and_default_off(monkeypatch) -> None:
+    """``preload_tools`` exposes one server's tools and leaves the rest lazy.
+
+    The flag exists because a workflow that NAMES its tools cannot use a tool the
+    model cannot see: on such a run, laziness costs the work rather than saving
+    context. It is per server and off by default, and both halves are the point —
+    opting one server in must not quietly preload its neighbours, or the context
+    tax this design deliberately avoids comes back through a side door.
+    """
+    builtin = AgentTool(
+        name="read",
+        description="read a file",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=_noop_execute,
+    )
+    opted_in, opted_in_meta = _preload_tool("mcp__risk_get_assessment", "risk", "get_assessment")
+    neighbour, neighbour_meta = _preload_tool("mcp__notion_search", "notion", "search")
+
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    # ``risk`` declares preload_tools; ``notion`` does not.
+    manager = FakeMcpManager(
+        configured=["risk", "notion"], connected=["risk", "notion"], preload={"risk"}
+    )
+    manager.tools = [opted_in, neighbour]
+    manager.meta[opted_in.name] = opted_in_meta
+    manager.meta[neighbour.name] = neighbour_meta
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [opted_in, neighbour], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    await wire_mcp_into_session(session, [builtin], ".")
+
+    # The opted-in server's schema is in the model's list with no discovery read.
+    assert opted_in in session.tools
+    # The neighbour is NOT: opting one server in must not preload the others.
+    assert neighbour not in session.tools
+    assert session.tools == [builtin, opted_in]
+
+
+@pytest.mark.asyncio
+async def test_preload_tools_picks_up_a_server_that_missed_the_startup_gate(monkeypatch) -> None:
+    """A cold cache contributes nothing at the gate, so preload must re-run on settle.
+
+    Measured on this seam: a cold cache yields ZERO tools at the 250 ms gate,
+    because the server's handshake outlasts it (see
+    docs/lop-harness-implementation-notes.md §1). A preload that only ran at
+    wiring time would therefore do nothing at all on exactly the first run of a
+    fresh per-run home — the case it exists for.
+    """
+    builtin = AgentTool(
+        name="read",
+        description="read a file",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=_noop_execute,
+    )
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    # Configured but contributing nothing yet: the server is still connecting.
+    manager = FakeMcpManager(configured=["risk"], connected=[], settling=True, preload={"risk"})
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    await wire_mcp_into_session(session, [builtin], ".")
+    assert session.tools == [builtin], "nothing is known about the server yet"
+
+    # The connection settles and its tools arrive.
+    late, late_meta = _preload_tool("mcp__risk_screen_sanctions", "risk", "screen_sanctions")
+    manager.tools = [late]
+    manager.meta[late.name] = late_meta
+    manager._connected = ["risk"]
+    assert manager.on_startup_settled is not None
+    manager.on_startup_settled()
+
+    assert late in session.tools
+
+
+@pytest.mark.asyncio
+async def test_preload_tools_cannot_surface_a_tool_the_allowlist_excludes(monkeypatch) -> None:
+    """An ``enabledTools`` allowlist still decides what a preloaded server exposes.
+
+    The eager path consumes ONLY ``manager.get_tools()``, which the manager has
+    already filtered through ``enabledTools``/``disabledTools`` before minting
+    names, so it cannot surface more than the manager's own view. That the filter
+    actually drops excluded tools is proven where the rule lives
+    (``test_recovery_reports_registered_not_raw_tool_count`` and
+    ``test_per_tool_filter_allow_deny_and_deny_wins``); this test proves the eager
+    path is not a second way around it.
+    """
+    builtin = AgentTool(
+        name="read",
+        description="read a file",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=_noop_execute,
+    )
+    allowed, allowed_meta = _preload_tool("mcp__docs_search_public", "docs", "search_public")
+    excluded, excluded_meta = _preload_tool("mcp__docs_search_private", "docs", "search_private")
+
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(configured=["docs"], connected=["docs"], preload={"docs"})
+    # The manager's view after its allowlist ran: ``search_private`` is absent.
+    manager.tools = [allowed]
+    manager.meta[allowed.name] = allowed_meta
+    manager.meta[excluded.name] = excluded_meta
+
+    async def fake_discover(cwd, auth_store=None):
+        # Discovery hands the wiring the manager's filtered list, not the
+        # server's raw one — the same thing production does.
+        return manager, [allowed], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+
+    await wire_mcp_into_session(session, [builtin], ".")
+    assert allowed in session.tools
+    assert excluded not in session.tools

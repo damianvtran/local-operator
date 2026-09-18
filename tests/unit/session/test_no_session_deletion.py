@@ -216,6 +216,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "glob is *.json inside that one directory: never a directory, never "
         "this process's own record, never under sessions/ (review round 2, R15)",
     ),
+    # The sidebar's pin store, the same shape and the same argument as
+    # `remember_recent` above: both paths are the config ROOT joined with a
+    # fixed basename (`sidebar-pins.json`, or a `.sidebar-pins-` temp minted by
+    # `mkstemp` in that same directory), so neither is derived from a session id
+    # and neither can resolve under sessions/. The value written is a list of
+    # session-id STRINGS, never a path this module opens or removes — pruning a
+    # stale pin drops the id from that list and touches no directory.
+    #
+    # Named on `_write_pins`, which is now the SINGLE writer shared by both verbs
+    # (`toggle_pin` for the TUI's chord, `set_pin` for the desktop route): the
+    # two calls were pinned on `toggle_pin` while it owned them, and naming the
+    # shared writer is what keeps this entry correct if a third verb ever
+    # appears — it cannot, because there is only one place that writes.
+    (
+        "local_operator/tui/sidebar_pins.py::_write_pins",
+        "os.replace",
+        "Atomic replacement of the single sidebar-pins.json file in the config dir, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/tui/sidebar_pins.py::_write_pins",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
@@ -384,6 +408,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/server/utils/desktop_sessions.py::_stage_and_replace",
         "os.replace",
         "the .desktop.json.<uuid>.tmp staging FILE -> desktop.json FILE",
+    ),
+    # The create+arm rollback in the wakes surface. This call CAN reach a
+    # session directory, and the row says so rather than claiming otherwise:
+    # it removes the draft `wakes.create` made in the same request, when and
+    # only when the arm that followed failed. What makes it safe is an
+    # IDENTITY proof checked at the call site (`_rollback_created`): the
+    # target is this config dir's own `sessions/<id>`, it carries the desktop
+    # draft marker THIS request wrote, and it holds no transcript, no runtime
+    # record and no wake index entry — any of which means something else has
+    # adopted the directory, and it is left alone. It deliberately does NOT go
+    # through `cleanup.remove_session_dir`, and that is the interesting half:
+    # that remover refuses an UNMARKED store, `mark_store`'s contract says
+    # cleanup must never mark its own target, and a store where no session has
+    # ever been built carries no marker — which is exactly the store a
+    # freshly created desktop draft lives in, so routing this through it would
+    # turn the rollback into a silent no-op in the one case it exists for.
+    (
+        "local_operator/server/routes/desktop_wakes.py::_rollback_created",
+        "shutil.rmtree",
+        "the desktop draft THIS request just created, after proving it is untouched",
     ),
     # The local publication's in-memory store swap. `<path>.replace` is this
     # guard's heuristic reading of `store.replace(state)` — the receiver is a
@@ -1168,6 +1212,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mcp/credentials.py::store_credentials.persist",
         "<path>.remove",
         "list.remove(key) — drops a written id from the failed-ids list",
+    ),
+    # The clipboard scratch probe (2026-09-17). `_probe_scratch_errno` creates
+    # ONE file per candidate base with `mkstemp` and unlinks that same file
+    # immediately, because `tempfile` throws away the errno of the refusal that
+    # matters: on a full volume it collapses `Errno 28` into
+    # `FileNotFoundError: No usable temporary directory found in [...]`, which
+    # named directories that existed and cost the operator a TUI session (the
+    # read runs on `ctrl+v` and must never raise). The name it unlinks is the
+    # one `mkstemp` generated and returned inside `$TMPDIR` — or `/tmp`, or
+    # Windows' `TEMP`/`TMP` — so it comes from the OS's scratch lookup and never
+    # from a caller, a config dir or a session id; the call is `unlink`, which
+    # takes files, and its argument is a scratch file, never a directory.
+    (
+        "local_operator/clipboard.py::_probe_scratch_errno",
+        "os.unlink",
+        "Removes only the probe FILE mkstemp just created in a scratch base "
+        "($TMPDIR//tmp-class); never a directory, never under sessions/",
     ),
 )
 

@@ -3,6 +3,8 @@
 import os
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
@@ -157,6 +159,17 @@ async def test_known_admission_rejection_survives_attach_decoder_and_http_bounda
     from local_operator.session.errors import AttachmentUnavailable
 
     client = object.__new__(AttachClient)
+    # The ladder takes its request now: it logs the route and the volume the
+    # store lives on when it refuses.
+    request = cast(
+        Any,
+        SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace()),
+            method="POST",
+            url=SimpleNamespace(path="/v1/desktop/sessions/abc/messages"),
+            path_params={"session_id": "abc"},
+        ),
+    )
 
     async def frame(*args, **kwargs):
         return {
@@ -167,7 +180,7 @@ async def test_known_admission_rejection_survives_attach_decoder_and_http_bounda
 
     client._request_frame = frame
     with pytest.raises(HTTPException) as caught:
-        async with errors():
+        async with errors(request):
             await client.request_ack_with_duplicate("prompt")
     assert caught.value.status_code == 409
     assert caught.value.detail == {

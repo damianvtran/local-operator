@@ -7,6 +7,7 @@ The catalog has no acknowledgement path: listing a conversation is not reading i
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -54,10 +55,28 @@ class CatalogEntry:
     #: defaulted, so every existing construction site (including the positional
     #: ones in the sidebar tests) keeps working unchanged.
     completion_reason: str = ""
+    #: Set ONLY on rows from the hidden subagent population.
+    #:
+    #: Load-bearing for SECTIONING, not decoration: `active` is
+    #: `pending or unseen or live_state`, and 45% of subagent directories carry
+    #: an unseen attention receipt, so without this flag they sort into ACTIVE
+    #: SESSIONS above the user's own work.
+    subagent: bool = False
+    #: `origin.json`'s `agent` (role) and `label` (task label), read only for
+    #: the capped page. Empty for every main row.
+    agent: str = ""
+    label: str = ""
 
     @property
     def id(self) -> str:
         return self.row.id
+
+    @property
+    def sub_title(self) -> str:
+        """`label · role`, degrading to whichever half exists, else the name."""
+        if self.label and self.agent:
+            return f"{self.label} · {self.agent}"
+        return self.label or self.agent or self.row.name
 
     @property
     def rank(self) -> tuple[int, int, float, str]:
@@ -462,19 +481,35 @@ def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> t
     return status_of(row._replace(heartbeat_age_s=None), attention)
 
 
-def active_of(row: SessionRow, attention: Mapping[str, Any] | None) -> bool:
-    """``CatalogEntry.active`` for one row — which SECTION the sidebar files it in.
+def order_key_of(
+    row: SessionRow, attention: Mapping[str, Any] | None
+) -> tuple[int, int, float, str]:
+    """``CatalogEntry.rank`` for one row — WHERE the sidebar files it, not only which section.
 
     A second CALLER of the same home, for the same reason :func:`status_of` is
-    one: section membership is derived state (``pending or unseen or
-    live_state``), and a caller that restated it would be free to move a row the
-    list does not move. The desktop feed asks this beside ``status_of`` because a
-    row can need to change section while its pair changes too — a background
-    session that finishes goes from "Previous chats" to "Active chats", and
-    placement is carried by a LIST read, so the feed owes its client an
-    invalidation when that happens (finding 8).
+    one: the order key is derived state (tier from ``session_category``, wake band
+    from ``wakes``, then birth and id), and a caller that restated it would be free
+    to move a row the list does not move. The desktop feed asks this beside
+    ``status_of`` because a row can need to change position while its pair changes
+    too — a busy session that finishes is 4 -> 1 and STAYS in "Active chats" — and
+    placement travels on a LIST read, so the feed owes its client an invalidation
+    for that (finding 8).
+
+    WHICH SECTION A ROW IS FILED IN IS THE KEY'S OWN FIRST TERM, so this single
+    comparison subsumes the section rule the feed used to make beside it: a
+    section move always changes the first term, while the converse is false (the
+    intra-section reorder above is the reported bug). ``CatalogEntry.active`` is
+    the boolean the sidebar collapses "Previous chats" by, and it is still built
+    from the same home (``entry_for``) — but nothing derives it for an EDGE, so
+    there is no second entry point to keep in step:
+    :func:`~local_operator.session.catalog.load_catalog` reads it off the entry.
+
+    The full key, including ``wake_rank``, and not just the category: the two are
+    equivalent for every ACTIVE row (``wake_rank`` is the constant there) and the
+    full key is the key the sort actually uses, so "changed" cannot drift from
+    "the client's next list read places it differently".
     """
-    return entry_for(row, attention).active
+    return entry_for(row, attention).rank
 
 
 def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
@@ -695,6 +730,32 @@ def decorate_rows(
 #: viewport keeps paging and ranking honest without materialising the tail.
 CATALOG_SCAN_LIMIT = 200
 
+#: Newest subagent runs the sidebar's ⌥ layer lists when it is switched on.
+#: One screenful of headroom past the ~38-row window, matching the reasoning
+#: behind CATALOG_SCAN_LIMIT. No paging: the layer answers "what just ran".
+#:
+#: WHAT THIS CAP DOES AND DOES NOT BOUND. The cap bounds the PAGE, not the
+#: selection. The per-row reads on the capped page — `origin.json` and
+#: `session_created_at` — are O(cap): measured flat at 85 `origin.json` reads
+#: with the hidden population at 50, 100, 400 and 800. What is NOT capped is
+#: the step-2 selection sweep in `load_catalog`, which stats every hidden
+#: directory to find the newest CAP of them: that is O(hidden population),
+#: linear at a stable ~6.0 µs/dir measured from 250 to 4000 dirs, and it is
+#: the term that scales.
+#:
+#: So the ON-path delta grows with the store, not with this constant. The
+#: +6.6 ms measured today was ruled ACCEPTED-with-documentation rather than a
+#: regression because the original +2.7 ms budget was set on a 462-hidden
+#: store and the store outgrew it — the sweep is the prescribed algorithm
+#: costing what it costs at a larger population, not a leak of the capped
+#: reads into the population. Memoizing the sweep is the follow-up, and it
+#: becomes worth its own invalidation surface at roughly 2,000 hidden
+#: directories (~12 ms, 0.6% of the 2 s poll), not before.
+#:
+#: The ruling, with the measurements: `BRIEF-sidebar-slice-b.md`,
+#: "## Lead check — round 1".
+SUBAGENT_LAYER_CAP = 40
+
 #: `session_id -> ((activity_mtime, transcript_size), SessionRow)`. A row's
 #: name and fork mark change only when its transcript does, and the scan
 #: already stats that file to rank the session, so the key is free. Only the
@@ -794,7 +855,47 @@ def cached_session_rows(
     return rows
 
 
-def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[CatalogEntry]:
+def _subagent_marker(session_dir: Path) -> tuple[str, str]:
+    """``(agent, label)`` from a subagent's ``origin.json``; ``("", "")`` if unreadable.
+
+    Best-effort by contract, like every other marker read on this path: a
+    missing, truncated or non-object marker costs the row its role and task
+    label, never the row itself.
+    """
+    try:
+        payload = json.loads((session_dir / "origin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ("", "")
+    if not isinstance(payload, dict):
+        return ("", "")
+    values = []
+    for key in ("agent", "label"):
+        value = payload.get(key)
+        values.append(value if isinstance(value, str) and value else "")
+    return (values[0], values[1])
+
+
+def subagent_population(directory: Path) -> int:
+    """How many hidden subagent runs the store holds — the footer chip's count.
+
+    A full second scan of the store: ``_scan_sessions`` is not memoized, so
+    this costs about as much as ``load_catalog`` itself (+2.36 ms measured on a
+    156-visible/462-hidden store). Call it on a slow cadence — the sidebar
+    reads it on open and then every fifteenth poll — never once per poll.
+    """
+    from local_operator.resume import _scan_sessions
+
+    return len(_scan_sessions(directory)[1])
+
+
+def load_catalog(
+    directory: Path,
+    limit: int = CATALOG_SCAN_LIMIT,
+    *,
+    include_subagents: bool = False,
+    pinned_hidden_ids: Sequence[str] = (),
+    pinned_off_page: Sequence[str] = (),
+) -> list[CatalogEntry]:
     """Rank a shared lightweight candidate snapshot before materializing a page.
 
     Discovery already stats the whole namespace. Applying a recency cap before
@@ -811,6 +912,22 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     Decorations are the opposite case: they never change WHICH rows are
     returned, only what is claimed about them, so a read that fails here is
     named on each row's ``degraded`` and the listing still stands.
+
+    ``include_subagents`` adds a capped page of the hidden subagent population
+    as a SEPARATE layer, and ``pinned_hidden_ids`` keeps individually pinned
+    hidden sessions resolvable while that layer is off. Both are keyword-only
+    and default to the behaviour every existing caller already has: with the
+    layer off this function issues exactly the syscalls it did before.
+
+    ``pinned_off_page`` keeps individually pinned sessions resolvable when the
+    PAGE does not carry them — the same promise ``pinned_hidden_ids`` makes on
+    the other axis, and a different one: a hidden id is absent because the
+    catalogue never built it, while an off-page id IS built here and is dropped
+    by the ``limit`` slice below. A caller that renders a pinned section must
+    have both, because a pin is a durable statement by the user and a recency
+    window is a property of the listing. The extras come back APPENDED, after
+    the page and in the ranking's own order (every extra ranks below every page
+    row by construction, so the concatenation IS rank order).
     """
     from dataclasses import replace
 
@@ -837,6 +954,69 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     # that cannot be read (an unavailable one).
     candidates, hidden = _scan_sessions(directory, strict=True)
     source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
+    # -- the opt-in subagent layer (PROPOSAL 5a) ----------------------------
+    #
+    # Every syscall this layer costs is inside this branch: with both keyword
+    # arguments at their defaults nothing below runs, and the poll is byte-for-
+    # byte the scan it was. `hidden` is already in hand from the scan above, so
+    # the OFF path does not even pay a directory read to learn it is off.
+    #
+    # THESE ROWS DELIBERATELY BYPASS `decorate_rows` AND THE ATTENTION LOOKUP
+    # BELOW. `CatalogEntry.active` is `pending or unseen or live_state`, and the
+    # attention store keys on conversation identity -- which answers for
+    # subagent ids too, 45% of them carrying an unseen receipt. A sub row placed
+    # in `rows` therefore comes out `active=True` and sections into Active
+    # Sessions, above the user's own work. No filter inside that path avoids it;
+    # the only fix is not to be on the path. So these are built by hand, in
+    # their own list, with the quiet fields left at their empty defaults, and
+    # they rejoin the main flow at exactly one point: the `rank_entries` call.
+    subagent_entries: list[CatalogEntry] = []
+    if include_subagents or pinned_hidden_ids:
+        pinned = [session_id for session_id in pinned_hidden_ids if session_id in hidden]
+        wanted = set(hidden) if include_subagents else set()
+        wanted.update(pinned)
+        stamped: list[tuple[float, str]] = []
+        for session_id in wanted:
+            transcript = directory / "sessions" / session_id / TRANSCRIPT_FILENAME
+            try:
+                stamped.append((transcript.stat().st_mtime, session_id))
+            except OSError:
+                # No readable transcript: nothing to hydrate a row from, and
+                # `_row_stat_key` would decline to cache it anyway.
+                continue
+        stamped.sort(key=lambda item: (-item[0], item[1]))
+        mtimes = {session_id: mtime for mtime, session_id in stamped}
+        # Pinned ids are exempt from the cap -- a pin to the 300th-oldest run
+        # must still resolve, or the pin renders as nothing at all.
+        selected = list(
+            dict.fromkeys(
+                [session_id for _, session_id in stamped[:SUBAGENT_LAYER_CAP]]
+                + [session_id for session_id in pinned if session_id in mtimes]
+            )
+        )
+        for session_id in selected:
+            session_dir = directory / "sessions" / session_id
+            agent, label = _subagent_marker(session_dir)
+            # Added to `source` ONLY -- never to `candidates`, never to `rows`.
+            # `source` is what the single `cached_session_rows` call below looks
+            # rows up in, so this alone is what buys these rows their real name.
+            source[session_id] = (session_id, mtimes[session_id], "subagent")
+            subagent_entries.append(
+                CatalogEntry(
+                    SessionRow(
+                        session_id,
+                        mtimes[session_id],
+                        "",
+                        # Stamped, never left at the 0.0 default: rows that all
+                        # tie there fall through to the id tie-break, which
+                        # silently reverses newest-first order.
+                        created_at=session_created_at(session_dir),
+                    ),
+                    subagent=True,
+                    agent=agent,
+                    label=label,
+                )
+            )
     # Creation time is the immutable ordering key (#800), so every construction
     # site must stamp it. Rows left at the 0.0 default all tie and fall through
     # to the session-id tie-break, which silently reverses newest-first order.
@@ -953,9 +1133,61 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
         # is the only read of that store, and it happens after the decoration.
         logger.warning("session catalogue could not read attention state", exc_info=True)
         rows = [row._replace(degraded=row.degraded + (DECORATION_ATTENTION,)) for row in rows]
-    entries = list(
-        rank_entries([entry_for(row, attention.get(identities[row.id])) for row in rows])
-    )[:limit]
+    ranked = list(
+        rank_entries(
+            [entry_for(row, attention.get(identities[row.id])) for row in rows]
+            # The ONE join point. Sub entries are concatenated here rather than
+            # being members of `rows`, so they never pass through the
+            # decoration and attention work above -- and this stays a single
+            # `rank_entries` call over a single list.
+            + subagent_entries
+        )
+    )
+    # THE PAGE, THEN THE PINS THAT FELL OUTSIDE IT. The slice is a RECENCY
+    # window, and a pin is the one thing in this listing that is not recency: it
+    # is a durable statement the user made about a conversation. On a store
+    # larger than the client's page a pinned session is therefore UNRENDERABLE
+    # without this — the row the client needs to draw in its pinned section is
+    # exactly the row the window removes — so the caller that renders pins names
+    # them and gets them back here.
+    #
+    # WHAT THIS COSTS: nothing measurable, and that is the reason it lives here
+    # rather than in a caller. Every candidate's row, decoration and attention
+    # lookup has ALREADY happened by this point — the slice is the only thing
+    # that discarded these entries — so an extra costs one membership test, not
+    # a scan, a hydration or a second `cached_session_rows` call. A caller-side
+    # union would have to re-scan the store or re-hydrate by id, and the id
+    # lookup it would need is the one thing this function does not return.
+    #
+    # SILENTLY ABSENT WHEN IT CANNOT BE RESOLVED, deliberately: an id that is
+    # not in ``ranked`` at all — a hidden (delegated) run, which never reaches
+    # ``candidates``, or a directory that has since been deleted — is simply not
+    # appended, rather than raising. The caller asked for a row it would like to
+    # render, not for a promise this store cannot keep.
+    entries = ranked[:limit]
+    if pinned_off_page:
+        # The window is the caller's own page bound, so a pinned row sitting
+        # exactly AT that bound is carried too — it is a row the caller's page
+        # does not carry, which is the whole condition. Order is preserved: the
+        # extras rank below every page row by construction, so appending them
+        # keeps the result in rank order.
+        wanted = set(pinned_off_page)
+        entries += [entry for entry in ranked[limit:] if entry.id in wanted]
+    # KNOWN LIMITATION, decided rather than missed. This slice applies to the
+    # COMBINED list, so a store with more than ~160 visible sessions cannot fit
+    # both populations in CATALOG_SCAN_LIMIT. Sub rows do not lose that race:
+    # their `session_category` inputs are all falsy by construction, giving them
+    # the same tier as a cold visible row, where the tie-break is `-created_at`
+    # and subagent runs are recent. So what is pushed past the slice is the
+    # user's OLDEST COLD sessions, never an active row. Raising the limit would
+    # restore the per-poll row-building cost the comment on CATALOG_SCAN_LIMIT
+    # exists to document removing, so it is deliberately not raised.
+    #
+    # A PINNED ID AMONG THEM IS NO LONGER PUSHED OUT, and that is the one thing
+    # `pinned_off_page` changes about this sentence: the row is still sliced off
+    # the page, and it comes back appended, which is cheaper than raising the
+    # limit for everyone to serve the few rows a user pinned.
+    # Pinned by `test_the_layer_competes_for_the_page_on_a_full_store`.
     named = {
         row.id: row
         for row in cached_session_rows(

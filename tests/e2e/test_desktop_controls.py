@@ -285,6 +285,29 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 "snapshot"
             ]
             assert snapshot["loop"]["completed"] == 2
+            # An IDLE driver and a trailing space is the shape that used to start
+            # a PAID unbounded goal-mode loop toward the literal flag text — the
+            # worst half of MAJOR-2, since neither word is a goal on any host.
+            for spaced_arg in ("--stop ", "--clear "):
+                idle = await client.post(
+                    target + "/commands",
+                    json={
+                        "request_id": request_id(),
+                        "command": "loop",
+                        "args": spaced_arg,
+                    },
+                )
+                assert idle.status_code == 200, idle.text
+                assert not handle._goal_loop.running, f"{spaced_arg!r} started a loop"
+            # And the exact flag on the same idle driver is the dismissal itself:
+            # the published state is REPLACED, so the surface stops describing a
+            # run that is over (the hop the PR body recorded as unverified).
+            dismissed = await command("loop", "--clear")
+            assert dismissed["data"] == {"type": "loop", "status": "idle", "completed": 0}
+            cleared_snapshot = (await client.get(target)).json()["result"]["payload"]["frontend"][
+                "snapshot"
+            ]
+            assert cleared_snapshot["loop"] == {"status": "idle", "completed": 0}
             print(
                 (
                     "Canonical count loop ran two actual model turns, persisted state, "
@@ -368,6 +391,22 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             stream.block = True
             await command("loop", "3")
             await asyncio.wait_for(stream.started.wait(), 15)
+            # The refusal at the surface it exists for, as a STATUS: `/loop
+            # --clear` while the driver runs used to answer 200 with `kind:
+            # error`, so a client reading the status could not tell it from a
+            # success (round 1, reviewer MINOR-4). A raw POST rather than
+            # `command(...)`, which asserts 200. It sits HERE, inside the blocked
+            # turn, because the refusal needs a loop that is genuinely mid-flight:
+            # the scripted stream answers a 2-iteration loop faster than a POST can
+            # follow it, which is how this cell first passed locally and failed in
+            # CI on an idle driver (it dismissed the state instead of refusing).
+            clearing = await client.post(
+                target + "/commands",
+                json={"request_id": request_id(), "command": "loop", "args": "--clear"},
+            )
+            assert clearing.status_code == 409, clearing.text
+            assert "/loop --stop" in clearing.json()["detail"]
+            assert handle._goal_loop.running, "the refusal cancelled live work"
             cancelled = await command("loop", "cancel")
             assert cancelled["data"]["status"] == "cancelled"
             await until(lambda: not session.is_streaming and not handle._prompt_queue)

@@ -4,19 +4,53 @@
  * for the past-sessions list.
  */
 
-/** 83.4 → "1m 23s"; 0.9 → "0.9s"; 3661 → "1h 1m". */
+/** Active processing time: `9s`, `41m1s`, `1h2m`, `4d5h` — the TUI's port.
+ *
+ * A port of `local_operator/tui/widgets/tool_card.py::format_duration`, branch
+ * for branch, because both surfaces print the same elapsed time for the same
+ * work and two spellings of one number is two answers to one question (design
+ * round 1 on the phone clock, D3/D5). Units are dropped once they stop carrying
+ * information: past an hour the seconds are noise, and a whole minute renders
+ * as `5m` rather than `5m0s`. Sub-second work renders as `0s` rather than
+ * vanishing, so a finished turn always leaves a mark.
+ *
+ * BOUNDED AT SIX CELLS over the whole domain, which the callers reserve room
+ * for rather than measure: the widest strings are `59m59s`, `23h59m` and
+ * `99d23h`, and from 100 days it is `100d+`. It used to compute
+ * `hours = floor(minutes / 60)` with no ceiling and no days branch, so
+ * `100h 40m` was 8 characters and `1000h 40m` was 9 — which is what put the
+ * phone's clock past the edge of a narrow row and pushed the band's label
+ * `1000h 40m` wide enough to re-clip 5 characters in one tick. The days branch
+ * is also the more readable answer at that magnitude, and the TUI's reason for
+ * keeping it a branch rather than a clamp holds here identically: clipping
+ * `100h40m` to fit renders `100h4…`, and `100h4m`, `100h40m` and `100h45m` all
+ * collapse to that same string. Prose survives truncation because the reader
+ * reconstructs it; a duration does not — and this number is load-bearing
+ * exactly when it is largest.
+ *
+ * The non-finite/negative guard is the phone's own (a wire value is untrusted;
+ * the TUI's callers filter with `parse_duration` before it gets there), and an
+ * empty string is the same "no duration to state" the callers already render
+ * as nothing.
+ */
 export function formatElapsed(seconds: number): string {
 	if (!Number.isFinite(seconds) || seconds < 0) return "";
-	if (seconds < 10) return `${seconds.toFixed(1)}s`;
-	if (seconds < 60) return `${Math.round(seconds)}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) {
-		const rem = Math.round(seconds - minutes * 60);
-		return rem > 0 ? `${minutes}m ${rem}s` : `${minutes}m`;
+	const total = Math.trunc(seconds);
+	if (total < 60) return `${total}s`;
+	if (total < 3600) {
+		const minutes = Math.floor(total / 60);
+		const secs = total % 60;
+		return secs ? `${minutes}m${secs}s` : `${minutes}m`;
 	}
-	const hours = Math.floor(minutes / 60);
-	const remM = minutes - hours * 60;
-	return remM > 0 ? `${hours}h ${remM}m` : `${hours}h`;
+	if (total < 86400) {
+		const hours = Math.floor(total / 3600);
+		const minutes = Math.floor((total % 3600) / 60);
+		return minutes ? `${hours}h${minutes}m` : `${hours}h`;
+	}
+	const days = Math.floor(total / 86400);
+	if (days > 99) return "100d+";
+	const hours = Math.floor((total % 86400) / 3600);
+	return hours ? `${days}d${hours}h` : `${days}d`;
 }
 
 /** Epoch seconds → "just now" / "4m ago" / "2h ago" / "3d ago" / "mar 3". */

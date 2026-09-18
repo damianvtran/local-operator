@@ -678,7 +678,7 @@ async def test_a_retiring_daemon_still_answers_reads(tmp_path) -> None:
     its readers to leave.
     """
     pool = DesktopSessions(tmp_path, retiring=lambda: True)
-    assert await pool.list(10) == []
+    assert (await pool.list(10)).rows == []
 
 
 @pytest.fixture

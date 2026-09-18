@@ -135,7 +135,11 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
-from local_operator.clipboard import MAX_CLIPBOARD_READ_BYTES, read_clipboard
+from local_operator.clipboard import (
+    MAX_CLIPBOARD_READ_BYTES,
+    SCRATCH_NO_SPACE,
+    read_clipboard,
+)
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
@@ -144,6 +148,7 @@ from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     CompletionMode,
     PickerMode,
+    at_token,
     completion_for,
     ghost_for,
     skill_token,
@@ -152,6 +157,7 @@ from local_operator.tui.widgets.command_picker import (
     slash_context,
     slash_token_span,
     slash_word,
+    split_token,
 )
 from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
@@ -198,6 +204,21 @@ PASTE_READING_NOTICE_DELAY_S = 0.35
 #: card's own lifetime, not about every notice that can occupy the slot
 #: (issue #422).
 PASTE_READING_NOTICE_MIN_S = 0.4
+
+#: How a clipboard read that never HAPPENED is named on
+#: :class:`EditorPasteEmpty`, keyed by the reason
+#: :mod:`local_operator.clipboard` records.
+#:
+#: A mapping rather than a branch per reason because the two ends are named for
+#: different things on purpose: the module names the CAUSE (``"no-space"``),
+#: which is what a log reader needs, and the message names the READ
+#: (``"read-no-space"``), which is what a user needs — one of them is about a
+#: filesystem and the other is about a paste. The default covers every other
+#: reason, including the ones this module cannot classify, so a new reason
+#: added to the clipboard lands on the honest generic notice rather than
+#: falling through to "the clipboard was empty".
+_CLIPBOARD_READ_FAILURE_REASONS = {SCRATCH_NO_SPACE: "read-no-space"}
+DEFAULT_CLIPBOARD_READ_FAILURE_REASON = "read-failed"
 
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
 #: a separator is what keeps prose out: "see screenshot.png" splits into two
@@ -1332,7 +1353,15 @@ class EditorPasteEmpty(Message):
     clipboard was never read, and an oversized screenshot IS on the clipboard.
     Both mislead a user into the one move that cannot help — re-copying.
 
-    Three values, no more, because three is what the code can establish:
+    **A CLOSED SET, and the list is the record of how it got closed.** One
+    value per outcome this code can honestly name, no more and no fewer. It
+    started at three and has grown one value per case a single value would have
+    described WRONGLY; that history is why the bar for a new one is not "is
+    this interesting" but "does the user's next move differ from every move
+    already on the list". Two of the values below exist only because the reason
+    they replace sent the user to the one action that could not work
+    (``"timeout"``, ``"too_large"``), and the two newest exist for exactly the
+    same reason:
 
     * ``"nothing"`` — the clipboard was read and had nothing attachable on it.
       This is the deliberately vague one: an empty clipboard, a text-only one,
@@ -1372,9 +1401,27 @@ class EditorPasteEmpty(Message):
       screenshot that their clipboard was empty (ux round 1, U3). A retry is
       the move that helps here and the move that cannot help there, so one
       sentence could not serve both.
+    * ``"read-no-space"`` — the read never happened because there was no room
+      to stage it: the scratch directory the file-based backends need could not
+      be allocated and the OS said the volume or the quota was full. The move
+      is to free space, and it is the ONLY move: ``copy again``, which is what
+      every other down-the-list reason implies, cannot help on a full disk, and
+      the failure surfaces as a paste that kills the app rather than as
+      anything about a disk (2026-09-17).
+    * ``"read-failed"`` — the read never happened for any other reason: a
+      scratch allocation refused for something other than space, an allocation
+      refused while the scratch bases looked writable to a probe, or an
+      exception escaping a backend and caught by the guard in
+      :func:`~local_operator.clipboard.read_clipboard`. One value for all of
+      them because the distinction is not one this code can establish, and the
+      honest thing for the app to say is exactly what it knows: the clipboard
+      was not read. The remedy is the PATH route, not a retry — half of this
+      value is a permanent refusal (a read-only or missing scratch base) where
+      a retry cannot work, and pasting a file path never touches the clipboard
+      at all (review round 1, NIT-5 / QA Q2).
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
-    card to the app; this only says which of the three happened.
+    card to the app; this only says which of them happened.
 
     THIS NOTICE IS NOT A DISCOVERY SURFACE, and an earlier revision's attempt
     to make it one is recorded here because the reasoning looks right and is
@@ -1596,6 +1643,33 @@ class SkillQueryOpened(Message):
     re-arms it (``Editor._skill_choices_requested``), which is what lets the
     app re-answer with a fresh set on the next ``$``.
     """
+
+
+class FileQueryOpened(Message):
+    """Posted when the buffer enters an ``@path`` token, so the app fills rows.
+
+    CARRIES THE DIRECTORY PART, unlike :class:`SkillQueryOpened`, which carries
+    nothing. That difference is the whole design of this message. A skill
+    vocabulary is fixed for the session, so one message per token is enough. A
+    file vocabulary is not: ``@src/`` and ``@src/ap`` list the SAME directory,
+    but ``@src/`` and ``@src/sub/`` list DIFFERENT ones. Keying the re-arm on
+    the token — the rule ``SkillQueryOpened`` uses — would list the parent
+    forever as the user typed deeper.
+
+    So the editor re-posts this whenever the directory part changes, not merely
+    when the token opens. That is the same problem
+    :class:`RefreshArgumentChoices` solves for a two-level argument whose choice
+    set changes under a standing command word, and the economy it documents is
+    preserved the same way: one scan per DIRECTORY, not one per keystroke.
+    """
+
+    def __init__(self, directory: str) -> None:
+        super().__init__()
+        #: The directory part of the token, as :func:`split_token` reads it —
+        #: ``""`` for a bare ``@``, ``"src/"`` for ``@src/ap``. The app resolves
+        #: it against the session cwd; it is never an absolute path of the
+        #: app's choosing.
+        self.directory = directory
 
 
 class RefreshArgumentChoices(Message):
@@ -1961,6 +2035,14 @@ class Editor(TextArea):
     #: two-command editor-local exception. Both spellings, because the alias is
     #: itself a runnable command — same reason ``MODEL_COMMANDS`` lists
     #: ``models``.
+    #:
+    #: It mirrors the registry's ``SlashCommand.name_argument`` flag, which is what
+    #: `set_commands` derives ``_name_prompt_commands`` from: the flag exists
+    #: because "has a name slot" and "has a value list" stopped being the same
+    #: question once `/goal` and `/loop` gained a flag row. This tuple stays the
+    #: editor's own vocabulary for the completion and highlight paths, and
+    #: ``test_slash_goal_loop_flags`` pins the two to each other so the mirror
+    #: cannot drift.
     NAME_ARGUMENT_COMMANDS = ("team", "teams", "agent", "agents")
 
     #: The discoverability hint shown the moment a NAME+message name is completed
@@ -2018,6 +2100,15 @@ class Editor(TextArea):
         #: the token so the next ``$`` asks again. Assigned here because
         #: ``_sync_picker`` reads it during ``super().__init__()``.
         self._skill_choices_requested: bool = False
+        #: The DIRECTORY a :class:`FileQueryOpened` has been posted for, or
+        #: ``None`` outside an ``@`` token. The file list's re-arm latch, and it
+        #: holds a directory rather than a bool because the file vocabulary
+        #: changes UNDER a standing token: ``@src/`` and ``@src/ap`` are the same
+        #: scan, ``@src/sub/`` is a different one. A bool latch — the rule the
+        #: skill list can afford — would list the parent directory forever as
+        #: the user typed deeper. Assigned here because ``_sync_picker`` reads
+        #: it during ``super().__init__()``.
+        self._file_choices_requested: str | None = None
         # Command words (primaries AND aliases) whose argument opens the value
         # list, and the subset of those the bare command cannot stand without.
         # DERIVED from the registry in :meth:`set_commands` rather than listed
@@ -2575,13 +2666,16 @@ class Editor(TextArea):
             if command.consumes_prompt
             for name in command.names
         )
-        # Those of the above that also offer a NAME list, so the `$` floor knows
-        # a name slot has to be passed first. Derived from the registry, not
-        # spelled out, so it cannot drift from `NAME_ARGUMENT_COMMANDS`.
+        # Those of the above whose argument list is a NAME slot, so the `$` floor
+        # knows a name has to be passed first. Read from the registry's
+        # ``name_argument`` flag rather than inferred from "has a value list":
+        # `/goal` and `/loop` now offer a flag row too, and neither has a name
+        # slot, so the proxy would have made `/goal $skill` refuse a `$` that
+        # belongs to the goal text the user is writing (see the flag's own note).
         self._name_prompt_commands = frozenset(
             name.lower()
             for command in commands
-            if command.consumes_prompt and command.arguments is not ArgumentMode.NONE
+            if command.consumes_prompt and command.name_argument
             for name in command.names
         )
         # Lower-cased vocabulary (primaries AND aliases), shared by the
@@ -2815,6 +2909,40 @@ class Editor(TextArea):
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
         key = event.key
+        # LF is Enter. sidekick.nvim, tmux send-keys, expect and every editor
+        # integration end a line with LF (0x0a); textual 8.2.8 decodes that to
+        # the key name `ctrl+j`, and every Enter meaning below gated on the
+        # literal "enter", so the byte did nothing at all (measured on the
+        # composer: `"alpha"` + `\n` left "alpha" in the buffer, unsubmitted,
+        # while `"alpha"` + `\r` submitted). Normalised HERE, ahead of every
+        # branch, rather than as a second arm on the submit site: the credential
+        # mint, both pickers and the ambiguity gate all own Enter, and a
+        # submit-only branch would send the draft from states where Enter does
+        # something else — measured, an LF with the `/credential` picker open
+        # submitted the bare command word, and one during a live masked capture
+        # submitted the mask and dropped the capture.
+        #
+        # The EVENT is rewritten as well as the local name, and that is not
+        # belt-and-braces: `_on_key` is not the only reader of the byte's
+        # spelling. The live-prompt router is handed this very event and
+        # re-reads its own `event.key == "enter"` (`route_key_to_live_prompt`,
+        # `app.py`), so a local-only rewrite still left it reading `ctrl+j`,
+        # which is not that branch: the router cancelled the held answer key,
+        # restored its character into the composer, and this method then
+        # submitted that character as a CHAT PROMPT while the question stayed up
+        # unanswered — measured as `prompts == ["y"]` with the approval card
+        # still mounted. The end state matched the pre-fix path, which did the
+        # same thing for the same reason once the held key reached the router as
+        # the next keystroke; what it diverged from is CR, which answers the
+        # question and submits nothing. It is deterministic rather than a race,
+        # because both events of one `"y\n"` write arrive in the same parse
+        # pass, so the terminator is always the key that cancels the hold.
+        # Rewriting the event, and not only the local name, is what closes that
+        # divergence and makes the byte indistinguishable from Enter, which is
+        # the whole point.
+        if key == "ctrl+j":
+            key = "enter"
+            event.key = "enter"
         # A CSI-modifier vertical chord IS its plain arrow, and is rewritten to
         # one here so that every handler below — both pickers, history, the
         # caret — sees the key it already gates on. This is the whole fix for
@@ -3224,7 +3352,41 @@ class Editor(TextArea):
                     # afterwards would measure the completed word (always one
                     # exact match) and submit unconditionally.
                     unambiguous = self._picker_choice_is_unambiguous(name)
-                    if self._picker.mode is PickerMode.SKILL:
+                    if self._picker.mode is PickerMode.FILE:
+                        # NO trailing space is inserted, unlike SKILL below, so
+                        # a completed token stays OPEN under the caret and the
+                        # list re-opens on the very name it just completed —
+                        # that is the mid-path rule, and it is what makes
+                        # `@src/` one keystroke from `@src/app.py`.
+                        #
+                        # It also means Enter alone can never terminate the
+                        # token, so the escape hatch is: ENTER SENDS WHEN THERE
+                        # IS NOTHING LEFT TO ACCEPT. A row that is already what
+                        # the buffer holds changes nothing, so the keystroke
+                        # means what Enter means everywhere else in the app. A
+                        # row that would APPEND anything still completes, which
+                        # leaves the mid-path case above exactly as it was — and
+                        # submitting a `@src/` the user is still typing is the
+                        # mis-send the no-submit rule exists to prevent.
+                        #
+                        # Without this the two rules composed into a keyboard
+                        # trap rather than a preference: `summarise @README.md`
+                        # + Enter ×3 sent nothing at all, forever (QA round 1,
+                        # Q-1), and every ordinary submission in this feature's
+                        # own test file had to press Escape first — which is
+                        # exactly how a green suite missed the headline flow.
+                        if key == "enter" and self._file_row_is_already_in_the_buffer(name):
+                            # Submitted HERE rather than left to fall out of the
+                            # picker block: the ctrl+c/super+c branch below ends
+                            # in an unconditional `event.stop()` + return, so
+                            # bubbling out would SWALLOW the press instead of
+                            # submitting it.
+                            self._submit()
+                            event.stop()
+                            event.prevent_default()
+                            return
+                        self._complete_file(name)
+                    elif self._picker.mode is PickerMode.SKILL:
                         # NEITHER key ever submits here, ambiguous or not. A
                         # completed `$skill ` is not a runnable thing the way
                         # `/logout anthropic` is — it is the opening of a
@@ -5501,6 +5663,28 @@ class Editor(TextArea):
                     _retire_this_card()
                 else:
                     self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, _retire_this_card)
+        if contents.read_failed:
+            # FIRST, ahead of every shape below. A read that never happened has
+            # no image, no paths and no text, so it would fall through the text
+            # branch into the reason block at the bottom and be reported as
+            # ``"nothing"`` — telling a user who is holding a screenshot that
+            # their clipboard is empty. That is the exact wrong-diagnosis class
+            # ``"timeout"`` and ``"too_large"`` were split out to end, and on
+            # the incident that produced these two values the user's clipboard
+            # did hold a valid image; what was empty was the disk (2026-09-17).
+            #
+            # Nothing below can be reachable honestly once this is set, which is
+            # why this is a guard at the top rather than another ``elif`` at the
+            # bottom beside the other reasons: the ordering is the claim, not a
+            # detail of which branch happens to win.
+            self.post_message(
+                EditorPasteEmpty(
+                    reason=_CLIPBOARD_READ_FAILURE_REASONS.get(
+                        contents.read_failed, DEFAULT_CLIPBOARD_READ_FAILURE_REASON
+                    )
+                )
+            )
+            return None
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
@@ -7205,10 +7389,17 @@ class Editor(TextArea):
     def _picker_phase(self) -> str | None:
         """Which list the caret is currently inside, or ``None``.
 
-        ``"argument"`` while :func:`slash_argument` matches, ``"command"``
-        while :func:`slash_context` matches, ``None`` otherwise. Used by
+        ``"file"`` while :func:`at_token` matches, ``"argument"`` while
+        :func:`slash_argument` matches, ``"command"`` while
+        :func:`slash_context` matches, ``None`` otherwise. Used by
         :meth:`_sync_picker_if_phase_changed` so a caret move that stays
         inside one phase does not re-open an Esc-dismissed list.
+
+        ``"file"`` is the FOURTH answer and it is mutually exclusive with the
+        other three for the cheapest possible reason: a boundary ``@`` is not a
+        boundary ``$`` and not a boundary ``/``. The sigils are distinct
+        characters, so no buffer position can open two of these tokens at once
+        and the order below decides only who is ASKED first, never who wins.
 
         The three answers are still mutually exclusive, but the claim alone no
         longer delivers that. A prompt command's claim is now PARTIAL: a ``$``
@@ -7221,6 +7412,11 @@ class Editor(TextArea):
         never who wins.
         """
         cursor = self._caret_offset()
+        # Asked first because it is the cheapest parse of the four and cannot
+        # collide with them: `at_token` matches only a boundary `@`, a character
+        # none of the other three parsers reads as a sigil.
+        if at_token(self.text, cursor) is not None:
+            return "file"
         # Checked FIRST and short-circuiting, but the reason is no longer "a `$`
         # is anchored at offset 0": it is inline now, so `/team ops $research`
         # puts both sigils on one line. `skill_token` takes the recognised
@@ -7270,10 +7466,13 @@ class Editor(TextArea):
         with its own vocabulary.
 
         ``self._picker`` is asked with ANY non-``None`` phase, not just
-        ``"command"`` (round 2, R14). That widget serves FOUR lists — the
+        ``"command"`` (round 2, R14). That widget serves FIVE lists — the
         command word, an argument list (`/theme `, `/effort `, `/login `,
-        `/mcp `, `/team `…), the `$skill` list and the loading reserve — and
-        every one of them can hold an Esc. Narrowing the question to the
+        `/mcp `, `/team `…), the `$skill` list, the `@path` list and the
+        loading reserve — and every one of them can hold an Esc. The `@path`
+        list cost this site NO edit, which is the point of asking a total
+        question: it became live the moment :meth:`_picker_phase` learned to
+        answer ``"file"``. Narrowing the question to the
         command word answered it for one list and returned the other three to
         the literal-whitespace corruption U13 exists to prevent: `/theme d`
         became `/theme d    `. ``_picker_phase()`` returning non-``None`` is
@@ -7343,6 +7542,33 @@ class Editor(TextArea):
         the caret sits, not just what the buffer contains.
         """
         cursor = self._caret_offset()
+        # The `@path` list is derived first, for the reason `_picker_phase`
+        # gives: `@` is a character no other parser here reads as a sigil, so
+        # this branch cannot take a token another list wanted.
+        file_token = at_token(self.text, cursor)
+        if file_token is not None:
+            # Re-posted on a DIRECTORY change, not once per token. This is the
+            # `RefreshArgumentChoices` problem in a new place: that message
+            # exists because a two-level argument's choice set changes while the
+            # command word stands still, and a file token does the same thing —
+            # `@src/` then `sub/` is the same token and a different directory.
+            # Keying the latch on the token alone (what the `$` branch below can
+            # safely do, because a session has one skill vocabulary) would list
+            # the parent forever.
+            directory = split_token(file_token.query)[0]
+            if self._file_choices_requested != directory:
+                self._file_choices_requested = directory
+                self.post_message(FileQueryOpened(directory))
+            self._picker.sync_files(self.text, cursor)
+            self._picker_phase_at_last_sync = self._picker_phase()
+            self._sync_ghost()
+            return
+        # Left the token: the next `@` asks for rows again, so a file created
+        # between two references is not invisible for the rest of the session.
+        # `None` rather than `""` because `""` is a REAL directory here — the
+        # cwd, what a bare `@` scans — and using it as the "nothing requested"
+        # value would suppress the post for the most common token of all.
+        self._file_choices_requested = None
         # The `$skill` list is derived before either slash list, and the
         # arbitration that makes that safe is inside the parse rather than in
         # this ordering — see `_picker_phase`: an inline `$` sitting in an
@@ -7762,6 +7988,18 @@ class Editor(TextArea):
             return True
         if query.strip().lower() == name.strip().lower():
             return True
+        # A FLAG row is named with its dashes (`--clear`, `--stop`) while the same
+        # action has a BARE spelling these commands have always honoured and
+        # still do (`clear`, `stop`). Spelled either way the user named the
+        # action, so both count as "typed in full" — they are the same word, and
+        # the bare one is what a user most often types. Without this the flag ROW
+        # would have turned `/goal clear` + Enter, one keystroke before the row
+        # existed, into a completion needing a second Enter, i.e. the gate would
+        # have cost the documented bare forms a keystroke instead of only gating
+        # the IMPLICIT one (round 1: the designer's D1 fix, and the two
+        # pre-existing tests its first cut broke).
+        if query.strip().lower().lstrip("-") == name.strip().lower().lstrip("-"):
+            return True
         return not self._argument_is_destructive() and len(self._picker.suggestions()) <= 1
 
     def _argument_is_destructive(self) -> bool:
@@ -7850,6 +8088,14 @@ class Editor(TextArea):
         """
         if not self._picker.is_open():
             return None
+        # ABOVE the two tests below, and that position is load-bearing rather
+        # than stylistic. The ARGUMENT test two lines down is a FALLTHROUGH —
+        # `is not ARGUMENT` returns COMMAND — so a FILE mode reaching it would
+        # be described as a command completion, and since `_ghost_completion`
+        # reads this function the user would see ghost text for a `/command`
+        # dimmed over a path token. Do not move this below it.
+        if self._picker.mode is PickerMode.FILE:
+            return CompletionMode.FILE
         if self._picker.mode is PickerMode.SKILL:
             return CompletionMode.SKILL
         if self._picker.mode is not PickerMode.ARGUMENT:
@@ -8059,6 +8305,18 @@ class Editor(TextArea):
         closes the picker — the word is now whitespace-terminated, so the list
         drops away on the same keystroke that chose from it.
         """
+        if self._picker.mode is PickerMode.FILE:
+            # A clicked file row FILLS AND WAITS, never submits — the same rule
+            # the keyboard gets, because the path may be mid-segment.
+            #
+            # This arm is required, not symmetry: without it FILE falls through
+            # to the COMMAND completion at the end of this method, which looks
+            # `src/app.py` up in the command vocabulary, gets `None` back from
+            # `completion_for`, and returns at the `completed is None` guard.
+            # The click would then do NOTHING — no row inserted, no error, no
+            # clue — which is the worst failure shape available here.
+            self._complete_file(name)
+            return
         if self._picker.mode is PickerMode.ARGUMENT:
             # A clicked team/agent row fills the name and a space and waits for
             # the message, exactly like Tab/Enter on the same row — a click on a
@@ -8132,6 +8390,52 @@ class Editor(TextArea):
         (review round 1, B1).
         """
         completed = self._completion_for(CompletionMode.SKILL, name)
+        if completed is None:
+            return
+        self._set_text_and_caret(*completed)
+
+    def _file_row_is_already_in_the_buffer(self, name: str) -> bool:
+        """Whether accepting file row ``name`` would leave the buffer unchanged.
+
+        The FILE list's Enter rule needs this because a FILE completion inserts
+        no trailing space: the token stays open, the list re-opens on the name
+        it just completed, and without a termination condition the next Enter
+        completes it again — measured, `summarise @README.md` + Enter ×3 kept
+        the buffer byte-identical and sent nothing (QA round 1, Q-1). A row the
+        buffer already holds has nothing left to accept, so Enter sends.
+
+        Compared on the TEXT the completion would produce, never on the row
+        name, because the two deliberately differ in two shapes: the directory
+        part survives (`@src/` + `app.py` is `@src/app.py`) and a name with a
+        space is emitted quoted (`@"my file.txt"`). A name comparison would
+        therefore report "not yet accepted" forever for exactly the rows a
+        path list is most useful for.
+        """
+        completed = self._completion_for(CompletionMode.FILE, name)
+        return completed is not None and completed[0] == self.text
+
+    def _complete_file(self, name: str) -> None:
+        """Put ``@name`` in the buffer, leaving the caret at the token's end.
+
+        NO TRAILING SPACE, unlike :meth:`_complete_skill`. A path segment may
+        continue — ``@src/`` is very often one keystroke from ``@src/app.py`` —
+        and a space would terminate the token, closing the very list the user is
+        still navigating down. This is the rule an enum-tail ARGUMENT gets, and
+        for the identical reason.
+
+        NO REASSEMBLY either, unlike :meth:`_complete_skill`. That method moves
+        the whole construct to the buffer front because the skill parser is
+        ANCHORED at offset 0 and cannot read an inline token. A reference has no
+        anchored parser: it is resolved wherever it sits, so the span
+        replacement is the entire edit and the user's draft is never reordered
+        around it.
+
+        Nothing submits here, on either key or a click. Enter SENDS instead of
+        completing only when the row is already what the buffer holds — see
+        :meth:`_file_row_is_already_in_the_buffer` — and a click never reaches
+        the submit path at all.
+        """
+        completed = self._completion_for(CompletionMode.FILE, name)
         if completed is None:
             return
         self._set_text_and_caret(*completed)
@@ -8210,15 +8514,21 @@ class Editor(TextArea):
         word, _, typed_argument = command_text[1:].partition(" ")
         word = word.lower()
         if word in self._prompt_commands:
-            # A prompt command with an ARGUMENT LIST (``/team``/``/agent``) and no
+            # A prompt command with a NAME slot (``/team``/``/agent``) and no
             # name chosen yet does not reassemble on the word alone — the name is
             # picked from the autofill first. `_apply_command` already completed
             # the word to ``/team `` and opened that list; leaving it open is the
             # whole interaction. Reassembly happens when the NAME row is chosen
-            # (see :meth:`_resolve_argument`). A prompt command with no list
+            # (see :meth:`_resolve_argument`). A prompt command with no name slot
             # (``/goal``/``/loop``/``/btw``) reassembles now: the draft is its
             # argument directly.
-            if word in self._argument_commands and not typed_argument.strip():
+            #
+            # Asked of the NAME SLOT, not of "has a value list" (the old
+            # `word in self._argument_commands` test, which read the two as the
+            # same thing): `/goal` and `/loop` now open a flag row at the space
+            # and still reassemble on the bare word, because there is no name to
+            # wait for. See :attr:`NAME_ARGUMENT_COMMANDS`.
+            if self._is_name_argument_command(word) and not typed_argument.strip():
                 return
             self._reassemble_prompt_command(token_start, token_end)
             return

@@ -629,3 +629,117 @@ def test_an_adapter_supplied_observation_cause_is_canary_checked() -> None:
         assert secret not in rendered
         assert quote(secret, safe="") not in rendered
         assert secret.encode("utf-8").hex() not in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_fault_reports_its_reason_on_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A channel-killing fault must leave its reason where the bundle can see it.
+
+    A protocol error is answered by tearing the channel down rather than by an
+    error frame, so the parent's read fails and it can name the CALL that died
+    but not WHY (see ``RpcClient._read_response``). Before this, the reason
+    existed only inside the worker and died with it: the bundle held an
+    attributed channel death whose cause was unrecoverable, which is the
+    distinction between a harness bug (a reused request ID) and an adapter one.
+    The supervisor already folds this process's bounded stderr tail into the
+    failure artifact, so stderr is the channel that costs no protocol change.
+    """
+
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    worker = CountingWorker(request_read, response_write)
+    worker.set_state("INSPECTED")
+    task = asyncio.create_task(worker.run())
+    writer = IncrementalWriter(request_write)
+    reader = IncrementalReader(response_read)
+    params = PrepareParams(
+        operation_id="prepare-op", episode_id="episode", secret_refs=(), infra_values=()
+    )
+    try:
+        await exchange(
+            writer,
+            reader,
+            RpcRequest(
+                jsonrpc="2.0", id=1, method="prepare", params=params.model_dump(mode="json")
+            ),
+        )
+        capsys.readouterr()
+        changed = params.model_copy(update={"episode_id": "other"})
+        writer.write(
+            canonical_line(
+                RpcRequest(
+                    jsonrpc="2.0",
+                    id=2,
+                    method="prepare",
+                    params=changed.model_dump(mode="json"),
+                )
+            )
+        )
+        os.close(request_write)
+        request_write = -1
+        assert await asyncio.wait_for(task, 1) == 70
+        reported = capsys.readouterr().err
+        assert "adapter worker: protocol error: " in reported
+        # The reason itself, not merely that something went wrong.
+        assert "operation ID was reused with changed content" in reported
+    finally:
+        for fd in (request_read, request_write, response_read, response_write):
+            if fd >= 0:
+                os.close(fd)
+
+
+@pytest.mark.asyncio
+async def test_the_protocol_reason_on_stderr_is_canary_checked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The one channel that escapes the reply envelope still fails closed.
+
+    ``_dispatch`` re-raises an adapter-supplied ``RpcProtocolError`` unchanged
+    (it must, or a desynchronised adapter would get a normal reply), so the text
+    reaching stderr is not guaranteed to be a worker literal. It is scanned
+    against this worker's own canary set first, exactly like every other string
+    the process emits.
+    """
+
+    from local_operator.evaluation.receipts import RedactionSet
+
+    secret = "AKIA-STDERR-CANARY-0123456789"
+
+    class LeakyWorker(CountingWorker):
+        async def _dispatch(self, method: Any, params: Any) -> Any:
+            raise RpcProtocolError(f"adapter desynchronised with {secret}")
+
+    request_read, request_write = os.pipe()
+    response_read, response_write = os.pipe()
+    worker = LeakyWorker(request_read, response_write)
+    worker.set_state("INSPECTED")
+    worker._redactions = RedactionSet.from_resolved_values((secret,))
+    task = asyncio.create_task(worker.run())
+    try:
+        IncrementalWriter(request_write).write(
+            canonical_line(
+                RpcRequest(
+                    jsonrpc="2.0",
+                    id=1,
+                    method="prepare",
+                    params=PrepareParams(
+                        operation_id="prepare-op",
+                        episode_id="episode",
+                        secret_refs=(),
+                        infra_values=(),
+                    ).model_dump(mode="json"),
+                )
+            )
+        )
+        os.close(request_write)
+        request_write = -1
+        assert await asyncio.wait_for(task, 1) == 70
+        reported = capsys.readouterr().err
+        assert "adapter worker: protocol error: <withheld: matched a secret canary>" in reported
+        assert secret not in reported
+    finally:
+        for fd in (request_read, request_write, response_read, response_write):
+            if fd >= 0:
+                os.close(fd)

@@ -37,6 +37,23 @@ from typing import Any
 #: :func:`_defaults`); this dict is not consulted at runtime.
 _DEFAULT_NOTES: dict[str, Any] = {
     "display.shimmer": True,
+    # Mid-turn narration — the prose a model call streams before it finalizes
+    # into tool calls. Defaults ON, which is the shipped behaviour: narration
+    # is rendered by the same block as the final answer, so it stays.
+    #
+    # OFF removes that block at finalize, leaving `user -> tools -> answer`, so
+    # the user can tell an answer from thinking. It is removal AT FINALIZE, not
+    # never-show: while deltas arrive nothing knows whether this call ends in
+    # tool calls or in the answer, so narration streams live and is dropped one
+    # event later.
+    #
+    # A mid-session flip applies FORWARD ONLY — already-mounted blocks are left
+    # exactly as they are. Re-projecting the transcript to apply it backwards
+    # means mounting many blocks in one synchronous pass, which leaves them
+    # unarranged and paints a blank frame; a display toggle must never risk
+    # blanking a transcript. The session history keeps the narration either
+    # way, so `/resume` re-reads it under the current value.
+    "display.narration": True,
     # A rule down the left edge of the assistant's answer, in the `label`
     # token. It ECHOES the user prompt's rule rather than matching it: same
     # column and same role, but deliberately a different glyph and a different

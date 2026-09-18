@@ -814,12 +814,41 @@ async def test_a_skipped_hint_never_leaves_a_leading_separator() -> None:
 @pytest.mark.asyncio
 async def test_an_empty_result_names_both_reasons_it_could_be_empty() -> None:
     """ "No endpoint" and "an endpoint you cannot reach" look identical in an
-    empty panel, and only the second is something the user can act on."""
+    empty panel, and only the second is something the user can act on.
+
+    The exact wording is pinned and not just its two keywords, because several
+    documents quote this string as the symptom an expired QwenCloud console
+    ticket produces. Rewording it here would silently invalidate all of them,
+    and the string they replaced it with once already — ``no windows reported``,
+    which needs a report object this provider can never produce. The quoting
+    sites are deliberately NOT enumerated here: a list of them went stale the
+    same round it was written, when a sixth site was added elsewhere. Find them
+    with ``git grep -n "no quota endpoint"`` instead, which also catches the
+    sites that wrap the string across two lines. Both subjects are pinned
+    because the scoped one is what ``/usage <provider>`` renders and it differs.
+
+    The exact-match arms run wide: at 80 columns ``truncate_cells`` clips the
+    message to ``…or no credential for…``, so a narrow panel would fail the
+    assertion for a reason that is not a wording change. The keyword arms stay
+    at the default width, where the truncation still leaves both keywords.
+    """
     async with _panel_app() as panel:
         panel.show_reports([])
         text = "\n".join(panel.render_lines_for_test())
     assert "no quota endpoint" in text
     assert "no credential" in text
+
+    unscoped = "no provider reports no usage — no quota endpoint, or no credential for one"
+    scoped = "alibaba-token-plan reports no usage — no quota endpoint, or no credential for one"
+    async with _panel_app(size=(110, 24)) as panel:
+        panel.show_reports([])
+        assert unscoped in "\n".join(panel.render_lines_for_test())
+        # The scoped form, which is the one a user actually sees from
+        # `/usage alibaba-token-plan`: `start_fetch(target)` sets the subject
+        # that replaces "no provider", and `show_reports` keeps it.
+        panel.start_fetch("alibaba-token-plan")
+        panel.show_reports([])
+        assert scoped in "\n".join(panel.render_lines_for_test())
 
 
 @pytest.mark.asyncio

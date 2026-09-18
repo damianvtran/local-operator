@@ -86,6 +86,7 @@ from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.paths import config_dir
 
 # The row's searchable text (``fork_haystack``) and the search itself both live
@@ -325,6 +326,71 @@ OUTER_INSET_ROWS = SCREEN_INSET + PICKER_INSET_ROWS
 #: part of the panes' column budget and is charged against their row budget here
 #: instead of being folded into the inset above.
 FILTER_ROWS = 1
+
+#: The most characters one paste contributes to the filter query.
+#:
+#: A bound on COST, not on display: the row ellipsises past its own width anyway,
+#: and a session NAME is capped at :data:`NAME_MAX` characters, so nothing past
+#: this could have matched one. What it bounds is the soft tier, whose cost is
+#: linear in the query's TOKEN count — measured on a 300-session / 725 KB digest
+#: store, 16 tokens cost 26 ms, 1,235 cost 1.98 s and 11,111 cost 17.7 s, against
+#: a shipped store of ~640 sessions and ~180k digest tokens. Typing cannot reach
+#: those numbers: it pays for the search a character at a time and the user stops
+#: long before. A clipboard dump arrives all at once, and the search runs on the
+#: UI thread inside the repaint, so an unbounded one freezes a modal whose only
+#: exit is a key that frozen loop never reads. 200 characters is ~30 tokens —
+#: the same order as ``sanitize_prompt_line``'s 500, and well past any phrase a
+#: body search wants.
+PASTE_QUERY_MAX_CHARS = 200
+
+#: Bidi formatting controls, removed from a pasted query.
+#:
+#: ``strip_control_sequences`` deliberately preserves Cf format characters — ZWJ
+#: holds an emoji sequence together and a stripped one would break a session name
+#: that legitimately contains it. The OVERRIDES are different: U+202E reverses the
+#: rendered order of everything after it, so a pasted ``secret\u202egnp.terces``
+#: paints as ``secret.png`` in the filter row and in ``no match for "…"``. ``on_key``
+#: cannot admit them (``isprintable()`` is False for every one), so paste is the only
+#: route in, and this is the same spoof ``sanitize_prompt_line`` escapes by name.
+#:
+#: DELETED rather than escaped: that function's ``\uXXXX`` escaping is right for a
+#: line whose whole job is to be read literally, but this string is a SEARCH NEEDLE —
+#: escaping every Cf turns a pasted ZWJ emoji name into a needle that matches the row
+#: it was copied from 0 times (measured). ZWJ, ZWNJ and the rest survive.
+#:
+#: The three bidi MARKS — U+061C (ALM), U+200E (LRM), U+200F (RLM) — are deliberately
+#: NOT here, though they carry Unicode's ``Bidi_Control`` property. Their bidi classes
+#: are ``AL``/``L``/``R``: they nudge the ordering of neighbouring NEUTRALS and cannot
+#: reverse a run, which is the only thing this deletion exists to stop. Measured
+#: against two independent bidi engines, the marks' whole reachable effect on a
+#: plausible session name is transposing adjacent digits, while U+202E turns
+#: ``secret\u202egnp.terces`` into a rendered ``secret.png``. They are also ORDINARY
+#: CONTENT in real RTL text: deleting them made a session named
+#: ``"report\u200f 2024 launch"`` match its own row 0 times — the same breakage the ZWJ
+#: counter-test above exists to prevent, and the reason the criterion here is
+#: "reverses rendered order", not "holds the Bidi_Control property".
+PASTE_BIDI_CONTROLS = dict.fromkeys(
+    [
+        0x202A,  # LEFT-TO-RIGHT EMBEDDING
+        0x202B,  # RIGHT-TO-LEFT EMBEDDING
+        0x202C,  # POP DIRECTIONAL FORMATTING
+        0x202D,  # LEFT-TO-RIGHT OVERRIDE
+        0x202E,  # RIGHT-TO-LEFT OVERRIDE
+        0x2066,  # LEFT-TO-RIGHT ISOLATE
+        0x2067,  # RIGHT-TO-LEFT ISOLATE
+        0x2068,  # FIRST STRONG ISOLATE
+        0x2069,  # POP DIRECTIONAL ISOLATE
+    ]
+)
+
+#: Horizontal whitespace a paste may carry at its edges and keep as one space.
+#:
+#: ``str.split()`` folds interior runs AND drops the edges, which silently welds a
+#: column-selection copy onto what the user already typed: ``"parser"`` + ``" crash"``
+#: became ``"parsercrash"`` and matched nothing. Line breaks are not in here on
+#: purpose — a trailing newline is a clipboard artifact, not content, and must not
+#: leave a trailing space.
+PASTE_EDGE_SPACE = " \t"
 
 #: Rows between the bottom of the panes' text and the box the real-stylesheet
 #: height test measures (``.session-picker``'s own ``region``), MEASURED as
@@ -1705,6 +1771,84 @@ class SessionPickerScreen(ModalScreen[str | None]):
             event.stop()
             event.prevent_default()
             self.set_query(self._query + char)
+
+    def on_paste(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A bracketed paste into the filter.
+
+        A clipboard drop arrives as ONE ``Paste`` event, never as the keystrokes
+        ``on_key`` collects, and nothing on this screen can hold focus — so
+        Textual routes the paste to the screen (``App.on_event`` forwards it to
+        ``focused or screen``) and, with no handler here, drops it: the filter
+        stays empty and the list stays unfiltered, with nothing on screen to say
+        why. Pasting a session name or id copied out of another terminal is the
+        gesture this filter exists for.
+
+        The payload needs five things a keystroke never does, in THIS order:
+
+        * **Line breaks unwrapped to ``\\n`` first.** ``\\r`` is a C0 control, so
+          the strip below DELETES it — before the collapse can treat it as a
+          separator. A terminal delivers a pasted line break as CR, so
+          ``"parser\\rcrash"`` reached the filter as ``"parsercrash"`` and matched
+          0 rows. Three siblings normalise CR the same way
+          (``editor.py``, ``key_prompt.py``, ``ask_picker.py``).
+        * **Control sequences stripped.** ``on_key`` admits printable characters
+          only, so this is the ONE route by which an escape sequence can reach
+          ``_query`` — and the filter row paints ``_query`` verbatim into a
+          ``Text`` the terminal then interprets (measured: a pasted
+          ``\\x1b[31m`` survives into the compositor's strip). ``key_prompt``
+          strips for the same reason.
+        * **Whitespace collapsed to single spaces, edges KEPT.** The row is
+          ``FILTER_ROWS`` tall with ``overflow="ellipsis"``, so a newline would
+          paint a second line no layout budgeted for; and an interior newline
+          matches nothing, because ``filter_rows`` takes ONE exact substring —
+          measured, ``"parser\\ncrash"`` admits 0 rows where ``"parser crash"``
+          admits the row it was pasted for. ``str.split()`` also drops the EDGE
+          whitespace, which welds a column-selection copy onto the typed prefix
+          (``"parser"`` + ``" crash"`` → ``"parsercrash"``), so one edge space is
+          put back — see :data:`PASTE_EDGE_SPACE`.
+        * **Bidi overrides removed** — see :data:`PASTE_BIDI_CONTROLS`. The strip
+          keeps Cf characters on purpose, and U+202E reverses the rendered order
+          of the row that echoes the query back.
+        * **Length bounded** — see :data:`PASTE_QUERY_MAX_CHARS`. The bound is on
+          ONE paste's contribution, not on the resulting query: a user who typed
+          150 characters first keeps them.
+
+        Appends, like every typed character does, rather than replacing what the
+        user already typed — and lands only if it paints at least one cell, so a
+        paste of nothing but zero-width characters is a no-op rather than an
+        invisible 200-character query.
+        """
+        raw = getattr(event, "text", "") or ""
+        # Line breaks become spaces BEFORE the strip, which DELETES them: `\r` is
+        # in the strip's own C0 class, so a CR-separated paste reached `.split()`
+        # already welded into one word. Real terminals deliver a pasted line break
+        # as CR, so this was the common case, not the exotic one.
+        unwrapped = raw.replace("\r\n", "\n").replace("\r", "\n")
+        stripped = strip_control_sequences(unwrapped)
+        core = " ".join(stripped.split())
+        # `.split()` drops the EDGES too; a column-selection copy routinely carries
+        # one, and welding it onto the typed prefix is what stops the match.
+        # ONE space at the seam, whoever supplied it. `trail` keeps a paste's own
+        # trailing space for the NEXT paste, so a `lead` that fired regardless of
+        # what preceded it produced `'parser  crash'` across two appends — and
+        # `filter_rows` strips the query's edges but never collapses its interior,
+        # so the doubled needle matched 0 rows (measured). Tab counts as an edge
+        # space here because `"\t".isprintable()` is False: a query can only end in
+        # one by having been pasted, never by being typed.
+        seam_is_open = bool(self._query) and self._query[-1:] not in PASTE_EDGE_SPACE
+        lead = " " if core and seam_is_open and stripped[:1] in PASTE_EDGE_SPACE else ""
+        trail = " " if core and stripped[-1:] in PASTE_EDGE_SPACE else ""
+        text = (lead + core + trail).translate(PASTE_BIDI_CONTROLS)[:PASTE_QUERY_MAX_CHARS]
+        # Stopped whether or not anything survived the strip: the gesture was
+        # addressed to this modal, and a whitespace-only paste bubbling on past
+        # it serves nothing.
+        event.stop()
+        event.prevent_default()
+        # `cell_len`, not truthiness: a paste of 300 zero-width characters is a
+        # true string that paints NOTHING, leaving a 200-char query behind an
+        # empty-looking row that only 200 backspaces clear.
+        if cell_len(text.strip()):
+            self.set_query(self._query + text)
 
     # -- mouse ---------------------------------------------------------------
     # The wheel moves the cursor a row at a time, which scrolls the window with

@@ -105,19 +105,38 @@ class ArgumentShape(Enum):
     ``/context x`` both run a command that silently discards what followed, which
     is the operator's own report against ``/compact``.
 
-    TWO DELIBERATE EXCEPTIONS, named here so the criterion is not read as a law
-    the table breaks silently: ``/search <word>`` (the desktop fixes its filter to
+    THREE DELIBERATE EXCEPTIONS, named here so the criterion is not read as a law
+    the table breaks silently. ``/search <word>`` (the desktop fixes its filter to
     ``web-search`` and reads no word) and ``/stop <word>`` (the picker owns
-    ``targets=[session_id]``) keep ``WORD``. Both are whole-draft controls the
-    composer RUNS, so a sentence after the word is prose while a single word is
-    not — and refusing the one-token form is the safe direction for a guard whose
-    whole purpose is that a control never becomes paid model chat.
+    ``targets=[session_id]``) keep ``WORD`` even though the path drops the text:
+    both are whole-draft controls the composer RUNS, so a sentence after the word
+    is prose while a single word is not — and refusing the one-token form is the
+    safe direction for a guard whose whole purpose is that a control never becomes
+    paid model chat.
+
+    ``/credential <anything>`` is the third, and it is a REFUSAL rather than a use:
+    the command route answers typed text with "Enter credentials in the masked
+    credential form, not command text", so the text is neither consumed by a
+    handler nor prose — another surface owns it. It therefore publishes ``ANY``,
+    which is the direction that CANNOT leak: a consumer reading ``NONE`` plans a
+    whole draft as prose, so ``/credential <secret>`` typed into a message reached
+    the model as a paid turn (measured, and the reason this exception is stated).
+    The shape is asked here and not left to the route's own check, because the
+    messages endpoint's admission rule reads only this vocabulary.
     """
 
     #: No argument AT ALL from any source: the two booleans are false for this
     #: row and no shape applies, so text after the word is prose, whatever it
     #: says. Read AFTER the booleans — see the precedence note above; a row they
     #: carry never says this (`/goal` is ``ANY``, not ``NONE``).
+    #:
+    #: NOR IS IT A ROW THAT OFFERS A VALUE LIST. ``ArgumentMode``
+    #: (``/credential``'s ``optional``) says a space here opens a list, so the
+    #: command does take text; publishing ``NONE`` beside it is the contradiction
+    #: that let a whole-draft ``/credential <secret>`` reach the model as prose
+    #: while the route refused the same text, and
+    #: ``test_a_row_that_offers_a_value_list_never_publishes_none`` pins it for
+    #: every row.
     NONE = "none"
     #: ONE whitespace-free token — a selector the desktop forwards as a
     #: ``selection``/``filter``/``selected`` value (a view, a mode, a session id).
@@ -136,11 +155,12 @@ class ArgumentShape(Enum):
     #: is prose.
     SUBCOMMAND = "subcommand"
     #: The command owns its trailing text, whatever it says — a handler or a form
-    #: field takes it (a session title, a working directory, a path), or one of the
-    #: two booleans above already carries it. Declared explicitly on those boolean
-    #: rows rather than left to the default: ``NONE`` means "no source at all",
-    #: and a consumer that reads this field alone must not plan prose for a control
-    #: the endpoint refuses.
+    #: field takes it (a session title, a working directory, a path), one of the
+    #: two booleans above already carries it, or the route REFUSES it because
+    #: another surface owns it (``/credential``, whose text must reach the masked
+    #: form or nothing). Declared explicitly on those rows rather than left to the
+    #: default: ``NONE`` means "no source at all", and a consumer that reads this
+    #: field alone must not plan prose for a control the endpoint refuses.
     ANY = "any"
 
 
@@ -260,6 +280,29 @@ class SlashCommand:
     #: ``tests/unit/tui/test_slash_prefixes_text.py`` so a new command cannot be
     #: added without stating this choice.
     argument_shape: ArgumentShape = field(default=ArgumentShape.NONE, kw_only=True)
+    #: Whether this command's argument list is a NAME slot: the first token is a
+    #: name drawn from a roster (`/team <name> <request>`, `/agent <name> <message>`),
+    #: and free text follows it.
+    #:
+    #: A SEPARATE fact from ``arguments``, and it has to be. Two readers need
+    #: "is there a name slot" and both used to ask "is there a value list"
+    #: instead, because for every command that existed the two answers coincided:
+    #: the `$skill` floor (a `$` inside a prompt command's argument is ordinary
+    #: text until the NAME SLOT has been passed, so the picker has to know which
+    #: commands have one) and the composer's inline reassembly in
+    #: ``Editor._apply_command`` (a bare inline `/team` deliberately does NOT
+    #: reassemble its draft — the name is picked from the list first — while a
+    #: bare `/goal` does). Giving a value list to a command with NO name slot is
+    #: what splits them: ``/goal --clear``'s first token is not a name, so the
+    #: proxy would have swallowed the ``$skill`` claim inside `/goal ` and
+    #: stopped a bare inline `/goal` from reassembling — both documented, both
+    #: pinned by tests (``test_skill_in_command_argument``).
+    #:
+    #: Keyword-only and defaulting to FALSE for the reason the fields above do: a
+    #: command that has not stated a name slot does not get one.
+    #: ``test_slash_goal_loop_flags`` pins the flag against the registry, so a
+    #: third party has to state its choice the way the other fields' pins do.
+    name_argument: bool = field(default=False, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:

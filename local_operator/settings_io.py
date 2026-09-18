@@ -1405,6 +1405,16 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("animate the working line", "static working line"),
     ),
     Setting(
+        key="display.narration",
+        path=("display.narration",),
+        section="appearance",
+        label="Mid-turn narration",
+        kind=Kind.BOOL,
+        default=True,
+        help="Keep the agent's mid-turn narration in the transcript after its tool calls run.",
+        choices=_bool_choices("keep narration", "hide narration once tools run"),
+    ),
+    Setting(
         key="display.rail",
         path=("display.rail",),
         section="appearance",
@@ -1598,6 +1608,19 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("left", "left", "sessions to the left of the conversation"),
             Choice("right", "right", "sessions to the right of the conversation"),
         ),
+    ),
+    Setting(
+        key="tui.sidebar_show_subagents",
+        path=("tui", "sidebar_show_subagents"),
+        section="appearance",
+        label="Sidebar subagent layer",
+        kind=Kind.BOOL,
+        default=False,
+        help=(
+            "List recent subagent runs below your own sessions. "
+            "Ctrl+A toggles the layer while the sidebar has focus."
+        ),
+        choices=_bool_choices("list recent subagent runs", "show only your own sessions"),
     ),
     # -- hotkeys ------------------------------------------------------------
     # DERIVED from `keymap.KEY_ACTIONS` rather than spelled out, because the

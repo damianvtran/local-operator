@@ -5,6 +5,9 @@ gate or bridge is mocked: this catches the seams a green adapter suite cannot.
 """
 
 import asyncio
+import base64
+import hashlib
+import io
 import json
 import os
 import secrets
@@ -100,6 +103,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     text_turn("The canonical runtime answered."),
                     text_turn("The team request arrived once."),
                     text_turn("The image arrived without invented text."),
+                    text_turn("The stored image arrived without invented text."),
                 ]
             )
             session = build_session(root / "sessions" / sid, stream, cwd=workspace)
@@ -335,6 +339,79 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                 print(
                     "Image-only prompt admitted200 without synthetic text; "
                     "one durable user row; retry did not duplicate image"
+                )
+
+                # The image above is 70 bytes of base64 -- BELOW the 1024-byte
+                # externalization floor -- so it never reaches the attachment
+                # store, and until now this file's single image body exercised
+                # admission with the store path untouched. That is the gap an
+                # image send walked through on 2026-09-17: the store write is the
+                # largest write in the flow, so it is the FIRST to fail on a
+                # nearly-full volume, while a few-KB text write still lands. That
+                # is the whole reason an image was refused and the same message
+                # without one was not.
+                #
+                # This second message carries a screenshot-sized image and pins
+                # the path end to end: admission, the bytes on disk, the
+                # REFERENCE the transcript keeps instead of the bytes, and the
+                # read route that serves them back.
+                from PIL import Image as PILImage
+
+                buffer = io.BytesIO()
+                PILImage.frombytes("RGB", (300, 300), os.urandom(300 * 300 * 3)).save(
+                    buffer, format="PNG"
+                )
+                raw = buffer.getvalue()
+                large_b64 = base64.b64encode(raw).decode()
+                assert len(large_b64) > 1024, "below the externalization floor"
+                large_body = {
+                    "request_id": "88888888-8888-4888-8888-888888888888",
+                    "text": "",
+                    "images": [{"mime_type": "image/png", "data_b64": large_b64}],
+                }
+                large_result = await client.post(target + "/messages", json=large_body)
+                assert large_result.status_code == 200, large_result.text
+                await next_frame(
+                    lines,
+                    lambda f: f["type"] == "event" and f["payload"].get("type") == "agent_end",
+                )
+
+                digest = hashlib.sha256(raw).hexdigest()[:32]
+                store_dir = root / "attachments"
+                stored = store_dir / f"{digest}.bin"
+                # A store that is absent is the failure mode this guards (the
+                # write never happened), so the diagnostic has to survive it.
+                present = (
+                    sorted(entry.name for entry in store_dir.iterdir())
+                    if store_dir.exists()
+                    else "no attachments directory at all"
+                )
+                assert stored.exists(), f"image never reached the store: {present}"
+                assert stored.read_bytes() == raw
+
+                rows = [
+                    json.loads(line)
+                    for line in (root / "sessions" / sid / "transcript.jsonl")
+                    .read_text()
+                    .splitlines()
+                ]
+                (row,) = [entry for entry in rows if entry.get("id") == large_body["request_id"]]
+                (block,) = [entry for entry in row["payload"]["content"] if entry.get("mime_type")]
+                # The reference, not the bytes: the row carries a digest and the
+                # store owns the payload, which is what keeps a screenshot out of
+                # the JSONL the model is replayed from.
+                assert block["attachment"] == digest
+                assert "data" not in block
+                assert len(json.dumps(row)) < len(large_b64)
+
+                served = await client.get(target + "/attachments/" + digest)
+                assert served.status_code == 200, served.text
+                assert served.content == raw
+                assert served.headers["content-type"].startswith("image/")
+                assert len(stream.requests) == 5
+                print(
+                    f"Image {len(raw)}B persisted to the attachment store and "
+                    "referenced from the transcript; served back over HTTP"
                 )
 
                 # Exercise the actual installed owner gate closures. Invalid

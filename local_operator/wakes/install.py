@@ -447,13 +447,16 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
                 installed=False, reason="plist written; launchd not addressable from here"
             )
         # bootout first so a reinstall replaces a loaded stale unit; a missing
-        # unit makes this a no-op, which is why its result is ignored.
-        _launchctl("bootout", _domain(), str(path))
-        result = _launchctl("bootstrap", _domain(), str(path))
-        if result.returncode != 0:
+        # unit makes this a no-op, which is why `reload_job` ignores that
+        # result. The rest of the pair — waiting for launchd to release the
+        # label, retrying past the measured teardown race, and checking the job
+        # is registered — is the whole reason this is not written inline. See
+        # :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
             return InstallOutcome(
                 installed=False,
-                reason=f"launchctl bootstrap failed: {result.stderr.strip() or result.returncode}",
+                reason=f"launchctl could not load the supervisor: {reloaded.detail}",
             )
         return InstallOutcome(installed=True, reason="installed")
     except Exception as exc:  # noqa: BLE001 — NEVER raises: the persist already won
@@ -490,20 +493,17 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(store))
         if outcome.kind != "repaired":
             return outcome
-        # bootout + bootstrap, unlike the `kickstart -k` a few lines up in
-        # ``ensure_supervisor_installed``: that repair restarts a STOPPED job
-        # whose plist is already correct, while this one has just CHANGED the
-        # plist, and launchd restarts a kickstarted job from its in-memory
-        # definition — measured, it keeps running the old argv. See
-        # :mod:`local_operator.launchd`.
-        _launchctl("bootout", _domain(), str(path))
-        loaded = _launchctl("bootstrap", _domain(), str(path))
-        if loaded.returncode != 0:
+        # bootout + bootstrap through the shared helper, unlike the
+        # `kickstart -k` a few lines up in ``ensure_supervisor_installed``: that
+        # repair restarts a STOPPED job whose plist is already correct, while
+        # this one has just CHANGED the plist, and launchd restarts a kickstarted
+        # job from its in-memory definition — measured, it keeps running the old
+        # argv. See :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
             # Names the recovery, because the job is DOWN at this point: see
             # `launchd.reload_failure`.
-            return launchd.reload_failure(
-                name, path, "lop wake install", loaded.stderr.strip() or str(loaded.returncode)
-            )
+            return reloaded.as_refresh_failure(name=name, path=path, recovery="lop wake install")
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))

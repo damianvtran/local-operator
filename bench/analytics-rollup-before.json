@@ -1,0 +1,228 @@
+{
+  "first_touch_ledger": {
+    "calls": 1155845,
+    "cpu_ms": 2134.28,
+    "path": "",
+    "wall_ms": 2764.09
+  },
+  "host": {
+    "cpu_count": 14,
+    "loadavg": [
+      280.44,
+      246.02,
+      221.13
+    ],
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.3"
+  },
+  "label": "before",
+  "ledger": {
+    "calls": 1155845,
+    "file_bytes": 342773760,
+    "has_session_daily": false,
+    "session_daily_rows": 0,
+    "sessions": 7241,
+    "span_ms": [
+      1787422417226,
+      1789587682771
+    ],
+    "table_bytes": {
+      "calls": 186273792,
+      "idx_calls_parent": 19632128,
+      "idx_calls_provider": 22716416,
+      "idx_calls_session": 28794880,
+      "idx_calls_ts": 19881984,
+      "idx_tool_calls_session": 17657856,
+      "idx_tool_calls_ts": 12070912,
+      "session_names": 552960,
+      "sqlite_autoindex_session_names_1": 163840,
+      "sqlite_autoindex_usage_daily_1": 12288,
+      "sqlite_autoindex_usage_monthly_1": 4096,
+      "sqlite_schema": 12288,
+      "sqlite_sequence": 4096,
+      "tool_calls": 34971648,
+      "usage_daily": 20480,
+      "usage_monthly": 4096
+    }
+  },
+  "module": "~/local-operator-worktrees/analytics-rollup-base/local_operator/__init__.py",
+  "read_ledger": {
+    "all_time": {
+      "by_session": 7241,
+      "calls": 1155845,
+      "cpu_ms": {
+        "max": 2205.78,
+        "min": 2058.49,
+        "n": 5,
+        "p50": 2177.96,
+        "p90": 2205.78
+      },
+      "path": "",
+      "wall_ms": {
+        "max": 2720.77,
+        "min": 2439.06,
+        "n": 5,
+        "p50": 2634.4,
+        "p90": 2720.77
+      }
+    },
+    "last_7d": {
+      "by_session": 4726,
+      "calls": 530459,
+      "cpu_ms": {
+        "max": 1724.62,
+        "min": 1620.38,
+        "n": 5,
+        "p50": 1661.52,
+        "p90": 1724.62
+      },
+      "path": "",
+      "wall_ms": {
+        "max": 2740.38,
+        "min": 2169.43,
+        "n": 5,
+        "p50": 2360.37,
+        "p90": 2740.38
+      }
+    },
+    "panel_30d": {
+      "by_session": 7241,
+      "calls": 1155845,
+      "cpu_ms": {
+        "max": 3427.56,
+        "min": 3096.03,
+        "n": 5,
+        "p50": 3179.03,
+        "p90": 3427.56
+      },
+      "path": "",
+      "wall_ms": {
+        "max": 7409.1,
+        "min": 3905.49,
+        "n": 5,
+        "p50": 4867.8,
+        "p90": 7409.1
+      }
+    }
+  },
+  "route_payload": {
+    "by_session_entries": 7241,
+    "bytes": 3743004,
+    "cpu_ms": {
+      "max": 50.66,
+      "min": 34.29,
+      "n": 5,
+      "p50": 35.46,
+      "p90": 50.66
+    },
+    "path": "",
+    "wall_ms": {
+      "max": 61.94,
+      "min": 34.29,
+      "n": 5,
+      "p50": 35.46,
+      "p90": 61.94
+    }
+  },
+  "samples": 5,
+  "session_report": {
+    "13669a0d7af1": {
+      "by_model": 7,
+      "calls": 21927,
+      "cpu_ms": {
+        "max": 150.99,
+        "min": 118.77,
+        "n": 5,
+        "p50": 123.27,
+        "p90": 150.99
+      },
+      "descendants": 0,
+      "first_wall_ms": 220.17,
+      "recent": 12,
+      "wall_ms": {
+        "max": 368.47,
+        "min": 152.88,
+        "n": 5,
+        "p50": 251.84,
+        "p90": 368.47
+      }
+    },
+    "29435655756c": {
+      "by_model": 8,
+      "calls": 25445,
+      "cpu_ms": {
+        "max": 179.4,
+        "min": 148.97,
+        "n": 5,
+        "p50": 152.47,
+        "p90": 179.4
+      },
+      "descendants": 0,
+      "first_wall_ms": 299.53,
+      "recent": 12,
+      "wall_ms": {
+        "max": 660.94,
+        "min": 291.84,
+        "n": 5,
+        "p50": 373.97,
+        "p90": 660.94
+      }
+    },
+    "835fbcafdc27": {
+      "by_model": 11,
+      "calls": 27974,
+      "cpu_ms": {
+        "max": 276.05,
+        "min": 265.15,
+        "n": 5,
+        "p50": 272.29,
+        "p90": 276.05
+      },
+      "descendants": 250,
+      "first_wall_ms": 356.36,
+      "recent": 12,
+      "wall_ms": {
+        "max": 735.06,
+        "min": 368.64,
+        "n": 5,
+        "p50": 603.78,
+        "p90": 735.06
+      }
+    }
+  },
+  "session_report_equivalence": {
+    "oracle": "unavailable on this tree"
+  },
+  "source_ledger": "<ledger copy>/analytics.db",
+  "tree": "~/local-operator-worktrees/analytics-rollup-base",
+  "write": {
+    "batch_1": {
+      "ledger_plus_calendar_cpu_ms": {
+        "max": 2.11,
+        "min": 0.05,
+        "n": 25,
+        "p50": 0.06,
+        "p90": 0.19
+      }
+    },
+    "batch_20": {
+      "ledger_plus_calendar_cpu_ms": {
+        "max": 3.5,
+        "min": 0.36,
+        "n": 25,
+        "p50": 0.41,
+        "p90": 0.68
+      }
+    },
+    "batch_5": {
+      "ledger_plus_calendar_cpu_ms": {
+        "max": 0.19,
+        "min": 0.13,
+        "n": 25,
+        "p50": 0.16,
+        "p90": 0.19
+      }
+    },
+    "with_rollup_arm": false
+  }
+}

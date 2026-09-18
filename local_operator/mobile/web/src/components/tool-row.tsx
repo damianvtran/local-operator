@@ -139,7 +139,18 @@ export function ToolRow({ entry }: { entry: TranscriptEntry }) {
 				>
 					{GLYPH[entry.tool_state]}
 				</span>
-				<span className="shrink-0 font-mono text-mono-sm text-ink-muted">
+				{/* The NAME yields, so the clock is the last thing lost rather than the
+				 * first. It used to be ``shrink-0``: on a row with a long MCP-name
+				 * (``mcp__local-operator__subagent_dispatch``) it could not give up a
+				 * pixel, so the whole deficit landed on the summary and then on the
+				 * clock — which the transcript scroller CLIPS with no ellipsis
+				 * (``overflow-x: hidden``, measured ``clientW 320 / scrollW 377``), so
+				 * ``1000h 40m`` read as ``1000h`` and ``59m 59s`` as ``59m``: shorter
+				 * strings that are themselves valid durations, with nothing to tell the
+				 * reader the number is short (design round 1 D1). ``min-w-0 truncate``
+				 * lets the name share the squeeze and ellipsize honestly; the clock
+				 * span below keeps ``shrink-0``, so it always fits. */}
+				<span className="min-w-0 shrink truncate font-mono text-mono-sm text-ink-muted">
 					{entry.tool_name}
 				</span>
 				<span className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
