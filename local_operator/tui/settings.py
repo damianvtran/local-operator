@@ -47,6 +47,11 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # tool calls or in the answer, so narration streams live and is dropped one
     # event later.
     #
+    # This flag decides whether narration is THERE at all; `display.rail`
+    # separately decides whether it wears the rail. Both were set from the same
+    # classification of the event that ended the message, so a narration block
+    # that survives this setting is un-railed (the rail marks the ANSWER).
+    #
     # A mid-session flip applies FORWARD ONLY — already-mounted blocks are left
     # exactly as they are. Re-projecting the transcript to apply it backwards
     # means mounting many blocks in one synchronous pass, which leaves them
@@ -54,12 +59,24 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # blanking a transcript. The session history keeps the narration either
     # way, so `/resume` re-reads it under the current value.
     "display.narration": True,
-    # A rule down the left edge of the assistant's answer, in the `label`
+    # A rule down the left edge of the assistant's ANSWER, in the `label`
     # token. It ECHOES the user prompt's rule rather than matching it: same
     # column and same role, but deliberately a different glyph and a different
     # ink (a quarter block in `label` against the prompt's half block in
     # `signal`), because a rail that looked identical to the prompt's would
     # remove the distinction it exists to draw.
+    #
+    # ANSWER means the TERMINAL message of the turn — precisely the finalized
+    # message `tui/narration.py::is_intermediate_narration` returns False for.
+    # A mid-turn progress sentence is painted by the same block, and railing it
+    # too is what made progress and outcome look identical (the report this
+    # change answers): the prose stays, because dropping it is
+    # `display.narration`'s separate job, and the mark goes.
+    #
+    # The rail STREAMS and is dropped at finalize, the same bargain narration
+    # strikes. Nothing knows mid-stream whether a call ends in tools or in the
+    # answer, and the alternative — no rail while streaming, added a frame
+    # later — would strip the mark off the answer being read.
     #
     # Default ON. The rail answers "where does the answer start and stop",
     # which only bites a reader who cannot already tell — so the people it
@@ -75,10 +92,12 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # design (see `AssistantBlock._body_width`). It is not merely an unpainted
     # gutter either way: the fold width, the copy gutter and the selection
     # slice are all read at the same rate as the paint, so the prose is not
-    # left indented two cells by a rail that is not there. A mid-session flip
-    # DOES reach blocks already on screen — `display.*` runs `retheme`, which
-    # re-enters `_apply_rows`, which is where the rail is painted and where the
-    # flag is read.
+    # left indented two cells by a rail that is not there. An UN-RAILED
+    # narration block is that same state, reached from inside the block rather
+    # than from this setting (`mark_narration`). A mid-session flip DOES reach
+    # blocks already on screen — `display.*` runs `retheme`, which re-enters
+    # `_apply_rows`, which is where the rail is painted and where the flag is
+    # read.
     "display.rail": True,
     # One padding row above and below a tool row and a user prompt
     # (`.comfortable-rows` in the stylesheet). Default ON was changed to OFF

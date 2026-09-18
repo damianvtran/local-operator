@@ -1,4 +1,4 @@
-"""The assistant message's gutter rail — the answer's delineation, on every row.
+"""The assistant message's gutter rail — the ANSWER's delineation, on every row.
 
 A user prompt has carried a rule down its left edge since ``UserBlock`` grew one
 (``test_user_block.py``, which asks exactly these questions of the other rule).
@@ -6,9 +6,18 @@ The model's answer carried nothing, so the transcript drew a line beside the
 shorter half of the conversation and left the half a reader actually scrolls
 back to read unmarked.
 
+**The rail marks the ANSWER, not every assistant block.** It was painted on every
+``AssistantBlock`` in PR #1229, which railed the mid-turn progress sentence
+exactly as it railed the outcome — the one distinction the mark exists to draw,
+and the shape a maintainer reported ("Progress messages shouldn't have the left
+bar"). A block the surfaces mark as narration paints no gutter and folds to the
+lane's full width, which is the rail-OFF geometry; ``test_rail_toggle.py`` owns
+that equivalence. The tests below are written for a RAILED block, which is what
+an answer is.
+
 This file holds two invariants, and the second is the expensive one.
 
-**Geometry.** Every row the block paints carries the rail — wrapped
+**Geometry.** Every row a RAILED block paints carries the rail — wrapped
 continuations and the blank rows between paragraphs alike, for the reason
 ``test_user_block`` states: a marker on one row marks a LINE, a marker on every
 row marks a BLOCK. The width is ``SPINE_INDENT``, the same two cells the prompt
@@ -129,13 +138,20 @@ def _rendered(block: AssistantBlock) -> list[str]:
     return visual.plain.split("\n")
 
 
-async def _block(text: str, size: tuple[int, int] = (100, 30)) -> tuple[AssistantBlock, list[str]]:
+async def _block(
+    text: str, size: tuple[int, int] = (100, 30), *, narration: bool = False
+) -> tuple[AssistantBlock, list[str]]:
     """A finalized assistant block at ``size``, and its painted rows.
 
     Two pauses after the text, as ``test_user_block._rows`` does it: the first
     mounts and lays the block out, the second lets the resize re-fold it against
     its REAL width. Without the second, every assertion here would be made
     against the 80-column fallback rather than the frame under test.
+
+    ``narration`` marks the block BEFORE its text, which is the order both
+    production paths use and the only one that produces a settled frame: the
+    mark is read at paint rate, so a mark set after ``finalize_text`` would leave
+    the committed rows carrying a rail nothing would repaint away.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=size) as pilot:
@@ -143,6 +159,8 @@ async def _block(text: str, size: tuple[int, int] = (100, 30)) -> tuple[Assistan
         block = AssistantBlock()
         view.append_block(block)
         await pilot.pause()
+        if narration:
+            block.mark_narration()
         block.update_text(text)
         block.finalize_text()
         await pilot.pause()
@@ -1001,20 +1019,66 @@ async def test_the_frozen_prefix_never_holds_the_rail() -> None:
 
 
 # --------------------------------------------------------------------------
+# Narration — the rail marks the ANSWER, and the mark is the whole difference
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_narration_block_paints_no_rail_and_keeps_its_prose() -> None:
+    """The report this change answers, at the block.
+
+    A settled block marked as mid-turn narration — the state
+    ``app.py::on_assistant_message_end`` commits when a message finalizes into
+    tool calls — paints no gutter on any row. The PROSE is untouched: dropping
+    it is ``display.narration``'s separate job, and this flag must not do it by
+    accident, so the text and its wrap are asserted alongside the absent mark.
+    """
+    block, rows = await _block(MIXED_CONSTRUCTS, (60, 24), narration=True)
+    assert block.is_narration() is True
+    assert block.text().strip() == MIXED_CONSTRUCTS.strip()
+    assert len(rows) >= 5, f"this fixture must paint several rows; got {rows!r}"
+    assert all(not row.startswith(RAIL) for row in rows), rows
+    # Not "railed geometry minus a glyph": the gutter is not reserved, so the
+    # prose starts at column 0 and the copy path strips nothing.
+    assert rows[0].startswith(MIXED_CONSTRUCTS.splitlines()[0]), rows[0]
+    assert block.copy_gutter(0) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_mark_is_the_only_difference_between_progress_and_the_answer() -> None:
+    """Same text, same width, one mark — and the two frames are opposite.
+
+    This is the discrimination the rail exists to draw, asserted as a PAIR
+    rather than as two independent claims about one block: a rule that railed
+    nothing, or one that railed everything, would satisfy either half alone.
+    """
+    answer, answer_rows = await _block(MIXED_CONSTRUCTS, (60, 24))
+    progress, progress_rows = await _block(MIXED_CONSTRUCTS, (60, 24), narration=True)
+
+    assert answer.is_narration() is False and progress.is_narration() is True
+    assert all(row.startswith(RAIL) for row in answer_rows), answer_rows
+    assert all(not row.startswith(RAIL) for row in progress_rows), progress_rows
+    assert answer.text() == progress.text(), "the mark must not move the prose"
+
+
+# --------------------------------------------------------------------------
 # Reuse surfaces and focus
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_subagent_page_shows_the_rail_on_agent_prose() -> None:
-    """D7's deliberate part: the rail appears everywhere the block does.
+async def test_the_subagent_page_marks_the_answer_and_not_the_progress_sentence() -> None:
+    """D7's deliberate part, under the rail's new meaning.
 
     The subagent page renders the same conversation shape, and the delegated
     PROMPT there already carries its own rule
     (``test_user_block::test_a_prompt_in_the_nested_subagent_body_paints_every_row_it_reserves``).
-    Suppressing the assistant rail on that page would leave it with exactly the
-    asymmetry this slice exists to remove, so it is asserted rather than left to
-    chance.
+    Its prose rows are all model responses, so the page is where a mark that
+    discriminates has to be shown to survive the second fold: the fixture's
+    opening sentence is prose streamed before a tool batch (progress), and its
+    closing sentence is the last thing the child said (the answer). The two
+    blocks are told apart BY TEXT and both outcomes are asserted, because a
+    page that had stopped marking anything would satisfy either one alone.
     """
     job = _job_with(TRAJECTORY)
     session = FakeSession()
@@ -1028,15 +1092,23 @@ async def test_the_subagent_page_shows_the_rail_on_agent_prose() -> None:
         app._open_subagent_view(str(job.id))
         for _ in range(8):
             await pilot.pause()
-        prose = [
-            block
+        prose = {
+            block.text().strip(): block
             for block in app.query_one(SubagentView)._body.blocks()
             if isinstance(block, AssistantBlock)
-        ]
-        assert prose, "the page stopped mounting agent prose"
-        for block in prose:
-            rows = _rendered(block)
-            assert all(row.startswith(RAIL) for row in rows), rows
+        }
+        assert set(prose) == {
+            "Reading the ingest path.",
+            "Two tests fail on the retry budget.",
+        }, f"the page stopped mounting agent prose: {sorted(prose)}"
+
+        progress = prose["Reading the ingest path."]
+        assert progress.is_narration() is True
+        assert all(not row.startswith(RAIL) for row in _rendered(progress)), _rendered(progress)
+
+        answer = prose["Two tests fail on the retry budget."]
+        assert answer.is_narration() is False
+        assert all(row.startswith(RAIL) for row in _rendered(answer)), _rendered(answer)
 
 
 @pytest.mark.asyncio
@@ -1066,13 +1138,20 @@ async def test_a_subagent_prompt_and_answer_use_different_inks() -> None:
         prompts = [block for block in blocks if isinstance(block, UserBlock)]
         answers = [block for block in blocks if isinstance(block, AssistantBlock)]
         assert prompts and answers, (len(prompts), len(answers))
+        railed = [block for block in answers if not block.is_narration()]
+        assert len(railed) == 1, "the page rails the answer, and only the answer"
 
         rail = theme_mod.semantic_color(RAIL_TOKEN)
         rule = theme_mod.semantic_color(UserBlock.RULE_TOKEN)
         assert rail != rule, (rail, rule)
         # Both are painting a gutter of the same width, which is what makes the
-        # colour the only thing telling them apart.
-        assert prompts[0].copy_gutter(0) == answers[0].copy_gutter(0) == RAIL_COLS
+        # colour the only thing telling them apart. It is a claim about RAILED
+        # blocks: the progress sentence beside them paints no gutter at all, so
+        # it has no bar to be told apart from.
+        assert prompts[0].copy_gutter(0) == railed[0].copy_gutter(0) == RAIL_COLS
+        progress = [block for block in answers if block.is_narration()]
+        assert progress, "the fixture's progress sentence stopped being marked"
+        assert all(block.copy_gutter(0) == 0 for block in progress)
 
 
 def test_an_assistant_block_is_not_a_focus_stop() -> None:

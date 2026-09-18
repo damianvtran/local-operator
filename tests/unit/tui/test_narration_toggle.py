@@ -19,6 +19,13 @@ answer``. Three properties carry the feature and are pinned here:
   same frame, which is exactly the shape that drifts — so the parity test
   compares the two block sequences directly rather than either in isolation.
 
+The flag decides whether narration is THERE; the RAIL separately decides whether
+it wears the answer's mark, and both are set from the same classification of the
+same event. A narration block that survives the flag is un-railed, and the tests
+below assert BOTH surfaces' rail state — including the pair from one streamed
+turn, because a rule that railed everything, or nothing, satisfies either half
+alone (PR #1229 railed progress prose exactly as it railed the outcome).
+
 Assertions are on what is in ``view.blocks()``, never on ``remove_block``
 having been CALLED: a spy passes even when removal is a no-op.
 """
@@ -29,6 +36,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from textual.content import Content
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
@@ -39,7 +47,7 @@ from local_operator.tui.events import (
     AssistantMessageStart,
 )
 from local_operator.tui.narration import DEFAULT_NARRATION, is_intermediate_narration
-from local_operator.tui.widgets.assistant import AssistantBlock
+from local_operator.tui.widgets.assistant import RAIL, AssistantBlock
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
@@ -53,6 +61,13 @@ from .test_app_pilot import FakeSession, _factory
 
 NARRATION = "Let me check the config first."
 ANSWER = "The timeout is 30 seconds."
+
+
+def _painted(block: AssistantBlock) -> list[str]:
+    """The rows ``block`` is painting right now — the frame, not a re-render."""
+    visual = block._render()
+    assert isinstance(visual, Content)
+    return visual.plain.split("\n")
 
 
 @pytest.fixture()
@@ -326,6 +341,115 @@ async def test_the_gap_is_recomputed_after_a_removal(narration_hidden) -> None:
 
 
 # --------------------------------------------------------------------------
+# Live path — the rail marks the ANSWER
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_narration_keeps_its_prose_and_loses_the_rail() -> None:
+    """The report this change answers, on the live path.
+
+    Under the shipped defaults ``display.narration`` ON leaves the block
+    mounted, so the rail is the ONLY thing that could tell a progress sentence
+    from the answer — and PR #1229 painted it on both. Finalized into tool
+    calls, the block paints no gutter and its prose starts at column 0.
+
+    No fixture: this is the shipped default, so a change that de-railed nothing
+    would pass every fixture-driven test above and fail here.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, NARRATION, stop_reason="toolUse", has_tool_calls=True)
+        blocks = _assistant_blocks(app)
+        assert len(blocks) == 1, "narration must stay mounted under the default"
+        assert blocks[0].text().strip() == NARRATION
+        assert blocks[0].is_narration() is True
+        rows = _painted(blocks[0])
+        assert sum(1 for row in rows if row.strip()) >= 1, rows
+        assert all(
+            not row.startswith(RAIL) for row in rows
+        ), f"a progress sentence still carries the answer's rail: {rows!r}"
+
+
+@pytest.mark.asyncio
+async def test_live_the_pair_is_what_discriminates_progress_from_the_answer() -> None:
+    """Same turn, two prose blocks, opposite marks — the whole point.
+
+    A rule that railed nothing, or one that railed everything, would satisfy
+    either half of this alone. Both blocks are asserted, in order, from one
+    streamed turn.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _stream(pilot, app, NARRATION, stop_reason="toolUse", has_tool_calls=True)
+        await _stream(pilot, app, ANSWER, stop_reason="stop", has_tool_calls=False)
+        blocks = _assistant_blocks(app)
+        assert [block.text().strip() for block in blocks] == [NARRATION, ANSWER]
+        progress, answer = blocks
+        assert progress.is_narration() is True and answer.is_narration() is False
+        assert all(not row.startswith(RAIL) for row in _painted(progress))
+        answer_rows = _painted(answer)
+        assert sum(1 for row in answer_rows if row.strip()) >= 1, answer_rows
+        assert all(row.startswith(RAIL) for row in answer_rows), answer_rows
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_progress_message_is_unrailed_too() -> None:
+    """The empty-text branch classifies from ITS OWN two fields.
+
+    A provider that aborts mid-sentence with calls following leaves a block
+    that survived ``mark_truncated`` — and it is still PROGRESS: the turn goes
+    on and the answer is still coming. Classifying it as an answer would put the
+    rail back on the very narration this change removes, on the one path where
+    the block is built by a different branch.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        app.post_message(AssistantDelta(NARRATION[:12]))
+        await pilot.pause()
+        app.post_message(AssistantMessageEnd("", stop_reason="toolUse", has_tool_calls=True))
+        await pilot.pause()
+        await pilot.pause()
+        blocks = _assistant_blocks(app)
+        assert len(blocks) == 1
+        assert blocks[0].is_truncated() is True
+        assert blocks[0].is_narration() is True
+        assert all(not row.startswith(RAIL) for row in _painted(blocks[0]))
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_ANSWER_keeps_the_rail() -> None:
+    """The control for the branch above, and the reason it reads its own fields.
+
+    No authoritative text and NO calls: nothing follows this message, so its
+    prose is the only thing the turn produced and the rail has to stay — that is
+    what marks it as all there is. Same branch, opposite outcome, decided by the
+    event's own ``has_tool_calls``.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        app.post_message(AssistantDelta(NARRATION[:12]))
+        await pilot.pause()
+        app.post_message(AssistantMessageEnd("", stop_reason="aborted", has_tool_calls=False))
+        await pilot.pause()
+        await pilot.pause()
+        blocks = _assistant_blocks(app)
+        assert len(blocks) == 1
+        assert blocks[0].is_truncated() is True
+        assert blocks[0].is_narration() is False
+        rows = _painted(blocks[0])
+        assert all(row.startswith(RAIL) for row in rows), rows
+
+
+# --------------------------------------------------------------------------
 # Replay parity — the non-negotiable one
 # --------------------------------------------------------------------------
 
@@ -434,6 +558,67 @@ async def test_replay_keeps_narration_when_the_toggle_is_on() -> None:
         shape = _shape(_blocks(app))
         assert ("AssistantBlock", NARRATION) in shape
         assert ("AssistantBlock", ANSWER) in shape
+
+
+@pytest.mark.asyncio
+async def test_replay_unrails_the_narration_and_rails_the_answer() -> None:
+    """A resumed session must reproduce the UN-RAILED progress sentence.
+
+    This module's whole purpose is that the live and the replayed transcript
+    cannot disagree, and the rail is now part of what they have to agree about:
+    a replay that mounted every prose block railed would show the answer's mark
+    on progress the moment a session was resumed — a frame that never existed
+    when it was live.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._project_settled_rows(_settled_history())
+        for _ in range(10):
+            await pilot.pause()
+        blocks = _assistant_blocks(app)
+        assert [block.text().strip() for block in blocks] == [NARRATION, ANSWER]
+        progress, answer = blocks
+        assert progress.is_narration() is True and answer.is_narration() is False
+        assert all(not row.startswith(RAIL) for row in _painted(progress))
+        assert all(row.startswith(RAIL) for row in _painted(answer))
+
+
+@pytest.mark.asyncio
+async def test_the_two_paths_agree_about_which_block_earned_the_rail() -> None:
+    """The rail state, compared ACROSS the two surfaces rather than asserted.
+
+    ``test_replay_hides_the_same_narration_the_live_path_hides`` compares block
+    types and texts; the mark is a third thing both surfaces decide, from the
+    same classification, and this is the comparison that fails when one of them
+    forgets to apply it — which is exactly how a replay comes to show a rail the
+    live frame never had.
+    """
+    railed_by_surface: dict[str, dict[str, bool]] = {}
+    for surface in ("replay", "live"):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            if surface == "replay":
+                app._project_settled_rows(_settled_history())
+                for _ in range(10):
+                    await pilot.pause()
+            else:
+                view = app.query_one(TranscriptView)
+                view.append_block(UserBlock("check the config"))
+                await pilot.pause()
+                await _stream(pilot, app, NARRATION, stop_reason="toolUse", has_tool_calls=True)
+                view.append_block(ToolCard("call-1", "bash", {"command": "echo hi"}))
+                await pilot.pause()
+                await _stream(pilot, app, ANSWER, stop_reason="stop", has_tool_calls=False)
+            railed_by_surface[surface] = {
+                block.text().strip(): any(row.startswith(RAIL) for row in _painted(block))
+                for block in _assistant_blocks(app)
+            }
+
+    assert railed_by_surface["live"] == railed_by_surface["replay"]
+    # And the agreed answer is the interesting one, not two empty maps.
+    assert railed_by_surface["live"] == {NARRATION: False, ANSWER: True}
 
 
 def test_the_registry_default_is_the_module_constant() -> None:
