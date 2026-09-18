@@ -60,15 +60,21 @@ answer is either doing work or just spending the inset. The fixture it folds has
 both kinds (a sentence before a tool batch, then the closing sentence), which is
 what makes the pair checkable from one frame rather than argued from the source.
 
-``stream`` captures the ONE event that moves a progress sentence — the new
-motion this treatment introduces, and the only thing a settled frame cannot
-show. Two frames of the same page, one event apart: ``OUT`` is taken between the
-last delta and the ``message_end`` that finalizes the call into tool calls (the
-rail is still painted, because mid-stream nothing can know which message is the
-answer), and ``OUT`` with ``-finalized`` inserted before its suffix is the same
-page one event later, with the rail retracted. Both hooks sit INSIDE that one
-call, so nothing else on the page differs between the pair and the pair is
-evidence about the event rather than about the turn.
+``stream`` captures the ONE event that moves the rail — the settle, and the only
+thing a settled frame cannot show. Two frames of the same page, one event apart:
+``OUT`` is taken between the last delta of the ANSWER and the ``message_end``
+that settles it (no rail, and the prose folded at the lane's full width), and
+``OUT`` with ``-finalized`` inserted before its suffix is the same page one event
+later, with the rail painted and the message re-wrapped two cells narrower behind
+it. Both hooks sit INSIDE that one call, so nothing else on the page differs
+between the pair and the pair is evidence about the event rather than about the
+turn.
+
+The ANSWER is the subject rather than the progress sentence, and that follows
+from where the motion moved to: narration is never railed, settled or not, so its
+pair would be two identical frames. It is still in the frame — the settled
+progress sentence above the tool card — which is what keeps "the rail is on the
+answer and not on the narration" observable in the same still.
 """
 
 from __future__ import annotations
@@ -98,7 +104,6 @@ from local_operator.tui.events import (  # noqa: E402
     AssistantMessageEnd,
     AssistantMessageStart,
 )
-from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
@@ -137,16 +142,6 @@ ANSWER = (
 PROGRESS = "The app quit during that window. Let me check its state and bring it back."
 
 
-def _answer(text: str) -> AssistantBlock:
-    """A SETTLED answer — ``finalize_text`` is what the stream does at message
-    end, and an unsettled block keeps its live-turn ink, which would make this
-    a capture of the streaming treatment rather than of the rail."""
-    block = AssistantBlock()
-    block.update_text(text)
-    block.finalize_text()
-    return block
-
-
 def _tool(app: OperatorApp, call_id: str, name: str, args: dict[str, object], result: str) -> None:
     """A FINISHED tool row, so the ledger spine beside the rail is settled ink
     rather than the live-turn accent."""
@@ -169,11 +164,12 @@ async def _stream(
 
     The mount, the finalize and the classification are all owned by these
     handlers (``on_assistant_delta``/``on_assistant_message_end``), so posting
-    the events is what makes the frame the one the product produces for a call
-    that ends in tool calls — the same sequence ``test_narration_toggle`` drives.
+    the events is what makes the frame the one the product produces — for a call
+    that ends in tool calls and for the answer alike, the same sequence
+    ``test_narration_toggle`` drives.
 
     ``before_end`` and ``after_end`` are AWAITED either side of the finalize
-    event, which is what gives the ``stream`` SURFACE both frames of the retraction
+    event, which is what gives the ``stream`` SURFACE both frames of the settle
     from one seeded turn (see the ``stream`` surface in the module docstring).
     Awaitable rather than plain callables so a hook can take its own pause
     before exporting: a frame is only evidence if the paint it shows has
@@ -194,34 +190,57 @@ async def _stream(
     await pilot.pause()
 
 
+def _geometry(app: OperatorApp, label: str) -> None:
+    """The numbers behind one frame, printed WHERE that frame is taken.
+
+    Per FRAME rather than once at the end of the run: the pair's whole claim is
+    that settling changes the layout, and a virtual size read after the second
+    frame can say nothing about the first (AGENTS.md, "Check the numbers behind
+    the frame").
+    """
+    screen = app.screen
+    print(
+        f"{label}: size={screen.size} virtual={screen.virtual_size} "
+        f"vscroll={screen.show_vertical_scrollbar}",
+        file=sys.stderr,
+    )
+
+
 async def _seed(
     app: OperatorApp,
     pilot: Any,
     *,
-    progress_frames: (
+    settle_frames: (
         tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[None]]] | None
     ) = None,
 ) -> None:
     """The reported turn: prompt, progress sentence, its tool card, the answer.
 
-    ``progress_frames`` is handed to the PROGRESS message's stream as
+    ``settle_frames`` is handed to the ANSWER message's stream as
     ``(before_end, after_end)`` — see the ``stream`` surface above.
+
+    The answer is painted through the same event path as the progress sentence,
+    because that is the path the product uses and the one whose settle this
+    capture is about: a block mounted already-committed (the shape this fixture
+    used to build) has no streaming state for the pair to photograph, and would
+    make the capture an argument about ``finalize_text`` rather than about the
+    frame a user sees.
     """
     app._append_block(UserBlock("how does the ingest path handle a failing source?"))
     await pilot.pause()
-    before_end, after_end = progress_frames or (None, None)
+    await _stream(app, pilot, PROGRESS, stop_reason="toolUse", has_tool_calls=True)
+    _tool(app, "t1", "read", {"path": "src/ingest/manifest.py"}, "412 lines")
+    await pilot.pause()
+    before_end, after_end = settle_frames or (None, None)
     await _stream(
         app,
         pilot,
-        PROGRESS,
-        stop_reason="toolUse",
-        has_tool_calls=True,
+        ANSWER,
+        stop_reason="stop",
+        has_tool_calls=False,
         before_end=before_end,
         after_end=after_end,
     )
-    _tool(app, "t1", "read", {"path": "src/ingest/manifest.py"}, "412 lines")
-    await pilot.pause()
-    app._append_block(_answer(ANSWER))
 
 
 async def _open_subagent(app: OperatorApp, pilot: Any, job_id: str) -> None:
@@ -291,12 +310,12 @@ async def main() -> None:
         return
 
     if surface == "stream":
-        # The retraction, photographed. `display.narration` and `display.rail`
-        # both stay at their shipped defaults: the subject is the ONE event that
-        # finalizes a progress sentence into tool calls, so anything else moved
-        # into the frame would be a second variable. Both frames come from one
-        # run of the real path, one event apart, with the capture hooks inside
-        # that call (R2, agent review round 1).
+        # The settle, photographed. `display.narration` and `display.rail` both
+        # stay at their shipped defaults: the subject is the ONE event that
+        # commits the ANSWER's rows, so anything else moved into the frame would
+        # be a second variable. Both frames come from one run of the real path,
+        # one event apart, with the capture hooks inside that call (R2, agent
+        # review round 1).
         finalized = out.replace(".svg", "-finalized.svg")
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=size) as pilot:
@@ -306,16 +325,20 @@ async def main() -> None:
                 await pilot.pause()
 
             async def mid_stream() -> None:
-                """The last delta has landed and the call has NOT ended."""
+                """The last delta has landed, the call has NOT settled: no rail,
+                and the prose folded at the lane's full width."""
                 await pilot.pause()
+                _geometry(app, "streaming")
                 save_capture(app, out)
 
             async def settled() -> None:
-                """The SAME page one event later, the rail retracted."""
+                """The SAME page one event later, rail painted and the message
+                re-wrapped behind it."""
                 await pilot.pause()
+                _geometry(app, "settled")
                 save_capture(app, finalized)
 
-            await _seed(app, pilot, progress_frames=(mid_stream, settled))
+            await _seed(app, pilot, settle_frames=(mid_stream, settled))
             await pilot.pause()
             await settle_status_line(pilot, app)
             screen = app.screen

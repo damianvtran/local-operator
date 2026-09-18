@@ -73,10 +73,17 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # change answers): the prose stays, because dropping it is
     # `display.narration`'s separate job, and the mark goes.
     #
-    # The rail STREAMS and is dropped at finalize, the same bargain narration
-    # strikes. Nothing knows mid-stream whether a call ends in tools or in the
-    # answer, and the alternative — no rail while streaming, added a frame
-    # later — would strip the mark off the answer being read.
+    # The rail is a SETTLED-state property. A message still streaming paints no
+    # bar and folds to the lane's full width — rail-OFF geometry exactly — and
+    # the bar appears in the same paint that commits the message
+    # (`AssistantBlock.finalize_text`). Narration is never railed, streaming or
+    # settled, because the rail marks the ANSWER rather than every assistant
+    # block; both routes are read from the one gate (`_rail_cols`), so the fold,
+    # the paint, the copy gutter and the selection slice cannot disagree about a
+    # frame. The cost of the streaming state is that the settle re-folds the
+    # message two cells narrower, so a long message re-wraps once — see
+    # `_rail_cols` for why the alternative (reserving the cells blank) was
+    # rejected.
     #
     # Default ON. The rail answers "where does the answer start and stop",
     # which only bites a reader who cannot already tell — so the people it
@@ -93,11 +100,12 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # gutter either way: the fold width, the copy gutter and the selection
     # slice are all read at the same rate as the paint, so the prose is not
     # left indented two cells by a rail that is not there. An UN-RAILED
-    # narration block is that same state, reached from inside the block rather
-    # than from this setting (`mark_narration`). A mid-session flip DOES reach
-    # blocks already on screen — `display.*` runs `retheme`, which re-enters
-    # `_apply_rows`, which is where the rail is painted and where the flag is
-    # read.
+    # narration block, and a message that has not SETTLED yet, are that same
+    # state, reached from inside the block rather than from this setting
+    # (`mark_narration`, and the flag `finalize_text` raises). A mid-session
+    # flip DOES reach blocks already on screen — `display.*` runs `retheme`,
+    # which re-enters `_apply_rows`, which is where the rail is painted and
+    # where the flag is read.
     "display.rail": True,
     # One padding row above and below a tool row and a user prompt
     # (`.comfortable-rows` in the stylesheet). Default ON was changed to OFF

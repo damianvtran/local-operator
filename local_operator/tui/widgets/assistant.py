@@ -67,12 +67,17 @@ FALLBACK_WIDTH = 80
 #: that a user message has a line down its side and the model's answer has
 #: nothing, so the answer gets the same delineation.
 #:
-#: **It marks the ANSWER, and only the answer.** The rail was originally painted
-#: on every assistant block, which made a mid-turn progress sentence and the
-#: answer look identical — the exact distinction it exists to draw. A block that
-#: is mid-turn narration (see :meth:`AssistantBlock.mark_narration`) therefore
-#: paints no rail; the prose stays, because dropping it is ``display.narration``'s
-#: separate job.
+#: **It marks the ANSWER, and only the answer — and only once that answer has
+#: SETTLED.** Two different questions, both answered with a zero gutter. A block
+#: that is mid-turn narration (see :meth:`AssistantBlock.mark_narration`) never
+#: takes the rail, because the rail was originally painted on every assistant
+#: block and that made a mid-turn progress sentence and the outcome look
+#: identical — the exact distinction it exists to draw. A block that has not
+#: SETTLED yet takes no rail either, because the bar is a property of the
+#: committed frame: it belongs to the message that has stopped arriving, and one
+#: painted beside a burst of deltas is marking a message the reader is still
+#: receiving. The prose stays in both cases, because dropping it is
+#: ``display.narration``'s separate job.
 #:
 #: ``U+258E`` (quarter block), not the rule's ``U+258C`` (half block), and the
 #: difference is not decorative. Colour alone did not carry the distinction:
@@ -469,6 +474,23 @@ class AssistantBlock(TranscriptBlock):
         #: reached for from inside a widget is exactly the second copy of the
         #: classification the ``narration`` module exists to prevent.
         self._narration: bool = False
+        #: Whether this message has SETTLED — it has stopped arriving and its
+        #: rows are committed — and therefore whether it has earned the rail
+        #: (:meth:`_rail_cols`). Set by :meth:`finalize_text`, the one settle seam
+        #: every row-producing surface goes through: the live transcript, cold
+        #: replay (``session_presentation``), the aside fork and the subagent
+        #: page, which settles per ROW and so earns each row's rail per row.
+        #:
+        #: A SECOND flag rather than a read of ``_finalized``, and the separation
+        #: is the whole point. ``_finalized`` is cleared and restored around the
+        #: two sanctioned rebuilds (:meth:`refit_width`, :meth:`retheme`), so a
+        #: rail gated on it would be painted OFF on any theme switch or resize of
+        #: a settled block, and then never repainted back — a bar that silently
+        #: vanishes when the user changes theme and returns only if something else
+        #: happens to relayout the block. This flag answers a question about the
+        #: MESSAGE (has it stopped), which neither repair changes, so both rebuild
+        #: freely and the rail survives exactly as it was painted.
+        self._settled: bool = False
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -521,13 +543,13 @@ class AssistantBlock(TranscriptBlock):
         afterwards would leave the committed frame with a rail the next rebuild
         would drop — a line visibly vanishing off a settled message.
 
-        **The streaming window keeps the rail, and that is the deliberate
-        bargain ``display.narration`` already struck.** While deltas arrive
-        nothing knows whether this call ends in tool calls or in the answer, so
-        the rail streams and is dropped one event later at finalize. The
-        alternative — no rail while streaming, added a frame later — would strip
-        the mark off the ANSWER being streamed, which is the case the rail is
-        for.
+        **Marking is not what keeps the rail off a STREAMING block.** A block
+        that has not settled carries no rail either (:meth:`_rail_cols`), so the
+        two states agree about the streaming window by construction; what this
+        mark decides is the SETTLED frame, where it is the only thing standing
+        between a progress sentence and the rail it would otherwise earn the
+        moment its message ended — the "Progress messages shouldn't have the left
+        bar" report this treatment exists to answer.
         """
         self._narration = True
 
@@ -538,14 +560,26 @@ class AssistantBlock(TranscriptBlock):
     def _rail_cols(self) -> int:
         """:data:`RAIL_COLS` when the rail is on, 0 when it is off or unearned.
 
-        Two independent routes to zero, and the second is the rail's MEANING
-        rather than its setting: a narration block (see :meth:`mark_narration`)
-        paints no rail because the rail marks the answer. Both return 0 here
-        rather than being special-cased anywhere else, which is what makes an
-        un-railed narration block behave EXACTLY like a rail-OFF block — the
+        THREE routes to zero, and the rail's MEANING is two of them: the setting
+        is off; the block is mid-turn narration (see :meth:`mark_narration`),
+        which is not the answer; or the block has not SETTLED (see
+        :meth:`finalize_text`), so the bar is not yet due. The two MEANING routes
+        both return 0 here rather than being special-cased anywhere else, which is
+        what makes an un-railed block behave EXACTLY like a rail-OFF block — the
         cells are not reserved, the prose folds to the lane's full width, the
         copy gutter is empty and the selection slice does not compensate —
         instead of the third state "railed geometry minus a glyph".
+
+        **The streaming state is that same equivalence, and the trade it makes is
+        deliberate.** The alternative — hold the two cells blank until the settle
+        so the prose never moves — is rejected: it puts an unexplained indent on
+        every streaming message and invents a second, transient geometry, where
+        this widget's rule everywhere else is that geometry follows the glyph (a
+        message is indented exactly when it is railed). The equivalence has a
+        real cost, recorded rather than assumed: at the settle the message
+        re-folds two cells narrower and the rail appears, so a long message
+        re-wraps ONCE, at the moment the reader has stopped reading it live.
+        Design review gets the frames and may overrule it.
 
         The block-level gutter width, read at the same rate as the paint in
         :meth:`_apply_rows` so a flip cannot leave the fold and the paint
@@ -560,7 +594,7 @@ class AssistantBlock(TranscriptBlock):
         :func:`rail_rows` makes about resolving colour at paint time — it is
         what makes a mid-session flip apply to mounted blocks for free.
         """
-        if self._narration:
+        if self._narration or not self._settled:
             return 0
         return RAIL_COLS if settings_get("display.rail", DEFAULT_RAIL) else 0
 
@@ -693,6 +727,13 @@ class AssistantBlock(TranscriptBlock):
         railed and be railed again, growing by two cells per flush. Painting the
         assembled output leaves the cache holding pure prose, so double-painting
         is impossible by construction rather than by a guard.
+
+        The decision read here is ONE read taken beside the fold rather than a
+        second question asked of the same state: :meth:`_flat_width` consulted the
+        same gate a statement earlier, so the width these rows were folded at and
+        the gutter they are painted with cannot disagree — which is exactly the
+        settle, where the gate flips from 0 to 2 and the message re-folds behind
+        the bar in a single pass.
         """
         self._built_width = self._flat_width()
         # ONE read of the flag per paint, recorded beside the width it was
@@ -787,6 +828,10 @@ class AssistantBlock(TranscriptBlock):
         so a rebuild cannot land on a third number: rows are a pure function of
         the text and the width, which is also what makes the ``_built_width``
         equality a sound guard.
+
+        ``_settled`` survives the ``_finalized`` dance below for the reason
+        :meth:`retheme` records: this repaints the same settled message, so the
+        rail is painted as the frame had it rather than dropped for one relayout.
         """
         if not self._full_text:
             return
@@ -853,10 +898,22 @@ class AssistantBlock(TranscriptBlock):
 
         One render of the WHOLE message, not the concatenation: the splice was
         only ever a streaming economy, and a settled message is re-lexed once.
+
+        **This is the settle the rail waits for, so the order of the two
+        statements below is load-bearing rather than incidental.** ``_settled``
+        goes up BEFORE the paint because :meth:`_apply_rows` is the only place
+        the rail is put on the frame: setting it afterwards would leave the
+        committed rows un-railed until something else repainted the block — the
+        bar arriving a repaint late, or (on a screen that then goes quiet) never.
+        Setting it first also folds this render at the railed width, because
+        ``_flat_whole`` reads the same gate through :meth:`_body_width`, so the
+        fold and the gutter cannot disagree about the frame that commits the
+        message.
         """
         if self._finalized:
             return
         self._full_text = self._full_text or ""
+        self._settled = True
         self._apply_rows(self._flat_whole())
         self.finalize()
 
@@ -901,6 +958,12 @@ class AssistantBlock(TranscriptBlock):
         FLATTENED TEXT with the old ramp's styles baked into every span, so
         the caches go first (the same invalidation ``update_text`` performs
         when it notices an epoch change) and the rebuild re-lexes from source.
+
+        ``_settled`` is deliberately NOT touched by the ``_finalized`` dance
+        below. It answers a question about the MESSAGE rather than about the
+        block's mutability, so a rebuild repaints the rail exactly as the settled
+        frame has it; clearing it here would drop the rail off every settled
+        block the moment the user changed theme, and nothing would put it back.
         """
         if not self._full_text:
             return
@@ -968,11 +1031,11 @@ class AssistantBlock(TranscriptBlock):
         copy path was fixed for — the constant is necessary and nowhere near
         sufficient.
 
-        Zero when the rail was off when these rows were painted, and zero for a
-        narration block — which is the same answer, because the block paints its
-        rows through the same gate that decided it: there is no gutter to strip,
-        and reporting two would take two cells of real content off the
-        clipboard.
+        Zero when the rail was off when these rows were painted, zero for a
+        narration block, and zero while the message is still STREAMING — which is
+        the same answer, because the block paints its rows through the same gate
+        that decided it: there is no gutter to strip, and reporting two would take
+        two cells of real content off the clipboard.
 
         **Answered from what was PAINTED, not from what the setting says now**
         (review round 2, M1). The paint and the copy happen at different times,

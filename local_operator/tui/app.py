@@ -40649,17 +40649,17 @@ class OperatorApp(App[None]):
         block.update_text(message.text)
         block.completion_anchor_id = message.message_id
         block.navigation_anchor_id = message.message_id
-        # MARKED before `finalize_text()`, which is what commits the rows: the
-        # rail marks the ANSWER, so a message that finalized into tool calls
-        # loses it — and losing it HERE, rather than a repaint later, is what
-        # keeps the reader from watching a rail drop off a settled frame.
+        # MARKED before `finalize_text()`, which is what commits the rows AND
+        # what raises the block's settled flag — and only a settled block can
+        # carry the rail at all (`AssistantBlock._rail_cols`). So a message that
+        # finalized into tool calls takes no rail, and this event is the first
+        # moment the outcome is known: mark it any later and the settling paint
+        # would already have railed a progress sentence.
         #
-        # The streaming window above kept the rail on purpose. While deltas
-        # arrive nothing knows whether this call ends in tools or in the answer,
-        # so the rail streams as it always did and is dropped at this event — the
-        # same bargain `display.narration` already struck (see
-        # `tui/settings.py`). Marking it the other way round would strip the rail
-        # off the ANSWER while it is being read and add it a frame later.
+        # The streaming window above carries no rail either, and that is by
+        # design rather than by this mark: a block that has not settled paints no
+        # bar. The mark is still load-bearing — it decides the SETTLED frame — but
+        # it is not what keeps the rail off the streaming one.
         if narration:
             block.mark_narration()
         block.finalize_text()
