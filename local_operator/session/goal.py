@@ -23,6 +23,70 @@ from typing import Callable
 #: capping it keeps the volatile tail small and bounds the per-turn cost.
 MAX_GOAL_CHARS = 2000
 
+#: The ``/goal`` arguments that UNSET the standing goal instead of becoming one.
+#:
+#: ONE set for the three hosts that implement ``/goal`` — the TUI's local handler,
+#: its routed one, and the detached runtime's — because a word honoured on one
+#: host and stored as a goal body on another is the worst of the two outcomes:
+#: the user's intent is executed in one window and silently becomes the standing
+#: objective in another. The bare words predate the flag; ``--clear`` is the
+#: discoverable form the palette and the argument picker now teach.
+#:
+#: The flag is matched as the WHOLE argument, never as a prefix: ``/goal --clear``
+#: is a flag, while ``/goal --clear the flaky job`` is still free text the user
+#: meant as an objective. Eating the tail of a real goal would be silent data
+#: loss in the one command whose argument the MODEL is told.
+GOAL_CLEAR_ARGS = frozenset({"clear", "none", "reset", "--clear"})
+
+#: How much of a cleared goal the receipt echoes.
+#:
+#: ``MAX_GOAL_CHARS`` is a spec-sized bound no single receipt should carry: the
+#: echo exists so a mistaken clear is visible and can be retyped by eye, and an
+#: echo long enough to bury the transcript defeats exactly that. 96 is the same
+#: bound the ``goal restored`` notice already clips to, so the two lines the app
+#: prints about the same value read alike.
+#:
+#: CHARACTERS, not cells, because this module is the shared, non-UI half of the
+#: app and the surfaces that paint the string own its cell clipping. The two
+#: bounds are not the same number and it is worth knowing which one is quoted
+#: here: the 14-cell ``goal cleared: `` prefix plus 96 ASCII characters plus the
+#: clip's ``…`` is 111 cells, and the same 96 characters in CJK glyphs is 207.
+#: So a maximum-length receipt WRAPS, and that is intended: measured as a
+#: painted notice, a 96-character goal with no spaces fills 3 rows at both 80 and
+#: 100 columns (Rich drops the unbreakable word to its own rows) and its CJK twin
+#: fills 4 — the continuation indents under the text column and reads as one
+#: notice, which is how a long objective stays legible at all. What the clip
+#: guarantees is a bounded length and one LOGICAL line. This comment and the
+#: helper below used to claim a single terminal ROW, which the code has never
+#: held (round 2: reviewer NIT-6, UX U8).
+CLEARED_GOAL_ECHO_CHARS = 96
+
+
+def cleared_goal_receipt(cleared: str) -> str:
+    """The ``/goal --clear`` receipt: name what went, or say there was nothing.
+
+    A standing goal is deliberately invisible in the UI — the band does not carry
+    it, and the only echo is the one-time ``goal restored`` notice on adopt — and
+    there is no undo. So this string is the user's whole chance to see what a
+    mistaken clear took away and type it back, which is why it names the goal
+    rather than reporting the event (design D4 / UX U3, round 1).
+
+    Flattened to ONE line — one LOGICAL line, which is all the flattening
+    promises: a goal is free text a user may have pasted newlines into, and a
+    multi-row payload dump in the transcript is what that must not become. The
+    clip below is a CHARACTER bound, so a long receipt does wrap onto more than
+    one painted row; :data:`CLEARED_GOAL_ECHO_CHARS` carries the measurements
+    and why it is characters rather than cells.
+    """
+    text = " ".join((cleared or "").split())
+    if not text:
+        # Nothing was set, so there is nothing to name — and "goal cleared: "
+        # with an empty tail reads as a rendering bug rather than an empty goal.
+        return "goal cleared"
+    if len(text) > CLEARED_GOAL_ECHO_CHARS:
+        text = text[:CLEARED_GOAL_ECHO_CHARS].rstrip() + "…"
+    return f"goal cleared: {text}"
+
 
 @dataclass
 class GoalState:

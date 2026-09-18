@@ -227,6 +227,44 @@ async def capabilities():
                 # to remove. Nothing else in the renderer is gated on it, so
                 # gating anything else here would hide a working surface.
                 "session_interrupt": 1,
+                # Durable conversation pins: the `pinned` flag on every catalogue
+                # row, and POST /v1/desktop/sessions/{id}/pin.
+                #
+                # ITS OWN KEY, not a bump of `session_catalogue`, by the rule
+                # `session_search` states above: an EXISTING surface must keep
+                # working against a backend that lacks the new one, and here that
+                # surface is the whole chats list. Bumping `session_catalogue` to
+                # 4 would hide a working catalogue behind an update it does not
+                # need, and no EXISTING key's shape changes — `sessions` gains
+                # rows (see below) without gaining a field.
+                #
+                # STILL 1, AND THAT IS NOT AN OMISSION. `sessions` on this route
+                # now also carries pinned conversations the page did not reach,
+                # which a client MUST read to render a pin made on an older
+                # conversation; that is a change to what the contract contains,
+                # not to the contract's shape, and the number has never been
+                # RELEASED — this key and the route that reads it are landing in
+                # the same unreleased window, and #1200/#1214 are still open. A
+                # bump to 2 would advertise a difference from a version no client
+                # has ever talked to, which is a migration nobody can perform.
+                # What the number gates is unchanged: absent ⇒ no affordance, no
+                # slot, no handler; present ⇒ the row's `pinned` flag is readable
+                # and settable, and `sessions` is complete for the pinned set.
+                #
+                # NOT gated on `desktop_feed` either, because the two answer
+                # different questions: the pin is durable state the renderer has
+                # to be able to READ, while the feed is only how fast it learns
+                # that someone else changed it. A backend with the route and no
+                # feed must still show pins — its ≤30 s safety poll picks them up.
+                #
+                # Absent ⇒ the renderer mounts NO affordance at all: no pin slot,
+                # no hover reveal, no handler (`session_interrupt` above is the
+                # precedent, and for the same reason). A DISABLED pin would be
+                # worse than an absent one — the row's control slot exists, so the
+                # user would read it as a feature they have not unlocked, and a
+                # permanently reserved empty slot costs every row width to
+                # advertise nothing.
+                "session_pins": 1,
             },
         },
     )

@@ -189,14 +189,14 @@ async def test_the_session_list_reports_durable_receipts_without_an_owner(tmp_pa
     _publish(tmp_path, unread, "unseen-result")
     await pool.acknowledge_attention(read, token)
 
-    rows = {row["id"]: row["attention"] for row in await pool.list(50)}
+    rows = {row["id"]: row["attention"] for row in (await pool.list(50)).rows}
     assert rows[read]["unseen"] is False and rows[read]["revision"] == [1, 1]
     assert rows[unread]["unseen"] is True
     assert rows[unread]["conversation_id"] == f"session/{unread}"
     # A session that never completed a turn is present and simply has nothing.
     quiet = await pool.create(str(tmp_path))
-    assert (await pool.list(50))[0]["id"] is not None
-    assert {row["id"]: row["attention"] for row in await pool.list(50)}[quiet][
+    assert (await pool.list(50)).rows[0]["id"] is not None
+    assert {row["id"]: row["attention"] for row in (await pool.list(50)).rows}[quiet][
         "completion_token"
     ] is None
 
@@ -369,7 +369,7 @@ async def test_a_degraded_store_never_breaks_opening_or_listing(tmp_path):
     async with pool.session(sid) as bridge:
         healthy = await bridge.snapshot()
         assert healthy["payload"]["frontend"]["snapshot"]["attention"]["unseen"] is True
-        assert (await pool.list(50))[0]["attention"]["unseen"] is True
+        assert (await pool.list(50)).rows[0]["attention"]["unseen"] is True
 
         _break_store(tmp_path)
         with pytest.raises(sqlite3.Error):
@@ -378,7 +378,7 @@ async def test_a_degraded_store_never_breaks_opening_or_listing(tmp_path):
         # The conversation still OPENS, and the list still lists.
         degraded = await bridge.snapshot()
         assert degraded["payload"]["frontend"]["snapshot"]["session_id"] == sid
-        rows = await pool.list(50)
+        rows = (await pool.list(50)).rows
         assert [row["id"] for row in rows] == [sid]
         # Omitted rather than fabricated: absent state is "not ackable" on the
         # client, which is correct. A false "read" would not be.

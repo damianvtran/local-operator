@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
@@ -91,7 +91,42 @@ from local_operator.mobile.types import (
     TranscriptEntry,
 )
 
+# The PHASE WORDS the working line is dated by, imported rather than restated:
+# the fold below matches its own phase against the one the producer folded
+# (``FrontendStateStore.activity_phase_clock``), so a rename in either place
+# must move together or the match silently stops and every attach-time clock
+# goes back to counting from the phone's arrival — the divergence
+# ``session/frontend_state.py`` warns about beside its own copies.
+from local_operator.session.frontend_state import (
+    ACTIVITY_PHASE_COMPOSING,
+    ACTIVITY_PHASE_QUEUED,
+    ACTIVITY_PHASE_RESPONDING,
+    ACTIVITY_PHASE_RUNNING,
+    ACTIVITY_PHASE_THINKING,
+)
+
 logger = logging.getLogger(__name__)
+
+#: The folded phases an ATTACH may adopt the producer's instant for, by NAME.
+#:
+#: A phase qualifies only when the producer HOLDS its instant across the events
+#: the fold renders that phase for — one zero per phase, restamped only when the
+#: phase is ENTERED — so a fold that reads the instant while the producer is
+#: already inside the phase is reading the number the producer itself holds.
+#:
+#: ``responding`` and ``composing`` are those phases: the prose edge is the first
+#: non-empty delta of a model call, the dictation edge is a batch's first
+#: announcement (and deliberately ONE zero for the batch's whole dictation).
+#: ``thinking`` does NOT qualify: the producer re-zeroes it at every provider
+#: call (``message_start``), turn boundary and tool end, and every label this
+#: fold derives for it comes from one of those very events — so adopting an
+#: older instant there would date a phase that has just begun by a previous
+#: phase's zero, the exact pairing ``FrontendStateStore.activity_phase_clock``
+#: exists to prevent. ``running`` does not qualify either: its finer anchor is
+#: the call (step 1) and its folded edge is the batch's FIRST call, so a
+#: narrowed label would report a shed sibling's age (the TUI's D9). ``queued``
+#: is never folded by the producer, so it can match nothing.
+_PHASE_ANCHOR_ADOPTABLE = frozenset({ACTIVITY_PHASE_RESPONDING, ACTIVITY_PHASE_COMPOSING})
 
 #: How much of a tool result's text the expand payload carries. The phone's
 #: expanded row is a readable window, not a log file — beyond this the right
@@ -203,6 +238,84 @@ FRAME_CAP_DERIVED_ROSTER_FIELDS = ("peer_ids", "child_ids", "ancestor_ids", "anc
 #: except ``error_text``, which exists nowhere else and is lost here (see the
 #: tier's own comment in ``cap_projection_frame``).
 FRAME_CAP_ROSTER_IDENTITY_FIELDS = ("job_id", "label", "parent_job_id", "status")
+
+
+def _stated_epoch(value: Any) -> float | None:
+    """The instant a producer STATED, or ``None`` when it stated none.
+
+    ``bool`` is excluded deliberately: it is an ``int`` in Python, so a stray
+    ``True`` in an epoch field would be read as 1970-01-01 and a live call
+    would report itself as 56 years old. Same guard the fold already applies
+    to a persisted ``duration_s``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _phase_pair(value: Any) -> tuple[str, float | None]:
+    """The ``(phase, instant)`` a probed accessor answered, or an empty pair.
+
+    The read is PROBED, so what comes back is whatever a host chose to return:
+    a reduced facade or a stand-in may answer ``None``, a shape of its own, or
+    a pair it built wrongly, and unpacking that here raises at the ATTACH — off
+    ``RuntimeServer._serve``, whose handler ends the runtime ("session runtime
+    loop died"), or into the app's rebind, which swallows it and leaves the
+    bridge silently unsubscribed. Both are worse than the answer this returns:
+    an empty pair matches no phase, so an unusable accessor withholds the clock
+    exactly like a session that has no fold at all.
+
+    ``str(phase or "")`` is why a stand-in's repr cannot match: an object whose
+    string is not a phase word is not equal to any phase the fold displays.
+    """
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return "", None
+    phase, started_at = value
+    return str(phase or ""), started_at
+
+
+def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
+    """A monotonic instant whose age is ``now - epoch``, for a threaded clock.
+
+    The phone's conversion from the wall-clock stamps that travel on events and
+    in the producer's folded state (``ToolExecutionStartEvent.started_at_epoch``,
+    ``FrontendStateStore.activity_phase_clock``) into the monotonic clock the
+    projection counts on. Conversion is AGE-ONLY and happens ONCE: everything
+    that ticks afterwards counts on ``clock()``, so a system-clock adjustment or
+    a DST jump after the seed cannot move a counter that is already running.
+    The clamp is the same rule for an epoch in the future (a producer whose
+    clock is ahead of ours means "age unknown, treat as new" rather than a
+    negative elapsed time that would render as a nonsense duration).
+
+    Deliberately a second copy of ``tui/widgets/tool_card.monotonic_from_epoch``
+    rather than an import of it: that module is a Textual widget module (it
+    imports ``textual.timer`` and the transcript widget) and this fold is loaded
+    by the phone daemon and by an owned session's runtime, neither of which
+    should pull the TUI's widget tree in to divide one number. The TUI's own
+    reader takes the same route the other way — ``tui/session_presentation.py``
+    carries the folded-anchor helpers and imports no phone module — so the
+    duplication is the module boundary, not a missing shared home. A change to
+    the arithmetic here has to be made there too; the rule is small enough that
+    two spellings stay cheaper than the coupling.
+    """
+    return clock() - max(0.0, time.time() - epoch)
+
+
+def _live_call_map(value: Any) -> dict[str, Any]:
+    """The live-call map a probed accessor answered, or an empty one.
+
+    The sibling of :func:`_phase_pair` for the other anchor this fold reads at
+    attach: ``live_tool_start_epochs()`` is PROBED, so what comes back is
+    whatever the host returned, and the shapes a real facade might answer instead
+    of a mapping — ``None``, a bare float, a string — raise where the phase half
+    now does not (``TypeError: 'x' object is not iterable``, ``ValueError:
+    dictionary update sequence element #0 has length 1``). Both reads sit on the
+    same unattended attach path (``RuntimeServer._serve`` ends the session on a
+    raise), and "cannot say" is the answer that keeps today's behaviour.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items()}
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -1013,8 +1126,26 @@ class ProjectionFold:
         # (SubagentProgressEvent is never per-delta by contract).
         self._subagents: dict[str, SubagentRow] = {}
         self._subagent_started_at: dict[str, float] = {}
-        # The working line's clock origin and the label's current source.
+        # The working line's label, the PHASE that label belongs to, and its
+        # clock origin.
+        #
+        # ``_activity_started_at`` is the instant the current phase is dated
+        # from, or ``None`` when this fold has none it can honestly use (a phase
+        # joined mid-flight whose producer stated no instant) — and that
+        # ``None`` is published as such, not as a zero. The phase is tracked
+        # separately from the label because the clock belongs to the phase: a
+        # batch's second announcement or an intent revised mid-call relabels the
+        # line without restarting a number the producer never restarted either.
         self._activity_started_at: float | None = None
+        self._activity_phase: str = ""
+        # The producer's folded PHASE at attach, and its instant when one was
+        # stated. The name alone answers a question the fold cannot answer from
+        # its own events — "was this phase already running when I arrived?" —
+        # which is what separates an edge the fold watched (its own zero, and a
+        # true one) from one it joined late (the producer's instant, or no clock
+        # at all). Applied only through ``_activity_anchor``.
+        self._attach_phase: str = ""
+        self._attach_phase_at: float | None = None
         # Whether the fold has folded a turn-terminal event (agent_end /
         # turn_end) that no later agent_start has superseded. This is what
         # makes ``reconcile_streaming`` safe on the abort/error path: there the
@@ -1282,7 +1413,20 @@ class ProjectionFold:
             row.error = ""
             row.summary = _summarize_args(event.tool_name, event.args)
             row.intent = event.intent or row.intent
-            self._tool_started_at[event.tool_call_id] = time.monotonic()
+            # The call's OWN start instant where the producer stated one. A
+            # start event this fold sees LATE — the fold was built at attach, the
+            # stream was relayed, the event was redelivered — would otherwise be
+            # dated from this fold's arrival, which is the fabricated zero the
+            # operator's report is about: both the row's elapsed reading and the
+            # duration its end event measures are taken from this instant. No
+            # stated epoch keeps today's behaviour, which for a genuinely live
+            # start IS the call's start (the row appears with the event that
+            # began it) and for a late one is the arrival instant the end event's
+            # own ``duration_s`` corrects.
+            stated = _stated_epoch(event.started_at_epoch)
+            self._tool_started_at[event.tool_call_id] = (
+                monotonic_from_epoch(stated) if stated is not None else time.monotonic()
+            )
             self._tool_args[event.tool_call_id] = event.args
         elif isinstance(event, ToolExecutionUpdateEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
@@ -1300,6 +1444,14 @@ class ProjectionFold:
             row = self._tool_row(event.tool_call_id, event.tool_name)
             result = event.result
             row.tool_state = "failed" if result.is_error else "done"
+            # From the instant this fold holds for the call: its own observation
+            # of the start, or the producer's seeded epoch
+            # (``reconcile_clocks``), so a call that began BEFORE this fold
+            # existed reports the duration it really ran rather than the time
+            # since the phone attached. The default is the honest answer for a
+            # call with no start at all — nothing to measure, which is exactly
+            # what today's code measured — and the producer's own
+            # ``duration_s``, when it stated one, is the authoritative half.
             measured = time.monotonic() - self._tool_started_at.pop(
                 event.tool_call_id, time.monotonic()
             )
@@ -1555,30 +1707,177 @@ class ProjectionFold:
 
     # -- working line (TUI WorkingBlock's phone counterpart) -------------------
 
-    def _set_activity(self, label: str, *, restart_clock: bool = False) -> None:
-        """Update the working line's label, resetting its clock only when the
-        KIND of work changed. A tool finishing restarts the wait for the next
-        model call, so the clock belongs to the phase, not the turn."""
+    def _set_activity(
+        self,
+        label: str,
+        *,
+        phase: str,
+        epoch: float | None = None,
+        edge: bool = True,
+        restart_clock: bool = False,
+    ) -> None:
+        """Update the working line's label and date the phase it belongs to.
+
+        The clock is (re)computed when the PHASE changes, when ``restart_clock``
+        forces one, and on the fold's first label; a same-phase relabel keeps
+        the instant it already holds. That is the TUI's rule — ``WorkingBlock``'s
+        phase clock moves when the phase moves, so the elapsed number is the
+        PHASE's age — and it is why a batch's second announcement or an intent
+        revised mid-call no longer restarts a number the producer never
+        restarted either.
+
+        ``phase`` is the producer's own word for the kind of work this label
+        names (``ACTIVITY_PHASE_*``, imported from ``session/frontend_state`` so
+        both surfaces match the same strings). ``epoch`` is an instant a
+        producer STATED for this very work — the ``tool_execution_start``
+        event's ``started_at_epoch`` — and it outranks every inferred instant:
+        for a running call the call's own start is the finer anchor the phase
+        fold deliberately does not supply, since a batch's phase edge is its
+        FIRST call's start and a narrowed label must not report a shed
+        sibling's age (the TUI's D9).
+
+        ``edge`` says whether THIS event is the phase's beginning as far as this
+        fold can tell. When it is, the fold's own instant for it is a TRUE zero
+        — the TUI's widget does the same with its phase clock, and the producer
+        restamps at those events for the phases it re-zeroes — so the phone
+        paints ``0s`` from the first frame and counts up. When the fold joined a
+        phase already in flight, ``_activity_anchor`` decides between the
+        producer's own instant and NO clock at all.
+
+        ``restart_clock`` marks an edge this fold OBSERVED for itself, so its
+        instant is now — a turn boundary, a tool finishing — and any attach-time
+        reading for that phase is dropped rather than allowed to date it.
+        """
         p = self.projection
-        if restart_clock or self._activity_started_at is None or p.activity != label:
-            self._activity_started_at = time.monotonic()
+        if restart_clock:
+            self._drop_attach_anchor()
+        if restart_clock or phase != self._activity_phase or self._activity_started_at is None:
+            self._activity_started_at = self._activity_anchor(phase, epoch, edge=edge)
+        self._activity_phase = phase
         p.activity = label
-        p.activity_started_s = round(time.monotonic() - self._activity_started_at, 1)
+        if self._activity_started_at is None:
+            # No instant to date this phase from: publish the ABSENCE rather than
+            # a zero, which is the whole point of the nullable field.
+            p.activity_started_s = None
+        else:
+            self.redate_from_phase()
+
+    def redate_from_phase(self) -> None:
+        """Re-date the published band age from THIS fold's phase instant.
+
+        ``activity_started_s`` is otherwise a number written when the phase last
+        moved, and the long phases are exactly the ones with no band event in
+        them: prose streams deltas that do not re-enter the label's arm, and a
+        running call has no arm at all. A frame built mid-phase therefore
+        carried the age as of the last edge, and a viewer that attached on it
+        painted that stale number — at a known zero, ``0s`` counting from its
+        own mount, which is the operator's reported defect rendered as a
+        fabricated zero on the one surface this change is about (review round 3,
+        MAJOR 1).
+
+        Called at every frame build (the runtime's push, the handle hand-off)
+        rather than on a timer: those are the moments the number becomes an
+        answer to "how long has this been going". The client needs no change — a
+        fresher number simply re-seeds it.
+
+        A fold that has never adopted a phase writes NOTHING here. Ownership is
+        the rule, and it is load-bearing: the projection object can be SHARED
+        with the fold that does own the age — the runtime builds its own
+        ``ProjectionFold`` over the handle's seed, and only the handle's fold is
+        ever fed events — so writing this fold's empty state over it would erase
+        a live age on every frame. That is exactly what review round 4's blocker
+        measured: a phone attached to the runtime was served ``null`` for every
+        phase, watched edges included. An unknown instant stays unknown because
+        ``_set_activity`` publishes that absence itself, not because a reader
+        clears it.
+        """
+        if self._activity_started_at is None:
+            return
+        self.projection.activity_started_s = round(time.monotonic() - self._activity_started_at, 1)
+
+    def _activity_anchor(self, phase: str, epoch: float | None, *, edge: bool) -> float | None:
+        """The instant to date ``phase`` from, or ``None`` when there is none.
+
+        Three sources, in order of authority:
+
+        1. an epoch the producer STATED for this work — the call's real start,
+           from the process that ran it. This is also what dates a start event
+           the fold sees LATE (a relayed stream, a redelivered seed) from the
+           call rather than from the phone's arrival.
+        2. the folded PHASE instant, while it is pending, matching, and a phase
+           the producer HOLDS (:data:`_PHASE_ANCHOR_ADOPTABLE`) — how a phone
+           that attached mid-prose or mid-dictation learns how long that work
+           has been going, which no per-call stamp can answer because there is
+           no call behind it.
+        3. the edge ``edge`` names: an event this fold watched BEGIN a phase is
+           that phase's zero, exactly as the TUI's widget zeroes its own phase
+           clock on entry. This is the source that makes the ordinary phone
+           tick, and the one the previous head got wrong by spending it on
+           phases this fold had joined late.
+
+        ``None`` is the fourth answer, and a real one: a phase this fold joined
+        mid-flight, whose producer stated no instant, and which no event of this
+        fold's has dated. The label is then published WITHOUT a clock rather
+        than with a number counted from the attach — carried on the wire as
+        ``activity_started_s = None``, which the phone renders by withholding the
+        digits and keeping the reserved cells.
+        """
+        stated = _stated_epoch(epoch)
+        if stated is not None:
+            return monotonic_from_epoch(stated)
+        if (
+            self._attach_phase_at is not None
+            and phase in _PHASE_ANCHOR_ADOPTABLE
+            and self._attach_phase == phase
+        ):
+            anchor = self._attach_phase_at
+            # One-shot, exactly like the epoch path: the anchor is an AGE
+            # converted once, and every tick after this counts on the monotonic
+            # clock rather than re-reading a wall-clock stamp on each repaint.
+            self._drop_attach_anchor()
+            return anchor
+        return time.monotonic() if edge else None
+
+    def _drop_attach_anchor(self) -> None:
+        """Retire the attach-time phase reading.
+
+        Called when it is spent (adopted by a matching label) and when a phase
+        edge has just been observed LIVE: the producer restamps its phase at
+        exactly those events, so a reading folded before attach describes a
+        phase that is already over. Retiring it is how one turn's attach cannot
+        date the next turn's work; the clock itself is never moved here — a
+        running counter is only ever moved by the code that owns its edge.
+        """
+        self._attach_phase = ""
+        self._attach_phase_at = None
 
     def _derive_activity(self, event: AgentEvent) -> None:
         """The label the TUI's WorkingBlock would show for this event, from the
         SAME rule: a running tool's intent, else the stream phase, else
-        "thinking". Empty once the turn settles."""
+        "thinking". Empty once the turn settles.
+
+        Each label carries the phase it belongs to, which is what lets
+        ``reconcile_clocks``' attach-time anchor be adopted only where it is the
+        same kind of work.
+        """
         p = self.projection
         if isinstance(event, AgentStartEvent):
-            self._activity_started_at = time.monotonic()
-            self._set_activity("thinking")
+            # A new turn: every phase in it is observed live from here, so the
+            # attach-time reading (the PREVIOUS turn's by definition) goes.
+            self._set_activity(
+                ACTIVITY_PHASE_THINKING, phase=ACTIVITY_PHASE_THINKING, restart_clock=True
+            )
             return
         if isinstance(event, AgentEndEvent):
             # The one true terminal: the run is over, clear the working line.
             p.activity = ""
-            p.activity_started_s = 0.0
+            p.activity_started_s = None
             self._activity_started_at = None
+            self._activity_phase = ""
+            # No turn is in flight any more, so there is no phase for an
+            # attach-time reading to date — and none is ever inherited by the
+            # next turn.
+            self._drop_attach_anchor()
             return
         if isinstance(event, TurnEndEvent):
             # A per-model-turn boundary, NOT the end of the run (loop.py ~589
@@ -1587,7 +1886,9 @@ class ProjectionFold:
             # after a tool finishes — show "thinking", restart the clock for the
             # wait. Clearing it here blanked the working line mid-run; only
             # AgentEndEvent settles the turn.
-            self._set_activity("thinking", restart_clock=True)
+            self._set_activity(
+                ACTIVITY_PHASE_THINKING, phase=ACTIVITY_PHASE_THINKING, restart_clock=True
+            )
             return
         if not p.streaming:
             return
@@ -1597,17 +1898,67 @@ class ProjectionFold:
             # the model finished writing: the terminal frame means the wait is
             # now on the harness (the call is queued), and a never-run verdict
             # means the wait is over and the call is not coming.
+            #
+            # The two terminal arms are dated ``queued``, a phase the producer
+            # never folds and whose clock the TUI withholds outright — "there is
+            # no instant a 'waiting to run' age could honestly count from"
+            # (``frontend_state``'s own words beside the phase constants). An
+            # ``edge`` of ``False`` is that refusal: the ``queued`` phase is also
+            # outside ``_PHASE_ANCHOR_ADOPTABLE``, so neither an attach-time
+            # reading nor this fold's own arrival can date these labels, and the
+            # band shows no number until the call starts or the phase moves on.
             if event.not_run_reason:
-                self._set_activity(event.not_run_reason)
+                self._set_activity(event.not_run_reason, phase=ACTIVITY_PHASE_QUEUED, edge=False)
             elif event.dictation_complete:
-                self._set_activity(f"waiting to run {event.tool_name}")
+                self._set_activity(
+                    f"waiting to run {event.tool_name}",
+                    phase=ACTIVITY_PHASE_QUEUED,
+                    edge=False,
+                )
             else:
-                self._set_activity(event.intent or f"dictating {event.tool_name}")
+                # A dictation's own edge is its batch's FIRST announcement: the
+                # producer folds one zero per batch and does not restamp on the
+                # later ones, so this fold dates the label from the edge it
+                # watched and from the producer's folded instant when it joined
+                # the batch late — never from a later announcement, which would
+                # be the batch's age reset by a name change.
+                self._set_activity(
+                    event.intent or f"dictating {event.tool_name}",
+                    phase=ACTIVITY_PHASE_COMPOSING,
+                    edge=(
+                        self._activity_phase not in ("", ACTIVITY_PHASE_COMPOSING)
+                        or self._attach_phase not in ("", ACTIVITY_PHASE_COMPOSING)
+                    ),
+                )
         elif isinstance(event, ToolExecutionStartEvent):
-            self._set_activity(event.intent or f"running {event.tool_name}")
+            # The call's OWN start when the producer stated one: a start event
+            # that reaches this fold late — the fold was built at attach, the
+            # stream was relayed, the event was redelivered — dates the row and
+            # the band from the call rather than from the phone's arrival.
+            #
+            # With NO epoch the start event is the phase's edge only if this
+            # fold watched the phase begin. A producer that states no epoch (an
+            # older runtime) plus a call already in flight at attach would
+            # otherwise publish the fold's own arrival as a KNOWN zero, and the
+            # band would count `0s` up from the phone's mount while the call's
+            # own row withholds its duration in the same frame — design round
+            # 3's D7, the D4 class inverted. The `running` phase is not an
+            # adoptable one (the batch's phase edge is its FIRST call's start,
+            # D9), so an unwatched start with no epoch publishes no clock at all.
+            self._set_activity(
+                event.intent or f"running {event.tool_name}",
+                phase=ACTIVITY_PHASE_RUNNING,
+                epoch=event.started_at_epoch,
+                edge=(
+                    self._activity_phase not in ("", ACTIVITY_PHASE_RUNNING)
+                    or self._attach_phase not in ("", ACTIVITY_PHASE_RUNNING)
+                ),
+            )
         elif isinstance(event, ToolExecutionEndEvent):
             # Back to waiting on the model: restart the clock for the gap.
-            self._set_activity("thinking", restart_clock=True)
+            self._set_activity(
+                ACTIVITY_PHASE_THINKING, phase=ACTIVITY_PHASE_THINKING, restart_clock=True
+            )
         elif isinstance(event, MessageStartEvent):
             # A model call is in flight with nothing streamed yet: "thinking",
             # not "responding". The loop yields this from a placeholder at the
@@ -1616,14 +1967,38 @@ class ProjectionFold:
             # "responding" here claimed prose for every model call. The TUI's
             # WorkingBlock says "responding" only once its streaming block is
             # mounted, which happens on the first non-empty delta below.
+            #
+            # No forced restart, and that is the producer's rule rather than an
+            # omission: its fold restamps ``thinking`` at every ``message_start``
+            # (``frontend_state._fold_activity_phase``), so the number this fold
+            # publishes from here — its own arrival — is the same zero the
+            # producer holds. An attach-time reading is never adopted for this
+            # label and could not honestly be: ``thinking`` is re-zeroed by
+            # every event that can carry it, so any folded instant predates the
+            # phase the label names (``_PHASE_ANCHOR_ADOPTABLE``).
             if isinstance(event.message, Message) and event.message.role == "assistant":
-                self._set_activity("thinking")
+                self._set_activity(ACTIVITY_PHASE_THINKING, phase=ACTIVITY_PHASE_THINKING)
         elif isinstance(event, MessageUpdateEvent):
             # The first text delta is the transition to prose. Only from the
             # model-wait: a running tool's intent outranks narration arriving
             # beside it, and once "responding" it stays until the phase ends.
-            if event.delta and p.activity in ("thinking", ""):
-                self._set_activity("responding")
+            #
+            # The prose edge is a delta only when the model-wait preceded it —
+            # the producer's own rule is ``into(RESPONDING)`` from ``THINKING``
+            # — so a fold built mid-prose either adopts the producer's instant
+            # for the phase it is already in or publishes no clock. Its first
+            # delta after such an attach is the middle of a phase, not its
+            # beginning, and dating it from the attach is the fabricated zero
+            # this whole path exists to remove.
+            if event.delta and p.activity in (ACTIVITY_PHASE_THINKING, ""):
+                self._set_activity(
+                    ACTIVITY_PHASE_RESPONDING,
+                    phase=ACTIVITY_PHASE_RESPONDING,
+                    edge=(
+                        self._activity_phase == ACTIVITY_PHASE_THINKING
+                        or self._attach_phase == ACTIVITY_PHASE_THINKING
+                    ),
+                )
         elif isinstance(event, MessageEndEvent):
             # Ends the PROSE phase only. `message_end` closes the model call,
             # but for a tool-calling turn it arrives AFTER the compose events
@@ -1634,12 +2009,18 @@ class ProjectionFold:
             # working line keeps saying `composing …` across `message_end`
             # while only the streaming block unmounts. Downgrading anything but
             # "responding" here said "thinking" for the whole approval wait.
+            #
+            # The producer restamps its phase at this edge (the fold's
+            # ``message_end`` arm), so the clock is restarted here too rather
+            # than left to the label change alone.
             if (
                 isinstance(event.message, Message)
                 and event.message.role == "assistant"
-                and p.activity == "responding"
+                and p.activity == ACTIVITY_PHASE_RESPONDING
             ):
-                self._set_activity("thinking")
+                self._set_activity(
+                    ACTIVITY_PHASE_THINKING, phase=ACTIVITY_PHASE_THINKING, restart_clock=True
+                )
 
     # -- todos / pending / state -------------------------------------------
 
@@ -1899,6 +2280,78 @@ class ProjectionFold:
         if self.projection.streaming != bool(is_streaming):
             self.projection.streaming = bool(is_streaming)
             self._bump()
+
+    def reconcile_clocks(self, session: Any) -> None:
+        """Adopt the producer's start instants ONCE, at attach.
+
+        The fold dates every clock from the events it observes, which is
+        exactly wrong for a projection BUILT at attach: it never witnessed the
+        ``agent_start``, the ``tool_execution_start`` or the ``tool_call_compose``
+        that began the work in flight, so the first event it does see dates that
+        work from the phone's own arrival. That is the operator's report — a
+        live band reading ``0s`` and counting up from the moment the phone
+        attached — and it is the same defect the TUI's cards and working block
+        were fixed on by seeding from these very anchors
+        (``tui/widgets/tool_card.py`` ``monotonic_from_epoch``,
+        ``OperatorApp._current_activity``).
+
+        The two anchors are read from the session, not from a second fold: both
+        real session shapes answer them (``Session`` and ``AttachedSession``,
+        declared in ``session/protocol.py``) and the PRODUCER is the process
+        running the work, so its instants are the executor's own rather than a
+        reconstruction. ``live_tool_start_epochs()`` dates calls that are in
+        flight; ``activity_phase_clock()`` dates the phases with no call behind
+        them (``thinking``/``responding``), which is the half a per-call stamp
+        cannot answer.
+
+        Both reads are probed and every refusal here is load-bearing:
+
+        * a source that cannot answer at all — a reduced facade, a legacy
+          producer, an embedder with no fold — seeds nothing, and today's
+          behaviour stands rather than an exception being raised on attach. Both
+          reads are SHAPE-checked as well as probed (``_phase_pair`` for the
+          phase pair, ``_live_call_map`` for the call map): a host that has the
+          member but answers the wrong shape would otherwise raise here, and
+          this call sits on the unattended attach path
+          (``RuntimeServer._serve``) where a raise ends the session for every
+          viewer;
+        * a call present in the map with ``None`` states that it STARTED
+          without stating when, so NO entry is seeded for it: its end event
+          then measures what it measured before rather than inheriting an
+          instant this fold invented;
+        * the phase instant is stored PENDING, never applied. A label asks for
+          it through ``_activity_anchor``, which hands it over only when the
+          phase it is about to display EQUALS the folded one AND that phase is
+          one the producer HOLDS rather than re-zeroes on every event of its
+          kind (:data:`_PHASE_ANCHOR_ADOPTABLE` — ``responding`` and
+          ``composing``). A mismatch — the phone about to say ``responding``
+          while the producer is still mid-``thinking``, a compaction fallback, a
+          facade answering ``("", None)`` — adopts nothing, because one phase's
+          zero under another phase's label is a wrong number where a blank one
+          would be honest. ``FrontendStateStore.activity_phase_clock`` exists,
+          and takes its two fields in one call, for the same reason.
+
+        Entries seeded for live calls live exactly as long as an observed one:
+        the call's own end event pops it, and a later start under a reused id
+        overwrites it, so a seeded instant can never date a different call.
+        """
+        phase_clock = getattr(session, "activity_phase_clock", None)
+        if callable(phase_clock):
+            phase, phase_started_at = _phase_pair(phase_clock())
+            self._attach_phase = phase
+            stated = _stated_epoch(phase_started_at)
+            self._attach_phase_at = monotonic_from_epoch(stated) if stated is not None else None
+        starts = getattr(session, "live_tool_start_epochs", None)
+        if not callable(starts):
+            return
+        for tool_call_id, epoch in _live_call_map(starts()).items():
+            stated = _stated_epoch(epoch)
+            if stated is None:
+                continue
+            # ``setdefault``, not assignment: a call this fold already watched
+            # start keeps the instant it observed, so adopting an anchor can
+            # never move a counter that is already running.
+            self._tool_started_at.setdefault(str(tool_call_id), monotonic_from_epoch(stated))
 
     def set_state(
         self,

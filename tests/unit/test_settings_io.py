@@ -70,6 +70,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
+        DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
@@ -89,6 +90,7 @@ def _consumer_defaults() -> dict[str, object]:
         "display.time_format": DEFAULT_TIME_FORMAT,
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
+        "tui.sidebar_show_subagents": DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,
@@ -215,6 +217,7 @@ def _consumer_defaults() -> dict[str, object]:
 #: the prose in ``_DEFAULT_NOTES`` is what documents the intent.
 _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
+    "display.narration": "tui/settings.py derives its defaults from this registry",
     "display.rail": "tui/settings.py derives its defaults from this registry",
     "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
@@ -307,6 +310,54 @@ def test_display_flag_round_trips_through_the_reader(
     # And visible to the reader WITHOUT a manual reload, because the facade
     # invalidated the cache itself.
     assert settings_get("display.shimmer") is False
+
+
+def test_the_narration_key_is_flat_dotted() -> None:
+    """THE trap, named for this key so it fails BY NAME.
+
+    ``test_display_keys_are_flat_dotted`` covers it by iteration; this one
+    exists because a split path here is invisible from every angle except the
+    one that matters — the toggle reports success, the config file gains a
+    plausible ``display:`` block, and the flag never changes.
+    """
+    setting = settings_io.BY_KEY["display.narration"]
+    assert len(setting.path) == 1, f"split into {setting.path}"
+    assert "." in setting.path[0]
+
+
+def test_the_narration_default_matches_its_module_constant() -> None:
+    """The registry and the live path's fallback must be ONE answer.
+
+    ``tui/narration.py::DEFAULT_NARRATION`` is what the live path reads when
+    config is unavailable; the registry is what an untouched config resolves
+    to. Disagreeing means the feature is ON in one circumstance and OFF in the
+    other, which is the worst version of an opt-in flag.
+    """
+    from local_operator.tui.narration import DEFAULT_NARRATION
+
+    assert settings_io.BY_KEY["display.narration"].default == DEFAULT_NARRATION
+    assert DEFAULT_NARRATION is True, "the toggle must be opt-in: ON is today's behaviour"
+
+
+def test_the_narration_flag_round_trips_through_the_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Written flat, read back by the fast path, with no nested mapping."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_get, settings_reload
+
+    settings_reload()
+    manager = ConfigManager(tmp_path)
+    assert settings_get("display.narration") is True
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["display.narration"], False)
+
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["display.narration"] is False
+    assert "display" not in stored, "wrote a nested mapping nothing reads"
+
+    settings_reload()
+    assert settings_get("display.narration") is False
 
 
 def _sample_value(setting: settings_io.Setting) -> object:

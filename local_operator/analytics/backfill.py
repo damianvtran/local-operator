@@ -1,4 +1,14 @@
-"""One-time recovery of session names the ledger never heard about.
+"""Backfill sweeps for the analytics store, run once per process at startup.
+
+Two independent sweeps live here, both bounded, idempotent, best-effort and
+re-derived from scratch on every launch, both dispatched off the event loop by
+``session_factory``'s store-maintenance pass:
+
+1. :func:`backfill_analytics_session_names` — recover session NAMES the ledger
+   never heard about (the account below).
+2. :func:`backfill_analytics_session_daily` — re-derive the per-session DAY
+   ROLLUP that ``aggregate()`` reads, because it is created empty on an upgrade
+   while the ledger already holds months of calls (see its own docstring).
 
 Until now the analytics ledger learned a session's human name from exactly one
 place — ``Session.set_conversation_name`` — so a name only reached it when it
@@ -67,7 +77,11 @@ from pathlib import Path
 from typing import Callable
 
 from local_operator.analytics.model import condense_label
-from local_operator.analytics.store import SESSION_NAME_RANK_BACKFILL, AnalyticsStore
+from local_operator.analytics.store import (
+    DEFAULT_RETENTION_DAYS,
+    SESSION_NAME_RANK_BACKFILL,
+    AnalyticsStore,
+)
 
 logger = logging.getLogger("local_operator.analytics.backfill")
 
@@ -320,3 +334,128 @@ def _role_from_opener(opener: str) -> str:
     if not role or not role.replace("-", "").isalpha():
         return ""
     return role
+
+
+#: How many local days ONE rollup pass may re-derive. The REACH is already
+#: bounded by the ledger itself (the sweep stops at the ledger's oldest day), so
+#: this only bounds the work a single launch takes on — and it is deliberately
+#: equal to the ledger's own retention so one pass can always finish the hole on
+#: a normal install, which is what makes the panel fast on the first launch
+#: after upgrading rather than on the tenth. Whatever is left is picked up next
+#: launch, because every pass re-derives its worklist from the watermark.
+DEFAULT_SESSION_DAILY_DAYS_PER_PASS = DEFAULT_RETENTION_DAYS
+
+
+def backfill_analytics_session_daily(
+    config_dir: Path,
+    *,
+    max_days: int = DEFAULT_SESSION_DAILY_DAYS_PER_PASS,
+    store: AnalyticsStore | None = None,
+) -> int:
+    """Re-derive ``session_daily`` from the ledger; return days committed.
+
+    WHY A SWEEP IS NEEDED AT ALL, given the writer maintains the rollup: the
+    writer only ever contributes the calls it sees. On the release that first
+    ships this table, the ledger already holds up to 90 days of calls (1.15 M
+    rows and 7 219 sessions on the operator's), and none of them are in the
+    rollup. Until a day is derived, the gate refuses windows touching it and
+    those reads stay on the ledger — same numbers, today's latency.
+
+    WHAT THE USER SEES WHILE IT IS INCOMPLETE: nothing. A refused window is
+    answered by the ledger, so no total is ever zeroed, partial or stale, and
+    the only observable difference is that a window becomes fast once its days
+    have been swept. On the operator's 341 MB ledger the whole sweep is ~5-8 s
+    of wall time on a host at load 217, spread over ~26 chunked transactions of
+    50-250 ms, all of it on the store-maintenance thread and none of it on the
+    event loop.
+
+    CORRECT IF INTERRUPTED: the watermark only ever advances over a committed
+    day, contiguous from the newest end, so an interrupted pass leaves a
+    consistent table and a monotone frontier, and the next launch resumes at the
+    same place. A crash mid-transaction rolls that day back entirely (one day,
+    one transaction). An interrupted ZONE re-label is inert by construction: the
+    new zone is published only by a pass that re-labelled the whole span, so a
+    partial one leaves the old zone recorded and every read on the ledger path —
+    the next launch redoes it.
+
+    WHAT IT ALSO HEALS (review R3): a ``lop`` still running the pre-rollup binary
+    stamps ``ts_ms`` when it records, so the rows it adds without maintaining the
+    rollup can only land on days from the previous pass's top onward. The pass
+    therefore re-derives from that top rather than from a fixed newest-three, so
+    a stale writer's hole is repaired on the next launch instead of being served
+    as exact for the life of the table.
+
+    Best-effort in the strongest sense, like every other maintenance pass: it
+    may fail in any way at all without disturbing the session that triggered it.
+    """
+    # Same narrow invariant as the name sweep, and for the same reason: the
+    # ledger root is whatever the CALLER hands us, so an isolated run never
+    # re-derives days into the operator's real ledger.
+    db_path = config_dir / "analytics.db"
+    if store is None and not db_path.exists():
+        # Returning before opening anything keeps this pass from being the
+        # FIRST connection to a fresh file, which is the one ordering that
+        # breaks the recorder's single-writer-thread rule (see AGENTS.md
+        # §Usage analytics). A read-only sweep must not materialise a ledger.
+        return 0
+    owned = store is None
+    store = store if store is not None else AnalyticsStore(db_path)
+    try:
+        try:
+            plan = store.session_daily_worklist(max_days=max_days)
+        except Exception:  # noqa: BLE001 — an unreadable store is a no-op sweep
+            logger.debug("analytics: could not read the rollup worklist", exc_info=True)
+            return 0
+        rebucket = plan.mode == "rebucket"
+        derived = 0
+        for day in plan.days:
+            written = store.rederive_session_daily_day(day, rebucket=rebucket)
+            if written is None:
+                # A failed day STOPS the walk rather than skipping it: the
+                # watermark is "every day at or after this is complete", and
+                # deriving an older day after a failure would claim the failed
+                # one. Next launch resumes here.
+                break
+            derived += 1
+        if rebucket:
+            # Publish the new zone ONLY if this pass re-labelled the ledger's
+            # whole span, which the rebucket plan hands over in full (review
+            # R11) — so ``derived == len(plan.days)`` means "every day the ledger
+            # can answer, re-labelled". A short pass (a failure above) leaves the
+            # recorded zone untouched, so the gate keeps refusing and the next
+            # launch starts over — never a table holding two zones while the meta
+            # names one.
+            if plan.days and derived == len(plan.days):
+                store.commit_session_daily_rebucket(oldest_day=plan.days[-1], top_day=plan.days[0])
+            return derived
+        if plan.days and derived >= plan.recent_count:
+            # The recent window — the whole range a stale writer could have added
+            # to since the previous pass — was derived in full, so the next pass
+            # may start from this top. A pass that did not get through it must
+            # leave the old frontier, or the days it skipped would never be
+            # looked at again.
+            try:
+                store.mark_session_daily_swept(plan.days[0])
+            except Exception:  # noqa: BLE001 — a lost frontier costs a re-derive
+                logger.debug("analytics: could not record the sweep frontier", exc_info=True)
+        # THE VERIFY HALF. The walk above never looks back at a day it has already
+        # swept, and a pre-rollup writer's rows can land in exactly such a day,
+        # where the newest-row tail check cannot see them — that hole was served
+        # as exact, permanently. Comparing each day's bucket total against the
+        # ledger's row count finds it wherever it is and re-deriving removes it,
+        # so the gate's refusal lasts until the next launch instead of forever.
+        # Budgeted from what the walk above left, so one pass stays one pass.
+        healed = 0
+        try:
+            for day in store.session_daily_mismatched_days(max_days=max(0, max_days - derived)):
+                if store.rederive_session_daily_day(day) is None:
+                    break
+                healed += 1
+            if healed:
+                logger.debug("analytics: session_daily repaired %s day(s)", healed)
+        except Exception:  # noqa: BLE001 — a verify pass that cannot run heals nothing
+            logger.debug("analytics: session_daily verify pass failed", exc_info=True)
+        return derived + healed
+    finally:
+        if owned:
+            store.close()

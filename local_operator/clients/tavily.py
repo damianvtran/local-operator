@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from pydantic import BaseModel, SecretStr
 
-from local_operator.clients._http import response_body
+from local_operator.clients._http import response_body, scrubbed_response_body
 
 
 class TavilyResult(BaseModel):
@@ -149,9 +149,11 @@ class TavilyClient:
         try:
             response = requests.post(url, json=payload, headers=headers)
             if response.status_code != 200:
+                # Scrubbed like the raising path below: this client authenticates with
+                # a bearer header, and an upstream is free to quote it back.
                 raise RuntimeError(
                     f"Tavily API request failed with status {response.status_code}, content:"
-                    f" {response.content.decode()}"
+                    f" {scrubbed_response_body(response)}"
                 )
             data = response.json()
             return TavilyResponse.model_validate(data)

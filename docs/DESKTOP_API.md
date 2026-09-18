@@ -26,14 +26,18 @@ on it — no surface is withheld — and its one consumer is the refusal alert's
 which differs by whether a correct client can reach that refusal at all.
 
 "IS a command" means the word plus an argument the desktop actually consumes — a
-prompt, a value from a list, or a shape the command route validates or forwards
-(`argument_shape` / `argument_words` on the catalogue, see
+prompt, a value from a list, or a shape the command route validates, forwards or
+REFUSES (`argument_shape` / `argument_words` on the catalogue, see
 [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md)). So `/compact hello`, `/usage more
 prose` and a draft that merely OPENS with `/mcp logout` are messages, while
-`/mcp logout`, `/login openai` and `/move ~/x` are still refused — each of those
-is a control the composer runs. The two booleans decide FIRST and a row they
-carry publishes `any` rather than `none`, so a client may read the shape alone or
-OR the three facts and reach the same answer.
+`/mcp logout`, `/login openai`, `/move ~/x` and `/credential <key> <value>` are
+still refused — each of those is a control the composer runs. The refusal case is
+the one where the text's destination is another surface rather than this one:
+`/credential`'s typed text is answered on `/commands` with "Enter credentials in
+the masked credential form, not command text", so a whole-draft form of it is
+refused on `/messages` too rather than posted as a message. The two booleans
+decide FIRST and a row they carry publishes `any` rather than `none`, so a client
+may read the shape alone or OR the three facts and reach the same answer.
 
 Electron **main**, not the renderer, generates a random 32-byte token for each
 managed backend lifetime. Supply it only through `LOCAL_OPERATOR_DESKTOP_TOKEN`
@@ -1022,12 +1026,15 @@ had one to attribute a catalogue event to.
 
   **`revision` is a MONOTONE COUNTER, not that token.** Two causes invalidate the
   rows, and both bump it: the row SET moving (a session created or removed) and a
-  row's derived ACTIVITY changing (`local_operator.session.catalog.active_of`,
-  i.e. which SECTION it is filed in — a background session that finishes leaves
-  "Previous chats" for "Active chats"). The client's refetch effect re-runs on a
-  dependency VALUE, so the revision it is given must be one it has never seen: a
+  row's derived ORDER KEY changing (`local_operator.session.catalog.order_key_of`,
+  the key `rank_entries` sorts by) — i.e. WHERE the sidebar files the row, which
+  is both the section it is in and the slot it holds inside one. A background
+  session that finishes is the second case twice over: it leaves "Previous chats"
+  for "Active chats", and a session that is already Active and finishes reorders
+  4 -> 1 without leaving its section at all. The client's refetch effect re-runs on
+  a dependency VALUE, so the revision it is given must be one it has never seen: a
   token that can repeat, or a number that only expresses one of the two causes,
-  would leave a row in the wrong section until the 30 s poll — measured at
+  would leave a row in the wrong slot until the 30 s poll — measured at
   7.5-8.9 s on the paired UI PR before this, and with "Previous chats" collapsed
   by default the row was not visible at all for that time. The `open` snapshot's
   `catalogue_revision` is that same counter, so a connecting client's view is

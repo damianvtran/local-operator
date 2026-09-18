@@ -40,6 +40,7 @@ import platform
 import re
 import shlex
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -466,6 +467,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # QwenCloud console session cookie: the credential the personal Token Plan
+    # usage window needs and no login flow can mint (a browser session cookie
+    # cannot be refreshed headlessly). stdlib-only registration, same rule.
+    qwencloud_parser = subparsers.add_parser(
+        "qwencloud-ticket",
+        help="Store the QwenCloud console session cookie that /usage reads",
+    )
+    qwencloud_actions = qwencloud_parser.add_subparsers(dest="qwencloud_command")
+    qwencloud_actions.add_parser(
+        "set", help="Store the cookie; the value is read from STDIN, never argv"
+    )
+    qwencloud_actions.add_parser(
+        "status", help="Whether a cookie is stored and how old it is; never the value"
+    )
+    qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
+    qwencloud_actions.add_parser(
+        "migrate", help="Move a plaintext ticket into the encrypted secret store"
+    )
+
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
@@ -840,7 +860,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "when",
         help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
     )
-    wake_create.add_argument("message", help="the self-prompt delivered when it fires")
+    # Lazy, like every other harness import in this module (see the module
+    # docstring): the flag's help names the SHARED cap rather than a second
+    # number that could drift from it.
+    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+
+    wake_create.add_argument(
+        "message",
+        # The cap is the SHARED one (``MAX_WAKE_MESSAGE_CHARS``, enforced by
+        # ``build_wake_schedule``), and this command used to build the model
+        # directly so it had no cap at all. Said here rather than leaving the
+        # limit to be discovered by being refused (review round 1, R5).
+        help=(
+            "the self-prompt delivered when it fires "
+            f"(at most {MAX_WAKE_MESSAGE_CHARS} characters)"
+        ),
+    )
     wake_create.add_argument(
         "--every",
         default="",
@@ -3578,6 +3613,13 @@ def _cell_len(text: str) -> int:
 
 
 def _wake_create(args: argparse.Namespace) -> int:
+    # THE READ IS THE WRITER'S NOW. Upstream built a ``Transcript`` here so the
+    # append could reuse it rather than parse the journal twice; this command no
+    # longer builds a list at all — ``arm_wake`` reads the transcript's latest
+    # ``wake_schedules`` entry with the one-row reader and appends through the
+    # object the write already needs — so that double parse is not reachable
+    # from here, and the note it carried is answered rather than dropped.
+
     """``lop wake create <session> "<when>" "<message>"``.
 
     Persists through the TRANSCRIPT first, exactly like the in-session wake
@@ -3594,23 +3636,22 @@ def _wake_create(args: argparse.Namespace) -> int:
     """
     import time as _time
 
-    from local_operator.harness.wake import (
-        MIN_WAKE_INTERVAL_MS,
-        WakeSchedule,
-        parse_wake_at,
-        parse_wake_duration,
-    )
+    from local_operator.harness.wake import parse_wake_at, parse_wake_duration
     from local_operator.paths import config_dir
-    from local_operator.wakes.store import read_entry, write_entry
+    from local_operator.wakes.arm import WakeWriteError, arm_wake
 
     root = config_dir()
     session_id = str(args.session)
-    session_dir = root / "sessions" / session_id
-    if not session_dir.is_dir():
-        print(f"no session {session_id!r}", file=sys.stderr)
-        return 1
-
     now_ms = int(_time.time() * 1000)
+
+    # The scheduling request, in the SHARED vocabulary the one validator reads
+    # (``message``/``in``/``at``/``every``/``until``/``limit``). The flags and
+    # their prepositions are translated here because that spelling is this
+    # command's, not the schedule's. What the values MEAN — the 16-schedule
+    # cap, the first FREE id slot, the interval floor, the bound-on-a-one-shot
+    # rule — is decided once, by ``build_wake_schedule`` inside
+    # ``wakes/arm.py``, which is also the writer the desktop arm route uses.
+    request: dict[str, Any] = {"message": str(args.message)}
     raw = str(args.when).strip()
     # "in 2m" is the phrasing the help text advertises and the one a person
     # reaches for; the parsers below take the bare duration, so the leading
@@ -3618,61 +3659,39 @@ def _wake_create(args: argparse.Namespace) -> int:
     body = raw[3:].strip() if raw.lower().startswith("in ") else raw
     if raw.lower().startswith("at "):
         due_at = parse_wake_at(raw[3:].strip(), now_ms)
+        request["at"] = raw[3:].strip()
     else:
         duration = parse_wake_duration(body)
         due_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
+        # A bare token is a duration when one parses and an absolute clock or
+        # an ISO instant otherwise — the same precedence ``parse_wake_at``
+        # applies to a leading ``+``.
+        request["in" if duration is not None else "at"] = body
     if due_at is None:
         print(f"could not read a time from {raw!r} (try 'in 2m' or 'at 09:30')", file=sys.stderr)
         return 1
 
-    entry = read_entry(root, session_id) or {}
-
-    # Existing schedules come from the TRANSCRIPT, not the index: the index
-    # is derived and may lag (or be absent), and the append below REPLACES
-    # the session's schedule list, so reading a stale source would silently
-    # cancel live reminders — the same hazard the in-session persist guards.
-    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
-    from local_operator.session.transcript import Transcript
-
-    # NOT converted to the one-row reader, deliberately: this command WRITES
-    # through the same object a few lines below (``transcript.append_custom``),
-    # and an append needs a materialised ``_entries`` — reconstructing it after
-    # the read would pay the same whole-journal parse twice. There is no parse
-    # to save here, so the read rides the object the write already needs.
-    transcript = Transcript(session_dir)
-    latest = transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
-    existing: list[dict[str, Any]] = []
-    if latest is not None:
-        details = dict(latest.payload.get("details", {}))
-        existing = [dict(s) for s in details.get("schedules", []) if isinstance(s, dict)]
-    # Per-session handles (``w1``…), matching the in-session numbering so the
-    # id a user sees here is the id `/wake` would have given it.
-    every_ms: int | None = None
+    # WHAT THIS COMMAND CHECKS, AND WHAT IT DOES NOT. Everything here that
+    # prints and returns is FLAG TRANSLATION: turning ``"in 2m"``/``"at 09:30"``
+    # into the request's own vocabulary, choosing which key carries it, and
+    # telling the user when a flag's value cannot be read as that flag's kind at
+    # all. Every RULE — the 16-schedule cap, the first free id slot, the interval
+    # floor, the bound-on-a-one-shot rule, the message length — is decided once,
+    # by ``build_wake_schedule`` inside ``wakes/arm.py``, and reaches this command
+    # as the SAME sentence the desktop route and the agent's tool print. This
+    # command used to re-word the floor and the bound for itself, which made "one
+    # rule, one place" half true; the ONLY check kept locally is that a repeat
+    # interval is parseable as a duration, because "which of these two kinds is
+    # this flag" is this command's question and nobody else's (review round 1,
+    # R4).
     every_raw = str(getattr(args, "every", "") or "").strip()
-    if every_raw:
-        every_ms = parse_wake_duration(every_raw)
-        if every_ms is None:
-            # The same refusal the tool path gives, for the same reason: a
-            # bare number is ambiguous between seconds and milliseconds, and
-            # guessing wrong is a runaway loop.
-            print(
-                f"could not read a repeat interval from {every_raw!r} "
-                "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
-                file=sys.stderr,
-            )
-            return 1
-        if every_ms < MIN_WAKE_INTERVAL_MS:
-            # Caught HERE rather than at the model validator so the user gets
-            # a sentence instead of a pydantic traceback. The floor is
-            # deliberate: a wake starts a full turn, so a sub-minute repeat
-            # starves the session it is meant to serve.
-            print(
-                f"repeat interval {every_raw!r} is too short — "
-                f"the minimum is {MIN_WAKE_INTERVAL_MS // 1000}s, "
-                "because each wake starts a full turn",
-                file=sys.stderr,
-            )
-            return 1
+    if every_raw and parse_wake_duration(every_raw) is None:
+        print(
+            f"could not read a repeat interval from {every_raw!r} "
+            "(try '5m', '1h' or '8h30m'; a bare number is ambiguous)",
+            file=sys.stderr,
+        )
+        return 1
 
     until_at: int | None = None
     until_raw = str(getattr(args, "until", "") or "").strip()
@@ -3696,82 +3715,61 @@ def _wake_create(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        # ``until`` is read by ``parse_wake_at`` — where a leading ``+`` marks a
+        # duration — while the flag promises the ``in 7d`` spelling, so the
+        # same translation ``when`` does above happens here.
+        request["until"] = "+" + body if duration is not None else body
 
     limit = getattr(args, "limit", None)
-    if limit is not None and limit < 1:
-        print("--limit must be at least 1", file=sys.stderr)
-        return 1
+    if every_raw:
+        request["every"] = every_raw
+    if limit is not None:
+        request["limit"] = limit
 
-    # Both bounds only mean something for a repeat: a one-shot already fires
-    # exactly once, so silently accepting them would promise a behaviour the
-    # schedule does not have.
-    if every_ms is None and (until_at is not None or limit is not None):
-        print("--until and --limit bound a repeat — add --every", file=sys.stderr)
-        return 1
-
-    schedule = WakeSchedule(
-        id=f"w{len(existing) + 1}",
-        message=str(args.message),
-        next_due_at=due_at,
-        created_at=now_ms,
-        every_ms=every_ms,
-        until_at=until_at,
-        limit=limit,
-    )
-    combined = [*existing, schedule.model_dump()]
-
-    # TRANSCRIPT FIRST, then the derived index — the same order as
-    # ``Session._persist_wake_schedules``. The append is the only step allowed
-    # to fail the command: an index written without it is a wake the next
-    # open deletes, which is exactly the round-2 defect.
+    # ONE writer. ``arm_wake`` appends the transcript entry first (the source of
+    # truth) and then rewrites the derived index CARRYING the keys it does not
+    # own — ``stopped_at``, and the ``last_fired_at``/``last_attempt_at``
+    # lateness stamps — which this command used to drop, so arming a wake on a
+    # session the user had stopped silently un-parked the whole session. It also
+    # verifies after the append that no other writer landed on top of it, since
+    # nothing prevents a second process appending to the same transcript.
     import asyncio as _asyncio
 
-    async def _append() -> None:
-        await transcript.append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": combined})
-
-    _asyncio.run(_append())
-
-    written = write_entry(
-        root,
-        session_id,
-        cwd=str(entry.get("cwd") or session_dir),
-        schedules=combined,
-    )
-
-    installed_reason = ""
     try:
-        from local_operator.wakes.install import ensure_supervisor_installed
-
-        installed_reason = ensure_supervisor_installed(root).reason
-    except Exception:  # noqa: BLE001
-        # A wake that is scheduled but unsupervised still fires whenever the
-        # session is open, so a failed install must not fail the command —
-        # `lop wake status` is where that gap is reported, in one place.
-        import logging as _logging
-
-        _logging.getLogger(__name__).debug("wake supervisor install failed", exc_info=True)
+        outcome = _asyncio.run(arm_wake(root, session_id, request, now_ms=now_ms))
+    except WakeWriteError as error:
+        # The refusal sentence comes from the shared validator, so the CLI, the
+        # desktop route and the agent's tool say the same thing about the same
+        # mistake.
+        print(str(error), file=sys.stderr)
+        return 1
 
     if getattr(args, "json", False):
         print(
             _json_dumps(
                 {
-                    "session_id": session_id,
-                    "wake_id": schedule.id,
-                    "next_due_at": due_at,
-                    "entry": str(written) if written else "",
-                    "supervisor": installed_reason,
+                    "session_id": outcome.session_id,
+                    "wake_id": outcome.wake_id,
+                    "next_due_at": outcome.next_due_at,
+                    "entry": outcome.index_path,
+                    "supervisor": outcome.supervisor,
                 }
             )
         )
         return 0
     from local_operator.wakes.display import format_wake_time
 
+    # The row as PERSISTED (the message the validator stripped), not the flag
+    # as typed: what the listing will show must be what was printed here.
+    row = next((s for s in outcome.schedules if s.id == outcome.wake_id), None)
+    assert outcome.next_due_at is not None  # a create always resolves a due time
     print(
-        f"{schedule.id}  {format_wake_time(due_at)} "
-        f"({_format_due((due_at - now_ms) / 1000.0)})  {schedule.message}"
+        f"{outcome.wake_id}  {format_wake_time(outcome.next_due_at)} "
+        f"({_format_due((outcome.next_due_at - now_ms) / 1000.0)})  "
+        f"{row.message if row else request['message']}"
     )
-    if installed_reason:
-        print(f"supervisor: {installed_reason}")
+    if outcome.supervisor:
+        print(f"supervisor: {outcome.supervisor}")
     return 0
 
 
@@ -5817,6 +5815,585 @@ def login_status_command() -> int:
         auth_store.close()
 
 
+#: The provider whose `/usage` window the console ticket feeds. The ticket is
+#: stored under its OWN namespace (`qwencloud-console`) so it can never satisfy
+#: `has_any_credential` and make local-operator believe it can CHAT on a
+#: read-only console cookie -- but the usage it reports is filed under this id,
+#: so this is the cache row a ticket change invalidates and the credential the
+#: ticket augments rather than replaces.
+_QWENCLOUD_TICKET_AUGMENTS = "alibaba-token-plan"
+
+
+def _qwencloud_credential_row_exists(store: Any) -> bool:
+    """Whether a Token Plan credential the ticket can augment is stored.
+
+    `status` warns on this rather than `status` fixing it, because the fix is
+    not available: `/usage` gates on `can_report_usage` -> `is_usable`, and a
+    ticket row that satisfied those is exactly the blast radius the separate
+    `qwencloud-console` namespace exists to prevent.
+
+    Soft-deleted rows are NOT included, which is the point: `lop logout
+    alibaba-token-plan` marks the row `logged-out`, and that is precisely the
+    moment the window goes silently missing and the warning has to appear.
+
+    An unreadable store returns True — no warning. This is a HINT, not a
+    security gate, so the honest failure is silence rather than telling the
+    user a credential is missing when the store could not be read at all.
+    `sqlite3.ProgrammingError` still propagates, following the rule
+    controller.py:268-278 records: a caller bug must not dress itself as a
+    plausible degraded state.
+    """
+    try:
+        rows = store.list_credentials(_QWENCLOUD_TICKET_AUGMENTS)
+    except sqlite3.ProgrammingError:
+        raise
+    except Exception:  # noqa: BLE001 — an unreadable store is not a missing credential
+        return True
+    return bool(rows)
+
+
+def qwencloud_ticket_command(args: argparse.Namespace) -> int:
+    """Store / inspect / remove the QwenCloud console session cookie.
+
+    The value is read from STDIN and never from argv: a command line is
+    readable by any process running as you (`ps`) and lands in shell history.
+    This mirrors `lop secret set NAME`.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore()
+    try:
+        return _qwencloud_ticket_action(getattr(args, "qwencloud_command", None), store)
+    finally:
+        # Same discipline as every sibling command in this file (see
+        # `login_command`, `logout_command`, `login_status_command`): the store
+        # owns a SQLite connection and, lazily, the usage cache's, and a verb
+        # that returns without closing leaks both.
+        store.close()
+
+
+def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
+    """One `qwencloud-ticket` verb, against an already-open store.
+
+    Split from the command so the store's lifetime is owned in exactly one
+    place, and so a test can drive a verb against a temp store it still needs
+    to read assertions from afterwards.
+    """
+    # `_invalidate_cached_usage` is auth_cli's, reused rather than re-spelled:
+    # `lop login` and `lop logout` already drop the cached usage row on a
+    # credential change (auth_cli.py:400, :409) precisely so the change shows
+    # at once, and the console ticket is a credential change this command's
+    # own cache key cannot observe -- `_account_fingerprint` reads the
+    # provider's rows, and the ticket lives in a separate namespace on
+    # purpose. A second mechanism here would be the "second way of doing
+    # something" this codebase treats as a defect.
+    from local_operator.providers.auth_cli import _invalidate_cached_usage
+    from local_operator.providers.qwencloud_console import (
+        QWENCLOUD_TICKET_STALE_MS,
+        TicketStoreError,
+        TicketStoreLocked,
+        _secret_is_present,
+        delete_ticket,
+        read_ticket_record,
+        store_ticket,
+    )
+
+    if command == "set":
+        if sys.stdin is None or sys.stdin.isatty():
+            print(
+                "lop qwencloud-ticket set: the value is read from stdin, never from "
+                "the command line (argv is readable by any process running as you).\n"
+                "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+                file=sys.stderr,
+            )
+            return 2
+        value = sys.stdin.read()
+        if value.endswith("\n"):
+            value = value[:-1]
+        try:
+            store_ticket(store, value)
+        except TicketStoreError as exc:
+            print(f"lop qwencloud-ticket set: {exc}", file=sys.stderr)
+            return 1
+        # The length is read back as confirmation, but the write already
+        # succeeded -- so a store that cannot be re-read afterwards must not
+        # turn into "(0 characters)", which reads as "nothing was stored" on
+        # the one command whose job is handling the secret. Report the length
+        # written instead, and never a zero after a successful write.
+        try:
+            record = read_ticket_record(store)
+        except TicketStoreError:
+            record = None
+        length = record["length"] if record else len(value.strip())
+        # Same call and the same position as the login path's: after the write
+        # succeeded, before the receipt. Without it a ticket swap changes
+        # NOTHING the cache key observes -- the key was measured identical
+        # across two different tickets -- so a latched `usage unavailable` row
+        # is served for up to ~12.5 min (USAGE_UNAVAILABLE_RETRY_MS 10 min,
+        # +/-25% jitter) after the user has already fixed the problem.
+        _invalidate_cached_usage(_QWENCLOUD_TICKET_AUGMENTS, store)
+        print(f"Stored QwenCloud console ticket ({length} characters).")
+        return 0
+
+    if command == "status":
+        # Shares `rm`'s hazard in a quieter form: reporting "nothing stored"
+        # for an unreadable store would tell the user the cookie is already
+        # gone when it is on disk and readable by anything that can open the
+        # file.
+        try:
+            record = read_ticket_record(store)
+            # The ROW is not the whole answer, and this is the other half of the
+            # fix `rm` already needed. `store_ticket` writes the VALUE first and
+            # the row second, on purpose, so a crash, a kill or an older
+            # `auth.db` restored from a backup leaves a SECRET ORPHAN: a live
+            # value with nothing pointing at it (see `delete_ticket`'s
+            # docstring for the same state from the revoking side).
+            # `read_ticket_record` reads rows and reports None for it, so
+            # without this probe `status` answers "no ticket stored" over a live
+            # full-account cookie -- hiding the exposure AND pointing away from
+            # `rm`, the only verb that revokes it.
+            #
+            # INSIDE this `try`, deliberately: `_secret_is_present` raises the
+            # same `TicketStoreError` family (`TicketStoreLocked`,
+            # `TicketStoreUnreadable`), and a store that cannot be read must
+            # reach the UNKNOWN branch below rather than fall through to the
+            # no-ticket receipt.
+            unreferenced_value = record is None and _secret_is_present(None)
+        # No separate `TicketStoreLocked` clause here, unlike `rm`. The remedy
+        # ("Run `lop secret unlock`") lives in the EXCEPTION MESSAGE that Slice
+        # A raises, and this clause interpolates it, so a locked store already
+        # exits 1 naming the remedy. A specific clause would need a body
+        # identical to this one -- measured: deleting it changed neither the
+        # exit code nor a byte of stderr. `rm` earns its second clause because
+        # its two bodies genuinely differ.
+        except TicketStoreError as exc:
+            print(
+                f"lop qwencloud-ticket status: {exc}\n"
+                "  Whether a ticket is stored is UNKNOWN; this is not the same "
+                "as none being stored.",
+                file=sys.stderr,
+            )
+            return 1
+        if record is None:
+            if unreferenced_value:
+                # Exit 0, not 1: unlike the UNKNOWN branch above, the question
+                # WAS answered -- something is stored, and the answer is
+                # "stored with no metadata row". The metadata-orphan WARNING
+                # below also rides exit 0, and 1 is this verb's dedicated code
+                # for "could not be read at all".
+                #
+                # No length and no age: both live in the row that is missing,
+                # and reading them would mean retrieving the value, which is
+                # the one thing this verb promises never to do. `/usage` does
+                # not read the value either -- with no row there is nothing for
+                # the controller to find -- so this state is present AND
+                # unusable, and the honest receipt says both.
+                print(
+                    "A QwenCloud console ticket VALUE is stored, but no metadata "
+                    "row records it, so /usage does not read it and its age and "
+                    "length are unknown."
+                )
+                print('  Run "lop qwencloud-ticket rm" to revoke it.')
+                return 0
+            print("No QwenCloud console ticket stored.")
+            print("  printf %s '<TICKET>' | lop qwencloud-ticket set")
+            return 0
+        captured = record.get("captured_at")
+        age_ms = 0
+        if captured:
+            age_ms = int(time.time() * 1000) - int(captured)
+            days = age_ms / 86_400_000
+            age = f"{days:.1f} days old"
+        else:
+            age = "age unknown"
+        print(f"QwenCloud console ticket stored ({record['length']} characters, {age}).")
+        # A METADATA ORPHAN: the row in `auth.db` says a ticket was stored but
+        # its encrypted value is gone, so `/usage` has nothing to read. The
+        # default is True so a pre-migration row, whose value still lives in
+        # `auth.db` itself, does not trip the warning.
+        if not record.get("secret_present", True):
+            print(
+                "  WARNING: the ticket's metadata is stored but its ENCRYPTED VALUE "
+                "is missing, so /usage cannot read it. Re-run "
+                "\"printf %s '<TICKET>' | lop qwencloud-ticket set\" to restore it."
+            )
+        if captured and age_ms > QWENCLOUD_TICKET_STALE_MS:
+            print(
+                "  This is older than a console session usually lasts. If /usage has "
+                "stopped showing the 7 Day Credits window, capture a fresh cookie."
+            )
+        # A `lop /update` or `uv tool upgrade` reinstalls from PyPI and reverts
+        # a locally built console fetcher while leaving this row in place --
+        # a silent "nothing reads it" state. Say so instead of looking healthy.
+        # Probed with getattr rather than a direct import: the symbol is absent
+        # by design in a build without the console fetcher, and an import of a
+        # name that may not exist is a static-analysis error rather than the
+        # runtime question actually being asked ("does this build read it?").
+        try:
+            from local_operator.providers import usage as _usage_module
+
+            has_fetcher = hasattr(_usage_module, "fetch_qwencloud_console_usage")
+        except ImportError:
+            has_fetcher = False
+        if not has_fetcher:
+            print(
+                "  WARNING: this build has no QwenCloud console fetcher, so the stored "
+                "ticket is not read by anything. Reinstall local-operator from a build "
+                "that includes it."
+            )
+        # The precondition that actually GATES the feature, and the only one
+        # `status` did not name. `/usage` asks `can_report_usage`, which
+        # requires `is_usable` -- and the ticket deliberately cannot satisfy
+        # that: it lives in its own namespace precisely so lop never concludes
+        # it can CHAT through alibaba-token-plan on a read-only console cookie.
+        # So the ticket AUGMENTS a Token Plan credential, it does not replace
+        # one, and with no such row `/usage` renders nothing at all for a
+        # perfectly valid ticket. Making the precondition visible is the fix
+        # available here; satisfying it would be the blast radius the separate
+        # namespace exists to avoid.
+        if not _qwencloud_credential_row_exists(store):
+            print(
+                f"  WARNING: no {_QWENCLOUD_TICKET_AUGMENTS} credential is stored, so "
+                "/usage will not show the 7 Day Credits window. This ticket AUGMENTS "
+                "an existing Token Plan credential rather than replacing one — it "
+                "reports usage but cannot authenticate the provider. Run "
+                f"'lop login {_QWENCLOUD_TICKET_AUGMENTS}' (or restore the API key) "
+                "to make the window visible."
+            )
+        return 0
+
+    if command == "rm":
+        # A revoke that cannot PROVE it worked must not report success. This is
+        # the only mitigation the user has for a full-account cookie held in
+        # plaintext, so "probably gone" is the one answer this command may not
+        # give: it would remove the mitigation and say it had worked.
+        try:
+            removed = delete_ticket(store)
+        except TicketStoreLocked as exc:
+            # First, for the same reason as `status`: caught by the clause
+            # below it, the one failure with a remedy reads as one without.
+            print(
+                f"lop qwencloud-ticket rm: {exc}\n"
+                "  The ticket MAY STILL BE STORED. Unlock the secret store and "
+                "re-run, and revoke the session in the QwenCloud console to "
+                "be certain.",
+                file=sys.stderr,
+            )
+            return 1
+        except TicketStoreError as exc:
+            print(
+                f"lop qwencloud-ticket rm: {exc}\n"
+                "  The ticket MAY STILL BE STORED, in the credential store, the "
+                "encrypted secret store, or both. Re-run once they are "
+                "readable, and revoke the session in the QwenCloud console to "
+                "be certain.",
+                file=sys.stderr,
+            )
+            return 1
+        if not removed:
+            print("No QwenCloud console ticket stored.")
+            return 0
+        # Symmetrical with `set`, for the reason `run_logout` drops its
+        # listing: a window fetched under the credential just removed must not
+        # keep rendering as though it were live.
+        _invalidate_cached_usage(_QWENCLOUD_TICKET_AUGMENTS, store)
+        print("Removed the stored QwenCloud console ticket.")
+        # The advice belongs HERE and not only on the failure path: someone
+        # revoking this credential is usually doing it because it may be
+        # compromised, and success is the moment they stop worrying. Deleting
+        # the row ends local use, but SQLite can keep the freed page contents
+        # in the freelist until a VACUUM, and the SESSION ITSELF stays valid
+        # server-side regardless -- so this command cannot be the whole answer.
+        print(
+            "  This ends local use of the cookie. The browser session itself is "
+            "still valid until you sign it out in the QwenCloud console — do "
+            "that too if the cookie may have been exposed."
+        )
+        return 0
+
+    if command == "migrate":
+        return _qwencloud_ticket_migrate(store)
+
+    print(
+        "usage: lop qwencloud-ticket {set,status,rm,migrate}\n"
+        "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _qwencloud_ticket_migrate(store: Any) -> int:
+    """Move a plaintext ticket out of `auth.db` and into the encrypted store.
+
+    VALUE-ONLY: the row is REWRITTEN, never deleted. Dropping it would lose
+    `captured_at` (the clock `status`'s staleness warning measures) and
+    `project_id` (what makes `_identity_key_for` upsert in place instead of
+    INSERTing a duplicate on the next `set`).
+
+    The secret is written and CONFIRMED before the plaintext is touched, so
+    every interruption point leaves the value in BOTH stores rather than in
+    neither, and re-running repairs it. A duplicate is recoverable; a loss is
+    not.
+
+    No redaction sink is registered here, unlike `mcp/credentials.py`. That
+    path is HANDED a session and a manager to register against; a bare CLI
+    invocation has neither, and there is no process-wide registry to fall back
+    to -- `variables.register_redaction` is a method on a session's store. The
+    guarantee this function makes instead is the stronger one, and the tests
+    pin it on every branch: the value never reaches stdout, stderr, a file, or
+    an exception message.
+    """
+    import json
+
+    from local_operator.providers.auth_cli import _invalidate_cached_usage
+    from local_operator.providers.qwencloud_console import (
+        QWENCLOUD_CONSOLE_PROJECT_ID,
+        QWENCLOUD_CONSOLE_PROVIDER,
+        QWENCLOUD_TICKET_SECRET_NAME,
+        TicketStoreError,
+        TicketStoreLocked,
+        _secret_is_present,
+        _store_secret_value,
+    )
+
+    def _compact() -> tuple[bool, bool]:
+        """`VACUUM` + a TRUNCATE checkpoint. Returns (compacted, blocked).
+
+        One spelling for both callers -- the migrating path and the
+        already-migrated no-op -- because they need the identical thing.
+
+        `VACUUM` ALONE IS NOT ENOUGH. `AuthStore._connect` sets
+        `journal_mode=WAL`, so the rebuild is itself written through the WAL
+        and the freed plaintext stays readable in `auth.db` until a
+        checkpoint lands. Measured on this branch: VACUUM only -> plaintext
+        still found; VACUUM + checkpoint -> gone from all three files.
+        """
+        try:
+            # `VACUUM` raises `cannot VACUUM from within a transaction` if one
+            # is armed. Nothing above arms one today -- sqlite3 begins only
+            # for DML and `upsert_credential` commits -- so this is a guard
+            # against a later step adding DML here, at no measurable cost.
+            store._conn.commit()
+            store._conn.execute("VACUUM")
+            store._conn.commit()
+            row = store._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.OperationalError as exc:
+            # An `in_transaction` failure is a DEFECT IN THIS CODE, not a busy
+            # database. Folding it into the "another process is reading"
+            # warning would name the wrong cause in an honest-looking
+            # sentence, which is the failure this module's comments already
+            # warn about.
+            if "within a transaction" in str(exc):
+                print(
+                    "lop qwencloud-ticket migrate: internal error — VACUUM ran "
+                    "inside an open transaction. The value is encrypted, but the "
+                    "old plaintext was NOT cleared. Please report this.",
+                    file=sys.stderr,
+                )
+            return False, False
+        except sqlite3.Error:
+            return False, False
+        # A checkpoint BLOCKED by another connection's read snapshot reports
+        # itself in the FIRST COLUMN of this row and RAISES NOTHING: measured
+        # `(1, 10, 1)` with the plaintext still readable in `auth.db-wal`.
+        # Discarding the row and catching only `sqlite3.Error` is how this
+        # command would claim success over a cookie that is still on disk.
+        if row is not None and row[0] == 1:
+            return False, True
+        return True, False
+
+    def _warn_not_compacted(blocked: bool) -> None:
+        # Printed on BOTH paths, including the already-migrated no-op. On that
+        # path we cannot know whether an earlier run left plaintext behind --
+        # and that path exists precisely FOR the run that did. Over-warning
+        # costs a line; staying silent loses the only signal the user has that
+        # the credential is still readable.
+        print(
+            "  WARNING: the old plaintext could NOT be cleared from auth.db"
+            + (" (another process is reading the database)" if blocked else "")
+            + ". It remains readable on disk until a later VACUUM. Re-run "
+            "`lop qwencloud-ticket migrate` when nothing else is using "
+            "local-operator; re-running clears it."
+        )
+
+    def _both_copies(reason: str) -> int:
+        """The one failure mode after the secret is confirmed: a duplicate."""
+        print(
+            f"lop qwencloud-ticket migrate: {reason}.\n"
+            "  BOTH COPIES EXIST: the value is in the encrypted store AND still "
+            "in auth.db, so nothing is lost. Re-run migrate.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # `include_disabled=True` for the reason `read_ticket_record` documents: a
+    # soft-deleted row is still ON DISK, and skipping it would leave plaintext
+    # behind while reporting success. Clause order is load-bearing --
+    # `ProgrammingError` is a caller bug and must keep propagating.
+    try:
+        rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError, json.JSONDecodeError) as exc:
+        print(
+            f"lop qwencloud-ticket migrate: the credential store could not be read "
+            f"({type(exc).__name__}); nothing was changed.",
+            file=sys.stderr,
+        )
+        return 1
+
+    value = ""
+    captured_at: Any = None
+    already_migrated = False
+    for row in rows:
+        row_data = getattr(row, "data", None)
+        if not isinstance(row_data, dict):
+            continue
+        if row_data.get("ticket"):
+            value = str(row_data["ticket"])
+            captured_at = row_data.get("captured_at")
+            break
+        if row_data.get("secret_name"):
+            already_migrated = True
+
+    if not value:
+        if already_migrated:
+            # THE NO-OP STILL COMPACTS, and that is the whole repair story.
+            # `_warn_not_compacted` tells the user to re-run; the second run
+            # lands HERE. An early return would make that advice a lie -- the
+            # plaintext would stay readable forever while `status` reported
+            # success (it sees no `ticket` key) and `rm` removed both stores
+            # without ever checkpointing. Unrepairable by the tool.
+            compacted, blocked = _compact()
+            if not compacted:
+                _warn_not_compacted(blocked)
+            print("The QwenCloud console ticket is already in the encrypted secret store.")
+            return 0
+        # Returns WITHOUT touching `store._conn`: there is nothing to clear,
+        # and this is the one path a caller with no live connection can drive.
+        print("No QwenCloud console ticket stored; nothing to migrate.")
+        return 0
+
+    # Named before the write: C measured `ensure_broker` polling to
+    # STARTUP_TIMEOUT_S twice when no broker is running, so a silent 10 s stall
+    # here reads as a crash. Flushed so it lands before the stall, not after.
+    print(
+        "Encrypting the ticket (this may take a moment if the secret broker is starting)…",
+        flush=True,
+    )
+
+    # THE SECRET IS WRITTEN FIRST. A crash between here and the rewrite below
+    # leaves the value in both stores -- recoverable, and `/usage` keeps
+    # working off the legacy row. The reverse order risks losing it entirely.
+    #
+    # `TicketStoreLocked` BEFORE `TicketStoreError`: it is a subclass, and a
+    # broad clause above it swallows the one remedy the user can act on. A's
+    # helper already puts `lop secret unlock` in the message; it is
+    # interpolated, never re-spelled.
+    try:
+        _store_secret_value(value, None)
+    except TicketStoreLocked as exc:
+        print(
+            f"lop qwencloud-ticket migrate: {exc}\n"
+            "  NOTHING WAS CHANGED. The plaintext ticket is still in auth.db. "
+            "Run `lop secret unlock`, then re-run migrate.",
+            file=sys.stderr,
+        )
+        return 1
+    except TicketStoreError as exc:
+        print(
+            f"lop qwencloud-ticket migrate: {exc}\n"
+            "  NOTHING WAS CHANGED. The plaintext ticket is still in auth.db, so "
+            "nothing is lost. If this persists, capture a fresh cookie and use "
+            "\"printf %s '<TICKET>' | lop qwencloud-ticket set\" instead.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # CONFIRMED, never inferred from the write returning -- the same rule
+    # `delete_ticket` applies to the other direction, and the whole safety
+    # property of this command. `describe`, not `get`, so the confirmation
+    # costs no audit `get` event and does not stamp `last_used_at`.
+    #
+    # The raise is caught for the same reason the rest of this module catches:
+    # a store that locked between the write and this check gives the SAME
+    # answer (we cannot confirm, so nothing may be removed) and must report it
+    # rather than surfacing a traceback carrying absolute local paths.
+    try:
+        confirmed = _secret_is_present(None)
+    except TicketStoreError as exc:
+        confirmed = False
+        detail = f" ({exc})"
+    else:
+        detail = ""
+    if not confirmed:
+        print(
+            f"lop qwencloud-ticket migrate: the encrypted value could not be "
+            f"confirmed after writing it{detail}.\n"
+            "  NOTHING WAS REMOVED. The plaintext ticket is still in auth.db, so "
+            "nothing is lost. Re-run migrate.",
+            file=sys.stderr,
+        )
+        return 1
+
+    payload = {
+        # The ORIGINAL `captured_at`, not `time.time()`: it is CAPTURE time,
+        # which is what the ~7-day staleness warning measures. Re-stamping it
+        # would tell the user a week-old cookie is fresh.
+        "project_id": QWENCLOUD_CONSOLE_PROJECT_ID,
+        "captured_at": captured_at,
+        "secret_name": QWENCLOUD_TICKET_SECRET_NAME,
+        "length": len(value),
+    }
+    # No `ticket` key -- that is the point. No `type` and no `source="login"`
+    # either: each short-circuits `_identity_key_for` to None, and the next
+    # `set` would INSERT a duplicate row instead of updating this one.
+    try:
+        store.upsert_credential(QWENCLOUD_CONSOLE_PROVIDER, payload)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        return _both_copies(f"the metadata row could not be rewritten ({type(exc).__name__})")
+
+    # Confirmed by RE-READING, for the reason `delete_ticket` states: the
+    # write returning is not evidence the plaintext is out of the API's view.
+    try:
+        remaining = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError, json.JSONDecodeError) as exc:
+        return _both_copies(
+            f"the rewritten row could not be re-read to confirm it ({type(exc).__name__})"
+        )
+    for row in remaining:
+        row_data = getattr(row, "data", None)
+        if isinstance(row_data, dict) and row_data.get("ticket"):
+            return _both_copies("a row still carries a plaintext ticket after the rewrite")
+
+    compacted, blocked = _compact()
+    if not compacted:
+        _warn_not_compacted(blocked)
+
+    # Required, not belt-and-braces: C proved a cached note survives the full
+    # ~5 min TTL, so a panel painted before the migration would keep rendering
+    # stale state. Same call, same position as `set` and `rm` -- after the
+    # write succeeded, before the receipt. Called regardless of `compacted`:
+    # the value moved either way, so the cached row is stale either way.
+    _invalidate_cached_usage(_QWENCLOUD_TICKET_AUGMENTS, store)
+    print(
+        f"Migrated the QwenCloud console ticket ({len(value)} characters) into the "
+        f"encrypted secret store as {QWENCLOUD_TICKET_SECRET_NAME}."
+    )
+    # CONDITIONAL, and that is mandatory. This is the sentence that would
+    # otherwise be false in exactly the blocked-checkpoint case: the value
+    # encrypted, the plaintext still readable in `auth.db-wal`. The warning
+    # above is the honest account there, and printing both would contradict
+    # one with the other in a single command's output.
+    if compacted:
+        print("  The plaintext row in auth.db has been replaced with metadata only.")
+    return 0
+
+
 _MCP_INTERACTIVE_LOGIN_TIMEOUT_MS = 10 * 60_000
 
 
@@ -6982,6 +7559,8 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "qwencloud-ticket":
+            return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":
             return browser_command(args)
         elif args.subcommand == "send":

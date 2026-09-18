@@ -54,6 +54,12 @@ from local_operator.mobile.types import (
     SessionProjection,
     ask_pending_request,
 )
+
+# The `/loop` argument vocabulary, imported rather than spelled out: `--stop` and
+# `--clear` have to mean the same thing in this dispatcher as in the TUI's two
+# handlers, and a second copy of the words is how `--stop` would cancel a loop in
+# one window and start one toward the literal goal `--stop` in another.
+from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
@@ -508,6 +514,14 @@ class ServingSessionHandle(SessionHandle):
         #: Deliberately never cleared: a retirement is a one-way door for the
         #: process.
         self._retiring_cause: str = ""
+        #: The parenthetical that belongs to ``_retiring_cause``, held here so
+        #: the exit can compose its own reading of it (``process._drain_detail_at_exit``
+        #: RE-READS the build pair rather than replaying the latch's). It is the
+        #: LOG's why-now and nothing else: a retirement cannot have cut a turn
+        #: (``begin_retire`` refuses while anything is in flight), so there is no
+        #: turn outcome for it to ride — see
+        #: :meth:`_note_retirement_cut_off`.
+        self._retiring_detail: str = ""
         #: Set by :meth:`begin_drain`, the latch that does NOT require an idle
         #: runtime. It says the leaving is a HANDOVER with time left in it: the
         #: runtime still has work to finish, so a message that arrives in the
@@ -978,10 +992,16 @@ class ServingSessionHandle(SessionHandle):
         # event), and suppressed when a deliberate stop was already noted for
         # this turn — the graceful ``stop`` op reaches here too, and relabelling
         # a user's own cancel as an error is the worse mistake.
-        session = getattr(self, "_session", None)
-        note = getattr(session, "note_cut_off", None)
-        if callable(note):
-            note(self._retiring_cause or "runtime-shutdown")
+        #
+        # THIS IS THE RUNG THAT WRITES IT, for every exit, and that placement is
+        # the fix (2026-09-17): the latches above run when the departure is
+        # DECIDED, which for the build rungs can be hours before the exit — and
+        # the note belongs to a TURN, so one armed at a latch could only ever
+        # brand whatever run ended next. Arming it here means it can only ever
+        # brand the turn the disposal is about to abort, and
+        # :meth:`_note_retirement_cut_off` gates even that on the session's own
+        # evidence of a live turn, so an exit that caught nothing notes nothing.
+        self._note_retirement_cut_off()
         # Revoke the broker registration along with the session: descendants of
         # a session that is going away must not stay authorized behind it
         # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
@@ -1246,10 +1266,27 @@ class ServingSessionHandle(SessionHandle):
         aborted (design §5.1). The latch makes the claim true by construction
         rather than by timing.
 
-        ``cause`` names the retirement for the refusal and the log; the session
-        is told as well, so a turn aborted while retiring is labelled with the
-        retirement rather than a generic shutdown.
+        ``cause`` names the retirement for the refusal and the log, and
+        ``detail`` is the why-now parenthetical that belongs to it — the build
+        pair the exit RE-READS, or the latch's reasons when the pair cannot be
+        asserted (``process._drain_detail_at_exit``). BOTH ARE RECORDED AND
+        LOGGED, AND NEITHER CAN BRAND A TURN: the cut-off note is written by
+        :meth:`_note_retirement_cut_off` at the disposal, and only for a turn
+        the disposal is actually aborting. Arming one here — which is what this
+        method did until 2026-09-17 — could only ever brand a run the exit did
+        not cut, because the idle gate above means no turn is in flight when
+        this succeeds (agent review round 1, MAJOR-1).
+
+        Refuses while this handle is already disposing, mirroring
+        :meth:`begin_drain`: the disposal owns the ordering from ``_disposing``
+        on, and a second rung committing to an exit would race it into
+        ``_clean_exit``. Hardening rather than a fix — the incident that
+        motivated the move (2026-09-17) has the arming, not the disposal, before
+        it — but the asymmetry with ``begin_drain`` is one rung away from being
+        read as an invitation.
         """
+        if getattr(self, "_disposing", False):
+            return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
@@ -1257,12 +1294,55 @@ class ServingSessionHandle(SessionHandle):
         if reason:
             return False
         self._retiring_cause = cause or "retiring"
+        self._retiring_detail = detail
         self._exit_committed = True
+        # The exit's own LOG line, and the only reader this detail has. It is
+        # logged HERE rather than at the departure site so every rung's reading
+        # lands in one shape: the two build rungs log the pair they composed at
+        # the exit (never the latch's), the signal rung its phrase, and the
+        # viewer-driven retirement (``server._retire``) its build label.
+        logger.info(
+            "session runtime: retiring (%s)%s",
+            self._retiring_cause,
+            f" {detail.strip()}" if detail.strip() else "",
+        )
+        return True
+
+    def _note_retirement_cut_off(self) -> None:
+        """Record the cause of the turn THIS disposal is about to cut.
+
+        Called by :meth:`dispose` before the handle hands over to the session's
+        own disposal, which is the moment the cut becomes a fact rather than a
+        forecast.
+
+        THE GATE IS THE SESSION'S OWN EVIDENCE, not this handle's latch, and
+        that is the fix (agent review round 1, MAJOR-1). Written whenever the
+        latch existed, the note branded whichever run end came next — and for
+        every rung that names a build there can only ever be a run this exit did
+        NOT cut, because ``begin_retire`` refuses while anything is in flight:
+        the note then landed on a run left unsettled by a turn that had stopped
+        somewhere else, and rendered the operator a "Stopped with an error" card
+        for an update that caught nothing. What the session can attest to is a
+        turn it is ABORTING (``Session.disposal_cuts_a_turn``), so that is what
+        is asked.
+
+        THE CAUSE STILL RIDES, because one latch that CAN reach a live turn is
+        the bounded signal drain: ``begin_drain(SIGNAL_DRAIN_CAUSE)`` does not
+        require idle, ``_drain_for`` retries the exit latch until the boundary,
+        and the disposal is what aborts the turn the bound expired under —
+        labelled ``runtime-shutdown``, the token that drain carries, so a turn
+        is classified identically whether the drain expired or never ran
+        (``process._drain_for_signal``). ``runtime-shutdown`` when nothing
+        latched at all: a fatal-on-arrival SIGTERM and a host that disposes in
+        place name no retirement, and both can catch a live turn.
+        """
         session = getattr(self, "_session", None)
+        cuts = getattr(session, "disposal_cuts_a_turn", None)
+        if not callable(cuts) or not cuts():
+            return
         note = getattr(session, "note_cut_off", None)
         if callable(note):
-            note(self._retiring_cause, detail)
-        return True
+            note(self._retiring_cause or "runtime-shutdown", self._retiring_detail)
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
         """Commit this runtime to leaving WITHOUT requiring it to be idle.
@@ -1304,9 +1384,9 @@ class ServingSessionHandle(SessionHandle):
 
         Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
         running when this latches is expected to FINISH, and arming a cut-off
-        for it would relabel a completed turn as an error — that note belongs
-        to the rung that actually takes the exit, which is still
-        :meth:`begin_retire`.
+        for it would relabel a completed turn as an error — the note belongs to
+        the DISPOSAL, and only for a turn the disposal is actually aborting
+        (:meth:`_note_retirement_cut_off`).
 
         ``cause`` is the vocabulary token the refusal and the eventual cut-off
         note carry; ``detail`` is free text for the log. Returns whether the
@@ -1675,7 +1755,22 @@ class ServingSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection skeleton: identity fields the runtime folds onto.
+
+        A pure read; see :meth:`redate_from_phase` for the hand-off that dates
+        the band's age, and the TUI handle's same pair for why they are separate
+        (review round 4, NIT 2).
+        """
         return self._projection
+
+    def redate_from_phase(self) -> None:
+        """Re-date the band's age through the fold the EVENTS ARE FED into.
+
+        The runtime calls this on every frame it serializes: the age is written
+        when the phase moves, so a viewer or a push arriving mid-phase is
+        otherwise served the number from the last edge (review round 3, MAJOR 1).
+        """
+        self._fold.redate_from_phase()
 
     # -- v4 full-TUI capability --------------------------------------------------
     # These three are what makes ``RuntimeServer`` advertise
@@ -1774,6 +1869,15 @@ class ServingSessionHandle(SessionHandle):
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
         self._reconcile_streaming()
+        # Seed the CLOCKS from the same attach, and for the same reason: this
+        # fold was built for the attachment, so it witnessed neither the
+        # ``tool_execution_start`` of a call already in flight nor the phase
+        # edge of a model call already streaming, and its first event would
+        # date both from this process's arrival — the reported band reading
+        # ``0s`` and counting up. The producer's own folded instants date them
+        # instead; a session that cannot answer seeds nothing
+        # (``ProjectionFold.reconcile_clocks``).
+        self._fold.reconcile_clocks(self._session)
         # Seed the state (and with it the child roster) ONCE at attach. Until
         # the next event arrives this push is all a freshly attached phone
         # renders, and a settled turn never sends another: without this an
@@ -3829,17 +3933,62 @@ class ServingSessionHandle(SessionHandle):
             return self._approvals_slash(session, args, SlashResult)
         if command == "compact":
             return self._compact_slash(session, SlashResult)
+        if command == "wake":
+            return await self._wake_slash(session, args, SlashResult)
         if command == "loop":
+            from local_operator.slash_commands import unknown_flag_refusal
+
             driver = self._loop_driver()
-            if args.lower() in ("stop", "cancel", "abort"):
+            # Strip ONCE, here, mirroring `_goal_slash`: `Command.args` is a plain
+            # `str` on the wire with no strip validator, so a trailing space
+            # arrives verbatim — and every comparison below is a whole-string
+            # match. Unstripped, `/loop --stop ` silently no-opped with `loop_busy`
+            # while the loop kept running, and `/loop --clear ` on an idle driver
+            # STARTED an unbounded goal-mode loop toward the literal goal
+            # `--clear` (round 1, reviewer MAJOR-2). The TUI strips the same
+            # argument before its handler, so leaving this unstripped was also a
+            # host disagreement about what one word means.
+            args = args.strip()
+            if args.lower() in LOOP_STOP_ARGS:
                 await driver.cancel()
+            elif args.lower() in LOOP_CLEAR_ARGS:
+                # Refused while a loop RUNS, and the refusal names the way out.
+                # Clearing a running loop's snapshot would leave the driver
+                # pushing turns with no surface saying so, and silently
+                # cancelling on `--clear` would make an ambiguous word destroy
+                # real work — the two things this branch must not do.
+                #
+                # A code of its own rather than `loop_busy`: that one is the
+                # START refusal (`a loop is already running`). This is a different
+                # condition with a different remedy, and the desktop route maps
+                # BOTH to a 409 (`desktop_sessions.py`, the `loop_running` arm) —
+                # so a client that only reads the status can already tell this
+                # refusal from a success, and the sentence it carries is what
+                # names the remedy `/loop --stop`. Round 2 review, NIT-4: this
+                # paragraph said "rides the ordinary error receipt", which the
+                # 409 mapping added in the same round had made false.
+                if not await driver.clear():
+                    return SlashResult(
+                        kind="error",
+                        text="a loop is running — /loop --stop to stop it first",
+                        data={"code": "loop_running"},
+                    )
             elif args.lower() != "status":
                 if driver.running:
                     return SlashResult(
                         kind="error", text="A loop is already running", data={"code": "loop_busy"}
                     )
+                # A bare `--token` that names no flag: without this the fall-through
+                # starts a paid goal-mode loop toward the literal flag text
+                # (`/loop --stopx`), which is the same defect the TUI refuses on
+                # (round 1, UX U6 / reviewer NIT-5). `loop_invalid` is the mapped
+                # client-error code, so the refusal reaches the caller as a 422
+                # rather than a 200 that only a rendered receipt explains.
+                refusal = unknown_flag_refusal("loop", args)
+                if refusal is not None:
+                    return SlashResult(kind="error", text=refusal, data={"code": "loop_invalid"})
                 try:
-                    driver.start(args.strip(), str(getattr(session, "goal", "")))
+                    driver.start(args, str(getattr(session, "goal", "")))
                 except ValueError as error:
                     return SlashResult(kind="error", text=str(error), data={"code": "loop_invalid"})
             return SlashResult(kind="block", data={"type": "loop", **driver.state})
@@ -3860,6 +4009,13 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        from local_operator.session.goal import (
+            GOAL_CLEAR_ARGS,
+            MAX_GOAL_CHARS,
+            cleared_goal_receipt,
+        )
+        from local_operator.slash_commands import unknown_flag_refusal
+
         arg = arg.strip()
         if not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
@@ -3867,13 +4023,25 @@ class ServingSessionHandle(SessionHandle):
             current = getattr(session, "goal", "")
             text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
             return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in ("clear", "none", "reset"):
+        # The clear forms are matched as the WHOLE argument, so `--clear` can
+        # never be stored as the goal body: nothing below runs for it, and no
+        # turn is started (`goal_set` is what the viewer submits).
+        if arg.lower() in GOAL_CLEAR_ARGS:
+            # Name what went: the receipt is rendered by a viewer that may have no
+            # other way to see the goal (design D4/U3), so the echo is built by
+            # the same shared helper every other host uses.
+            receipt = cleared_goal_receipt(session.goal)
             session.set_goal("")
             self._notify()
-            return SlashResult(kind="notice", text="goal cleared", style="info")
+            return SlashResult(kind="notice", text=receipt, style="info")
+        refusal = unknown_flag_refusal("goal", arg)
+        if refusal is not None:
+            # One refusal string for every host: a runtime that stored `--stop` as
+            # the goal while the TUI refused it is the host-disagreement class the
+            # shared vocabularies in this module exist to remove (UX U6).
+            return SlashResult(kind="notice", text=refusal, style="warning")
         stored = session.set_goal(arg)
         self._notify()
-        from local_operator.session.goal import MAX_GOAL_CHARS
 
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
@@ -3891,6 +4059,121 @@ class ServingSessionHandle(SessionHandle):
             style="info",
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
+
+    async def _wake_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one wake mutation INSIDE the session that owns the schedules.
+
+        Reached from the desktop by ``POST/PATCH/DELETE /v1/desktop/wakes``
+        when a live runtime holds the session (see ``routes/desktop_wakes``),
+        never by a user typing ``/wake``: the name is a routed-command word in
+        the ladder above, not a registry entry, so no palette row exists for
+        it and no terminal offers it. ``desktop_mcp`` and ``fork`` are the
+        same shape of internal word.
+
+        WHY THIS PATH EXISTS AT ALL. ``Session._persist_wake_schedules`` is
+        the one writer of schedule state, and a live session republishes its
+        WHOLE in-memory list on any change. An external write that appended a
+        transcript row would therefore be overwritten by the session's next
+        persist — while the supervisor, which skips any session with a live
+        record, never fired it either. That is a silently dead reminder with a
+        200 response, so the mutation has to happen in this process.
+
+        The three helpers below are the SAME ones the agent's ``wake`` tool
+        runs (``tools/builtin``), so a wake armed here and a wake armed by the
+        model are validated and allocated identically; they end in
+        ``scheduler.update`` -> ``_persist_wake_schedules``, which appends the
+        transcript, rewrites the derived index and re-arms the timer. Edit has
+        no twin on the tool because the tool's vocabulary is create/list/
+        cancel — ``_wake_edit`` is that missing helper, and what an edit MEANS
+        lives in ``build_wake_edit``, shared with the route-less arm path.
+        """
+        import json
+
+        from local_operator.tools.builtin import (
+            FAULT_INVALID_ARGUMENTS,
+            FAULT_KEY,
+            WakeParams,
+            _wake_cancel,
+            _wake_create,
+            _wake_edit,
+        )
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("wake payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._wake_failure(
+                SlashResult, "The wake request could not be read.", "wake_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        request = payload.get("request") or {}
+        if not isinstance(request, dict):
+            return self._wake_failure(
+                SlashResult, "The wake request could not be read.", "wake_invalid"
+            )
+        wake_id = str(payload.get("wake_id") or "")
+        scheduler = getattr(session, "wake_scheduler", None)
+        if scheduler is None:
+            return self._wake_failure(
+                SlashResult,
+                "Wake scheduling is not available in this session (no scheduler attached).",
+                "wake_unavailable",
+            )
+        known_ids = {row.id for row in scheduler.schedules}
+
+        # A synthetic tool-call id: these helpers build a ToolResult, whose id
+        # is a transcript correlation handle. Nothing here is written to a
+        # transcript as a tool call — the result is read for its status and
+        # its details and discarded — so the id exists only to satisfy the
+        # constructor, and it is deliberately not shaped like a real one.
+        tool_call_id = "desktop-wake"
+        if op == "create":
+            try:
+                params = WakeParams.model_validate({**request, "op": "create"})
+            except Exception:  # noqa: BLE001 — a malformed body, refused below
+                return self._wake_failure(
+                    SlashResult, "The wake request was not a valid create.", "wake_invalid"
+                )
+            result = await _wake_create(tool_call_id, params, scheduler, int(time.time() * 1000))
+        elif op == "edit":
+            result = await _wake_edit(
+                tool_call_id, wake_id, dict(request), scheduler, int(time.time() * 1000)
+            )
+        elif op == "cancel":
+            params = WakeParams.model_validate({"op": "cancel", "id": wake_id})
+            result = await _wake_cancel(tool_call_id, params, scheduler)
+        else:
+            return self._wake_failure(
+                SlashResult, f"Unknown wake operation {op!r}.", "wake_invalid"
+            )
+
+        if result.is_error:
+            details = result.details or {}
+            malformed = details.get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
+            code = "wake_invalid" if malformed else "wake_refused"
+            # A refused cancel/edit may be refused because the handle does not
+            # exist, which the route answers 404 for. Asked of the scheduler
+            # rather than matched out of the helper's sentence: the sentence is
+            # shared prose that may be reworded, and a status decided by prose
+            # is a status that silently changes meaning one edit later.
+            if op in ("cancel", "edit") and wake_id and wake_id not in known_ids:
+                code = "wake_not_found"
+            return self._wake_failure(SlashResult, result.text, code)
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(kind="notice", text=result.text, data=dict(result.details or {}))
+
+    @staticmethod
+    def _wake_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
 
     async def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """``/title`` on a detached runtime: report, set, or refresh.

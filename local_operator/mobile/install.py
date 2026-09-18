@@ -187,21 +187,15 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
         if outcome.kind != "repaired":
             return outcome
-        # bootout + bootstrap, NOT kickstart -k: measured on macOS with a
-        # scratch label, a kickstart after a rewrite restarts the job from
-        # launchd's in-memory definition and keeps running the OLD argv. See
-        # :mod:`local_operator.launchd`.
-        _launchctl("bootout", _domain(), str(path))
-        result = _launchctl("bootstrap", _domain(), str(path))
-        if result.returncode != 0:
+        # bootout + bootstrap through the shared helper, NOT kickstart -k:
+        # measured on macOS with a scratch label, a kickstart after a rewrite
+        # restarts the job from launchd's in-memory definition and keeps running
+        # the OLD argv. See :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
             # Names the recovery, because the job is DOWN at this point: see
             # `launchd.reload_failure`.
-            return launchd.reload_failure(
-                name,
-                path,
-                "lop mobile install",
-                result.stderr.strip()[:200] or str(result.returncode),
-            )
+            return reloaded.as_refresh_failure(name=name, path=path, recovery="lop mobile install")
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
@@ -305,10 +299,14 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     steps.append(f"wrote {plist_path()}")
 
     if not dry_run:
-        _launchctl("bootout", _domain(), str(plist_path()))  # stale copy: fine if absent
-        result = _launchctl("bootstrap", _domain(), str(plist_path()))
-        if result.returncode != 0:
-            return {"ok": False, "steps": steps, "error": result.stderr.strip()[:300]}
+        # The reload, not a bare pair: it tolerates an absent job, waits for
+        # launchd to release the label, retries the bootstrap past the measured
+        # teardown race, and verifies the job is registered afterwards — so the
+        # steps below are reporting a daemon that really is loaded. See
+        # :mod:`local_operator.launchd`.
+        reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
+        if not reloaded.ok:
+            return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
         steps.append("loaded the LaunchAgent")
 
         # The daemon we just bootstrapped owns the port now; a health check

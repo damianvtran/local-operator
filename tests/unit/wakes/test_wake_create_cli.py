@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -249,3 +252,231 @@ def test_the_listing_shows_a_time_bound(
 
     assert "every 1h" in unbounded and "until" not in unbounded
     assert "every 30m" in bounded and "until in 6d" in bounded, bounded
+
+
+# ---------------------------------------------------------------------------
+# The three defects the write moved to ``wakes/arm.py`` to fix
+# ---------------------------------------------------------------------------
+#
+# Each was reachable only through THIS command — the in-session tool and the
+# validator got all three right — and each failed silently: a 17th schedule
+# past the cap, a reused id, and a stopped session that quietly restarted.
+# They are pinned here as well as in ``test_arm.py`` because the command is
+# what a person actually types.
+
+
+def _schedule_row(wake_id: str, **extra: object) -> dict[str, Any]:
+    """One persisted row, in the shape the transcript stores (the model's own
+    dump): the loader validates with ``extra="forbid"``, so a row missing any
+    field would be dropped rather than read, and this test would be measuring
+    its own fixture."""
+    row = {
+        "id": wake_id,
+        "message": f"message {wake_id}",
+        "next_due_at": int(time.time() * 1000) + 3_600_000,
+        "created_at": 1_700_000_000_000,
+        "every_ms": None,
+        "until_at": None,
+        "limit": None,
+        "fired_count": 0,
+    }
+    row.update(extra)
+    return row
+
+
+def _persisted_wakes(directory: Path) -> list[dict[str, Any]]:
+    """The latest ``wake_schedules`` snapshot, read from the bytes on disk."""
+    latest: list[dict[str, Any]] = []
+    for line in (directory / "transcript.jsonl").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        payload = entry.get("payload") or {}
+        if payload.get("custom_type") == "wake_schedules":
+            latest = list((payload.get("details") or {}).get("schedules") or [])
+    return latest
+
+
+def _seed_wakes(directory: Path, rows: list[dict[str, Any]]) -> None:
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "seed-wakes",
+                    "ts": 3.0,
+                    "type": "custom",
+                    "payload": {
+                        "custom_type": "wake_schedules",
+                        "details": {"schedules": rows},
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def _seed_index(
+    config_dir: Path, session_id: str, rows: list[dict[str, Any]], **extra: object
+) -> Path:
+    entry = {
+        "schema": 1,
+        "session_id": session_id,
+        "cwd": "/work/here",
+        "updated_at": 1,
+        "schedules": rows,
+    }
+    entry.update(extra)
+    path = config_dir / "wakes" / f"{session_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entry), encoding="utf-8")
+    return path
+
+
+def test_a_seventeenth_wake_is_refused_instead_of_written_past_the_cap(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The cap belongs to the one validator, and this command used to build its
+    schedule model directly — so a 17th wake went to disk as ``w17``."""
+    from local_operator.cli import _wake_create
+
+    directory = _session(tmp_path, "wakecreate01")
+    _seed_wakes(directory, [_schedule_row(f"w{i}") for i in range(1, 17)])
+
+    assert _wake_create(_args(message="one too many")) == 1
+
+    assert "16" in capsys.readouterr().err
+    rows = _persisted_wakes(directory)
+    assert len(rows) == 16
+    assert not {row["id"] for row in rows} & {"w17"}
+
+
+def test_a_cancelled_wake_id_is_reissued_rather_than_duplicated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``w{len(existing) + 1}`` collided the moment an id was cancelled: with
+    ``[w1, w3]`` on disk it handed out ``w3`` a second time."""
+    from local_operator.cli import _wake_create
+
+    directory = _session(tmp_path, "wakecreate01")
+    # ``w2`` cancelled out of ``[w1, w2, w3]`` leaves two rows.
+    _seed_wakes(directory, [_schedule_row("w1"), _schedule_row("w3")])
+
+    assert _wake_create(_args(message="replacement")) == 0
+
+    assert json.loads(capsys.readouterr().out)["wake_id"] == "w2"
+    ids = [row["id"] for row in _persisted_wakes(directory)]
+    assert ids == ["w1", "w3", "w2"]
+    assert len(set(ids)) == 3
+
+
+def test_arming_a_stopped_session_leaves_it_stopped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``stopped_at`` is the user's stop, and it lives in the derived index. The
+    index write here passed no ``preserve``, so scheduling one more wake
+    un-parked the whole session and dropped the lateness stamps with it."""
+    from local_operator.cli import _wake_create
+    from local_operator.wakes.store import read_entry
+
+    directory = _session(tmp_path, "wakecreate01")
+    _seed_wakes(directory, [_schedule_row("w1")])
+    path = _seed_index(
+        tmp_path,
+        "wakecreate01",
+        [_schedule_row("w1")],
+        stopped_at=4321,
+        last_fired_at=8765,
+        last_attempt_at=9876,
+    )
+
+    assert _wake_create(_args(message="one more")) == 0
+    capsys.readouterr()
+
+    entry = read_entry(tmp_path, "wakecreate01")
+    assert entry is not None, path
+    assert entry["stopped_at"] == 4321
+    assert entry["last_fired_at"] == 8765
+    assert entry["last_attempt_at"] == 9876
+    assert len(entry["schedules"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# The rules this command no longer re-words, and the cap it gained
+# ---------------------------------------------------------------------------
+#
+# The refactor moved the message-length bound into the shared validator, so
+# `lop wake create --message <2001 chars>` is refused where the old command
+# (which built the model directly) armed it — a fourth user-visible change.
+# These pin the SENTENCES as the validator's, because that is the property the
+# code claims: the floor and the bound-on-a-repeat used to print this command's
+# own prose for the same mistakes.
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("every", "30s", "wake interval must be at least 60s."),
+        ("limit", 3, "'until' and 'limit' bound a repeat — add an 'every' interval."),
+        ("limit", 0, "'limit' must be a positive integer."),
+    ],
+)
+def test_a_rule_refusal_is_the_shared_validators_sentence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object, expected: str
+) -> None:
+    from local_operator.cli import _wake_create
+
+    session = _session(tmp_path, "wakecreate01")
+
+    assert _wake_create(_args(**{field: value})) == 1
+
+    assert expected in capsys.readouterr().err
+    assert _persisted_wakes(session) == []
+
+
+def test_the_message_cap_is_the_shared_validators(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bound at the boundary rather than somewhere inside it: the length that
+    is allowed still arms, and the one past it is refused with the validator's
+    sentence — the same text the desktop dialog and the agent's tool show."""
+    from local_operator.cli import _wake_create
+    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+
+    session = _session(tmp_path, "wakecreate01")
+
+    assert _wake_create(_args(message="x" * MAX_WAKE_MESSAGE_CHARS)) == 0
+    assert len(_persisted_wakes(session)[0]["message"]) == MAX_WAKE_MESSAGE_CHARS
+
+    assert _wake_create(_args(message="x" * (MAX_WAKE_MESSAGE_CHARS + 1))) == 1
+    assert f"at most {MAX_WAKE_MESSAGE_CHARS} characters" in capsys.readouterr().err
+    assert len(_persisted_wakes(session)) == 1
+
+
+def test_a_live_owner_is_refused_with_a_sentence_that_says_what_to_do(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI is a second external writer, so it meets the same guard the
+    route's cold path does: a runtime owns the schedules, and a row appended
+    behind it would be deleted by its next persist without ever firing.
+
+    The owner is a REAL one — a live ``.session.pid`` and no discovery record,
+    which is the state review round 2 showed the guard used to write behind
+    (R6) — rather than a stubbed predicate, so this cell fails if the predicate
+    narrows again.
+    """
+    from local_operator.cli import _wake_create
+
+    session = _session(tmp_path, "wakecreate01")
+    (session / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    assert _wake_create(_args()) == 1
+    # A pid mirror with no usable record gets the sentence that is TRUE in that
+    # state (review round 3, R6's minor): an owner this build can see but not
+    # dial, with both explanations named and the marker a user can act on —
+    # rather than "open in a running session", which is false when the marker is
+    # all that is left of it.
+    message = capsys.readouterr().err
+    assert "does not answer as a runtime" in message
+    assert "stale owner marker" in message
+    assert "Nothing was written" in message
+    assert _persisted_wakes(session) == []

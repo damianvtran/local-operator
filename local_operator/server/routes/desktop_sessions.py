@@ -40,6 +40,7 @@ from local_operator.server.models.desktop_sessions import (
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
+    PinState,
     PresenceReceipt,
     SessionList,
     SessionSearch,
@@ -65,6 +66,11 @@ from local_operator.server.utils.desktop_sessions import (
     move_session,
     resolve_working_directory,
 )
+from local_operator.server.utils.store_failures import (
+    StoreFailure,
+    sqlite_store_failure,
+    store_failure,
+)
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import MoveIndeterminate, SessionStoreUnavailable
@@ -74,7 +80,6 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
-from local_operator.session.session_search import search_store
 from local_operator.slash_commands import (
     command_argument_refusal,
     slash_command_for,
@@ -479,6 +484,29 @@ class Notified(Input):
     completion_token: RequestID
 
 
+class Pin(Input):
+    """The pin STATE the caller wants this session to be in.
+
+    A desired state rather than a toggle verb, and that is deliberate: see the
+    route's docstring. ``extra="forbid"`` (inherited from ``Input``) is what
+    makes an omitted ``pinned`` a 422 rather than a silent false — the field is
+    the whole request, so a body that does not carry it is not a request this
+    route can honour.
+
+    ``StrictBool`` rather than a bare ``bool``, matching every other boolean on
+    this plane (``PresenceWindow``, ``PresenceBeat``, ``Watch``, ``Answer``). A
+    bare ``bool`` coerces the strings and integers a generous JSON client sends
+    — ``{"pinned": "yes"}`` and ``{"pinned": 1}`` both pin the session — so a
+    client whose serialiser is producing the wrong type gets a 200 and no
+    signal, and the bug surfaces later as "the pin came from nowhere". The
+    neighbours refuse that shape, and a pin is durable state rather than a
+    display hint: being wrong about it silently is what this route exists to
+    prevent.
+    """
+
+    pinned: StrictBool
+
+
 class PresenceWindow(Input):
     """The desktop window's REAL state, as reported by its main process.
 
@@ -780,6 +808,17 @@ class Prompt(Input):
         if len(self.model_dump_json().encode()) > 900_000:
             raise ValueError("Message exceeds the canonical control-frame limit")
         command = whole_draft_command(self.text)
+        # The sentence is GENERIC on purpose, and one row is why it must stay
+        # that way: `/credential` is a whole-draft command whose text belongs to
+        # the masked form, so "move it below your text" would name exactly the
+        # prose form that still reaches the model (`MESSAGE_DRAFTS` pins those two
+        # forms as messages). Latent rather than live, because the app's shaper
+        # publishes "The request has invalid fields." for every body-validation 422
+        # (`server/app.py`), so this text reaches no wire — an in-process caller
+        # only, while the route keeps the masked-form instruction. Giving this row
+        # its own sentence here is a behaviour change and does not belong in a
+        # comment-only pass; if that shaper ever starts publishing validator
+        # detail, this row needs one first.
         if command is not None:
             raise ValueError(
                 f"/{command[0].name} is a command, not a message. "
@@ -913,8 +952,63 @@ async def _join_owned(operation: "asyncio.Task[dict[str, Any]]") -> dict[str, An
     return result
 
 
+def store_root(request: Request) -> pathlib.Path:
+    """The config root whose volume a store failure is about.
+
+    Read from the APP's config manager rather than from the process's env
+    default so the answer is about the volume the stores actually live on: a
+    backend started against a relocated root, or a test that mounted the app on
+    a ``tmp_path``, must not have its free space measured somewhere else.
+    """
+    manager = getattr(request.app.state, "config_manager", None)
+    directory = getattr(manager, "config_dir", None)
+    if directory is not None:
+        # ``pathlib`` rather than ``Path``: this module imports FastAPI's ``Path``
+        # for path parameters, and the name is taken.
+        return pathlib.Path(directory)
+    from local_operator.paths import config_dir
+
+    return config_dir()
+
+
+def _store_refusal(request: Request, failure: StoreFailure, error: BaseException) -> HTTPException:
+    """Log what really happened, and build the client's vetted refusal.
+
+    THE LOG RECORD IS THE DELIVERABLE, not a courtesy. This ladder used to raise
+    ``from None`` with no record at all, so a store that could not be written
+    left the operator a sentence about a busy read state and an empty log to
+    check: attributing the 2026-09-17 disk-full incident took an hour of log
+    archaeology through a runtime log that had recorded the same condition three
+    other times. The exception is logged where it is still live, with the route
+    and the session, because the client's copy may never carry it (a store error
+    names file paths -- the rule the ConnectionError arm below states at length).
+    """
+    session_id = request.path_params.get("session_id")
+    logger.log(
+        failure.level,
+        "desktop store failure %s at %s %s%s",
+        failure.code,
+        request.method,
+        request.url.path,
+        f" (session {session_id})" if session_id else "",
+        # The traceback rides only the two conditions an operator has to act on,
+        # where the stack IS the finding; contention is routine and clears on its
+        # own, so a traceback per retry is noise that buries the records worth
+        # reading (review round 1, R5). The line itself is emitted either way.
+        exc_info=error if failure.traceback else None,
+    )
+    return HTTPException(failure.status, {"code": failure.code, "message": failure.message})
+
+
 @asynccontextmanager
-async def errors() -> AsyncIterator[None]:
+async def errors(request: Request) -> AsyncIterator[None]:
+    """The control plane's shared failure ladder.
+
+    ``request`` is taken rather than reached for, the way ``host(request)`` and
+    ``receipts(request)`` beside it are: two arms below must name the route they
+    failed on and the volume the store lives on, and a ladder shared by six
+    route modules cannot invent either.
+    """
     try:
         yield
     except DaemonRetiring as error:
@@ -1022,13 +1116,20 @@ async def errors() -> AsyncIterator[None]:
             # store had refused (the `code` field of its control error).
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
-    except sqlite3.Error:
-        # Contention on the shared receipt store is transient and retryable, so
-        # it gets a vetted sentence rather than a bare 500 carrying SQLite's own
-        # wording. The text is NOT echoed for the same reason the ConnectionError
-        # ladder below refuses to echo: a store error can name file paths.
-        raise HTTPException(
-            503, "Read state is busy right now. It will catch up on its own."
+    except sqlite3.Error as error:
+        # THREE CONDITIONS, THREE ANSWERS, and the split is the point: this arm
+        # used to answer all of them (contention, a full disk, an unopenable
+        # store, a corrupt one) with the CONTENTION sentence, raised ``from
+        # None`` and logged nowhere. On a full volume that told the operator a
+        # read state was momentarily busy and would heal itself, over the one
+        # condition no amount of retrying clears -- and the client's hint is
+        # exactly "send it again". ``server/utils/store_failures`` owns the
+        # classification and the copy; ``_store_refusal`` owns the log record.
+        #
+        # The text is still NOT echoed for the reason the ConnectionError arm
+        # below refuses to echo: a store error can name file paths.
+        raise _store_refusal(
+            request, sqlite_store_failure(error, store_root(request)), error
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
@@ -1062,6 +1163,30 @@ async def errors() -> AsyncIterator[None]:
         raise HTTPException(
             503, {"code": RUNTIME_UNREACHABLE, "message": RUNTIME_UNREACHABLE_MESSAGE}
         ) from None
+    except OSError as error:
+        # THE LAST ARM, and only for the disk. Placed here rather than beside the
+        # sqlite arm because ``ConnectionError`` -- caught above, with its own
+        # vetted copy -- is an ``OSError``, and because
+        # ``SessionStoreUnavailable`` (the third arm, an ``OSError`` subclass
+        # whose sentence is about a store that could not be WALKED) must keep
+        # winning for its own condition.
+        #
+        # Everything this ladder cannot classify is RE-RAISED untouched: it sits
+        # under every desktop control-plane route, and answering for arbitrary
+        # ``OSError``s would swallow the failures whose own routes have better
+        # words for them -- ``move_session`` answers a bad target (an unmounted
+        # volume, a symlink loop: ENOENT/ELOOP/ENOTDIR) with a 409 naming the
+        # path, and that clause returns ``None`` for exactly those, so the
+        # ladder must let them past rather than answer in its own voice.
+        #
+        # What it does answer is ENOSPC. The non-sqlite writes on the send path
+        # (the transcript append, the attachment store) raise this rather than a
+        # sqlite error, and a message that could not be persisted is the same
+        # condition to the user as a store that could not be written.
+        failure = store_failure(error, store_root(request))
+        if failure is None:
+            raise
+        raise _store_refusal(request, failure, error) from None
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
@@ -1071,7 +1196,7 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
     # a bare 500. The decoration is already omitted per row inside `list()`;
     # this ladder covers anything else the pool can raise — including the store
     # it could not walk, which is now a typed 503 rather than an empty 200.
-    async with errors():
+    async with errors(request):
         # THE STATUS STAMPS, read WITHOUT constructing the feed. `getattr`
         # rather than `feed(request)` is deliberate: `feed()` BUILDS the
         # singleton (and the poller that comes with it), so calling it here
@@ -1082,15 +1207,39 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         # contract an older backend's rows carry.
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
-        rows = await host(request).list(limit + 1, status_stamps=stamps)
-        sessions = rows[:limit]
+        page = await host(request).list(limit, status_stamps=stamps)
+        # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
+        # DECIDED, not left open: concatenated on the wire rather than published
+        # as a second field, because of what the client does with this array — it
+        # REPLACES the rows it is holding with it. A pinned row parked in a
+        # sibling field would be a row the client does not hold until it learns
+        # about that field, and a client that missed it renders nothing for the
+        # pin, which is the exact gap the extra exists to close. A second field
+        # would also mean every consumer learns a second merge path for rows it
+        # must render identically, while `pinned` already distinguishes them.
+        #
+        # WHAT THAT COSTS, stated so the next reader does not assume the old
+        # invariant: ``len(sessions)`` MAY EXCEED ``limit``. ``limit`` and
+        # ``truncated`` continue to describe the PAGE ONLY — the extras are not
+        # page rows and do not make the page bigger.
+        #
+        # ORDER: the page first, then the extras, which is the catalogue's own
+        # ranking continued below the page — the same order the page's rows
+        # arrive in, and the same order the TUI's ``★ Pinned`` section draws. It
+        # is deliberately NOT pin recency: the store holds that (newest pin
+        # first) and it is one of the few orderings the two surfaces could
+        # disagree about, so ordering the extras by it would put a second
+        # ordering authority inside one section and make the app's Pinned list
+        # read as catalogue order followed by pin order.
+        sessions = page.rows + page.pinned_off_page
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the
         # listing-level statement is derivable, and a second channel through
         # `list()` would be one more thing a caller can forget to pass. Sorted
         # so the set is stable across polls, and computed over what is actually
-        # sent — a degraded row beyond the page says nothing about this answer.
+        # sent — a row the page does not carry AND this answer does not send says
+        # nothing about it. (The extras below ARE sent, so they are included.)
         #
         # The stamps and this marker are INDEPENDENT facts about the same rows
         # and neither may displace the other: a stamp answers "is this row newer
@@ -1101,7 +1250,7 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         return reply(
             {
                 "sessions": sessions,
-                "truncated": len(rows) > limit,
+                "truncated": page.truncated,
                 "limit": limit,
                 "degraded": degraded,
             }
@@ -1136,21 +1285,10 @@ async def search_sessions(
     characters because the query is only ever a user's typing, and an unbounded
     one would be projected into every digest comparison.
     """
-    async with errors():
-        matches = await asyncio.to_thread(search_store, host(request).root, q, limit=limit)
+    async with errors(request):
         return reply(
             {
-                "sessions": [
-                    {
-                        "id": match.row.id,
-                        "name": match.row.name,
-                        "mtime": match.row.mtime,
-                        "forked": match.row.forked,
-                        "rank": match.rank,
-                        "body_match": match.body_match,
-                    }
-                    for match in matches
-                ],
+                "sessions": await host(request).search(q, limit),
                 "query": q,
                 "limit": limit,
             }
@@ -1208,7 +1346,7 @@ async def create_session(body: CreateSession, request: Request):
         )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
-    async with errors():
+    async with errors(request):
         # REFUSED BEFORE ANYTHING IS CLAIMED OR ADMITTED — before the receipt is
         # claimed and before the draft's own admissions (the working directory, the
         # model spec, the target registry) run: a refused request must leave no
@@ -1355,7 +1493,7 @@ async def preview_session(body: DraftPreview, request: Request):
         )
         return {"frontend": sync_wire_payload(sync)}
 
-    async with errors():
+    async with errors(request):
         return reply(await preview())
 
 
@@ -1366,7 +1504,7 @@ async def snapshot(session_id: str, request: Request):
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
     # ``cold_reason``; the previous envelope answered 503 "Session owner is
     # unavailable" after ~17 s for a runtime whose loop was merely busy.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.snapshot())
 
 
@@ -1378,7 +1516,7 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     # READ, for the same reason as ``snapshot`` beside it.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.history(before_id=before_id, limit=limit))
 
 
@@ -1410,7 +1548,7 @@ async def child_transcript(
     Read-only in the strongest sense: no bridge, no runtime, no message
     admission — a paused conversation answers exactly like a running one.
     """
-    async with errors():
+    async with errors(request):
         return reply(
             await host(request).child_transcript(
                 session_id, child_id, before_id=before_id, limit=limit
@@ -1444,7 +1582,7 @@ async def child_attachment(
     desktop surface; what this route must not become is a way to reach a child
     that is not the named session's, which ``_contained_child_dir`` refuses.
     """
-    async with errors():
+    async with errors(request):
         data, mime_type = await host(request).child_attachment(session_id, child_id, digest)
     return Response(
         content=data,
@@ -1522,7 +1660,7 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
       ``image/gif``. Harmless for real images (the bytes decide what renders),
       but the two values are not a matched pair.
     """
-    async with errors():
+    async with errors(request):
         data, mime_type = await host(request).attachment(session_id, digest)
     return Response(
         content=data,
@@ -1562,7 +1700,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
     on the latch and not on the record: an announced daemon is still the only
     place its client can work (``server/retire.py``).
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def admit():
             assert bridge.remote is not None
@@ -1665,11 +1803,19 @@ async def command(session_id: str, body: Command, request: Request):
     if spec is None or not spec.desktop_destination:
         raise HTTPException(422, "Unknown command")
     if spec.name == "credential" and body.args:
-        # The ONE command whose trailing text the desktop never consumes: the
-        # secret is entered in the masked form (`argument_shape` is NONE), so any
-        # text here is prose the caller sent to the wrong route. Left as its own
-        # check because the sentence is about the FORM, not about a shape the
-        # admission rule reads.
+        # The ONE command whose trailing text this route REFUSES rather than
+        # consumes, because the secret is entered in the masked form. Left as its
+        # own check because the sentence is about the FORM, not about a shape
+        # `command_argument_refusal` validates.
+        #
+        # It is NOT a row the admission rule calls prose, and that is the half
+        # this comment used to get wrong: the registry publishes
+        # `argument_shape=ANY` for it, so the messages endpoint reads a
+        # whole-draft `/credential <secret>` as the command and answers 422 too.
+        # The two 422s are one policy — the text belongs to the masked form —
+        # and the registry's `ANY` is what keeps the secret out of a paid turn
+        # for a client whose command surface is off and which therefore plans
+        # every draft as `send`.
         raise HTTPException(
             422, "Enter credentials in the masked credential form, not command text"
         )
@@ -1681,7 +1827,7 @@ async def command(session_id: str, body: Command, request: Request):
         # — the `/mcp logout` / `/login openai` class where a control was accepted
         # as a message while the route would still have run it.
         raise HTTPException(422, refusal)
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             if (
@@ -1713,6 +1859,13 @@ async def command(session_id: str, body: Command, request: Request):
             if outcome.kind == "error" and outcome.data.get("code") in {
                 "loop_invalid",
                 "loop_busy",
+                # The third loop refusal: `/loop --clear` while the driver RUNS.
+                # It rode a 200 error receipt before, so a client that reads the
+                # status could not tell the refusal from a success — on the very
+                # surface the flag exists for (round 1, reviewer MINOR-4). It
+                # takes the 409 arm with its siblings' `outcome.text`, the
+                # sentence that names `/loop --stop`.
+                "loop_running",
             }:
                 raise HTTPException(
                     422 if outcome.data["code"] == "loop_invalid" else 409, outcome.text
@@ -1806,7 +1959,7 @@ async def answer(session_id: str, body: Answer, request: Request):
     handler's first statement: a stale-epoch answer on a latched daemon must not
     get a refusal that suggests retrying against this process.
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, "This answer belongs to an earlier session owner")
@@ -1824,7 +1977,7 @@ async def answer(session_id: str, body: Answer, request: Request):
 
 @router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[AttentionState])
 async def seen(session_id: str, body: Seen, request: Request):
-    async with errors():
+    async with errors(request):
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
 
 
@@ -1845,9 +1998,69 @@ async def notified(session_id: str, body: Notified, request: Request):
     no runtime is started, and neither ``unseen`` nor the read watermark moves.
     Notifying is not reading.
     """
-    async with errors():
+    async with errors(request):
         claimed = await host(request).claim_notification(session_id, body.completion_token)
         return reply({"claimed": claimed})
+
+
+@router.post("/v1/desktop/sessions/{session_id}/pin", response_model=CRUDResponse[PinState])
+async def pin(session_id: str, body: Pin, request: Request):
+    """Set a session's durable pin to the state the caller asked for.
+
+    THE PIN FILE IS NOW A CROSS-SURFACE CONTRACT. It began as the sidebar's own
+    index and it is now the durable record two front ends share — the TUI writes
+    it with f10 and reads it on every sidebar refresh, this route writes it for
+    the desktop app, and the catalogue row below reports it — so a change to its
+    shape is a coordinated change between the two surfaces and the backend, not
+    a private refactor of a TUI index. It stays a bare JSON array of session
+    directory names for the reasons `sidebar_pins` gives; nothing here adds a
+    field to it.
+
+    DESIRED STATE, NOT A TOGGLE. The TUI's verb is a toggle because it is a
+    keypress; over HTTP a toggle is not idempotent, so a request retried after a
+    dropped response flips the pin BACK and the user reports "the pin keeps
+    un-pinning itself". The body therefore carries the state the caller wants
+    and a retry lands on the same state — re-pinning a pinned session is a no-op
+    that does not even rewrite the file, which is also what keeps a retry from
+    reordering the user's pins (the store is newest-pin-first).
+
+    RECEIPT-FREE, deliberately, unlike the mutating routes around it. Receipts
+    buy at-most-once for calls that ADMIT WORK (a retried send must not run a
+    turn twice); this call is idempotent by construction, which is strictly
+    better than putting it on the ``ReceiptConflict`` 409 ladder.
+
+    LAST WRITER WINS across processes, accepted and documented rather than
+    fixed, and the unit of arbitration is the WHOLE LIST rather than this one id:
+    every write is a read-modify-write of the entire index, so two presses
+    landing inside one window do not merely arbitrate over the conversation they
+    share — the later ``os.replace`` is what the file holds, and anything the
+    earlier writer added in that same window is gone. That can be a pin to a
+    DIFFERENT conversation.
+
+    THAT LOSS IS NOT SOMETHING THIS ROUTE INTRODUCES. The store's own docstring
+    already concedes it between two ``lop`` processes — the TUI was the only
+    writer, not the only possible one — and what this route changes is how often
+    the window is hit: a press here beside a press in the terminal is routine in
+    a way two terminal processes colliding never was, so a few-microsecond race
+    stops being a curiosity. A cross-process lock for a small index has no precedent in this
+    codebase, the store's own docstring records why no read-back is wanted
+    either, and the only consequence a user can observe is that two presses
+    within one animation resolve to the second — the correct reading of their own
+    two actions. Stated rather than left to the store's comment because the
+    client reconciles its row on this answer: until the next catalogue read
+    agrees, a pin the app just made is not yet durable, and it never is on a
+    config root the backend cannot write.
+
+    ID SHAPE AND IS-DIR ONLY. Deliberately NOT the ``is_user_session`` check its
+    neighbour ``/seen`` applies: the sidebar pins delegated runs, and a route
+    that refused to unpin one would leave a pin the user can see and cannot
+    remove. Unknown and malformed ids both raise ``KeyError`` into ``errors()``
+    above, which answers the generic 404 — the reader cannot act on the
+    difference between the two, and inventing a code for it would be a
+    distinction with no remedy behind it.
+    """
+    async with errors(request):
+        return reply(await host(request).set_pin(session_id, body.pinned))
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])
@@ -1858,7 +2071,7 @@ async def watch(session_id: str, body: Watch, request: Request):
     # made the panel report a lost connection for a session that was running.
     # The visible lease this beat carries still CREATES residency (through
     # ``bridge.watch`` and its lease-warm loop); read mode bounds only the attach.
-    async with errors(), host(request).session(session_id, read=True) as bridge:
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
         await bridge.watch(body.subscription_id, visible=body.visible, can_notify=body.can_notify)
         return reply({"lease_seconds": 45})
 
@@ -1918,7 +2131,7 @@ async def warm(session_id: str, body: Warm, request: Request):
     for.
     """
     del body
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         return reply({"state": await bridge.warm()})
 
@@ -2103,7 +2316,7 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
     Origin, 503 a desktop capability that is not configured or an owner that
     cannot be reached (``ConnectionError``/``RuntimeError``/``TimeoutError``).
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             assert bridge.remote is not None
@@ -2249,7 +2462,7 @@ async def move(session_id: str, body: MoveSession, request: Request):
     rolled back — restoring the old marker there would overwrite a committed move
     with a stale one.
     """
-    async with errors(), host(request).session(session_id) as bridge:
+    async with errors(request), host(request).session(session_id) as bridge:
 
         async def execute():
             try:
@@ -2298,7 +2511,7 @@ async def events(
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
     context = host(request).session(session_id, read=True)
-    async with errors():
+    async with errors(request):
         bridge: DesktopSessionBridge = await context.__aenter__()
         try:
             # ADDITIVE NEGOTIATION (contract §C). ``frontend_replace=1`` says

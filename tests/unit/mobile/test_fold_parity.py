@@ -909,3 +909,253 @@ def test_the_wake_headline_strips_every_model_facing_prefix() -> None:
     assert wake_receipt_headline("(alarm) " * 5 + "build finished") == "build finished"
     # A message that merely MENTIONS the marker keeps its own words.
     assert wake_receipt_headline("see (alarm) in the logs") == "see (alarm) in the logs"
+
+
+def test_both_surfaces_strip_the_reference_block() -> None:
+    """A `@path` expansion is model-facing payload, not the user's words.
+
+    An `@` reference is expanded ONCE at submit and the file rides the message
+    as an `<operator-references>` block. The model needs it; a transcript row
+    must not show it, or a one-line question about a file paints as the whole
+    file.
+
+    Asserted through `user_row_text` because that is the ONE function both
+    surfaces paint through (`tui/session_presentation.py:1093` and
+    `mobile/projection.py:865`). Stripping in a host is how the phone once got
+    a rule the TUI had and the other did not, which is the divergence this whole
+    file exists to prevent — so the test lives here rather than in a new
+    `test_rows.py` beside it.
+
+    THE FIXTURE IS THE RESOLVER'S REAL OUTPUT, preamble included. It used to
+    build `<file path="auth.py">`, a shape nothing emits — the strip is
+    shape-blind, so the test passed either way and the fixture was a fiction
+    that would mislead the next reader into thinking `<file>` was the contract.
+    """
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    typed = "what does @auth.py do?"
+    sent = (
+        f"{typed}\n\n{REFERENCE_BLOCK_OPEN}\n\n"
+        "The operator's message references these paths. "
+        "Content is included below.\n\n"
+        '<reference path="auth.py" typed="@auth.py" bytes="31" lines="2">\n'
+        "def login():\n    return SECRET\n\n</reference>\n\n"
+        f"{REFERENCE_BLOCK_CLOSE}"
+    )
+
+    row = user_row_text(sent)
+
+    assert row == typed
+    assert "SECRET" not in row
+    assert REFERENCE_BLOCK_OPEN not in row
+    # The token itself SURVIVES: it is what the operator typed, and the row is
+    # a record of that rather than of what the model was handed.
+    assert "@auth.py" in row
+
+
+def test_an_unexpanded_message_is_untouched_by_the_reference_strip() -> None:
+    """The overwhelmingly common case must not be rewritten.
+
+    Every message that cites no file goes through this same function, so a
+    strip that trimmed or normalised ordinary prose would change every row on
+    both surfaces to fix a case that is not present.
+    """
+    assert user_row_text("just a question about @ signs") == "just a question about @ signs"
+    assert user_row_text("plain prose") == "plain prose"
+
+
+def test_a_message_that_QUOTES_the_block_marker_keeps_all_its_words() -> None:
+    """Quoting the tag is ordinary prose, and must not truncate the row.
+
+    The marker is part of the product's visible vocabulary, so an operator
+    asking about this feature, quoting a log line, or pasting a prompt will type
+    it. An unanchored `text.find(REFERENCE_BLOCK_OPEN)` treated every one of
+    those as the start of a block and dropped the rest of the sentence —
+    silently, with no notice, on BOTH surfaces. R4 says the transcript shows
+    what the operator typed; it showed strictly less.
+
+    The sibling rule this is modelled on is the same one
+    `test_a_wake_receipt_headline…` asserts for `(alarm)`: a message that merely
+    MENTIONS the marker keeps its own words.
+    """
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    quoted = f"why does my message contain {REFERENCE_BLOCK_OPEN} in it?"
+    assert user_row_text(quoted) == quoted
+
+    mid = f"explain {REFERENCE_BLOCK_OPEN} and then tell me about the resolver"
+    assert user_row_text(mid) == mid
+
+    # A closer in the MIDDLE of a sentence: no opener precedes it, so nothing
+    # is a block and the row is untouched. This is the quoted-tag case, not the
+    # half-a-block one.
+    closer_only = f"what does {REFERENCE_BLOCK_CLOSE} mean?"
+    assert user_row_text(closer_only) == closer_only
+
+    # A stray closer at the END with no opener — half a quoted tag rather than
+    # a block, because a block is also the preamble line and the open marker.
+    # Guessing a span for it would be the same defect in the other direction.
+    # The assertion above cannot observe this branch, which left it untested.
+    trailing_closer = f"paste went wrong, here is a stray closer {REFERENCE_BLOCK_CLOSE}"
+    assert user_row_text(trailing_closer) == trailing_closer
+
+
+def test_a_second_block_does_not_leave_the_first_ones_body_in_the_row(tmp_path: Path) -> None:
+    """The FORWARDING shape, which painted a whole file body into the row.
+
+    A message can be expanded twice: pass 1 appends a block, a token is added
+    after it, pass 2 appends a SECOND one — so the first block ends up
+    MID-MESSAGE, not trailing. Stripping only the trailing block left the whole
+    of the first in the row; measured on this fixture's shape, a 12,965
+    character message painted 6,496 characters of file body, which is the
+    failure this strip exists to prevent, reached with no attacker and no
+    unusual input.
+
+    The fixture is the REAL resolver's output, driven through ``asyncio.run``
+    because this module's tests are sync — the same rule the fixture above
+    records, and the reason a block spelled by hand here would prove nothing.
+    """
+    import asyncio
+
+    from local_operator.references import REFERENCE_BLOCK_OPEN, expand_references
+
+    (tmp_path / "a.txt").write_text("A" * 90, encoding="utf-8")
+    (tmp_path / "b.txt").write_text("B" * 90, encoding="utf-8")
+    first = asyncio.run(expand_references("first @a.txt", str(tmp_path)))
+    second = asyncio.run(expand_references(f"{first.sent} and now @b.txt", str(tmp_path)))
+
+    assert second.sent.count(REFERENCE_BLOCK_OPEN) == 2, "not the two-block shape"
+    row = user_row_text(second.sent)
+
+    assert row == "first @a.txt and now @b.txt"
+    assert "A" * 90 not in row and "B" * 90 not in row
+
+
+def test_a_real_block_is_still_stripped_when_the_prose_also_quotes_the_marker() -> None:
+    """The case that makes the anchor a rule rather than a special case.
+
+    A message can legitimately do both: ask about the tag AND carry a real
+    expansion. Only the appended block may go, and the operator's own sentence —
+    marker and all — must survive intact. The quoted marker is not followed by
+    the block's preamble line, so it is not a span; the real block is.
+    """
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    typed = f"what is {REFERENCE_BLOCK_OPEN} for? see @auth.py"
+    sent = (
+        f"{typed}\n\n{REFERENCE_BLOCK_OPEN}\n\n"
+        "The operator's message references these paths. "
+        "Content is included below.\n\n"
+        '<reference path="auth.py" typed="@auth.py" bytes="31" lines="2">\n'
+        "def login():\n    return SECRET\n\n</reference>\n\n"
+        f"{REFERENCE_BLOCK_CLOSE}"
+    )
+
+    row = user_row_text(sent)
+
+    assert row == typed
+    assert "SECRET" not in row
+
+
+def test_an_unclosed_opener_before_a_real_block_keeps_the_operators_prose(
+    tmp_path: Path,
+) -> None:
+    """The operator's own sentence must survive an UNCLOSED opener.
+
+    ``reference_block_spans`` promises an unclosed block reports nothing, and
+    while nothing followed it that held. With a real block later in the same
+    message it did not: the bare ``find(CLOSE, start)`` paired the unclosed
+    opener with the LATER block's closer, so one span covered the opener, the
+    operator's sentence, and the whole block — and the strip deleted all of it,
+    silently, on both surfaces. Reproduced before the fix: the row came back as
+    ``truncated history\n\ntail`` with the middle sentence and the block gone
+    together (review round 2, MINOR-1).
+
+    This is the R4 failure in the branch the function's own docstring claimed
+    was protected, which is why the assertion is on the PROSE and not only on
+    the span count.
+    """
+    import asyncio
+
+    from local_operator.references import (
+        _BLOCK_PREAMBLE,
+        REFERENCE_BLOCK_OPEN,
+        expand_references,
+    )
+
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    sent = asyncio.run(expand_references("look at @a.txt", str(tmp_path))).sent
+    # From the open marker: `.sent` carries the operator's sentence too, and the
+    # span is only ever the block.
+    block = sent[sent.index(REFERENCE_BLOCK_OPEN) :]
+    forged = (
+        f"truncated history\n\n{REFERENCE_BLOCK_OPEN}\n\n{_BLOCK_PREAMBLE}\n\n"
+        'unfinished <reference path="x" typed="@x">\nAAA\n\n'
+        "MIDDLE PROSE THE OPERATOR TYPED\n\n"
+        f"{block}\n\ntail"
+    )
+
+    row = user_row_text(forged)
+
+    assert "MIDDLE PROSE THE OPERATOR TYPED" in row, "the strip ate the operator's prose"
+    assert "A_BODY" not in row, "the real block was not stripped"
+    assert (
+        REFERENCE_BLOCK_OPEN in row
+    ), "the UNCLOSED opener is not a block, so its text must stay visible"
+
+
+def test_a_PASTED_complete_block_is_stripped_and_that_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """A complete block the operator pasted goes too — pinned, not denied.
+
+    The anchor is the preamble line plus the closer, so it cannot tell an
+    APPENDED block from a pasted or forwarded one: they are the same bytes. The
+    docstring used to claim only a marker the operator merely mentioned was
+    safe, which read as a promise that a complete pasted payload stays visible;
+    it does not, and the docstring now says so (review round 2, MINOR-2).
+
+    Reachable in this repo routinely — someone asks about a payload of this very
+    feature. The assertion is the DISCLOSED behaviour rather than the desirable
+    one, so the next reader gets the truth from the suite instead of from a
+    surprise.
+    """
+    import asyncio
+
+    from local_operator.references import REFERENCE_BLOCK_OPEN, expand_references
+
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    sent = asyncio.run(expand_references("look at @a.txt", str(tmp_path))).sent
+    block = sent[sent.index(REFERENCE_BLOCK_OPEN) :]
+    pasted = f"look at this payload:\n\n{block}\n\nwhat does it mean?"
+
+    row = user_row_text(pasted)
+
+    assert row == "look at this payload:\n\nwhat does it mean?"
+    assert "A_BODY" not in row
+
+
+def test_a_block_followed_by_non_whitespace_does_not_fuse_two_words(
+    tmp_path: Path,
+) -> None:
+    """The separator the strip drops belongs to the BLOCK, so it owes one back.
+
+    Each segment is right-stripped because the ``JOIN`` before a block is the
+    block's own, not the operator's prose. A caller that then appends text with
+    no space of its own got the two halves welded together —
+    ``expand("first @a.txt") + "and next"`` painted ``first @a.txtand next``
+    (review round 2, NIT-1). One space, and only where the next segment starts
+    on a non-space character, so the ordinary shapes (whose tail carries its own
+    leading newline) are joined exactly as before.
+    """
+    import asyncio
+
+    from local_operator.references import expand_references
+
+    (tmp_path / "a.txt").write_text("A_BODY\n", encoding="utf-8")
+    expanded = asyncio.run(expand_references("first @a.txt", str(tmp_path))).sent
+
+    assert user_row_text(expanded + "and next") == "first @a.txt and next"
+    # The ordinary shape is untouched: the tail's own whitespace is enough, and
+    # no second separator is inserted on top of it.
+    assert user_row_text(expanded + "\n\nand next") == "first @a.txt\n\nand next"

@@ -523,3 +523,41 @@ def test_runtime_killed_says_nothing_recorded_a_stop() -> None:
     assert "nothing recorded a stop" in sentence
     # The inverse still recovers the token from the longer sentence.
     assert cause_from_reason(sentence) == "runtime-killed"
+
+
+def test_a_detail_is_separated_from_the_sentence_it_rides_with() -> None:
+    """The separator is the RENDERER's, because the callers disagree about it.
+
+    ``render_cut_off_reason``'s output is what every surface prints (the live
+    notice, the sidebar tooltip, the phone frame, the next turn's incident
+    card) and what the durable outcome stores, so a detail glued to the
+    sentence is a defect in all of them at once. Two callers hand over a string
+    that already opens with a space and a bracket; ``process._drain_detail``
+    hands over a phrase and its own pair (``the runtime declined to hand over 3x
+    (0.56.2 → 0.56.6)``) with neither, and rendering that by concatenation
+    produced ``…would run a newer builddeclined 3x (0.56.2 → 0.56.6)`` on every
+    retirement of a stale runtime (measured on the reporting host, 2026-09-17).
+
+    ONE PARENTHETICAL, NEVER NESTED (design round 1, D1; QA round 1, Q2): a
+    bare detail joins the sentence with the em dash this vocabulary already uses
+    to append a clause, NOT with a second pair of brackets around a phrase that
+    carries its own. The rule is ``journal.row_detail``'s own, stated there
+    because a first draft nested them and read ``(SIGTERM received), (turn 4 in
+    flight …)``; the assertion that catches a regression is structural rather
+    than a golden string — exactly ONE bracket in the rendered sentence, since
+    the detail supplies the only one.
+    """
+    from local_operator.incidents import render_cut_off_reason
+
+    sentence = "the runtime retired so the next engage would run a newer build"
+    detail = "the runtime declined to hand over 3x (0.56.2 → 0.56.6)"
+    bare = render_cut_off_reason("runtime-retired", detail=detail)
+    wrapped = render_cut_off_reason("runtime-retired", detail=" (0.56.2 → 0.56.6)")
+    assert bare == f"{sentence} — {detail}"
+    assert bare.count("(") == 1 and bare.count(")") == 1
+    assert "))" not in bare, "the detail's own pair must not be nested in a second"
+    assert "builddeclined" not in bare
+    # ONE pair of brackets, not two: the detail was already a parenthetical.
+    assert wrapped == f"{sentence} (0.56.2 → 0.56.6)"
+    assert render_cut_off_reason("runtime-retired") == sentence
+    assert render_cut_off_reason("runtime-retired", detail="   ") == sentence

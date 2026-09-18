@@ -317,7 +317,7 @@ login-capable provider; the ids and plan requirements:
 | Kimi | `lop login kimi` | Kimi (Moonshot) |
 | Grok | `lop login xai-oauth` (`xai` = API key) | Grok OAuth |
 | Z.AI / GLM | `lop login zai-oauth` (`zai` = API key) | GLM Coding Plan |
-| Qwen | `lop login alibaba-token-plan-oauth` | QwenCloud Token Plan |
+| Qwen | `lop login alibaba-token-plan-oauth` | QwenCloud Token Plan (a personal plan also needs the [console ticket](./local_operator/guides/qwencloud/GUIDE.md) for `/usage`) |
 
 OpenAI, Anthropic, Z.AI, and Qwen logins are keyed by account identity, so a
 second login adds to the pool; Kimi holds one account (xAI identity is
@@ -351,7 +351,9 @@ per account and a hop would re-pay to rebuild it.
 - **Everything is visible in-app.** `/usage` shows each provider's quota
   windows and account spend; `/accounts` lists every stored credential;
   `/session` reports the current session's cost, cache, and request
-  diagnostics.
+  diagnostics. One exception: QwenCloud's personal Token Plan window needs a
+  [console ticket](./local_operator/guides/qwencloud/GUIDE.md) stored alongside
+  the login.
 
 <p align="center">
   <img src="./static/tui-usage.png" alt="The /usage panel showing per-provider quota windows and account spend" width="720">
@@ -440,8 +442,8 @@ with its title and age:
 | `/resume` | Pick a past conversation and continue it |
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
 | `/update` | Install the latest version from PyPI and relaunch |
-| `/goal <text>` | Set the session objective and send the same text to start work; bare `/goal` shows it and `/goal clear` clears it without starting a turn |
-| `/loop` | Iterate autonomously toward the session objective |
+| `/goal <text>` | Set the session objective and send the same text to start work; bare `/goal` shows it and `/goal --clear` clears it without starting a turn (`/goal clear`, `none` and `reset` still work) |
+| `/loop` | Iterate autonomously toward the session objective: `/loop <n>` for a bounded count, `/loop <goal>` toward an inline goal; `/loop --stop` cancels a running one and `/loop --clear` clears it — which on a detached owner means dismissing a finished run's published state |
 | `/btw` | Ask a side question off the record; it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
@@ -823,7 +825,15 @@ lop credential update TAVILY_API_KEY
 lop credential delete TAVILY_API_KEY
 ```
 
-OAuth tokens from `lop login` are stored separately and refresh themselves.
+OAuth tokens from `lop login` are stored separately, in
+`~/.local-operator/auth.db`, and refresh themselves. The one credential that
+does not is the QwenCloud console ticket: a browser session cookie you capture
+and store by hand, expiring roughly weekly. Its value is held in the encrypted
+`lop secret` store rather than in `auth.db`, which keeps only when it was
+captured and how long it is — a higher bar than a file mode, though not a vault,
+since anything running as you that can run `lop` can read it. The
+[QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
+including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
 
 ## 🌟 Radient: automatic model selection and agent sharing
 

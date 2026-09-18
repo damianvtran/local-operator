@@ -12,7 +12,9 @@ calls worse than the bug it fixes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -93,6 +95,26 @@ def test_classify_cut_off_rewrites_an_involuntary_abort(tmp_path: Path) -> None:
     assert classed.cut_off == render_cut_off_reason("runtime-shutdown")
 
 
+def test_classify_cut_off_leaves_a_normally_completed_run_alone(tmp_path: Path) -> None:
+    """An armed cause cannot brand a run that says it COMPLETED.
+
+    THE GUARD THE INCIDENT NEEDED (2026-09-17). The cut-off vocabulary is armed
+    for a TURN, and the latches that commit a runtime to leaving run while the
+    session may still be working — for the build rungs, hours before the exit.
+    Any end event arriving in that window was rewritten to an error, so a turn
+    that finished normally was reported as cut off. An involuntary end always
+    says so (``aborted=True``, both from the loop's abort and from the teardown's
+    synthesised event), which is what makes this guard exact rather than
+    approximate.
+    """
+    session = _make_session(tmp_path / "sess")
+    session.note_cut_off("runtime-retired", " (1.0@a → 1.1@b)")
+    event = AgentEndEvent(messages=[], aborted=False)
+    assert session._classify_cut_off(event) is event
+    assert event.error is None
+    assert event.cut_off_cause == ""
+
+
 def test_classify_cut_off_does_not_overwrite_a_provider_error(tmp_path: Path) -> None:
     """A real provider diagnosis outranks "the runtime went away"."""
     session = _make_session(tmp_path / "sess")
@@ -123,6 +145,45 @@ def test_note_cut_off_keeps_the_first_and_most_specific_cause(tmp_path: Path) ->
     session.note_cut_off("runtime-shutdown")
     assert session._cut_off_cause == "runtime-retired"
     assert session._cut_off_detail == " (1.0@a → 1.1@b)"
+
+
+@pytest.mark.asyncio
+async def test_a_cause_armed_mid_run_cannot_brand_the_run_that_completes(tmp_path: Path) -> None:
+    """THE OPERATOR'S ROW (2026-09-17), at the seam that produced it.
+
+    A retirement latch fires on a session that is still WORKING — that is its
+    design, commit to leaving and then let the work finish — and it used to arm
+    the cut-off cause at that instant. The cause is consumed by whichever end
+    event comes next, so a run that then finished NORMALLY was published as
+    ``kind=error`` with a cut-off sentence: the desktop drew "Stopped with an
+    error" and the following turn was handed a ``[session incident] cut-off: …``
+    card for a turn that had completed. Six such rows are in this host's
+    ``attention.db``, and the card is in session ``8c13a003dc6d``'s transcript.
+
+    The note here is replayed exactly as the latch wrote it (``note_cut_off``
+    with the detail the reaper composes), and the run then ends the way a
+    completed one does: ``aborted=False``, no error, with its assistant message
+    in the transcript. Nothing about that end claims to have been cut.
+    """
+    from local_operator.harness.types import Message, TextContent
+
+    session = _make_session(tmp_path / "sess")
+    answer = Message(role="assistant", content=[TextContent(text="all done")])
+    await session._transcript.append_message(answer)
+    session._attention_run_token = str(uuid.uuid4())
+    session._attention_run_settled = False
+    # …the retirement latches WHILE this run is in flight.
+    session.note_cut_off("runtime-retired", " (0.56.2 → 0.56.6)")
+    # …and the turn then ends normally.
+    session._attention_outcome = session._classify_cut_off(
+        AgentEndEvent(messages=[answer], aborted=False)
+    )
+    await session._publish_attention_outcome()
+
+    state = AttentionStore().state(conversation_identity(session._transcript.directory))
+    assert state["kind"] == "complete", state
+    assert state["cause"] == "", state
+    assert "cut off" not in str(state.get("reason") or "")
 
 
 # -- the durable outcome -----------------------------------------------------
@@ -353,6 +414,10 @@ class _LatchHost:
     # 4, D10), so the binding here must pass ``self``. `test_serving_drain.py`'s
     # ``DrainHost`` binds it the same way.
     _retiring_refusal = _H._retiring_refusal
+    # The EXIT rung that writes what ``begin_retire`` recorded (2026-09-17): the
+    # note is written at the disposal, so this is the half that must be pinned
+    # alongside the latch.
+    _note_retirement_cut_off = _H._note_retirement_cut_off
 
     #: Typed ``Any`` on purpose: the real attribute holds a ``Session``, and the
     #: tests below substitute a recorder that only implements ``note_cut_off``.
@@ -360,6 +425,7 @@ class _LatchHost:
 
     def __init__(self, *, reason: str = "") -> None:
         self._retiring_cause = ""
+        self._retiring_detail = ""
         self.reason = reason
         self.notes: list[tuple[str, str]] = []
 
@@ -368,19 +434,50 @@ class _LatchHost:
 
 
 class _NoteSession:
-    def __init__(self) -> None:
+    """A recorder for the cut-off note, plus the evidence the note is gated on.
+
+    ``disposal_cuts_a_turn`` is ``Session``'s own answer to "is this disposal
+    about to abort a live turn?", and it is the ONLY thing the note now keys
+    on (agent review round 1, MAJOR-1): a stub without it would pin where the
+    note is written rather than whether it is earned.
+    """
+
+    def __init__(self, *, cuts_a_turn: bool = False) -> None:
         self.notes: list[tuple[str, str]] = []
+        self.cuts_a_turn = cuts_a_turn
 
     def note_cut_off(self, cause: str, detail: str = "") -> None:
         self.notes.append((cause, detail))
 
+    def disposal_cuts_a_turn(self) -> bool:
+        return self.cuts_a_turn
+
 
 def test_begin_retire_commits_when_idle_and_names_the_cause() -> None:
+    """The latch records; the DISPOSAL writes, and only for a turn it cuts.
+
+    Both halves matter, and the second has a GATE (2026-09-17, PR #1242). The
+    latch is still what names the retirement for the refusal and the log, and
+    it still commits in one synchronous step; the note moved to the disposal
+    because at the latch it belonged to a TURN the runtime was merely waiting
+    for. What round 1 added is that the disposal asks the SESSION whether it is
+    cutting anything, so a retirement — which by ``may_refresh`` means no turn
+    is in flight — writes nothing at all.
+    """
     host = _LatchHost()
     session = _NoteSession()
     host._session = session
     assert host.begin_retire("runtime-retired", " (1.0@a → 1.1@b)") is True
     assert host._retiring_cause == "runtime-retired"
+    assert host._retiring_detail == " (1.0@a → 1.1@b)"
+    assert session.notes == [], "the latch must not arm a turn it is still waiting for"
+    host._note_retirement_cut_off()
+    assert session.notes == [], "an idle latch proves there was no turn to cut"
+
+    # The same latch over a disposal that IS aborting a live turn: this is the
+    # one reachable shape, and it keeps the latched cause and detail.
+    session.cuts_a_turn = True
+    host._note_retirement_cut_off()
     assert session.notes == [("runtime-retired", " (1.0@a → 1.1@b)")]
     # The refusal is a TYPED admission category now, and its sentence
     # deliberately does NOT name the internal cause token any more — the token
@@ -543,29 +640,59 @@ def test_a_tear_reported_from_a_record_names_the_pair(monkeypatch) -> None:
 #
 # A bare `/stop` on a TUI-OWNED session does not travel through the `stop`
 # control op: it disposes the session in-process. `Session.dispose()` notes
-# `disposed` unconditionally (correct for the teardown rungs, wrong for a
-# deliberate one), so whether the user's own cancel is reported as a failure is
-# decided by ONE thing — whether the caller recorded the verdict first. The
-# pre-existing guard set `_attention_outcome` directly and the e2e cell used
-# `stop_session`, so neither exercised this route at all; these two tests pin
-# both directions of it against the REAL `dispose()`, which is what makes the
-# classification difference the fix rests on observable rather than assumed.
+# `disposed` for a turn it is ABORTING (correct for the teardown rungs, and
+# gated on a live ``_turn_task`` since round 1), so whether the user's own
+# cancel is reported as a failure is decided by ONE thing — whether the caller
+# recorded the verdict first. The pre-existing guard set `_attention_outcome`
+# directly and the e2e cell used `stop_session`, so neither exercised this
+# route at all; these two tests pin both directions of it against the REAL
+# `dispose()`, which is what makes the classification difference the fix rests
+# on observable rather than assumed.
 
 
 async def _dispose_with_unsent_run(directory: Path, *, deliberate: bool) -> None:
-    """Boot a real session with an in-flight run, then dispose it."""
+    """Boot a real session with a turn IN FLIGHT, then dispose it.
+
+    The turn is parked in the provider stream rather than staged by state, and
+    the difference is load-bearing: a run left UNSETTLED is *what* the disposal
+    publisher reports, while a live ``_turn_task`` is *whether this disposal cut
+    anything*. A helper that minted the token by hand could not tell a teardown
+    that cut work from a run whose outcome never landed, and those are opposite
+    verdicts — the second is the shape of the operator's spurious rows, where a
+    session that had simply gone quiet was reported as an error for work that
+    had finished (2026-09-17).
+    """
     directory.mkdir(parents=True, exist_ok=True)
-    session = _make_session(directory)
+    session = _make_session(directory, stream=_never_yielding_stream())
     await session.async_init()
     # What `_run_turn` does at the head of a turn: a token is minted and the run
     # is left UNSETTLED, so the dispose publisher sees a turn that never
-    # reported an outcome. Driving this by state rather than by running a turn
-    # keeps the test about the classification, which is the seam in question.
-    session._attention_run_token = str(uuid.uuid4())
-    session._attention_run_settled = False
+    # reported an outcome.
+    task = asyncio.ensure_future(session.prompt("a turn that will be cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session.is_streaming:
+        await asyncio.sleep(0.01)
+    assert session.is_streaming, "the turn never reached the provider stream"
     if deliberate:
         session.note_deliberate_stop()
     await session.dispose()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+def _never_yielding_stream() -> Any:
+    """A provider stream that never yields: the turn stays in flight.
+
+    An async GENERATOR, because that is what ``stream_fn`` requires — a plain
+    coroutine would type-check as a mistake and raise the first time a turn ran.
+    """
+
+    async def _stream(*_args: Any, **_kwargs: Any) -> Any:
+        await asyncio.Event().wait()
+        yield  # pragma: no cover — unreachable: the event is never set
+
+    return _stream
 
 
 @pytest.mark.asyncio
@@ -589,14 +716,20 @@ async def test_the_dispose_route_publishes_the_users_own_stop_as_an_interruption
 
 
 @pytest.mark.asyncio
-async def test_an_unnoted_dispose_is_still_a_cut_off_error(tmp_path: Path) -> None:
+async def test_an_unnoted_dispose_of_a_LIVE_turn_is_still_a_cut_off_error(tmp_path: Path) -> None:
     """The control, and the reason this is a caller's verdict rather than a guess.
 
-    An INVOLUNTARY teardown (a reload, an unmount, ``_mobile_teardown``) is a
-    turn cut off under the user, and it must keep reading as one. Without this
-    half, "note the stop everywhere" would look equivalent to "never report a
-    disposed turn", and the two differ on exactly the teardowns nobody asked
-    for.
+    An INVOLUNTARY teardown (a reload, an unmount, ``_mobile_teardown``) that
+    cuts a turn in flight is a turn cut off under the user, and it must keep
+    reading as one. Without this half, "note the stop everywhere" would look
+    equivalent to "never report a disposed turn", and the two differ on exactly
+    the teardowns nobody asked for.
+
+    The guard the disposal now carries makes that claim TRUE BY CONSTRUCTION
+    rather than by assertion: the note is written only when a ``_turn_task`` is
+    live, which is the same evidence the abort below it uses, so "disposed while
+    this turn was running" is a fact about this disposal rather than a hope
+    about which run end comes next.
     """
     directory = tmp_path / "sessions" / "torn"
     await _dispose_with_unsent_run(directory, deliberate=False)
@@ -605,6 +738,94 @@ async def test_an_unnoted_dispose_is_still_a_cut_off_error(tmp_path: Path) -> No
     assert state["kind"] == "error", state
     assert state["cause"] == "disposed", state
     assert state["reason"], "a cut-off must name a reason"
+
+
+@pytest.mark.asyncio
+async def test_a_dispose_that_cut_no_turn_settles_the_run_with_no_verdict(
+    tmp_path: Path,
+) -> None:
+    """The operator's rows from the other side, on the seam that wrote them.
+
+    A run left unsettled with NO turn in flight is not work this disposal cut:
+    the turn's task is gone, so there is nothing to abort and nothing to
+    attribute. Writing a cause anyway claimed a cut of work that had ended — the
+    six ``error`` rows the operator's ``attention.db`` carries against sessions
+    last active hours earlier — and the taxonomy's aborted-run default claimed
+    the opposite, the user's own stop (agent review round 1, MAJOR-1 and
+    MAJOR-2).
+
+    What this pins is the third disposition: the run is SETTLED and nothing is
+    asserted. ``Session._settle_run_without_an_outcome`` carries the argument
+    for silence over each of the three kinds; the observable claims here are
+    that no row exists, and that the run's token is CLOSED, so a successor
+    cannot classify it either (that is what makes silence safe rather than
+    merely quiet).
+    """
+    from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+    directory = tmp_path / "sessions" / "quiet"
+    directory.mkdir(parents=True, exist_ok=True)
+    session = _make_session(directory)
+    await session.async_init()
+    # The shape a wedged turn leaves behind: the run was minted and never
+    # published, and the turn that owned it is gone.
+    session._attention_run_token = str(uuid.uuid4())
+    session._attention_run_settled = False
+    await session.dispose()
+
+    assert session._attention_run_settled is True
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state["kind"] is None, state
+    assert state["cause"] == "", state
+    saved = Transcript(directory).latest_custom(ATTENTION_CUSTOM_TYPE)
+    assert saved is not None and saved.get("eligible") is False, saved
+
+
+@pytest.mark.asyncio
+async def test_a_latched_retirement_over_an_orphan_run_brands_nothing(tmp_path: Path) -> None:
+    """MINOR-1: the REACHABLE ordering, through the production seams.
+
+    The headline cell used to arm the cause by calling ``note_cut_off``
+    directly, which no production path does. The shape that exists is latch ->
+    dispose -> orphan, and it is one-directional: ``begin_retire`` refuses while
+    anything would be lost (``may_refresh``), so a retirement that SUCCEEDED is
+    proof no turn was in flight and the only run it can reach is one that was
+    already orphaned before the latch. Round 1 keys the note on the session's
+    own evidence (``Session.disposal_cuts_a_turn``) rather than on the latch,
+    which is what this stages: a real handle, a real session, a real unsettled
+    run, and no row on any surface.
+
+    The contrast lives next door
+    (``test_an_unnoted_dispose_of_a_LIVE_turn_is_still_a_cut_off_error``): the
+    same disposal over a turn that IS in flight still records the error.
+    """
+    from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    directory = tmp_path / "sessions" / "latched-orphan"
+    directory.mkdir(parents=True, exist_ok=True)
+    session = _make_session(directory, stream=_never_yielding_stream())
+    await session.async_init()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    task = asyncio.ensure_future(session.prompt("a turn that will be cancelled"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session.is_streaming:
+        await asyncio.sleep(0.01)
+    assert session.is_streaming, "the turn never reached the provider stream"
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert session._attention_run_settled is False, "this cell needs an unsettled run"
+
+    assert handle.begin_retire("runtime-retired", " (1.0@a → 1.1@b)") is True
+    assert session._cut_off_cause == "", "a latch may not arm a turn"
+    await handle.dispose()
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state["kind"] is None, state
+    assert state["cause"] == "", state
+    saved = Transcript(directory).latest_custom(ATTENTION_CUSTOM_TYPE)
+    assert saved is not None and saved.get("eligible") is False, saved
 
 
 @pytest.mark.asyncio
@@ -636,6 +857,44 @@ async def test_the_handles_cancel_rungs_record_the_deliberate_verdict(tmp_path: 
 
 
 # -- an aborted turn that also failed (review round 1, MINOR-1) --------------
+
+
+def test_a_mid_install_import_failure_still_brands_the_aborted_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one arming path that does NOT go through the disposal (round 1, NIT-2).
+
+    ``Session._note_import_failure`` records the cause when a lazy import loses
+    a name against a half-REPLACED install, and the turn is then re-raised — so
+    the end event the pipeline emits is ``aborted=True`` and the classifier
+    brands it. ``_classify_cut_off`` now insists on exactly that, so this is
+    pinned rather than inferred: the guard narrows the SHAPE of the end event,
+    and a claim about a mid-turn cut-off should not rest on prose (agent review
+    round 1 flagged that this sibling had no cell at all).
+
+    Only the classifier's verdict is stubbed; the note, the arming and the
+    re-labelling are the production code.
+    """
+    session = _make_session(tmp_path / "sess")
+    monkeypatch.setattr(
+        "local_operator.update.classify_import_failure",
+        lambda *_args, **_kwargs: "the loaded module tree was replaced mid-turn",
+    )
+    assert session._note_import_failure(ImportError("cannot import name 'X'"), "local_operator.x")
+    assert session._cut_off_cause == "install-mid-update"
+
+    aborted = session._classify_cut_off(AgentEndEvent(messages=[], aborted=True))
+    assert aborted.cut_off_cause == "install-mid-update"
+    assert aborted.cut_off == render_cut_off_reason(
+        "install-mid-update", detail=session._cut_off_detail
+    )
+    assert aborted.error and "replaced on disk" in aborted.error
+
+    # …and the same cause is inert against an end that says it was NOT aborted,
+    # which is the guard's whole contract.
+    session._cut_off_cause = "install-mid-update"
+    completed = AgentEndEvent(messages=[], aborted=False)
+    assert session._classify_cut_off(completed) is completed
 
 
 def test_an_aborted_turn_that_also_failed_keeps_the_providers_diagnosis(

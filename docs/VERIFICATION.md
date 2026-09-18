@@ -704,7 +704,7 @@ produce a report for a typical user:
 | `OAUTH_USAGE_PROVIDERS` was hand-written, had drifted, and was read by nothing; `USAGE_PROVIDERS` (the set that gates the UI) duplicated the same eight keys | `USAGE_PROVIDERS = frozenset(_FETCHERS)`; `OAUTH_USAGE_PROVIDERS` deleted — `usage_kinds()` already answers its question for its one would-be caller |
 | The Moonshot balance URL hardcoded the INTERNATIONAL host `api.moonshot.ai` while every other Kimi setting targets mainland `api.moonshot.cn` — separate platforms, separate accounts, separate keys, so the `KIMI_API_KEY` a user must hold 401s and the table is empty again | the balance path is appended to the provider's configured `base_url`; the host also fixes the currency (the response carries none), so a CNY balance no longer renders as USD |
 | `UsageReport.identity` was never assigned, so the TUI's annotation was unreachable | populated from the OAuth email/account id |
-| `/usage` could not distinguish "no endpoint" from "endpoint you cannot reach" | `usage_kinds()` reports both routes; the TUI now names the missing credential |
+| `/usage` could not distinguish "no endpoint" from "endpoint you cannot reach" | `usage_kinds()` reports both routes; the TUI now names the missing credential. **Partially superseded:** for `alibaba-token-plan` an expired console ticket renders the same empty-panel string as a provider with no endpoint (`no provider reports no usage — no quota endpoint, or no credential for one`), which names a missing credential when the credential is stored and merely expired; there is no "re-run `set`" hint because the ticket is not an OAuth row. See "QwenCloud personal Token Plan usage" below. |
 | OpenRouter called the undocumented `/api/v1/auth/key` alias | pinned to the documented `/api/v1/key` (both verified live, identical bodies) |
 | The renderer printed a number only for `used`, so both balance fetchers (deliberately `remaining`-only) drew a row labelled "Balance" with no amount, and `UNIT_LABELS` was read by nothing while the raw dict key was interpolated | `remaining`/`limit`/fraction fall-backs, and units come from `UNIT_LABELS` — `519.86 USD` and `30%`, not `519.86 usd` and `30 percent` |
 
@@ -2036,3 +2036,148 @@ added codes, the label-width budget, a hostile-input sweep asserting the fetcher
 never raises, and the 200-with-`success:false` path), `tests/unit/providers/test_registry.py`
 (definition, coding-plan base URL, search aliases), and the `/login` picker and
 usage-panel frames captured from the real `OperatorApp`.
+
+## QwenCloud personal Token Plan usage (`alibaba-token-plan`)
+
+One provider, two routes, and the second exists only because the first was
+verified live to answer nothing for this account shape. The console route runs
+FIRST and falls through to BSS on `None`, so a teams account keeps its monthly
+window (`providers/usage.py`, `fetch_usage`).
+
+**The BSS dead end, live.** The management OAuth token from
+`/login alibaba-token-plan-oauth` posts to
+`https://cli.qwencloud.com/data/v2/api.json` (product `BssOpenAPI-V3`, region
+`ap-southeast-1`). Against a live personal Token Plan account every call
+succeeds at the transport and reports nothing:
+
+- `QuerySubscriptionGray` → `IsGray: true` — the account IS in the grey release
+- `GetSeatSubscriptionSummary` → `Data: {}`
+- `DescribeFrInstances` → `TotalCount: 0` on all three Token Plan commodities
+  (`sfm_tokenplanpersonal_dp_intl`, `sfm_tokenplanteams_dp_intl`,
+  `sfm_tokenplanteamsaddon_dp_intl`)
+
+No test can reproduce that: it is a property of one live account, and it is the
+entire justification for the console route. On that shape
+`fetch_qwencloud_token_plan` returns **`None`**, not a window-less report:
+`_qwencloud_credits_limit` bails at `if not total or total <= 0`, an empty seat
+summary gives `total = 0.0`, so `limits` stays empty and the fetcher's
+`return … if limits else None` answers `None` (re-verified in-process against a
+`MockTransport` BSS, 2026-09-16). That is the real reason the console route runs
+first: `fetch_usage` returns on the first route it can attempt and has no
+fall-through between the OAuth and API-key pair, so BSS first would end the
+fetch at `None` and the console route would never be consulted. A window-less
+BSS report IS reachable on a narrower shape — an account that also holds add-on
+Credit Packs (`packs > 0`) with no subscription window — and there console-first
+is what keeps the 7-day window on the panel, at the cost of the packs row
+`fetch_usage` documents as a KNOWN LIMITATION. The fetcher's `# NOTE` records
+both; the packs-only case is deliberately not fixed here.
+
+**Console envelope.** `POST https://cs-data.qwencloud.com/data/api.json`,
+`application/x-www-form-urlencoded`, product `sfm_bailian`, action
+`IntlBroadScopeAspnGateway`, api
+`zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage`, plus a JSON `params`
+string carrying the `cornerstoneParam` block. Authentication is exactly ONE
+cookie, `login_qwencloud_ticket`, sent as a `cookie:` HEADER rather than
+httpx's `cookies=`: the client is caller-owned and shared across providers, so
+a jar write would ride a full-account console session on every other provider's
+request. `sec_token` is sent and never validated — an empty value and a wrong
+one both returned live data (bisection against a live account, 2026-09-11).
+
+Four nested envelopes, each type-checked rather than walked with `.get()`
+chains: `data` → `DataV2` → `data` → `data`, with a `success` flag that must be
+literally `True` at both levels carrying one. In the innermost object:
+
+- `per1WeekPercentage` is a **fraction used**, not a 0–100 percentage — `0.24`
+  renders as 24% used. Read as a percentage, every personal plan reports ~0%.
+- `per1WeekResetTime` is **epoch milliseconds**.
+- Expiry arrives as HTTP **200** carrying `code: "200"`, `data.success: false`
+  and `data.errorCode == "BailianGateway.Login.NotLogined"`. A "200 means
+  success" read parses that as data and reports a fabricated window.
+
+**The management Bearer cannot reach the console host** — it answers
+`BailianGateway.Login.NotLogined` there as well. That is why a second
+credential exists at all, and why it is stored under its own provider id
+`qwencloud-console`, deliberately absent from `PROVIDER_REGISTRY`: a row under
+`alibaba-token-plan` would satisfy `has_any_credential`, and local-operator
+would conclude it can run CHAT traffic on a read-only console cookie.
+
+**Expiry is indistinguishable from "no endpoint", so the audit row above is
+partially stale for this provider.** An expired ticket renders the empty-panel
+string `no provider reports no usage — no quota endpoint, or no credential for
+one` (`tui/widgets/usage_panel.py`; `alibaba-token-plan reports no usage — …`
+when the panel is scoped to the provider) — the same string a provider with no
+quota endpoint produces, and it names a MISSING credential when the credential
+is stored and merely expired, with no "re-run `set`" hint, because the ticket
+is not an OAuth row and cannot set `credential_invalid`. The panel also keeps
+serving the last cached percentage past expiry: the report TTL is 5 min
+(`USAGE_REPORT_TTL_MS`), stale serving holds the last-good row, and an
+unavailable account is re-probed on a 10 min ±25% cadence
+(`USAGE_UNAVAILABLE_RETRY_MS`). `lop qwencloud-ticket status` is the only
+diagnostic, and it reports presence, character count and age — never the value.
+It now **proves** it never retrieves the value rather than asserting it: the
+value lives in the encrypted secret store and `read_ticket_record` reads it with
+`describe`, never `get`.
+
+**Where the value lives, and the claim stated precisely.** PR 2 moved the
+ticket's VALUE into the encrypted `lop secret` store (AES-256-GCM,
+blind-indexed names) as `QWENCLOUD_CONSOLE_TICKET`, leaving `captured_at`,
+`length`, `secret_name` and `project_id` in `auth.db`. The namespace argument
+above is unchanged — only the value's location moved. This raises the cost of
+stealing the cookie; it is **not a vault**, because the default `keyfile` mode
+keeps the master key in a file beside the store and anything running as the user
+that can run `lop` can retrieve the value.
+
+The retrieval-free property is asserted as an **observable, not as an audit
+count**, and that is a deliberate correction. `access.open_store()` appends one
+`key`/`deny:key` audit row **per call** — the broker audits the key handout —
+so "a `status` call appends no audit row" is false and would fail against a
+correct implementation. What holds, and what is asserted: `status` appends **no
+`get` event** and leaves `last_used_at` **`None`**. Measured: 5 `describe` calls
+on an open handle moved the audit count by 0; 3 `get` calls moved it by 3 and
+set `last_used_at` from `None` to a float.
+
+The migration's plaintext check is scanned across `auth.db`, `auth.db-wal` and
+`auth.db-shm`, not the main file alone: `AuthStore` runs in WAL mode, so a
+freshly written value sits in the WAL and a scan of `auth.db` by itself reports
+clean against a completely broken migration. The check is asserted **True before
+and False after**, which is what proves it discriminates. Clearing those bytes
+needs `VACUUM` **and** `PRAGMA wal_checkpoint(TRUNCATE)`, and the checkpoint
+signals a blocked run through its return value's first column rather than by
+raising — so `migrate` reports when the plaintext could not be cleared instead
+of claiming a removal it did not perform.
+
+Evidence for the two-store behaviour:
+`tests/unit/providers/test_qwencloud_console.py` (61 cases, 22 added for the
+secret store — the three verbs against the two stores, the metadata/secret
+orthogonality matrix, the locked-store outcome kept distinct from "nothing
+stored", and `rm` revoking a value whose metadata row is already gone),
+`tests/unit/test_cli_new.py` (15 added CLI cases — the metadata-orphan warning,
+`status` staying retrieval-free, `rm` naming which store it could not confirm,
+and the usage footer advertising `migrate`), and
+`tests/unit/providers/test_controller.py` (29 ticket cases, 8 added — the
+missing-secret repair note, the locked note and its survival under panel
+truncation, exposed file modes and a version-skewed broker reported rather than
+swallowed, and a slow retrieval not blocking the event loop).
+
+**Two accepted trades.** Returning the console report instead of merging both
+routes is what makes exactly one `credits-7d` row possible, since both routes
+build that id; the cost is that a HYBRID account — a personal Token Plan that
+also holds BSS Credit Packs — loses its `credits-packs` row, because the BSS
+path that reports packs never runs. Narrow: it needs a dead OAuth grant AND
+packs, and packs are the teams addon commodity. Separately, `lop /update`
+reinstalls from PyPI and silently reverts a locally built console fetcher while
+leaving the stored row in place, so nothing reads it and the credential still
+looks healthy; `status` reports that state explicitly.
+
+Evidence: `tests/unit/providers/test_qwencloud_console.py` (42 cases — the
+store's mode refusals, stdin-only `set`, refusal messages that never echo the
+value, `rm` exiting non-zero when it cannot prove the row is gone, and the
+cached usage row dropping on a ticket change),
+`tests/unit/providers/test_usage.py` (50 qwencloud/console cases — the
+fraction-to-percentage clamp, the 200-with-`NotLogined` path, a partial
+envelope at every nesting level, a hostile-input sweep asserting the fetcher
+never raises, console-first ordering and the fall-through that never doubles
+the window), `tests/unit/providers/test_controller.py` (9 ticket cases — the
+stored ticket reaching the dispatcher, no ticket meaning no request, and
+another provider never querying the namespace), and the `page-usage-qwencloud`
+usage-panel frame captured from the real `OperatorApp`.

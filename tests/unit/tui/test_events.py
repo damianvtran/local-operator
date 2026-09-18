@@ -22,6 +22,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     NoticeEvent,
+    ToolCall,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -480,6 +481,48 @@ def test_message_end_adopts_authoritative_text() -> None:
     session.emit(MessageEndEvent(message=Message.assistant("partial and complete")))
     ends = [m for m in app.posted if isinstance(m, AssistantMessageEnd)]
     assert ends[-1].text == "partial and complete"
+
+
+def test_message_end_carries_the_narration_signal() -> None:
+    """The two fields that distinguish mid-turn narration from the answer.
+
+    The harness sets ``tool_calls`` and ``stop_reason`` on the message
+    immediately before it yields the end event, and this controller used to
+    DISCARD both — so the app saw every finalized message as identical prose
+    and could not honour ``display.narration``. Asserted here rather than only
+    through the app, because the app's own tests post the event directly and
+    would stay green with the controller reading nothing at all.
+    """
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    session.emit(MessageStartEvent(message=Message.assistant("")))
+    session.emit(
+        MessageEndEvent(
+            message=Message.assistant(
+                "looking into it",
+                tool_calls=[ToolCall(id="c1", name="bash", arguments={"command": "ls"})],
+                stop_reason="toolUse",
+            )
+        )
+    )
+    ends = [m for m in app.posted if isinstance(m, AssistantMessageEnd)]
+    assert ends[-1].has_tool_calls is True
+    assert ends[-1].stop_reason == "toolUse"
+
+
+def test_message_end_reports_a_final_answer_as_final() -> None:
+    """The other arm: no calls and a terminal reason must not read as narration.
+
+    Without this, a controller that hardcoded ``has_tool_calls=True`` would
+    pass the test above and silently sweep every answer the user asked for.
+    """
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    session.emit(MessageStartEvent(message=Message.assistant("")))
+    session.emit(MessageEndEvent(message=Message.assistant("here it is", stop_reason="stop")))
+    ends = [m for m in app.posted if isinstance(m, AssistantMessageEnd)]
+    assert ends[-1].has_tool_calls is False
+    assert ends[-1].stop_reason == "stop"
 
 
 def test_agent_end_final_flush_delivers_buffered_tail() -> None:
