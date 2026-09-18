@@ -29,6 +29,8 @@ from typing import Any
 # Allow running from the repo root without installation.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from local_operator.agent_shell import harness_child_env  # noqa: E402
+
 OUT_DIR = Path("/tmp/lo-bench")
 MODEL = os.environ.get("LO_BENCH_MODEL", "deepseek/deepseek-v4-flash-0731")
 HOSTING = "openrouter"
@@ -86,7 +88,10 @@ def run_task(workdir: Path, slug: str, prompt: str) -> dict[str, Any]:
         ],
         capture_output=True,
         text=True,
-        env={**os.environ},
+        # This script is a harness driving the real CLI, so it declares itself
+        # one: an agent's shell sets the marker, and without this every task
+        # would come back refused (`agent_shell.harness_child_env`).
+        env=harness_child_env(),
         timeout=900,
     )
     wall = time.monotonic() - start

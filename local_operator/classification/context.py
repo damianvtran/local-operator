@@ -66,14 +66,45 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from local_operator.classification.cascade import classification_section
 
 ResourceKind = Literal["skill", "guide", "mcp"]
+
+
+@runtime_checkable
+class CandidateLike(Protocol):
+    """The four attributes this module reads off a candidate row.
+
+    STRUCTURAL, and that is the point: the wiring owns its own row type
+    (``session_factory``'s ``_ClassificationCandidate``) precisely so the turn path
+    never imports this package, and both sides are read by ATTRIBUTE. Annotating
+    these helpers with the concrete dataclass made the wiring's rows a type error at
+    a seam that already works at runtime — the fix is to state the interface the
+    helpers actually use, not to make either side import the other.
+
+    Read-only ``property`` declarations rather than plain attributes: the rows on
+    both sides are frozen dataclasses, and a writable attribute in the protocol would
+    refuse them while describing something neither side does.
+    """
+
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def resource_url(self) -> str: ...
+
 
 #: ``values.classification.maxStateChars`` — the whole state's hard cap.
 DEFAULT_MAX_STATE_CHARS = 6000
@@ -123,6 +154,12 @@ class Candidate:
     name: str
     description: str
     resource_url: str
+
+
+#: The row type ``shortlist`` preserves: it decides WHICH rows travel and hands back
+#: the CALLER'S OWN rows, so the caller keeps its concrete type (the wiring's own
+#: ``_ClassificationCandidate``, which must not be replaced by this module's).
+CandidateT = TypeVar("CandidateT", bound=CandidateLike)
 
 
 def setting_int(settings: Mapping[str, Any] | None, key: str, default: int) -> int:
@@ -190,7 +227,115 @@ def select_candidates(
     return tuple(kept)
 
 
-def candidate_line(candidate: Candidate, limit: int | None = None) -> str:
+def _tokens(text: str) -> set[str]:
+    """The word set a score is computed over.
+
+    Same shape as ``skills/index.py``'s tokenizer (``[a-z0-9]+`` on lowercased
+    text) on purpose: the roster here and the embedder there are judging the same
+    strings, and two tokenizers would make the two surfaces disagree about what a
+    word is for no benefit.
+    """
+    return set(_WORD_RE.findall(text.lower()))
+
+
+#: Local, and module level so the pattern is compiled once: this runs per message.
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def shortlist(
+    candidates: Sequence[CandidateT],
+    query: str,
+    limit: int | None = None,
+) -> tuple[CandidateT, ...]:
+    """The candidates to spend budget on, chosen by LOCAL relevance to ``query``.
+
+    WHY A CHOICE HAS TO BE MADE AT ALL
+    ---------------------------------
+    ``maxCandidates`` is a cost bound (every candidate travels TWICE: one line in
+    the state and one option description in its kind's question), and the roster
+    is the whole discovered catalogue. An operator with hundreds of installed
+    skills therefore cannot send all of them, and the first ``limit`` of them in
+    discovery order is an arbitrary permanent shortlist: the same dozen favourites
+    would be offered on every message for the life of the session while the rest
+    of the catalogue was unreachable — precisely when scaling to hundreds is the
+    thing that matters.
+
+    WHY THE SCORING IS LOCAL, AND LEXICAL
+    -------------------------------------
+    Three constraints pushed it here rather than into the embedder:
+
+    * **No extra round trip.** The layer's latency budget is one network call
+      (§5a rule 1); a second embedding request per message is not affordable, and
+      the embedder's own selection is a different question (it picks what the
+      PROMPT should carry, this picks what the classifier should judge).
+    * **Deterministic and inspectable.** A Jaccard overlap over lowercase word
+      sets, plus a literal-name bonus, answers "is this resource's text about what
+      the user just asked?" with numbers a reviewer can recompute by hand.
+    * **Cheap at catalogue scale.** Word sets are built once per (roster, query);
+      hundreds of candidates cost well under a millisecond of set arithmetic,
+      against a 50 ms turn budget.
+
+    The order of the RETURNED rows is the caller's (discovery) order, not the
+    score order — the state's line order and the question's option order are part
+    of the request the vendor sees, and this function's job is to decide WHICH
+    rows travel, not to reshuffle them. Ties keep discovery order for the same
+    reason: two equally relevant candidates must not swap places between two
+    identical messages, or the session cache key would churn for nothing.
+
+    A roster that already fits per kind is returned BY IDENTITY, so a small
+    catalogue behaves exactly as it did before this existed — the wiring's warm
+    path stays allocation-free (asserted in the wiring's own tests).
+    """
+    cap = limit if limit is not None else DEFAULT_MAX_CANDIDATES
+    if cap <= 0:
+        # THE SAME RULE as ``select_candidates``: a cap of zero keeps nothing. Two
+        # functions that apply one bound must not disagree about the same number, and
+        # reading 0 as "no cap" here would have made it mean the opposite of what it
+        # means one function over (agent review round 1). The §8 readers refuse a 0
+        # for ``maxCandidates`` anyway, so this is only reachable from a direct call.
+        return ()
+    per_kind: dict[str, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        per_kind.setdefault(candidate.kind, []).append(index)
+    if all(len(rows) <= cap for rows in per_kind.values()):
+        # IDENTITY, not a copy: the wiring asserts that a warm message carries the
+        # cached roster object, and a fresh tuple per message would churn that for
+        # nothing. A list is normalised because the annotation promises a tuple, and
+        # the cast is what lets the caller keep ITS row type through the generic
+        # (``tuple(x)`` is ``x`` itself when x is already a tuple, so no allocation
+        # happens on this path).
+        if isinstance(candidates, tuple):
+            return cast(tuple[CandidateT, ...], candidates)
+        return tuple(candidates)
+
+    query_tokens = _tokens(query)
+    lowered_query = query.lower()
+    keep: list[int] = []
+    for rows in per_kind.values():
+        if len(rows) <= cap:
+            keep.extend(rows)
+            continue
+        scored: list[tuple[float, int]] = []
+        for position, roster_index in enumerate(rows):
+            item = candidates[roster_index]
+            line_tokens = _tokens(candidate_line(item))
+            union = query_tokens | line_tokens
+            overlap = len(query_tokens & line_tokens) / len(union) if union else 0.0
+            # A resource whose NAME the user typed is the strongest signal this
+            # scorer has, and Jaccard alone can bury it under a long shared
+            # description ("deploy the service" against a deploy skill's blurb).
+            named = 1.0 if item.name and item.name.lower() in lowered_query else 0.0
+            scored.append((overlap + named, position))
+        # Highest score first, discovery order as the tie-break, then the survivors
+        # go back in the caller's order — this decides WHICH rows travel, not how
+        # they are laid out for the vendor.
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        keep.extend(rows[position] for _, position in scored[:cap])
+    kept = set(keep)
+    return tuple(item for index, item in enumerate(candidates) if index in kept)
+
+
+def candidate_line(candidate: CandidateLike, limit: int | None = None) -> str:
     """``"name: description"``, trimmed to ``limit`` chars when one is given."""
     line = f"{candidate.name}: {candidate.description}" if candidate.description else candidate.name
     if limit is not None and limit > 0 and len(line) > limit:

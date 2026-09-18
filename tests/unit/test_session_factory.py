@@ -660,9 +660,10 @@ def test_coerce_compaction_reads_legacy_max_threshold_tokens() -> None:
 def test_train_false_named_agent_uses_ephemeral_dir(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
     agent = cast("AgentData", SimpleNamespace(id="a1"))
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         agent, _args(train=False), cast("AgentRegistry", registry)
     )
+    assert is_new is True  # an id nothing has ever used
     # Ephemeral session dir — NOT the agent dir: no replay, no append.
     assert directory.parent == tmp_path / "sessions"
     assert directory.name != "a1"
@@ -672,28 +673,31 @@ def test_train_false_named_agent_uses_ephemeral_dir(tmp_path: Path) -> None:
 def test_train_true_named_agent_uses_agent_dir(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
     agent = cast("AgentData", SimpleNamespace(id="a1"))
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         agent, _args(train=True), cast("AgentRegistry", registry)
     )
     assert directory == tmp_path / "agents" / "a1"
     assert agent_id == "a1"
+    assert is_new is False  # an agent DIRECTORY, not a session
 
 
 def test_train_true_no_agent_uses_autosave(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         None, _args(train=True), cast("AgentRegistry", registry)
     )
     assert registry.autosave_calls == 1
     assert directory == tmp_path / "agents" / "autosave-1"
+    assert is_new is False  # the autosave agent's directory, as above
     assert agent_id == "autosave-1"
 
 
 def test_no_train_no_agent_is_ephemeral(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         None, _args(train=False), cast("AgentRegistry", registry)
     )
+    assert is_new is True
     assert directory.parent == tmp_path / "sessions"
     assert agent_id == "main"
     assert registry.autosave_calls == 0
@@ -1875,11 +1879,14 @@ def test_resume_reuses_the_named_session_directory(tmp_path: Path) -> None:
     (sessions / "abc123" / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
     registry = FakeRegistry(tmp_path)
 
-    directory, agent_id = session_factory._transcript_dir_and_agent_id(
+    directory, agent_id, is_new = session_factory._transcript_dir_and_agent_id(
         None, _args(resume="abc123"), cast("AgentRegistry", registry)
     )
     assert directory == sessions / "abc123"
     assert agent_id == "main"
+    # A strict resume only resolves a conversation that exists, so it is never
+    # "new" — which is what stops the escape stamp hiding the operator's own.
+    assert is_new is False
 
 
 def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
@@ -1896,10 +1903,11 @@ def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
         os.utime(transcript, (when, when))
     registry = FakeRegistry(tmp_path)
 
-    directory, _ = session_factory._transcript_dir_and_agent_id(
+    directory, _, is_new = session_factory._transcript_dir_and_agent_id(
         None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
     )
     assert directory == sessions / "newer"
+    assert is_new is False
 
 
 def test_resume_latest_skips_a_subagent_that_finished_last(tmp_path: Path) -> None:
@@ -1919,10 +1927,11 @@ def test_resume_latest_skips_a_subagent_that_finished_last(tmp_path: Path) -> No
     resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT, label="review")
     registry = FakeRegistry(tmp_path)
 
-    directory, _ = session_factory._transcript_dir_and_agent_id(
+    directory, _, is_new = session_factory._transcript_dir_and_agent_id(
         None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
     )
     assert directory == sessions / "mine"
+    assert is_new is False
 
 
 def test_a_subagent_session_still_resumes_by_explicit_id(tmp_path: Path) -> None:
@@ -4463,8 +4472,11 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     WHY A TEST rather than reading the call site: the prewarm only ever SAVES time, so
     nothing fails when it is dropped — the cost simply arrives on a session's first
     message instead, which no test notices and only a measurement shows. The
-    enabled-only half is a real constraint, not a detail: a default install must not
-    import the package, build a service or open a client for a feature that is off.
+    enabled-only half is a real constraint, not a detail: a session with the layer OFF
+    must not import the package, build a service or open a client. That case is named
+    explicitly (``auto: false``) rather than left to the absent key, which is ON by
+    default since 2026-09-18 — the flip made the old "no section means off"
+    assumption here wrong, and CI, not this file, caught it.
 
     Counted on the METHOD rather than with a recording subclass, because a subclass
     would inherit this stub and then prove nothing about the shipped body — which is
@@ -4494,9 +4506,11 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
         await on_session.dispose()
 
     off_dir = tmp_path / "off"
+    off_config = ConfigManager(off_dir)
+    off_config.set_config_value("classification", {"auto": False})
     off_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
-        ConfigManager(off_dir),
+        off_config,
         CredentialManager(off_dir),
         AgentRegistry(off_dir),
     )

@@ -147,9 +147,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: ``values.classification.auto`` — off means the prompt is byte-identical to a
-#: harness without this feature. Default false, matching ``values.effort.auto``:
-#: an upgrade must never silently change behaviour or spend (§8).
-DEFAULT_AUTO = False
+#: harness without this feature. Default TRUE since 2026-09-18.
+#:
+#: WHY THE DEFAULT FLIPPED (the earlier value was argued for here and in §8)
+#: ------------------------------------------------------------------------
+#: It shipped off so an upgrade could never silently change behaviour or spend,
+#: by analogy with ``values.effort.auto``. Three measurements replaced the
+#: analogy with a decision: (1) the spend is bounded and small — a full default
+#: roster estimates ~2.7k input tokens per user message
+#: (:mod:`~local_operator.classification.recommend` shows the arithmetic, and the
+#: one live Radient call measured while writing this billed $0.000027); (2) the
+#: latency is not the operator's — the turn waits ``waitMs`` (50 ms) and a slower
+#: answer rides the NEXT message, so the vendor's ~250 ms never lands in a turn;
+#: (3) the failure mode is a line of context, not a wrong action: every answer is
+#: advisory and nothing here may gate a capability (§6).
+#:
+#: The cost of the flip is real and it is in the import graph: with ``auto``
+#: absent now meaning ON, a session built without the key builds the seam and
+#: pays the package's cold import during session construction (an explicit
+#: ``auto: false`` is still the byte-identical, no-import path). That is the
+#: deliberate trade — a layer that must be discovered and switched on by hand
+#: does not make the operator's installed skills reachable, which is its point.
+DEFAULT_AUTO = True
 
 #: ``values.classification.timeoutMs`` — per-call deadline, in milliseconds.
 DEFAULT_TIMEOUT_MS = 1500

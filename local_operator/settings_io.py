@@ -2014,13 +2014,19 @@ SETTINGS: tuple[Setting, ...] = (
         section="classification",
         label="Smart hints",
         kind=Kind.BOOL,
-        default=False,
-        # Same precedent as `values.effort.auto` (`model/effort_classifier.py`):
-        # default OFF, because an upgrade must never silently change behaviour or
-        # spend. The help says what ON does rather than what the feature is: the
+        # Default ON since 2026-09-18, matching the package's own `DEFAULT_AUTO`
+        # (`classification/service.py`, which records why the flip is worth its
+        # spend). The OFF case stays a real path and stays free: with
+        # `auto: false` the wiring returns before it imports the package, so the
+        # prompt is byte-identical to a harness without the layer.
+        #
+        # The flip was a deliberate change of behaviour, so it is stated once
+        # here in the comment that owns the default, and nowhere else in this
+        # file. The help says what ON does rather than what the feature is: the
         # label already names the feature, and it now names it in the one term
-        # the tips and `guide://classification` use (D11).
-        help="Off: the prompt is unchanged. On: a decision model may add advisory resources.",
+        # the tips and `guide://classification` use (design round 2, D11).
+        default=True,
+        help="On: a decision model may add advisory resources. Off: the prompt is unchanged.",
         choices=_bool_choices(
             "a decision model may add advisory resources",
             "the prompt stays exactly as it is",

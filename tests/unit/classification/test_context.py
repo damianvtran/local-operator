@@ -20,7 +20,9 @@ from local_operator.classification.context import (
     select_candidates,
     serialized_size,
     setting_int,
+    shortlist,
 )
+from local_operator.classification.recommend import build_questions
 from tests.unit.classification.support import candidate
 
 
@@ -34,6 +36,68 @@ def roster(
 
 def size_of(state: dict[str, Any]) -> int:
     return len(json.dumps(state, ensure_ascii=False))
+
+
+#: A description of the length a discovered skill actually carries (the §5 line cap
+#: is 120 chars): the budget numbers move a lot with it, and short toy descriptions
+#: understated the request enough that a 5x drift passed the first version of these
+#: assertions (agent review round 1).
+_REALISTIC_DESCRIPTION = (
+    "Screening and enrichment playbooks for the tenant, with the runbooks an operator needs"
+)
+
+
+#: An MCP server's harness-owned capability hint, the shape the roster carries for one.
+_MCP_DESCRIPTION = "CRM contacts, companies, deals, marketing, and sales."
+
+
+def _catalogue_roster() -> tuple[Candidate, ...]:
+    """THE roster the §5 accounting is measured on: 537 rows, and the doc quotes it.
+
+    Shared by both budget tests so the two cannot drift apart against one paragraph,
+    which is exactly what review round 3 found (the cap-40 test was still building
+    the old 530-row roster while the doc quoted a 537-row measurement).
+    """
+    return (
+        tuple(_realistic_roster(500))
+        + tuple(
+            candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
+            for index in range(30)
+        )
+        + tuple(
+            candidate(f"server-{index}", kind="mcp", description=_MCP_DESCRIPTION)
+            for index in range(7)
+        )
+    )
+
+
+#: The message both budget tests classify. Repeated because a real turn can be, and
+#: it is the whole ``request`` field the state carries.
+_CATALOGUE_MESSAGE = "why can't this tenant run legal searches? " * 8
+
+
+def option_chars_of(plan: Any) -> int:
+    """The character cost of the questions' OPTION text.
+
+    ``Question.criteria`` is a per-kind union — a mapping for ``choice``/``noul`` and a
+    tuple of level descriptions for ``score`` — so the mapping arm is named here rather
+    than assumed, which is also what keeps this measurable under the repo's type
+    checker (CI's whole-repo pyright run caught the first version of this helper
+    reaching for ``.items()`` on the union).
+    """
+    total = 0
+    for question in plan.questions:
+        criteria = question.criteria
+        if isinstance(criteria, dict):
+            total += sum(len(f"{name}: {text}") for name, text in criteria.items())
+    return total
+
+
+def _realistic_roster(count: int) -> list[Candidate]:
+    return [
+        candidate(f"skill-{index:03d}", description=_REALISTIC_DESCRIPTION)
+        for index in range(count)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -406,3 +470,137 @@ def test_a_context_only_state_needs_no_candidates_key() -> None:
     state = build_state(user_message="", context="summary", candidates=[], max_chars=100)
     assert state == {"request": "", "context": "summary"}
     assert serialized_size(state) <= 100
+
+
+# ---------------------------------------------------------------------------
+# Scaling to hundreds of skills: which rows travel, and what the request costs
+# ---------------------------------------------------------------------------
+
+
+def test_a_roster_that_fits_every_kind_is_returned_by_identity() -> None:
+    """The warm path must not allocate: a small catalogue IS the roster object.
+
+    The wiring asserts that two consecutive messages carry the same candidates
+    object, so a version of ``shortlist`` that copied unconditionally would make
+    every warm message a fresh tuple for no gain.
+    """
+    rows = tuple(roster(count=5))
+    assert shortlist(rows, "deploy core to qa", DEFAULT_MAX_CANDIDATES) is rows
+
+
+def test_a_roster_over_the_cap_keeps_the_relevant_rows() -> None:
+    """The per-kind cap is a cost bound, so WHICH rows survive has to be a choice.
+
+    Before ``shortlist`` the survivors were the first ``maxCandidates`` in
+    discovery order — a permanent dozen for the life of the session, with the rest
+    of the catalogue unreachable. Here 61 skills contend for 12 places and the one
+    the message is about wins one of them.
+    """
+    rows = tuple(
+        [candidate(f"fleet-{index:03d}", description="Fleet automation") for index in range(60)]
+        + [
+            candidate(
+                "flavia-adverse-media",
+                description="Adverse media screening for a named person",
+            )
+        ]
+        + [candidate("guide-x", kind="guide", description="A packaged guide")]
+    )
+
+    picked = shortlist(rows, "run an adverse media screen for Flavia", DEFAULT_MAX_CANDIDATES)
+    names = [row.name for row in picked]
+
+    assert "flavia-adverse-media" in names
+    assert len([name for name in names if name.startswith("fleet-")]) == 11
+    # A kind under its own cap is untouched, so the guide keeps its place.
+    assert "guide-x" in names
+    # SURVIVORS KEEP THE CALLER'S ORDER: the named skill sits where the roster put
+    # it (last of the skills), not first because it scored highest. The option order
+    # is part of the request the vendor sees.
+    assert names == [name for name in (row.name for row in rows) if name in set(names)]
+
+
+def test_the_shortlist_is_deterministic() -> None:
+    """Two identical messages must not churn the request, or the cache key churns."""
+    rows = tuple(roster(count=40))
+    assert shortlist(rows, "deploy core", DEFAULT_MAX_CANDIDATES) == shortlist(
+        rows, "deploy core", DEFAULT_MAX_CANDIDATES
+    )
+
+
+def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None:
+    """Hundreds of installed skills, and the request the vendor receives.
+
+    Every candidate travels TWICE — a line in the state and an option description
+    in its kind's question — so the two visible bounds are ``maxStateChars``
+    (6 000 chars) and ``maxCandidates`` per kind. This test pins the whole request
+    at the shipped defaults against the model's real window: **32k input tokens**
+    (operator's figure, 2026-09-18; §5 of the design doc said 64k, which nothing
+    had measured).
+
+    The numbers are MEASURED here and QUOTED in §5 of the design doc, and the
+    assertion is EQUALITY against the measured total rather than a loose ceiling: two
+    review rounds were spent on the gap between this test and that paragraph (toy
+    descriptions that let a 5x drift through a `<= 3000` bound, then a doc quoting
+    figures this test did not measure). If the harness's question copy or the roster
+    changes, this fails and both numbers move together.
+    """
+    rows = _catalogue_roster()
+    message = _CATALOGUE_MESSAGE
+
+    state = build_state(user_message=message, context=None, candidates=rows)
+    state_chars = serialized_size(state)
+    assert state_chars <= DEFAULT_MAX_STATE_CHARS
+
+    plan = build_questions(rows)
+    option_chars = option_chars_of(plan)
+    # The questions themselves carry instructions; counted roughly, they are a few
+    # hundred characters each and bounded by the three kinds.
+    instruction_chars = sum(len(question.instructions) for question in plan.questions)
+    estimated_tokens = (state_chars + option_chars + instruction_chars) // 4
+
+    print(
+        f"537-row catalogue: state={state_chars} chars, options={option_chars} chars, "
+        f"instructions={instruction_chars} chars, ~{estimated_tokens} tokens "
+        f"of a 32 768-token window"
+    )
+    # These three are the numbers §5 prints, and they must move together with it.
+    assert (state_chars, option_chars, instruction_chars) == (3279, 3170, 449)
+    assert estimated_tokens == (state_chars + option_chars + instruction_chars) // 4
+
+
+def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() -> None:
+    """The knob's safe range, measured: the window is not what binds at 40 a kind."""
+    rows = _catalogue_roster()
+    message = _CATALOGUE_MESSAGE
+
+    state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
+    plan = build_questions(rows, limit=40)
+    state_chars = serialized_size(state)
+    option_chars = option_chars_of(plan)
+    # The INSTRUCTIONS are measured here too, not assumed from the default-cap test:
+    # they are byte-identical at both caps today, and that is exactly the kind of
+    # assumption that stops being true silently (agent review round 4, R4-1).
+    instruction_chars = sum(len(question.instructions) for question in plan.questions)
+    estimated_tokens = (state_chars + option_chars + instruction_chars) // 4
+
+    # The same 537-row catalogue at 40 a kind: the cap is the lever, and even here the
+    # window is not what binds. The figures are §5's, asserted by equality for the
+    # reason the default-cap test's docstring gives.
+    print(
+        f"maxCandidates=40: state={state_chars} options={option_chars} "
+        f"instructions={instruction_chars} ~{estimated_tokens} tokens"
+    )
+    assert (state_chars, option_chars, instruction_chars) == (5336, 8102, 449)
+
+
+def test_a_zero_cap_keeps_nothing_like_select_candidates() -> None:
+    """One rule for one bound: 0 keeps nothing in both functions.
+
+    Reading 0 as "no cap" here would have made it mean the opposite of what it means
+    one function over, and the §8 readers refuse a 0 for `maxCandidates` precisely so
+    the two cannot be asked to disagree in production (agent review round 1).
+    """
+    rows = tuple(roster(count=3))
+    assert shortlist(rows, "deploy", 0) == ()
+    assert select_candidates(rows, 0) == ()

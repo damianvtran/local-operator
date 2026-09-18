@@ -10,6 +10,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -35,6 +36,57 @@ from local_operator.update import (
     tui_installer_failure,
     update_command,
 )
+
+_REAL_SERVICES_REFUSAL = update_mod._services_refusal
+
+
+def _install_kind_double(kind: InstallKind):
+    """A stand-in for `install_kind` that mirrors its REAL signature.
+
+    NOT `lambda *a, **k`. That accepts anything, which means it cannot see a
+    POSITIONAL call to a keyword-only function — and a positional call is exactly
+    what shipped in serve-reload review round 6's R6-1: `install_kind(mine)` raised
+    `TypeError` in production while 145 tests passed, because every double here had
+    a wider signature than the function it stood in for and the guard happened to
+    short-circuit before reaching the line in this venv. A double must be no more
+    permissive than the thing it replaces, or it is a test that cannot fail.
+    """
+
+    def _kind(*, prefix: Any = None, executable: Any = None) -> InstallKind:
+        return kind
+
+    return _kind
+
+
+@pytest.fixture(autouse=True)
+def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default to "this install owns the fleet" for every test in this module.
+
+    The ownership check has its own tests below; every OTHER test here is about
+    the shape of `lop update`'s output or its failure paths, and without this each
+    of them would have to fabricate an install tree under a `generations` root and
+    a `sys.prefix` inside it — which is a pytest process's venv, so they would all
+    be asserting against a refusal instead of against the thing they were written
+    for.
+
+    THE GUARD FIRES ON KIND HERE, which is the honest reason rather than the
+    prefix one this docstring first gave (serve-reload review round 4, R4-3, and
+    round 5, R5-3, which caught that the first correction still described the
+    wrong half): a pytest process inside this worktree reports
+    ``install_kind() == EDITABLE``, so it is refused before the membership
+    question is ever reached. The prefix half would refuse it too, but that is a
+    coincidence of where the venv lives rather than the reason.
+
+    WHAT THIS HIDES, stated so it is not discovered by surprise: while it is in
+    force NO test in this module can see the guard through
+    `update_command`. That is why the test that must see it — the upgrade-path one
+    below, which is the shape that broke in serve-reload R4-1 — restores the real
+    drives `update_command` itself rather than calling `_services_stage`.
+
+    The restore is `_REAL_SERVICES_REFUSAL`, not a re-implementation: a test's own
+    `monkeypatch` runs after this fixture, so it wins.
+    """
+    monkeypatch.setattr(update_mod, "_services_refusal", lambda *a, **k: None)
 
 
 def _pypi_transport(
@@ -464,6 +516,23 @@ def _check(installed: str, latest: str | None, behind: bool) -> update_mod.Versi
     return update_mod.VersionCheck(installed=installed, latest=latest, behind=behind)
 
 
+def _check_latest_double(installed: str, latest: str | None, behind: bool):
+    """A stand-in for `check_latest` that mirrors its REAL signature.
+
+    Same rule as `_install_kind_double`, and the reason it exists (serve-reload
+    review round 7, R7-3): the real `check_latest` is keyword-only, so
+    `lambda force=False: ...` accepts a POSITIONAL call it would reject — a double
+    more permissive than the function it replaces, which is a test that cannot fail.
+    It also builds the real `VersionCheck` through `_check` rather than a
+    `SimpleNamespace`, so `update_command` is handed the type it actually reads.
+    """
+
+    def _latest(*, force: bool = False, cache_dir: Any = None, client: Any = None):
+        return _check(installed, latest, behind)
+
+    return _latest
+
+
 def test_update_command_check_behind(capsys: pytest.CaptureFixture[str]) -> None:
     with (
         patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)),
@@ -499,12 +568,23 @@ def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> None:
+    """Nothing to INSTALL is not nothing to do.
+
+    This test used to assert that the daemon refresh was NOT called on this path,
+    which was the bug rather than the contract (serve-reload review round 1, R1-2): the
+    reporting machine printed exactly this line, returned 0, and left its backend
+    on a build four releases old. The canary is now the SERVICES STAGE, and it is
+    asserted to run — with the install itself untouched, which is what "is the
+    latest" still means.
+    """
     with (
         patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False)),
-        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+        patch.object(update_mod, "perform_upgrade") as perform,
+        patch.object(update_mod, "_services_stage") as stage,
     ):
         assert update_command(check=False) == 0
-        refresh.assert_not_called()
+        perform.assert_not_called()
+        stage.assert_called_once_with()
     assert capsys.readouterr().out.strip() == "local-operator 0.27.0 is the latest"
 
 
@@ -535,7 +615,9 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check"])
     with patch("local_operator.update.update_command", return_value=2) as cmd:
         assert main() == 2
-        cmd.assert_called_once_with(check=True, refresh_daemons=False, from_snapshot=None)
+        cmd.assert_called_once_with(
+            check=True, refresh_daemons=False, from_snapshot=None, services=True
+        )
 
 
 def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,7 +626,9 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update"])
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
-        cmd.assert_called_once_with(check=False, refresh_daemons=False, from_snapshot=None)
+        cmd.assert_called_once_with(
+            check=False, refresh_daemons=False, from_snapshot=None, services=True
+        )
 
 
 def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,12 +638,257 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.argv", ["lop", "update", "--from-snapshot", "main"])
     with patch("local_operator.update.update_command", return_value=0) as cmd:
         assert main() == 0
-        cmd.assert_called_once_with(check=False, refresh_daemons=False, from_snapshot="main")
+        cmd.assert_called_once_with(
+            check=False, refresh_daemons=False, from_snapshot="main", services=True
+        )
 
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
     with patch("local_operator.update.update_command", return_value=1) as refused:
         assert main() == 1
         refused.assert_called_once()
+
+
+def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--no-services`` reaches the installer as the escape hatch it is.
+
+    The default is to finish the job (move the serves onto the new build); the
+    flag is what a caller that will start the daemons itself uses, so it has to
+    survive the CLI rather than only existing in the function's signature.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "update", "--no-services"])
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(
+            check=False, refresh_daemons=False, from_snapshot=None, services=False
+        )
+
+
+def test_update_runs_the_services_stage_when_nothing_needs_installing(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """serve-reload R1-2: the reported bug, as a regression test.
+
+    `lop update` on the reporting machine printed "0.59.0 is the latest" and
+    returned 0 without reaching the daemon/services stage — because `behind` is a
+    version-string compare and the SERVICES are not versioned by the pointer at
+    all. So the one machine this change exists for was the one machine where the
+    change did nothing. The stage is idempotent (a daemon already on the current
+    build is reported and not touched), so it runs on both paths.
+    """
+    from local_operator import update
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        update,
+        "check_latest",
+        _check_latest_double("0.59.0", "0.59.0", False),
+    )
+    monkeypatch.setattr(update, "_services_stage", lambda: ran.append("services"))
+    assert update.update_command() == 0
+    assert ran == ["services"]
+    assert "0.59.0 is the latest" in capsys.readouterr().out
+
+
+def test_update_no_services_still_repairs_the_supervised_daemons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-services`` is the pre-change behaviour, not "do nothing"."""
+    from local_operator import update
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        update,
+        "check_latest",
+        _check_latest_double("0.59.0", "0.59.0", False),
+    )
+    monkeypatch.setattr(update, "_services_stage", lambda: ran.append("services"))
+    monkeypatch.setattr(
+        update, "refresh_daemons_after_upgrade", lambda: ran.append("daemons") or []
+    )
+    assert update.update_command(services=False) == 0
+    assert ran == ["daemons"]
+
+
+def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """serve-reload R3-2: the guard must ask ownership, not just install kind.
+
+    Asking only "is this an installation at all" let a pip-installed `lop update`
+    on a uv-tool machine reload the fleet that install owns. Harmless in
+    destination — everything converges on the shared pointer — but not in
+    authority, and a spurious reload cuts the app's relay for nothing.
+    """
+    import sys as sys_mod
+    from pathlib import Path
+
+    from local_operator import services, update
+    from local_operator.update import InstallKind
+
+    called: list[str] = []
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(InstallKind.UV_TOOL))
+    monkeypatch.setattr(update, "stable_root", lambda: Path("/nowhere/lop"))
+    monkeypatch.setattr(sys_mod, "prefix", "/usr/local/lib/python3.12/site-packages")
+    monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
+    update._services_stage()
+    assert called == []
+    assert "is not one of this machine's install generations" in capsys.readouterr().err
+
+
+def test_update_command_moves_the_services_on_the_upgrade_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """serve-reload R4-1's regression: the caller that just flipped the pointer is SUPERSEDED.
+
+    ``perform_upgrade`` installs into a new generation and flips the pointer **in
+    this same process** — nothing re-execs — so the guard's first attempt, which
+    compared ``sys.prefix`` with the generation the pointer names, refused the one
+    caller that had actually performed the upgrade. `lop update` then moved the
+    tree, moved no service, and reported success: the reported bug, restored one
+    generation later.
+
+    This drives `update_command` itself rather than `_services_stage`, because the
+    module's autouse fixture hides the guard from `update_command` (serve-reload R4-3) — the
+    path that broke has to be the path under test.
+    """
+    import sys as sys_mod
+
+    from local_operator import update
+    from local_operator.update import InstallKind
+
+    generations = tmp_path / "lop" / "generations"
+    superseded = generations / "20260101T000000Z-0.1.0" / "tools" / "local-operator"
+    superseded.mkdir(parents=True)
+    # The pointer has already moved on, and this process is still the old build.
+    current = generations / "20260102T000000Z-0.2.0"
+    current.mkdir(parents=True)
+    # THE POINTER IS ACTUALLY CREATED, so the pre-fix failure is the one this
+    # docstring narrates — "is not the install the pointer names" — rather than the
+    # "the install pointer names no build" a missing symlink produces (serve-reload
+    # serve-reload review round 5, R5-4). A regression test whose failure mode is a different
+    # refusal is one that would keep passing if the real check were deleted.
+    (tmp_path / "lop" / "current").symlink_to(current)
+
+    ran: list[str] = []
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(InstallKind.UV_TOOL))
+    monkeypatch.setattr(update, "stable_root", lambda: tmp_path / "lop")
+    monkeypatch.setattr(sys_mod, "prefix", str(superseded))
+    monkeypatch.setattr(
+        update,
+        "check_latest",
+        _check_latest_double("0.2.0", "0.2.0", False),
+    )
+    monkeypatch.setattr(
+        "local_operator.services.restart_services", lambda **k: ran.append("ran") or []
+    )
+    assert update.update_command() == 0
+    assert ran == ["ran"], "the stage refused the caller that performed the upgrade"
+
+
+@pytest.mark.parametrize("kind", [InstallKind.EDITABLE, InstallKind.UNKNOWN])
+def test_the_services_stage_refuses_a_checkout(
+    kind: InstallKind, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """serve-reload R2-1's sentence: a worktree does not own this machine's services.
+
+    Before the services stage existed this was unreachable by construction (a
+    checkout that was behind hit `editable_refusal`; one that was not behind
+    returned early). Wiring the stage to the "nothing to install" path is what
+    opened it, and the consequence was measured in review — an editable caller
+    classifies every daemon as stale and signals the serve fleet.
+    """
+    from local_operator import services, update
+
+    called: list[str] = []
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(kind))
+    monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
+    update._services_stage()
+    assert called == []
+    assert "does not own this machine's services" in capsys.readouterr().err
+
+
+def test_a_generation_of_this_install_may_proceed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard must not refuse the callers it exists for — either of them.
+
+    Both shapes are real, and the second is the one serve-reload R4-1 was about:
+
+    * steady state — `lop` invoked through `current`;
+    * the superseded build — the process that has just performed the upgrade.
+
+    Checked against the REAL install on this machine before this was written: the
+    `current` generation's `lop` has `sys.prefix` inside `stable_root()/generations`.
+    """
+    import sys as sys_mod
+    from pathlib import Path
+
+    from local_operator import update
+    from local_operator.update import InstallKind
+
+    generations = tmp_path / "lop" / "generations"
+    steady = generations / "20260102T000000Z-0.2.0" / "tools" / "local-operator"
+    superseded = generations / "20260101T000000Z-0.1.0" / "tools" / "local-operator"
+    steady.mkdir(parents=True)
+    superseded.mkdir(parents=True)
+
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", _install_kind_double(InstallKind.UV_TOOL))
+    monkeypatch.setattr(update, "stable_root", lambda: tmp_path / "lop")
+    monkeypatch.setattr(sys_mod, "prefix", str(steady))
+    assert update._services_refusal() is None
+    # The `generations` root itself is not an install, only what lives under it.
+    assert update._services_refusal(prefix=Path(generations)) is not None
+    monkeypatch.setattr(sys_mod, "prefix", str(superseded))
+    assert update._services_refusal() is None
+
+
+def test_main_dispatches_services_status(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """``lop services status`` prints what it finds and changes nothing."""
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "services", "status"])
+    with patch("local_operator.services.status_lines", return_value=["line one"]):
+        assert main() == 0
+    assert capsys.readouterr().out.strip() == "line one"
+
+
+def test_main_dispatches_services_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``restart`` runs the fleet stage, and ``--wait`` reaches it."""
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "services", "restart"])
+    with patch("local_operator.services.restart_services", return_value=[]) as restart:
+        assert main() == 0
+    restart.assert_called_once_with()
+
+    monkeypatch.setattr("sys.argv", ["lop", "services", "restart", "--wait", "5"])
+    with patch("local_operator.services.restart_services", return_value=[]) as waited:
+        assert main() == 0
+    waited.assert_called_once_with(wait_s=5.0)
+
+
+def test_main_refuses_an_unknown_services_verb(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """A bare ``lop services`` names its verbs instead of doing something.
+
+    It returns 2 rather than raising through ``parser.error`` (design review D8):
+    ``parser.error`` dumped the WHOLE program's usage here — every verb of ``lop``
+    under a second ``usage:`` prefix — when the thing that was mistyped is a
+    subcommand of this one group. 2 keeps a usage error distinct from the 1 the
+    sibling ``install`` group returns for its own, which this deliberately mirrors.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "services"])
+    assert main() == 2
+    err = capsys.readouterr().err
+    assert err.strip() == "usage: lop services {status, restart}"
+    assert "{credential,config,agents" not in err, "the whole program's verb list"
 
 
 @pytest.mark.parametrize(
