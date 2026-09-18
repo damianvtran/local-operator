@@ -297,29 +297,68 @@ def test_the_click_rungs_do_not_hand_a_child_the_marker(
 
 
 def test_the_fork_window_drops_the_marker() -> None:
-    """The third caller, pinned at the source.
+    """The third caller, pinned as a shape rather than a spelling.
 
     `/fork`'s spawn needs a real session factory, a real backend and a running
     app, so it is asserted as the call that must be there rather than as a pilot
     run — the shape `tests/unit/test_fork.py` already uses for the fork paths it
-    cannot drive. What it catches is a regression to `dict(os.environ)`, which
-    is the defect the round-2 finding named.
+    cannot drive. What it catches is the defect round 2's F1 named: the call kept
+    and its result discarded, with plain `os.environ` handed to the spawn.
+
+    PARSED rather than substring-matched (round 4, F3). The spawn rides
+    `asyncio.to_thread(backend.spawn, launch, <env>)`, so the environment is the
+    last argument of the `to_thread` call — and an equivalent refactor that binds
+    it first (`fork_env = without_agent_shell_marker(os.environ)` then
+    `to_thread(backend.spawn, launch, fork_env)`) keeps that guarantee while a
+    text pin called it a regression. A name bound to the helper is therefore
+    accepted; a raw `os.environ`, or the helper's result discarded, is not.
     """
+    import ast
     import inspect
+    import textwrap
 
     from local_operator.tui.app import OperatorApp
 
-    # THE CALL SHAPE, not merely the presence of the helper (review round 3,
-    # F5): keeping the call and discarding it — passing plain `os.environ` —
-    # passed the first version of this pin. Whitespace is normalised because a
-    # reflow of those two lines is not the regression.
-    source = " ".join(inspect.getsource(OperatorApp._on_fork_complete).split())
-    assert "backend.spawn, launch, without_agent_shell_marker(os.environ)" in source, (
-        "the fork window inherits the session's environment, so the marker has to "
-        "be dropped AT the spawn, or a /fork in a harness-driven session opens a "
-        "window that dies on the refusal"
-    )
-    assert "dict(os.environ)" not in source, "the raw copy is the regression"
+    source = inspect.getsource(OperatorApp._on_fork_complete)
+    # Dedented because `getsource` hands back a method body still carrying its
+    # class-level indentation, which `ast.parse` rejects outright.
+    tree = ast.parse(textwrap.dedent(source))
+
+    dropped: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if isinstance(func, ast.Name) and func.id == "without_agent_shell_marker":
+                dropped.update(t.id for t in node.targets if isinstance(t, ast.Name))
+
+    dispatches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "to_thread"
+        and len(node.args) >= 3
+    ]
+    assert dispatches, "the fork's window must be opened through asyncio.to_thread"
+
+    for node in dispatches:
+        first, env = node.args[0], node.args[-1]
+        assert (
+            isinstance(first, ast.Attribute) and first.attr == "spawn"
+        ), f"the threaded call is not a backend spawn: {ast.dump(first)}"
+        if isinstance(env, ast.Call):
+            assert isinstance(env.func, ast.Name) and env.func.id == "without_agent_shell_marker", (
+                "the fork window inherits the session's environment, so the marker "
+                "has to be dropped at the spawn"
+            )
+        else:
+            assert isinstance(env, ast.Name) and env.id in dropped, (
+                "the fork spawn's environment must come from "
+                "`without_agent_shell_marker`, called inline or bound to a name"
+            )
+    # And the raw copy is gone from the method entirely: it is the shape that was
+    # there before the fix.
+    assert "dict(os.environ)" not in " ".join(source.split())
 
 
 def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Path) -> None:
@@ -452,6 +491,11 @@ async def test_the_factory_leaves_a_resumed_conversation_alone(
 
     monkeypatch.setenv(AGENT_SHELL_ENV, "1")
     monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
+    # The runtime's own flag, so this drives the ADOPT branch — the one the
+    # round-3 mutation targeted and the one a phone's first message takes. Without
+    # it `resume=<id>` goes through strict `resume_dir`, and the test proves a
+    # neighbouring branch (review round 4, F2).
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
     resumed = await _factory_session(tmp_path, monkeypatch, resume=session_id)
     assert isinstance(resumed, Session)
     try:
