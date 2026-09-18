@@ -4472,8 +4472,11 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     WHY A TEST rather than reading the call site: the prewarm only ever SAVES time, so
     nothing fails when it is dropped — the cost simply arrives on a session's first
     message instead, which no test notices and only a measurement shows. The
-    enabled-only half is a real constraint, not a detail: a default install must not
-    import the package, build a service or open a client for a feature that is off.
+    enabled-only half is a real constraint, not a detail: a session with the layer OFF
+    must not import the package, build a service or open a client. That case is named
+    explicitly (``auto: false``) rather than left to the absent key, which is ON by
+    default since 2026-09-18 — the flip made the old "no section means off"
+    assumption here wrong, and CI, not this file, caught it.
 
     Counted on the METHOD rather than with a recording subclass, because a subclass
     would inherit this stub and then prove nothing about the shipped body — which is
@@ -4503,9 +4506,11 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
         await on_session.dispose()
 
     off_dir = tmp_path / "off"
+    off_config = ConfigManager(off_dir)
+    off_config.set_config_value("classification", {"auto": False})
     off_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
-        ConfigManager(off_dir),
+        off_config,
         CredentialManager(off_dir),
         AgentRegistry(off_dir),
     )

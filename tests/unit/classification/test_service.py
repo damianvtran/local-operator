@@ -65,19 +65,31 @@ def service(manager, install_legs, settings_map=None, **leg_specs):
 
 
 async def test_the_defaults_are_the_contract_defaults() -> None:
-    assert DEFAULT_AUTO is False
+    assert DEFAULT_AUTO is True
     assert DEFAULT_TIMEOUT_MS == 1500
     assert DEFAULT_NOTICE is True
     assert CACHE_SIZE == 64
     assert CIRCUIT_FAILURE_THRESHOLD == 3
 
 
-async def test_off_by_default_and_off_means_no_vendor_call(manager, install_legs) -> None:
+async def test_the_default_is_on_and_off_means_no_vendor_call(manager, install_legs) -> None:
+    """The layer is ON when the operator has said nothing (flipped 2026-09-18).
+
+    The absent-key case is the one the flip changed, so it is asserted here
+    against the package's own reader: ``{}`` is what a stock install's
+    ``config.yml`` carries, and the vendor must be reachable from it.
+    """
     subject, legs = service(manager, install_legs, settings_map={}, radient={})
-    assert subject.enabled is False
-    recommendation = await subject.recommend_resources(request())
+    assert subject.enabled is True
+
+    off, off_legs = service(
+        manager, install_legs, settings_map={"classification": {"auto": False}}, radient={}
+    )
+    assert off.enabled is False
+    recommendation = await off.recommend_resources(request())
     assert recommendation.skipped == "disabled"
     assert recommendation.block == ""
+    assert off_legs["radient"].calls == []
     assert legs["radient"].calls == []
 
 
@@ -762,7 +774,12 @@ async def test_one_keep_alive_client_is_reused_across_messages(manager, install_
 async def test_no_client_is_opened_for_a_session_that_never_calls_out(
     manager, install_legs
 ) -> None:
-    subject, _ = service(manager, install_legs, settings_map={}, radient={})
+    # An EXPLICIT off: the point is that the disabled layer opens no socket, and
+    # the default is now on, so naming ``auto: False`` is what keeps this test
+    # about the disabled path rather than about the flip.
+    subject, _ = service(
+        manager, install_legs, settings_map={"classification": {"auto": False}}, radient={}
+    )
     assert (await subject.recommend_resources(request())).skipped == "disabled"
     assert subject._http is None
 

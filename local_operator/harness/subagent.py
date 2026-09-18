@@ -1906,6 +1906,14 @@ async def _construct_child_session(
     # rediscovering the same guides in every child. These are names/links and
     # descriptions, not the parent's conversation or full skill documents.
     knowledge = getattr(parent_hooks, "frozen_block", "") or ""
+    if not knowledge:
+        # A skill-tree change invalidates the parent's frozen block and parks the
+        # previous render in ``superseded_block``; the NEXT parent message re-renders
+        # it. This closure is synchronous — it cannot wait for that render — so a child
+        # spawned inside that window inherits yesterday's directory, which is strictly
+        # better than an empty one. Same bound as before, applied to the block we
+        # actually ship.
+        knowledge = getattr(parent_hooks, "superseded_block", "") or ""
     if len(knowledge) > 12000:
         knowledge = knowledge[:12000].rsplit("\n", 1)[0]
 
