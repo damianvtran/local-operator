@@ -233,3 +233,21 @@ def test_an_encoded_separator_keeps_the_directory_marker(root: Path) -> None:
     (root / "logs").mkdir()
     assert parse_scratchpad_url("scratchpad://logs%2F", root).directory is True
     assert parse_scratchpad_url("scratchpad://logs", root).directory is False
+
+
+def test_a_scheme_inside_the_path_is_refused_as_a_nested_url(root: Path) -> None:
+    """``scratchpad://notes://x`` spells TWO URLs: the outer one asks for a file
+    called ``notes://x`` and the inner one is a scheme separator that would land
+    as a path component. Accepting it materialised ``<root>/notes:/x`` — a
+    directory named after a URL, inside the folder this module promises holds the
+    agent's own files (round 2, Q6). The test is on ``://`` and not on ``:``: a
+    single colon is a legal POSIX filename character and ``a:b.txt`` must keep
+    working."""
+    with pytest.raises(ScratchpadPathError) as caught:
+        parse_scratchpad_url("scratchpad://notes://x", root)
+    message = str(caught.value)
+    assert "'notes://' is a URL, not a file name" in message
+    assert "plain name or path" in message
+
+    # A colon without a scheme separator is still an ordinary file name.
+    assert parse_scratchpad_url("scratchpad://a:b.txt", root).path == (root / "a:b.txt")

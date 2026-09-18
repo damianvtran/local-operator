@@ -1283,6 +1283,96 @@ async def test_a_path_argument_carrying_a_stranger_scheme_creates_nothing(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_lsp_refuses_a_scheme_path_instead_of_reporting_it_missing(tmp_path) -> None:
+    """``lsp`` is a DEFAULT tool with a ``path`` parameter and was the one the
+    round-1 sweep missed (round 2, D6). Unguarded, ``path="scratchpad://probe.py"``
+    resolved as the relative ``<cwd>/scratchpad:/probe.py`` and answered "Path does
+    not exist" for a file that IS there — the misleading answer ``grep`` and
+    ``glob`` refuse, reached by this feature's own flow (write a scratch script,
+    then analyse it). Read-only, so nothing was ever at risk of being written —
+    the wrong ANSWER is the defect."""
+    from local_operator.tools.lsp import build_lsp_tool
+
+    if build_lsp_tool() is None:
+        pytest.skip("jedi is not installed, so the lsp tool is not advertised")
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    scratchpad = await tools["lsp"].execute(
+        "c", {"action": "symbols", "path": "scratchpad://probe.py"}, None, None, context
+    )
+    assert scratchpad.is_error is True
+    assert scratchpad.text.startswith("scratchpad:// is a URL, and lsp takes only filesystem paths")
+    assert "Path does not exist" not in scratchpad.text
+
+    stranger = await tools["lsp"].execute(
+        "c", {"action": "symbols", "path": "notes://probe.py"}, None, None, context
+    )
+    assert stranger.is_error is True
+    assert "notes:// is a URL, and lsp takes only filesystem paths" in stranger.text
+
+    assert not (tmp_path / "ws" / "scratchpad:").exists()
+    assert not (tmp_path / "ws" / "notes:").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_scheme_inside_a_scratchpad_url_is_refused_by_all_three_tools(tmp_path) -> None:
+    """The grammar's own seam (round 2, Q6): containment held, but a URL inside a
+    URL used to be accepted and landed as ``<root>/notes:/x``. One condition in the
+    parser closes it for read, write AND edit — they share the parser, so this is a
+    single fix with three callers, not three fixes."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    results = [
+        await tools["write"].execute(
+            "c", {"path": "scratchpad://notes://x", "content": "hi"}, None, None, context
+        ),
+        await tools["read"].execute("c", {"path": "scratchpad://notes://x"}, None, None, context),
+        await tools["edit"].execute(
+            "c",
+            {"path": "scratchpad://notes://x", "old_text": "a", "new_text": "b"},
+            None,
+            None,
+            context,
+        ),
+    ]
+    for result in results:
+        assert result.is_error is True
+        assert "'notes://' is a URL, not a file name" in result.text
+        assert result.details is not None and result.details["__fault"] == "invalid_arguments"
+    # Nothing materialised, under any spelling: no `notes:` directory anywhere.
+    assert not list(tmp_path.rglob("notes:*"))
+    assert not pad.exists()
+
+
+@pytest.mark.asyncio
+async def test_globs_refusal_prescribes_a_route_glob_can_take(tmp_path) -> None:
+    """The shared remedy ("pass the absolute path read prints") is a dead end for
+    ``glob``: its patterns are relative to the working directory and an absolute
+    pattern is refused (round 2, Q7). Proved by taking the route the old message
+    prescribed and watching this tool refuse it."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    await tools["write"].execute(
+        "c", {"path": "scratchpad://perf.md", "content": "x\n"}, None, None, context
+    )
+
+    refused = await tools["glob"].execute(
+        "c", {"pattern": "scratchpad://*.md"}, None, None, context
+    )
+    assert refused.is_error is True
+    assert "glob searches the working directory with a relative pattern" in refused.text
+    assert "or search inside it with grep(" in refused.text
+
+    # The route this tool CAN honour, end to end: read it (which prints the path),
+    # then grep that path.
+    read = await tools["read"].execute("c", {"path": "scratchpad://perf.md"}, None, None, context)
+    assert read.is_error is False
+    grep = await tools["grep"].execute(
+        "c", {"pattern": "x", "path": str(pad / "perf.md")}, None, None, context
+    )
+    assert grep.is_error is False
+
+
+@pytest.mark.asyncio
 async def test_glob_refuses_a_scheme_pattern_instead_of_matching_nothing(tmp_path) -> None:
     """``glob`` resolves no scheme either: a ``scratchpad://*.md`` pattern can
     only ever match nothing, and "No paths matched" reads as "the file is not
@@ -1643,7 +1733,7 @@ async def test_reads_unresolvable_url_names_the_remedy(tmp_path) -> None:
     resolver is available") and stopped there — a statement about the harness
     rather than about what to do next."""
     context, _, tools = _scratchpad_context(tmp_path)
-    remedy = "read takes a filesystem path, or scratchpad://<name>"
+    remedy = "read takes a filesystem path, or one of its own internal URLs"
 
     no_resolver = await tools["read"].execute("c", {"path": "notes://perf.md"}, None, None, context)
     assert no_resolver.is_error is True

@@ -1210,7 +1210,7 @@ ToolExecuteFn = Callable[
 #: tool knows which of its arguments IS the decision.
 #:
 #: A describer may declare a third, keyword-only ``context`` parameter. It is
-#: OPT-IN by name (``LocalOperator._approval_summary`` resolves it the way
+#: OPT-IN by name (``AgentLoop._approval_summary`` resolves it the way
 #: ``harness/approval.py`` resolves a gate's ``job_id``) precisely so that the
 #: plain ``(args, cwd)`` form every existing describer uses keeps working
 #: untouched: the only describer that needs more is the path one, and the only
