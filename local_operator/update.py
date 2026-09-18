@@ -3873,7 +3873,7 @@ def _services_refusal(prefix: Path | None = None) -> str | None:
 
     1. **Is this an installation at all?** A kind that is not a uv tool — a
        source checkout, a pip or pipx tree, anything unrecognised — is refused
-       outright (review round 2, R2-1). A worktree venv once rewrote the
+       outright (serve-reload review round 2, R2-1). A worktree venv once rewrote the
        operator's four live plists to point at itself, and the same reasoning
        applies to signalling the services those plists start.
     2. **Is this process running this machine's install?** (review rounds 3 and 4,
@@ -3909,6 +3909,14 @@ def _services_refusal(prefix: Path | None = None) -> str | None:
     if kind is not InstallKind.UV_TOOL:
         return f"this install's kind is {kind.value}"
     mine = (prefix or Path(sys.prefix)).resolve()
+    # ASK ABOUT THE SAME INSTALL, or the seam above silently checks one tree's
+    # membership while judging another's kind (serve-reload review round 5, R5-2:
+    # measured ACCEPT for a non-existent, non-install path under the store while
+    # the calling process was a uv tool, because the kind question was still asked
+    # about the CALLER).
+    kind = install_kind(mine)
+    if kind is not InstallKind.UV_TOOL:
+        return f"this install's kind is {kind.value}"
     generations = (stable_root() / "generations").resolve()
     if mine == generations or not mine.is_relative_to(generations):
         return (
@@ -3947,10 +3955,10 @@ def _services_stage(*, wait_s: float | None = None) -> None:
     #
     # The plist half was never reachable this way: `_repair_refusal` already refuses
     # an editable caller inside the refresh child, so the blast radius here is the
-    # SERVES (review round 3, R3-4: an earlier version of this comment listed the
+    # SERVES (serve-reload review round 3, R3-4: an earlier version of this comment listed the
     # mobile daemon, the browser bridge and the tunnel too, and overclaimed). The
     # mobile daemon IS reachable from an editable caller, but only through
-    # `--no-services` (review round 4, R4-4), which is by design the pre-change path
+    # `--no-services` (serve-reload review round 4, R4-4), which is by design the pre-change path
     # and is therefore left exactly as it was.
     #
     # `services.reload_serve_daemons` refuses on the same missing stamp, so this is
@@ -4110,7 +4118,7 @@ def update_command(
 
     if not result.behind:
         # NOT AN EARLY RETURN ANY MORE, and that is the whole fix for the report
-        # this change exists for (review round 1, R1-2). "Nothing to install" is
+        # this change exists for (serve-reload review round 1, R1-2). "Nothing to install" is
         # not "nothing to do": the reported machine printed exactly this line
         # while its backend went on serving a build four releases old, because
         # `behind` is a version-string compare and the SERVICES are not versioned

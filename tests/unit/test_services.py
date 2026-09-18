@@ -97,7 +97,7 @@ def _run(
 
 
 def test_an_unproven_process_is_never_signalled(pointer: dict[str, Any]) -> None:
-    """THE IDENTITY GUARD (review round 1, R1-4).
+    """THE IDENTITY GUARD (serve-reload review round 1, R1-4).
 
     A record is a file whose name is a pid, and a pid is recycled: review
     constructed a live `sleep` named by a hand-written live, reloadable record and
@@ -166,7 +166,7 @@ def test_a_missing_stamp_moves_nothing_and_says_so(monkeypatch: pytest.MonkeyPat
 
 
 def test_the_probe_url_brackets_an_ipv6_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bracket join is load-bearing and was untested (review round 2, R2-6).
+    """The bracket join is load-bearing and was untested (serve-reload review round 2, R2-6).
 
     `http://::1:1111/health` is not a URL: an IPv6 literal must be bracketed, and
     a probe that cannot parse its own URL is a probe that answers "did not
