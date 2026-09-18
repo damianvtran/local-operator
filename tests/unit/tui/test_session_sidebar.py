@@ -682,11 +682,17 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
             app._sidebar_timer.pause()
             sidebar = app._session_sidebar
             sidebar.set_entries(_hover_entries(("alpha", "sess", "gamma")))
-            await _focus_settled(pilot, sidebar)
             sidebar.cursor_id = cursor
             sidebar.requested_id = requested
             sidebar.refresh()
-            await pilot.pause()
+            # Focus LAST, with no await between its check and the read below.
+            # `has_focus` gates the cursor mark, and focus can move after the
+            # first `_focus_settled` returned — seen once in 30 captures, where
+            # the frame was then served from a cache painted while focused and
+            # the mark survived by luck rather than by construction. Once this
+            # helper has checked, the read is the very next statement and nothing
+            # can yield in between, so focus cannot move under it.
+            await _focus_settled(pilot, sidebar)
             lines = sidebar.render_lines(Region(0, 0, sidebar.size.width, sidebar.size.height))
             return ["".join(segment.text for segment in line) for line in lines]
 
@@ -694,14 +700,42 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
     mirrored = await grid("gamma", "alpha")
     assert straight != mirrored, "requested and cursor render identically"
 
-    # And the distinction is the caret, in the same two columns as before, so
-    # nothing reflows: the title still starts where it always did.
     def row_line(lines: list[str], title: str) -> str:
         return next(line for line in lines if title in line)
 
-    assert row_line(straight, "Session alpha").startswith(" ›   ")
-    assert row_line(straight, "Session gamma").startswith(" »   ")
-    assert row_line(mirrored, "Session alpha").startswith(" »   ")
+    def caret(line: str) -> str:
+        """The caret cell: one gutter cell, then the marker column's slot."""
+        return line[1]
+
+    # The CARET SLOT, not a fixed prefix. The cell beside the caret is the row's
+    # own MARK COLUMN, and it carries state that legitimately moves with time:
+    # the requested row's spinner starts at `REQUESTED_SPINNER_DELAY_S` (0.15 s
+    # after the request), a busy row animates its own frame, an unread completion
+    # has a glyph. Reading that column into the caret assertion made this a bet on
+    # how long the capture took — it is CI's shard-2 failure, and it reproduces
+    # here: a 30-capture probe read ` » ⣻ Session gamma` with the caret present
+    # and the spinner beside it, and the glyph sat on the row in 2 of 20 further
+    # captures (holding the frame until the row spun reddened the old assertion
+    # every time). The caret itself was never the thing that went missing — 0
+    # misses in 80 captured frames — and the spinner does not displace it (it
+    # takes the mark column, the caret keeps its slot), so there is no paint
+    # defect to fix: the assertion was naming a column that is not part of the
+    # caret's identity.
+    assert caret(row_line(straight, "Session alpha")) == "›"
+    assert caret(row_line(straight, "Session gamma")) == "»"
+    assert caret(row_line(straight, "Session sess")) == " "
+    assert caret(row_line(mirrored, "Session alpha")) == "»"
+    assert caret(row_line(mirrored, "Session gamma")) == "›"
+    assert caret(row_line(mirrored, "Session sess")) == " "
+
+    # And nothing reflows: whatever the caret and the mark column hold, the title
+    # starts in the same column on every row of both frames — the layout claim
+    # the old prefix made about the two rows it happened to name.
+    markers = ("Session alpha", "Session sess", "Session gamma")
+    columns = {
+        row_line(frame, title).index(title) for frame in (straight, mirrored) for title in markers
+    }
+    assert columns == {len(" »   ")}, columns
 
 
 @pytest.mark.asyncio
