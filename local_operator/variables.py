@@ -29,6 +29,13 @@ containing "key", which is far too common in legitimate config
 matching so a Unicode homoglyph cannot slip a credential past it.
 Over-matching is the safe direction: it hides more, never less.
 
+Redaction has TWO passes, and both matter here: the values this session KNOWS
+(above) and the credential SHAPES anything may print — a DSN, a connection
+string, an ``AWS_SECRET_ACCESS_KEY=`` line, a PEM block, an issuer-prefixed
+token. ``VariableStore.redact`` composes them, and that one callable is what
+every model-visible surface reads; see :mod:`local_operator.redaction_shapes`
+for what the shape pass does and does not guarantee.
+
 Session credentials (``/credential``, ``ask`` with ``secret=true``) are a
 fourth, memory-only source that inverts that rule on purpose. The operator
 hands the process a secret the agent must USE and must never READ: the name

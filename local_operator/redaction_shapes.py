@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Match, Optional, Pattern, Sequence, Union
+from typing import Callable, Iterable, Match, Optional, Pattern, Union
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -396,6 +396,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         "cookie-header",
         re.compile(r"(?i)\b(set-cookie|cookie)\s*:\s*([^\r\n]{4,})"),
         r"\1: " + REDACTION_MARKER,
+        2,
     ),
     # --- CLI / ecosystem shapes ---------------------------------------------
     # ``--password=hunter2``, ``--password hunter2``, ``--token …`` — how a CLI
@@ -878,8 +879,3 @@ def credential_dump_notice(command: str) -> Optional[str]:
 def _is_name_only_pipeline(command: str, match: Match[str]) -> bool:
     """Whether the dump is piped straight into a names-only extractor."""
     return bool(_NAME_ONLY_PIPELINE.match(command[match.end() :]))
-
-
-def describe_shape_hit(labels: Sequence[str]) -> str:
-    """A short, value-free rendering of shape labels for a notice or an incident."""
-    return ", ".join(labels)
