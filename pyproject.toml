@@ -161,7 +161,7 @@ dev = [
     # Bump this pin, not an env override, and keep the exclude-superset
     # guard in tests/unit/test_ci_hygiene.py green against the new
     # analyzer.
-    "pyright==1.1.411",
+    "pyright==1.1.414",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
