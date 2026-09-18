@@ -20,7 +20,9 @@ from local_operator.classification.context import (
     select_candidates,
     serialized_size,
     setting_int,
+    shortlist,
 )
+from local_operator.classification.recommend import build_questions
 from tests.unit.classification.support import candidate
 
 
@@ -406,3 +408,121 @@ def test_a_context_only_state_needs_no_candidates_key() -> None:
     state = build_state(user_message="", context="summary", candidates=[], max_chars=100)
     assert state == {"request": "", "context": "summary"}
     assert serialized_size(state) <= 100
+
+
+# ---------------------------------------------------------------------------
+# Scaling to hundreds of skills: which rows travel, and what the request costs
+# ---------------------------------------------------------------------------
+
+
+def test_a_roster_that_fits_every_kind_is_returned_by_identity() -> None:
+    """The warm path must not allocate: a small catalogue IS the roster object.
+
+    The wiring asserts that two consecutive messages carry the same candidates
+    object, so a version of ``shortlist`` that copied unconditionally would make
+    every warm message a fresh tuple for no gain.
+    """
+    rows = tuple(roster(count=5))
+    assert shortlist(rows, "deploy core to qa", DEFAULT_MAX_CANDIDATES) is rows
+
+
+def test_a_roster_over_the_cap_keeps_the_relevant_rows() -> None:
+    """The per-kind cap is a cost bound, so WHICH rows survive has to be a choice.
+
+    Before ``shortlist`` the survivors were the first ``maxCandidates`` in
+    discovery order — a permanent dozen for the life of the session, with the rest
+    of the catalogue unreachable. Here 61 skills contend for 12 places and the one
+    the message is about wins one of them.
+    """
+    rows = tuple(
+        [candidate(f"fleet-{index:03d}", description="Fleet automation") for index in range(60)]
+        + [
+            candidate(
+                "flavia-adverse-media",
+                description="Adverse media screening for a named person",
+            )
+        ]
+        + [candidate("guide-x", kind="guide", description="A packaged guide")]
+    )
+
+    picked = shortlist(rows, "run an adverse media screen for Flavia", DEFAULT_MAX_CANDIDATES)
+    names = [row.name for row in picked]
+
+    assert "flavia-adverse-media" in names
+    assert len([name for name in names if name.startswith("fleet-")]) == 11
+    # A kind under its own cap is untouched, so the guide keeps its place.
+    assert "guide-x" in names
+    # SURVIVORS KEEP THE CALLER'S ORDER: the named skill sits where the roster put
+    # it (last of the skills), not first because it scored highest. The option order
+    # is part of the request the vendor sees.
+    assert names == [name for name in (row.name for row in rows) if name in set(names)]
+
+
+def test_the_shortlist_is_deterministic() -> None:
+    """Two identical messages must not churn the request, or the cache key churns."""
+    rows = tuple(roster(count=40))
+    assert shortlist(rows, "deploy core", DEFAULT_MAX_CANDIDATES) == shortlist(
+        rows, "deploy core", DEFAULT_MAX_CANDIDATES
+    )
+
+
+def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None:
+    """Hundreds of installed skills, and the request the vendor receives.
+
+    Every candidate travels TWICE — a line in the state and an option description
+    in its kind's question — so the two visible bounds are ``maxStateChars``
+    (6 000 chars) and ``maxCandidates`` per kind. This test pins the whole request
+    at the shipped defaults against the model's real window: **32k input tokens**
+    (operator's figure, 2026-09-18; §5 of the design doc said 64k, which nothing
+    had measured).
+
+    The numbers, so the assertion can be checked by hand: 6 000 chars of state plus
+    12 skills + 12 guides + 12 MCP options at the §5 line cap (120 chars) is
+    ~10.3k chars ≈ 2.6k tokens, i.e. ~8% of the window — and the candidate cap, not
+    the window, is what the operator would move.
+    """
+    rows = tuple(roster(count=500)) + tuple(
+        candidate(f"guide-{index}", kind="guide", description="A packaged guide")
+        for index in range(30)
+    )
+    message = "why can't this tenant run legal searches? " * 8
+
+    state = build_state(user_message=message, context=None, candidates=rows)
+    state_chars = serialized_size(state)
+    assert state_chars <= DEFAULT_MAX_STATE_CHARS
+
+    plan = build_questions(rows)
+    option_chars = sum(
+        len(f"{name}: {text}")
+        for question in plan.questions
+        for name, text in question.criteria.items()
+    )
+    # The questions themselves carry instructions; counted roughly, they are a few
+    # hundred characters each and bounded by the three kinds.
+    instruction_chars = sum(len(question.instructions) for question in plan.questions)
+    estimated_tokens = (state_chars + option_chars + instruction_chars) // 4
+
+    print(
+        f"500 skills + 30 guides: state={state_chars} chars, "
+        f"options={option_chars} chars, instructions={instruction_chars} chars, "
+        f"~{estimated_tokens} tokens of a 32k window"
+    )
+    assert estimated_tokens <= 3_000
+
+
+def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() -> None:
+    """The knob's safe range, measured: the window is not what binds at 40 a kind."""
+    rows = tuple(roster(count=500))
+    message = "deploy core to qa"
+
+    state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
+    plan = build_questions(rows, limit=40)
+    option_chars = sum(
+        len(f"{name}: {text}")
+        for question in plan.questions
+        for name, text in question.criteria.items()
+    )
+    estimated_tokens = (serialized_size(state) + option_chars) // 4
+
+    print(f"maxCandidates=40: state+options ~{estimated_tokens} tokens")
+    assert estimated_tokens <= 16_000

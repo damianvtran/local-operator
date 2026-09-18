@@ -531,8 +531,12 @@ async def test_the_memo_is_per_instance_not_a_module_global(bare_manager, tmp_pa
 async def test_a_401_invalidates_the_memo_once_and_re_resolves_exactly_once(manager) -> None:
     """A revoked key must not become a per-message retry loop.
 
-    The resolve counter IS the assertion: initial resolve + one re-resolve, and
-    two requests — not a loop.
+    The REQUEST count IS the assertion: one initial attempt plus one retry, not a
+    loop. There are three resolves and the extra one is the *fallback tier* lookup
+    (this manager has no ``JEV_API_KEY``, so the walk past the refused tier finds
+    nothing and the leg fails) — still one pass down the tier list, which is what
+    "exactly once" means here: the tier index only advances, so the next message
+    starts below the tier that refused.
     """
     resolves: list[int] = []
     requests: list[httpx.Request] = []
@@ -551,7 +555,10 @@ async def test_a_401_invalidates_the_memo_once_and_re_resolves_exactly_once(mana
         await vendor.decide(request_of(choice_question()), timeout_s=5.0)
     assert caught.value.kind == "auth"
     assert len(requests) == 2
-    assert len(resolves) == 2
+    assert len(resolves) == 3
+    # The tier that refused is behind us for the rest of the session: tiers are
+    # (authstore, TYPESAFE_API_KEY, JEV_API_KEY) and the env key was index 1.
+    assert vendor._tier == 2
 
 
 async def test_a_401_that_heals_on_the_retry_answers_the_call(manager) -> None:
@@ -768,3 +775,134 @@ async def test_the_storage_id_follows_the_registrys_store_credentials_as(bare_ma
     # A provider with no registry row degrades to its own id rather than raising,
     # so this leg still works in a tree where the registry entry has not landed.
     assert storage_provider_id("not-a-provider") == "not-a-provider"
+
+
+# ---------------------------------------------------------------------------
+# The preference order, and the fallback behind it (operator requirement,
+# 2026-09-18): the login row is PREFERRED, the static key is LEGACY.
+# ---------------------------------------------------------------------------
+
+
+def _answers_choice() -> httpx.Response:
+    return json_response(
+        {"answers": {"recommend_skill": {"type": "choice", "choice": "minerva-deploy"}}}
+    )
+
+
+async def test_the_radient_leg_prefers_the_login_session_over_the_static_key(
+    bare_manager,
+) -> None:
+    """Both credits present and disagreeing: the LOGIN row is what gets sent.
+
+    Radient's own case of the documented precedence — the OAuth session an
+    interactive login wrote is the preferred credential, and ``RADIENT_API_KEY``
+    is the legacy static tier behind it. Asserted on the WIRE rather than on the
+    resolver, because "which one is preferred" is only observable as the bearer
+    the vendor receives.
+    """
+    store_login_key(bare_manager, "radient", "oauth-session-bearer")
+    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    bearers: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bearers.append(request.headers["Authorization"])
+        return _answers_choice()
+
+    vendor = RadientVendor(bare_manager, client=client_for(handler))
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+
+    assert bearers == ["Bearer oauth-session-bearer"]
+
+
+async def test_a_dead_login_row_falls_back_to_the_legacy_static_key(bare_manager) -> None:
+    """The login row is preferred, not absolute: a dead one stops hiding the key.
+
+    Before the fallback, the once-only retry re-resolved from the top, got the
+    SAME stored row back, and the leg failed for the whole session — so a legacy
+    static key the operator had exported was unreachable in practice. The
+    sequence asserted here is: refused login row, one re-read (which proves the
+    value did not rotate), then the tier behind it.
+    """
+    store_login_key(bare_manager, "radient", "dead-oauth-bearer")
+    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    bearers: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bearer = request.headers["Authorization"]
+        bearers.append(bearer)
+        if bearer == "Bearer dead-oauth-bearer":
+            return httpx.Response(401, json={"error": {"message": "revoked"}})
+        return _answers_choice()
+
+    vendor = RadientVendor(bare_manager, client=client_for(handler))
+    response = await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+
+    assert response.answers["recommend_skill"].value == "minerva-deploy"
+    assert bearers == [
+        "Bearer dead-oauth-bearer",
+        "Bearer dead-oauth-bearer",
+        "Bearer legacy-static-key",
+    ]
+
+    # The advance is MEMOIZED for the session: the next message starts at the
+    # fallback tier instead of paying the dead row again.
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert bearers[3] == "Bearer legacy-static-key"
+    assert len(bearers) == 4
+
+
+async def test_a_rotated_login_row_still_heals_without_advancing_a_tier(
+    bare_manager,
+) -> None:
+    """The fallback must not fire when the preferred tier merely rotated.
+
+    Same shape as the store-rotation test above, asserted through the TIER INDEX:
+    a refreshed value is not a dead tier, so the session keeps using the login
+    row rather than silently downgrading to the legacy key.
+    """
+    store_login_key(bare_manager, "radient", "first-bearer")
+    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    bearers: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bearer = request.headers["Authorization"]
+        bearers.append(bearer)
+        if len(bearers) == 1:
+            store_login_key(bare_manager, "radient", "rotated-bearer", replace=True)
+            return httpx.Response(401, json={"error": {"message": "stale"}})
+        return _answers_choice()
+
+    vendor = RadientVendor(bare_manager, client=client_for(handler))
+    await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+
+    assert bearers == ["Bearer first-bearer", "Bearer rotated-bearer"]
+    assert vendor._tier == 0
+
+
+async def test_every_tier_dead_walks_each_of_them_at_most_once(bare_manager) -> None:
+    """Bounded when nothing works: no per-message hammering of a dead store.
+
+    The login row is the only credential here, so the walk runs out after
+    advancing past it. The second call must therefore make NO request at all
+    (the leg now reports "no credential"), which is what stops a genuinely
+    revoked session from costing two store reads and two POSTs per message.
+    """
+    store_login_key(bare_manager, "radient", "dead-oauth-bearer")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(403, json={"error": {"message": "forbidden"}})
+
+    vendor = RadientVendor(bare_manager, client=client_for(handler))
+    with pytest.raises(DecisionVendorError) as first:
+        await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert first.value.kind == "auth"
+    assert len(requests) == 2
+
+    with pytest.raises(DecisionVendorError) as second:
+        await vendor.decide(request_of(choice_question()), timeout_s=5.0)
+    assert second.value.kind == "auth"
+    assert "no credential" in str(second.value)
+    assert len(requests) == 2
+    assert vendor._tier == 1

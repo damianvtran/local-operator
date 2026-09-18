@@ -21,8 +21,8 @@ therefore owns ONE keep-alive client for the session and injects it here (and
 an injected client still works — it opens one for the call — which keeps the
 classes usable on their own in a diagnostic or a one-off script.
 
-HOW A LEG FINDS ITS CREDENTIAL
-===============================
+HOW A LEG FINDS ITS CREDENTIAL — LOGIN FIRST, LEGACY KEY BEHIND IT
+=================================================================
 
 The order is the provider stack's, and it is the same for all three legs
 (:meth:`_HttpDecisionVendor._resolve_key`):
@@ -30,14 +30,21 @@ The order is the provider stack's, and it is the same for all three legs
 1. **The ``AuthStore`` row for the provider** — ``auth.db``, read-only. This is
    where an interactive login puts a key: ``ProviderController.login`` does
    ``upsert_credential(store_credentials_as or provider_id, {"key": <pasted>,
-   "source": "login", "type": "api_key"})``. A leg that skipped this store
-   silently ignored ``lop login typesafe`` — the user saw "Stored API key" and
-   the classifier then fell through to the next leg, or to no vendor at all.
+   "source": "login", "type": "api_key"})``, and for Radient it is the OAuth
+   session ``lop login radient`` wrote. A leg that skipped this store silently
+   ignored ``lop login typesafe`` — the user saw "Stored API key" and the
+   classifier then fell through to the next leg, or to no vendor at all.
+
+   **This tier is PREFERRED, deliberately.** An OAuth session is the account the
+   operator is signed into and the route we bill; a pasted key is the legacy
+   path, kept working rather than leading. So a machine that has BOTH uses the
+   login row, and the static key is a fallback rather than the default.
 2. **``CredentialManager.get_credential(<env key>)``** — the process environment
    and the legacy ``credentials.env``. Still needed explicitly: the store's own
    env tier reads only a provider's *single-string* ``env_keys``, so a tuple
    like TypeSafe's ``("TYPESAFE_API_KEY", "JEV_API_KEY")`` is not covered there,
-   and neither is ``OPENROUTER_API_KEY_DEV``.
+   and neither is ``OPENROUTER_API_KEY_DEV``. This is also the LEGACY tier the
+   ladder below falls back to when the login row cannot serve.
 3. **The vendor-specific alternates** — ``JEV_API_KEY`` for TypeSafe,
    ``OPENROUTER_API_KEY_DEV`` behind the production key for OpenRouter.
 4. ``None`` — "this leg has no credential", which the cascade treats as "skip".
@@ -64,7 +71,10 @@ memo with no TTL keeps using a key the operator has since rotated or logged out
 of, for the whole session. And when a leg answers 401/403, the memo is dropped
 and the credential re-resolved ONCE — never in a loop — so a rotated key heals
 on the next message while a genuinely dead one stops costing a request per
-message.
+message. If that re-resolve hands back the SAME value, the tier itself is dead
+for this session and the walk advances to the next one: a stored login that
+cannot serve must not strand the legacy static key sitting one tier below it
+(:meth:`_HttpDecisionVendor._advance_tier`).
 
 NO KEY EVER LEAVES THIS MODULE
 ==============================
@@ -485,22 +495,59 @@ class _HttpDecisionVendor:
         self._clock = clock
         self._key: SecretStr | None = None
         self._key_expires_at = 0.0
+        #: The tier index the NEXT resolve starts at, and the tier the current
+        #: memo came from. Both are per SERVICE, like the memo: they exist so the
+        #: 401/403 ladder in :meth:`decide` can move past a dead tier instead of
+        #: re-reading it forever. ``_key_tier`` is ``None`` while nothing is
+        #: memoized — see :meth:`_advance_tier` for the blame rule.
+        self._tier = 0
+        self._key_tier: int | None = None
 
-    async def _resolve_key(self, manager: "CredentialManager") -> SecretStr | None:
-        """``AuthStore`` row → ``credentials.env``/env key → alternates → ``None``.
+    @property
+    def credential_tiers(self) -> tuple[str, ...]:
+        """The credential tiers in PREFERENCE ORDER: the login row, then static keys.
+
+        ``"authstore"`` is the provider stack's own row — for Radient that is the
+        OAuth session an interactive login wrote, which is the preferred way to
+        bill this call; every name after it is a static key the operator pasted
+        or exported, which is the LEGACY tier. The order is the contract (see the
+        module docstring), and the members are ``CredentialManager`` key names,
+        so a tier can be named in a log line without a value ever being printed.
+        """
+        return ("authstore", *self.env_key_names)
+
+    async def _resolve_key(
+        self, manager: "CredentialManager"
+    ) -> tuple[SecretStr | None, int | None]:
+        """The first tier at or after :attr:`_tier` that yields a value.
 
         One implementation for all three legs because the order is the provider
         stack's, not a per-vendor detail; the legs differ only in the ids and key
         names they declare. See the module docstring for why each tier is needed.
+
+        Returns ``(value, tier index)`` rather than the value alone: the index is
+        what lets an auth refusal move PAST the tier that refused us
+        (:meth:`_advance_tier`) instead of re-reading it for the rest of the
+        session. ``(None, None)`` is "no tier has anything", which the cascade
+        reads as "skip this leg".
+
+        The starting tier is READ from :attr:`_tier` rather than taken as an
+        argument, deliberately: subclasses in this repo's own tests wrap this
+        method to count resolves (``_Counting._resolve_key(self, manager)``), and
+        a new REQUIRED keyword would break every one of them — a private seam that
+        quietly raises through a test double is worse than one that reads its own
+        state.
         """
-        stored = await auth_store_api_key(manager, self.provider_id)
-        if stored:
-            return SecretStr(stored)
-        for name in self.env_key_names:
-            value = manager.get_credential(name)
+        for index, tier in enumerate(self.credential_tiers[self._tier :], start=self._tier):
+            if tier == "authstore":
+                stored = await auth_store_api_key(manager, self.provider_id)
+                if stored:
+                    return SecretStr(stored), index
+                continue
+            value = manager.get_credential(tier)
             if value:
-                return value
-        return None
+                return value, index
+        return None, None
 
     async def credential(self, manager: "CredentialManager") -> SecretStr | None:
         """The bearer for this leg, memoized for :data:`CREDENTIAL_TTL_S`.
@@ -513,7 +560,7 @@ class _HttpDecisionVendor:
         """
         if self._key is not None and self._clock() < self._key_expires_at:
             return self._key
-        self._key = await self._resolve_key(manager)
+        self._key, self._key_tier = await self._resolve_key(manager)
         self._key_expires_at = self._clock() + self._credential_ttl_s
         return self._key
 
@@ -522,10 +569,36 @@ class _HttpDecisionVendor:
 
         Called on a 401/403 (see :meth:`decide`) and nowhere else, and only once
         per call: a leg that re-resolves in a loop turns a revoked key into a
-        request storm against the credential store.
+        request storm against the credential store. The tier INDEX is not reset
+        here — it belongs to the session's walk, and only
+        :meth:`_advance_tier` moves it.
         """
         self._key = None
         self._key_expires_at = 0.0
+        self._key_tier = None
+
+    def _advance_tier(self) -> bool:
+        """Move past the tier that just refused us; ``False`` when none is left.
+
+        The other half of "the login row is preferred": a preferred tier that
+        cannot serve must FALL BACK rather than shadow the legacy key behind it.
+        Before this, the once-only retry re-resolved from the top, so a stored
+        OAuth row that could not refresh was handed back for the whole session
+        and the static key was unreachable in practice.
+
+        The walk is MONOTONE within a service instance: the index only ever moves
+        forward, so a session cannot oscillate between a dead login row and the
+        key behind it, and the number of auth refusals it will pay for is bounded
+        by the number of tiers. Falls back to the CURRENT index when there is no
+        memo to blame (a refusal can only follow a resolved credential, so that
+        arm is unreachable in practice and answered rather than asserted).
+        """
+        blame = self._tier if self._key_tier is None else self._key_tier
+        if blame + 1 >= len(self.credential_tiers):
+            return False
+        self._tier = blame + 1
+        self.invalidate_credential()
+        return True
 
     async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse:
         key = await self.credential(self._manager)
@@ -543,9 +616,23 @@ class _HttpDecisionVendor:
             # problem (§4). The cascade turns this into a disabled question shape.
             raise refusal
         if isinstance(refusal, DecisionVendorError) and refusal.status in (401, 403):
-            # Exactly one re-resolve-and-retry. Written out rather than looped so
-            # the bound is visible: a revoked key costs one extra store read per
-            # message, not a request storm.
+            # Two steps, and both are needed:
+            #
+            # 1. re-resolve ONCE in place. A rotated or centrally refreshed value
+            #    heals here — that is the case ``test_a_login_stored_key_is_
+            #    memoized_and_re_resolved_once_on_a_401`` pins, where the store row
+            #    changes between the two attempts.
+            # 2. if that re-resolve hands back the SAME value, the tier itself
+            #    cannot serve this session, so the walk moves to the tier behind
+            #    it (``_advance_tier``) and tries once more. Without this arm, the
+            #    preferred login row shadowed the legacy static key forever: the
+            #    re-resolve returned the same dead OAuth row, the leg failed, and
+            #    the cascade skipped a key that would have worked.
+            #
+            # Written out rather than looped so the bound is visible: at most three
+            # requests and one extra store read per call, all of them one-time —
+            # the tier index only ever advances, so the next message starts where
+            # this one ended.
             logger.info(
                 "classification: %s rejected the memoized credential; re-resolving once",
                 self.name,
@@ -558,6 +645,31 @@ class _HttpDecisionVendor:
                 self._client, body, self._headers(refreshed.get_secret_value()), timeout_s
             )
             refusal = _refusal(response, refreshed.get_secret_value())
+            if (
+                isinstance(refusal, DecisionVendorError)
+                and refusal.status in (401, 403)
+                and self._advance_tier()
+            ):
+                # Two refusals — one of them against a value re-read from the
+                # store — is the signal that the TIER is dead for this session
+                # rather than the value being stale, so the walk moves to the
+                # legacy tier behind it and answers THIS message from there.
+                # That is the half that was missing: the re-resolve handed back
+                # the same dead login row for the rest of the session, so an
+                # exported static key was unreachable in practice.
+                logger.info(
+                    "classification: %s credential tier did not serve; "
+                    "falling back to the next tier (%s)",
+                    self.name,
+                    self.credential_tiers[self._tier],
+                )
+                fallback = await self.credential(self._manager)
+                if fallback is None or not fallback.get_secret_value():
+                    raise refusal
+                response = await self._send_with(
+                    self._client, body, self._headers(fallback.get_secret_value()), timeout_s
+                )
+                refusal = _refusal(response, fallback.get_secret_value())
         if refusal is not None:
             raise refusal
 
