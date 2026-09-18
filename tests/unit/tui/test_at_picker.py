@@ -640,3 +640,202 @@ async def test_an_empty_directory_notice_SURVIVES_the_next_keystroke(workspace) 
 
         assert picker._notice == held, "the FILE notice was dropped on the next keystroke"
         assert picker.display, "the list closed and took the notice with it"
+
+
+# ---------------------------------------------------------------------------
+# The design round's fix-forward (design review round 1 on #1220, D1–D5).
+# Every test below FAILS against 59c435739 and is written from that round's own
+# reproductions, because the four defects it found are all invisible to a test
+# that only asks whether the feature works: the shape that shipped worked, and
+# offered the wrong directory while it did.
+# ---------------------------------------------------------------------------
+
+
+def _rendered(editor: Editor, width: int = 80) -> list[str]:
+    """The picker's painted rows + notice, as the user reads them."""
+    return editor.picker.render_text(width).plain.split("\n")
+
+
+def _gutter(row: str) -> str:
+    """The 3-cell selection gutter of a rendered row, stripped."""
+    return row[:3].strip()
+
+
+async def _click_at(editor: Editor, pilot, offset: int) -> None:
+    """One real mouse click on whole-buffer ``offset`` in the composer.
+
+    The gesture, not the handler: D1's second reproduction is a plain click, and
+    a test that called ``_sync_picker_if_phase_changed`` directly would prove the
+    comparison is right while proving nothing about whether anything CALLS it.
+    """
+    row, column = editor._location_at_offset(offset)
+    x, y = editor.wrapped_document.location_to_offset((row, column))
+    await pilot.click(Editor, offset=(editor.gutter_width + x, y))
+    for _ in range(3):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_paste_into_the_second_reference_lists_THAT_tokens_directory(workspace) -> None:
+    """D1, the paste-shaped arrival: the rows must describe the CARET's token.
+
+    `load_text` then a caret move to the end is one plain paste, and before the
+    fix it left the caret in `@src/` while the rows were the FIRST token's
+    (`README.md`) — the phase went `file -> file`, so the phase-only gate never
+    re-derived. ``dir_latch`` is the witness: it still named the old directory.
+
+    The consequence asserted here is the harmful one rather than the cosmetic
+    one. Enter on a stale row cannot be accepted at this caret
+    (`_file_row_is_already_in_the_buffer` is False), so it fell through to the
+    ordinary submit — and with the root's row highlighted, ``_complete_file``
+    wrote **@src/README.md**, a path that does not exist, into the draft,
+    silently, with nothing sent and no notice.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "@README.md and also @src/")
+        assert editor.picker.mode is PickerMode.FILE, "premise: the list is live"
+        assert editor._file_choices_requested == "src/", "premise: the caret left `src/`"
+        assert "app.py" in _rows(editor), "the rows are the FIRST token's directory"
+        assert "README.md" not in _rows(editor), "a row from the other token's directory"
+
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+
+        assert editor.text == "@README.md and also @src/app.py", "the row was not accepted"
+        assert editor.text.count("@") == 2, "a reference was duplicated"
+        assert session.prompts == [], "the draft went out instead of completing"
+
+
+@pytest.mark.asyncio
+async def test_a_click_into_an_earlier_reference_relists_its_directory(workspace) -> None:
+    """D1, the mouse shape: the list follows the caret, not the last directory.
+
+    Driven with real keys and one real click, because that is the reproduction:
+    typing ends in `@src/`, and clicking back into the earlier `@README.md` used
+    to leave `src/`'s four rows on screen under a ROOT-directory token, with a
+    highlighted row that could not be accepted at this caret.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "explain @README.md and also @src/")
+        assert "app.py" in _rows(editor), "premise: the list is on `src/`"
+
+        await _click_at(editor, pilot, 15)  # inside the earlier `@README.md`
+
+        assert 8 < editor._caret_offset() <= 18, "premise: the click landed in the token"
+        assert editor._file_choices_requested == "", "the list still latches the other token"
+        assert "README.md" in _rows(editor), "the root's own row is missing"
+        assert "app.py" not in _rows(editor), "a row from the token the caret LEFT"
+
+
+@pytest.mark.asyncio
+async def test_a_reference_is_painted_with_the_reference_ink(workspace) -> None:
+    """D2: the `@path` token must not be indistinguishable from the prose.
+
+    Measured before the fix: `/help` painted `#6ea8d8` and
+    ` explain @README.md to me` came back as ONE run of `#e9e5db`, so the token
+    against the words beside it was **1.00:1** — not faint, identical. The rule
+    the sheet already stated for an object of exactly this kind (the attachment
+    chip: "the ramp's file/reference hue") had simply never been written for it.
+
+    Read off the FINISHED strip `render_line` produces, which is what the
+    terminal is sent, and both halves of the ruling are asserted: a token that
+    RESOLVES gets the reference ink and a token the resolver would call prose
+    (`@me`) does not. The second assertion is the one that keeps the ink from
+    claiming an expansion that will not happen.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    signal = theme_mod.semantic_color("signal").lower()
+    prose = theme_mod.semantic_color("fg").lower()
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "/help explain @README.md to me")
+        cells = {
+            segment.text: (
+                segment.style.color.get_truecolor().hex.lower()
+                if segment.style and segment.style.color
+                else None
+            )
+            for segment in editor.render_line(0)._segments
+        }
+        assert cells.get("/help") == signal, "premise: the command word's own ink"
+        assert cells.get("@README.md") == signal, "the reference token has no ink of its own"
+        assert cells.get(" explain ") == prose, "the prose either side changed instead"
+
+        editor = await _draft(app, pilot, "glab mr create --assignee @me")
+        cells = [
+            (
+                segment.text,
+                (
+                    segment.style.color.get_truecolor().hex.lower()
+                    if segment.style and segment.style.color
+                    else None
+                ),
+            )
+            for segment in editor.render_line(0)._segments
+        ]
+        assert "@me" in editor.text, "premise: the token is on this row"
+        assert signal not in [ink for _text, ink in cells], "prose was painted as a reference"
+
+
+@pytest.mark.asyncio
+async def test_a_no_match_query_holds_a_notice_and_stays_closed(workspace) -> None:
+    """D3: `@me` answered with silence, one keystroke from `@srx/` explaining itself.
+
+    A notice is not a match, which is the property Q-2 rests on: the fuzzy
+    near-miss stays unoffered, ``is_open()`` stays False and every key still
+    reaches the buffer. What changes is that the surface now says why.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "glab mr create --assignee @me")
+        picker = editor.picker
+        assert not picker.is_open(), "a no-match query must not own Enter"
+        assert not picker.suggestions(), "a notice is not a row"
+        assert picker._notice == "nothing here matches `me`", "the no-match state is silent"
+        assert picker.display, "the notice was not held on screen"
+        assert "nothing here matches `me`" in chr(10).join(_rendered(editor)), "not painted"
+
+        # The copy quotes the query, so it has to move with it: holding the
+        # first one left `@zz` reading "nothing here matches `z`".
+        editor.insert("z")
+        for _ in range(3):
+            await pilot.pause()
+        assert picker._notice == "nothing here matches `mez`", "a stale copy of the query"
+
+        # And the buffer still owns the keys.
+        before = editor.text
+        editor.insert("!")
+        for _ in range(3):
+            await pilot.pause()
+        assert editor.text == before + "!", "the notice swallowed a keystroke"
+
+
+@pytest.mark.asyncio
+async def test_the_row_enter_would_send_carries_the_send_mark(workspace) -> None:
+    """D5: nothing before the press said whether Enter would complete or SEND.
+
+    The rows were pixel-identical in the two states — same gutter glyph, same
+    ink, same ground, same detail cell — and only
+    ``_file_row_is_already_in_the_buffer`` differed, invisibly. The mark is asked
+    of a predicate at PAINT time rather than read from a flag, which is why the
+    two rows below can be rendered straight off the widget with no app at all.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        # COMPLETES: `@README` is a partial token, so the accept key appends.
+        completing = await _draft(app, pilot, "explain @README")
+        assert completing.picker.highlighted_name() == "README.md"
+        assert not completing._file_row_is_already_in_the_buffer("README.md")
+        assert _gutter(_rendered(completing)[0]) == "❯", "an accept key that completes"
+
+        # SENDS: the buffer already holds the row, so there is nothing to accept.
+        sending = await _draft(app, pilot, "explain @README.md")
+        assert sending.picker.highlighted_name() == "README.md"
+        assert sending._file_row_is_already_in_the_buffer("README.md")
+        assert _gutter(_rendered(sending)[0]) == "↵", "an accept key that SENDS"

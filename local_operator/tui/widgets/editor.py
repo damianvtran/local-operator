@@ -108,6 +108,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
 import secrets
 import shlex
@@ -143,12 +144,13 @@ from local_operator.clipboard import (
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
+from local_operator.references import at_references_enabled, reference_resolves
+from local_operator.sigils import at_token, at_token_spans, split_token
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     CompletionMode,
     PickerMode,
-    at_token,
     completion_for,
     ghost_for,
     skill_token,
@@ -157,7 +159,6 @@ from local_operator.tui.widgets.command_picker import (
     slash_context,
     slash_token_span,
     slash_word,
-    split_token,
 )
 from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
@@ -2070,6 +2071,13 @@ class Editor(TextArea):
         "text-area--slash-argument",  # recognized team/agent NAME
         "text-area--slash-unknown",  # a leading /word that is NOT a command
         "text-area--credential-armed",  # a /credential token arming a capture
+        # A resolvable `@path` reference. The fourth member of the same
+        # family as the three above — a span of the buffer the composer can
+        # name as structure rather than prose — and the only one that was
+        # missing its ink (design round 1, D2: measured 1.00:1 against the
+        # prose beside it, because there was no rule at all). See
+        # `_reference_runs` for what "resolvable" is asked, and why.
+        "text-area--at-reference",
     }
 
     def __init__(
@@ -2083,6 +2091,13 @@ class Editor(TextArea):
         self._picker = CommandPicker(
             self._apply_command, self._on_picker_highlight, self._on_picker_preview
         )
+        # What an accept key would DO to a highlighted row is a question about
+        # this buffer and caret, so the editor owns the answer and the picker
+        # asks it per painted row (design round 1, D5). Installed here rather
+        # than set at each sync: a flag would have to be refreshed after the
+        # arrow keys, after the app's one-tick-later refill and after every
+        # buffer mutation, and one missed site is a row whose mark lies.
+        self._picker.set_send_predicate(self._file_row_would_send)
         self._model_picker = ModelPicker(self._apply_model)
         # Which list-taking command the argument list is currently open for, or
         # None when the buffer is not in one. This is the transition edge the
@@ -2163,16 +2178,34 @@ class Editor(TextArea):
         self._slash_runs_cache: (
             tuple[tuple[object, ...], tuple[int, list[tuple[int, int, str]]] | None] | None
         ) = None
+        # Per-render-pass memo for :meth:`_reference_runs` (design round 1, D2).
+        # Same shape and same reason as `_slash_runs_cache` above: `render_line`
+        # runs once per visible screen row, and the reference spans are identical
+        # for every row of a frame. Keyed on every input the resolution reads —
+        # text, cwd, kill switch — so a `/move` or a flipped switch cannot leave
+        # ink standing that was decided against somewhere else. ``None`` until the
+        # first row of the first frame that asks.
+        self._reference_runs_cache: (
+            tuple[tuple[object, ...], dict[int, list[tuple[int, int]]]] | None
+        ) = None
         # Guards the picker resync inside ``load_text`` so ``_set_text_and_caret``
         # can move the caret first and sync ONCE at the final position (D5). Set
         # BEFORE ``super().__init__`` because TextArea's constructor loads the
         # initial document through ``load_text`` → ``_sync_picker``.
         self._suspend_picker_sync = False
-        # Last parse phase `_sync_picker` settled. Compared by
-        # `_sync_picker_if_phase_changed` so a caret move that stays inside
-        # one phase does not re-open an Esc-dismissed list. Set BEFORE
-        # ``super().__init__`` because that constructor already syncs.
-        self._picker_phase_at_last_sync: str | None = None
+        # Last (phase, directory) pair `_sync_picker` settled on, compared by
+        # `_sync_picker_if_phase_changed`. BOTH halves are in the key, and the
+        # directory is the one that was missing: the rows a `@` list offers are
+        # a function of the caret token's DIRECTORY, and a caret move that
+        # starts and ends inside `@` tokens is `"file" -> "file"` — so a key of
+        # the phase alone let the previous token's rows stand under the caret's
+        # token, with Enter then rewriting the draft into a path that does not
+        # exist or sending it (design round 1, D1). A motion that stays in one
+        # phase AND one directory — the case the phase gate exists for — is
+        # still a no-op, which is what keeps Esc a dismissal.
+        #
+        # Set BEFORE ``super().__init__`` because that constructor syncs.
+        self._picker_key_at_last_sync: tuple[str | None, str | None] | None = None
         # The escape action held for one pump turn, or ``None`` when no escape
         # is in flight (the resting state). See the escape-coalescing block
         # below :meth:`_on_key` for why an escape is ever held at all.
@@ -2428,7 +2461,10 @@ class Editor(TextArea):
         # ghost's first cell. :meth:`_paint_ghost_ink` only re-inks that one
         # cell; it does not move the caret.
         return self._paint_ghost_ink(
-            self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
+            self._paint_reference_ink(
+                self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
+            ),
+            y,
         )
 
     def _paint_ghost_ink(self, strip: Strip, y: int) -> Strip:
@@ -4565,17 +4601,17 @@ class Editor(TextArea):
             cells.append((x_start + gutter, x_end + gutter, component))
         return cells
 
-    def _paint_slash(self, strip: Strip, y: int) -> Strip:
-        """Overlay the slash-command / name highlight on an already-rendered row.
+    def _overlay_runs(self, strip: Strip, cells: list[tuple[int, int, str]]) -> Strip:
+        """Overlay foreground-only component runs on an already-rendered row.
 
-        Foreground-only component styles (see the tcss) laid on as ``post_style``
-        for the same reason as the chip: every segment ``TextArea`` returns
-        carries an explicit fg/bg, so a base style is discarded on arrival.
-        Foreground-only is deliberate — it composes with the cursor's inverse and
-        the selection ground without fighting them, so the pass need not exclude
-        the caret cell the way the opaque chip does.
+        ``cells`` is ``(x_start, x_end, component_class)`` in screen columns —
+        the shape both the slash pass and the reference pass derive from their
+        own span tables. Shared rather than spelled twice because the two passes
+        differ only in which spans they carry: the divide/join math, the
+        "post_style, not base style" reason and the edges mattering are all
+        properties of overlaying on a `TextArea` strip, not of a particular
+        token kind.
         """
-        cells = self._slash_cells(y)
         if not cells:
             return strip
         width = strip.cell_length
@@ -4589,6 +4625,138 @@ class Editor(TextArea):
                 continue
             pieces.append(self._overlay(piece, styles[component]))
         return Strip.join(pieces)
+
+    def _paint_slash(self, strip: Strip, y: int) -> Strip:
+        """Overlay the slash-command / name highlight on an already-rendered row.
+
+        Foreground-only component styles (see the tcss) laid on as ``post_style``
+        for the same reason as the chip: every segment ``TextArea`` returns
+        carries an explicit fg/bg, so a base style is discarded on arrival.
+        Foreground-only is deliberate — it composes with the cursor's inverse and
+        the selection ground without fighting them, so the pass need not exclude
+        the caret cell the way the opaque chip does.
+        """
+        return self._overlay_runs(strip, self._slash_cells(y))
+
+    def _reference_cwd(self) -> str:
+        """The directory `@path` tokens resolve against — the SESSION's, not the process's.
+
+        It has to be the session's: the file list scans that directory and
+        `Session.prompt` expands the token against it (`app.session_cwd`), so a
+        second opinion here would let the ink disagree with both. Read through the
+        app the way the composer reads its other session facts — a published hook
+        looked up with ``getattr`` — so a bare widget host in a test answers with
+        the process cwd instead of raising, and a `/move` is picked up on the next
+        frame rather than cached at construction.
+        """
+        hook = getattr(self.app, "session_cwd", None)
+        if callable(hook):
+            value = hook()
+            if isinstance(value, str) and value:
+                return value
+        return os.getcwd()
+
+    def _reference_runs(self) -> dict[int, list[tuple[int, int]]]:
+        """Document line -> the column spans on it that are RESOLVING `@path` tokens.
+
+        RESOLVING, not merely well-formed, and that distinction is the finding's
+        own ruling rather than a refinement of it. The ink claims "this is a
+        reference", and the resolver calls a token whose path does not exist
+        PROSE — it is sent as written, with a notice saying so (`@me — no such
+        path`) — so painting `@me` would assert something false about precisely
+        the token the Q-2 fix exists to keep as prose. `references.reference_resolves`
+        is the resolver's question asked with the resolver's own steps, so the
+        ink cannot promise an expansion that will not happen. The visible
+        consequence is that a half-typed path has no ink until it names
+        something; the ink arrives with the file, which is when the claim
+        becomes true.
+
+        Per LINE rather than per buffer, because a reference can sit on any line
+        of a multi-line draft while the parse that feeds the picker only ever
+        looks at the caret's — `at_token_spans` is the same grammar over one
+        line, so a wrapped or multi-line draft paints every reference it holds.
+        (It is imported from `local_operator.sigils`, the module that owns the
+        grammar, rather than through `command_picker`'s re-export the way
+        `at_token` and `split_token` arrive: one rule, one question about where a
+        token starts and ends.)
+
+        Memoized on every input the answer depends on: the text, the cwd and the
+        kill switch. Cached at all because `render_line` runs once per visible
+        row and each `@` token costs a `stat`; per-frame rather than per-row is
+        the difference between one stat per token per frame and one per token per
+        screen row.
+        """
+        cwd = self._reference_cwd()
+        enabled = at_references_enabled()
+        key: tuple[object, ...] = (self.text, cwd, enabled)
+        cached = self._reference_runs_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        runs: dict[int, list[tuple[int, int]]] = {}
+        if enabled:
+            for line_index, line in enumerate(self.text.split("\n")):
+                for start, end, query in at_token_spans(line):
+                    if reference_resolves(query, cwd):
+                        runs.setdefault(line_index, []).append((start, end))
+        self._reference_runs_cache = (key, runs)
+        return runs
+
+    def _reference_cells(self, y: int) -> list[tuple[int, int]]:
+        """``(x_start, x_end)`` of every resolving `@path` run on screen row ``y``.
+
+        The same screen-row -> document-column mapping :meth:`_slash_cells` uses,
+        including the wrap boundary: a reference in a long draft that soft-wraps
+        must paint on whichever wrapped row carries it. What differs is the line
+        filter — the slash pass is restricted to the command line, where a
+        reference is not.
+        """
+        runs = self._reference_runs()
+        if not runs:
+            return []
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return []
+        row_line, section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        spans = runs.get(row_line)
+        if not spans:
+            return []
+        line = self.document.get_line(row_line)
+        offsets = wrapped.get_offsets(row_line)
+        section_index = bisect_right(offsets, section_start)
+        wraps_on = section_index < len(offsets)
+        section_end = offsets[section_index] if wraps_on else len(line)
+        gutter = self.gutter_width
+        cells: list[tuple[int, int]] = []
+        for col_start, col_end in spans:
+            start = max(col_start, section_start)
+            end = min(col_end, section_end)
+            if start >= end:
+                continue  # this token lives entirely on another wrapped row
+            x_start = wrapped.location_to_offset((row_line, start)).x
+            if wraps_on and end >= section_end:
+                # ``end`` IS the wrap offset, which location_to_offset reads as
+                # column 0 of the NEXT row; the token runs to this row's text end.
+                x_end = cell_len(
+                    expand_tabs_inline(line[section_start:section_end], self.indent_width)
+                )
+            else:
+                x_end = wrapped.location_to_offset((row_line, end)).x
+            cells.append((x_start + gutter, x_end + gutter))
+        return cells
+
+    def _paint_reference_ink(self, strip: Strip, y: int) -> Strip:
+        """Overlay the reference ink on every resolving `@path` run of a rendered row.
+
+        Foreground-only, like the slash pass and for the same reason — see
+        :meth:`_overlay_runs`. That it composes rather than replaces is what lets
+        a reference sit inside a selection or under the caret without either
+        losing its own state.
+        """
+        return self._overlay_runs(
+            strip,
+            [(start, end, "text-area--at-reference") for start, end in self._reference_cells(y)],
+        )
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         """Note a press that landed inside a marker; the release decides.
@@ -7510,8 +7678,39 @@ class Editor(TextArea):
             return self._picker.is_dismissed()
         return False
 
+    def _picker_sync_key(self) -> tuple[str | None, str | None]:
+        """The parse state a picker re-derivation is a function of: (phase, DIRECTORY).
+
+        The phase alone is not that state, and this function exists because
+        assuming it was one is design round 1's D1. What the `@` list offers is
+        a function of the caret token's DIRECTORY: `@README.md` and `@src/` are
+        both phase ``"file"``, so a caret that moves between them is
+        ``"file" -> "file"``, and a gate reading only the phase left the
+        previous token's rows on screen under the caret's token. Enter then
+        acted on a row that cannot be accepted at this caret —
+        ``_file_row_is_already_in_the_buffer`` is False — so control fell
+        through to the ordinary submit and the draft went out; the same staleness
+        on the paste-shaped arrival rewrote the draft into ``@src/README.md``, a
+        path that does not exist, silently.
+
+        Both halves are already computed here — the parse that answers the phase
+        answers the directory — so the key costs no new parse and no new state,
+        which is why this is the smallest change that clears it rather than the
+        start of a second notion of staleness.
+
+        ``None`` for the directory outside an `@` token, which is every other
+        phase: the three slash parses and the `@` parse are mutually exclusive
+        by construction (`_picker_phase` asks `at_token` FIRST and returns
+        ``"file"`` whenever it matches), so a non-`@` phase cannot hide a
+        directory and a `@` phase cannot hide behind one.
+        """
+        token = at_token(self.text, self._caret_offset())
+        if token is not None:
+            return "file", split_token(token.query)[0]
+        return self._picker_phase(), None
+
     def _sync_picker_if_phase_changed(self) -> None:
-        """Re-sync the picker only when the caret crossed a parse phase.
+        """Re-sync the picker only when the caret crossed a parse phase OR directory.
 
         The #393 reopen (`end` after `home` on `/mcp `) is a phase change:
         column 0 is outside the argument, the end of the line is inside
@@ -7519,9 +7718,16 @@ class Editor(TextArea):
         `shift+up` with a model list dismissed — must not call
         :meth:`_sync_picker`, because that helper treats a matching query
         as "show the list" and would undo Esc.
+
+        The DIRECTORY is in the key for the reason :meth:`_picker_sync_key`
+        records: a caret move that stays inside `@` tokens is a phase no-op and
+        a directory change at the same time, and the rows follow the directory.
+        The Esc property above is unaffected — arrows inside one word of one
+        token change neither half of the key, and crossing a `/` inside the
+        token moves the caret into a genuinely different candidate set, which is
+        a new question rather than a dismissal being undone.
         """
-        phase = self._picker_phase()
-        if phase == getattr(self, "_picker_phase_at_last_sync", None):
+        if self._picker_sync_key() == self._picker_key_at_last_sync:
             self._sync_ghost()
             return
         self._sync_picker()
@@ -7560,7 +7766,7 @@ class Editor(TextArea):
                 self._file_choices_requested = directory
                 self.post_message(FileQueryOpened(directory))
             self._picker.sync_files(self.text, cursor)
-            self._picker_phase_at_last_sync = self._picker_phase()
+            self._picker_key_at_last_sync = self._picker_sync_key()
             self._sync_ghost()
             return
         # Left the token: the next `@` asks for rows again, so a file created
@@ -7589,7 +7795,7 @@ class Editor(TextArea):
                 self._skill_choices_requested = True
                 self.post_message(SkillQueryOpened())
             self._picker.sync_skills(self.text, cursor)
-            self._picker_phase_at_last_sync = self._picker_phase()
+            self._picker_key_at_last_sync = self._picker_sync_key()
             self._sync_ghost()
             return
         # Left the token: the next `$` asks for rows again, so a skill added
@@ -7807,7 +8013,7 @@ class Editor(TextArea):
             # the short-circuit leaves the cost only where the answer is used.
             if self._model_picker.is_dismissed() and not self._text_holds_model_token():
                 self._model_picker.forget_dismissal()
-            self._picker_phase_at_last_sync = self._picker_phase()
+            self._picker_key_at_last_sync = self._picker_sync_key()
             return
         if self._model_picker.is_open():
             self._model_picker.set_query(argument)
@@ -7822,8 +8028,9 @@ class Editor(TextArea):
             self.post_message(ModelQueryOpened())
         # Recorded after both list branches so a later caret-only move can
         # tell whether the parse PHASE changed (#393 reopen vs. an
-        # Esc-dismissed list that must stay closed).
-        self._picker_phase_at_last_sync = self._picker_phase()
+        # Esc-dismissed list that must stay closed) — and, inside `@`, whether
+        # the DIRECTORY under the caret did (see `_picker_sync_key`).
+        self._picker_key_at_last_sync = self._picker_sync_key()
 
     def _on_picker_highlight(self, name: str | None) -> None:
         """Relay the picker's highlight to the app (see ArgumentHighlightChanged).
@@ -8413,6 +8620,25 @@ class Editor(TextArea):
         """
         completed = self._completion_for(CompletionMode.FILE, name)
         return completed is not None and completed[0] == self.text
+
+    def _file_row_would_send(self, name: str) -> bool:
+        """Whether an accept key on row ``name`` would SEND instead of completing.
+
+        The picker's own question, in the picker's own terms: it is handed to
+        ``CommandPicker.set_send_predicate`` and asked once per painted row, so
+        the `↵` gutter mark cannot lag a highlight, a refill or a buffer edit.
+        A value here is what :meth:`_file_row_is_already_in_the_buffer` answers
+        at the moment Enter would be pressed, which is the point — the mark
+        states the consequence rather than a heuristic about it.
+
+        Gated on the FILE list because that is the only list where an accept key
+        has two meanings; a COMMAND or ARGUMENT row is completed by definition
+        (their completion always changes the buffer), so they answer False and
+        keep the plain cursor.
+        """
+        if self._picker.mode is not PickerMode.FILE:
+            return False
+        return self._file_row_is_already_in_the_buffer(name)
 
     def _complete_file(self, name: str) -> None:
         """Put ``@name`` in the buffer, leaving the caret at the token's end.

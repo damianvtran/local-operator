@@ -125,7 +125,7 @@ from local_operator.providers.catalogue import picker_rows
 # it is reached through a lazy seam: this module already imports the session
 # layer directly (`session.naming`, `session.goal_loop`, …), so the layering
 # objection that applies to a Textual WIDGET does not apply to the app.
-from local_operator.references import expand_references, scan_directory
+from local_operator.references import expand_references, scan_directory_report
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -5695,7 +5695,7 @@ class OperatorApp(App[None]):
         runtime's discovery record (it is running, so its recorded ``cwd`` is
         current), then the wake index, which keeps a ``cwd`` for a session no
         process has open. This is the ladder ``tui/resume_click.py``'s
-        ``_session_cwd`` already uses, deliberately minus its ``~`` fallback:
+        ``session_cwd`` already uses, deliberately minus its ``~`` fallback:
         a notification may put a user in a plausible default, but the band's
         ``cwd`` rung renders as the conversation's own identity field, where a
         guess cannot be told apart from a recorded fact.
@@ -14819,7 +14819,7 @@ class OperatorApp(App[None]):
             session_id=fork_id,
             executable=executable,
             argv=resume_argv(fork_id, executable),
-            cwd=self._session_cwd(),
+            cwd=self.session_cwd(),
             title=self._fork_window_title(),
         )
         try:
@@ -14881,7 +14881,7 @@ class OperatorApp(App[None]):
         except Exception:
             return {}
 
-    def _session_cwd(self) -> str:
+    def session_cwd(self) -> str:
         """The session's working directory, falling back to the process's.
 
         The fork must open in the PARENT's directory: a window in ``$HOME``
@@ -14889,6 +14889,17 @@ class OperatorApp(App[None]):
         different cwd also changes the environment block and which ``createIf``
         tools resolve — altering the cached prompt prefix the fork exists to
         inherit warm.
+
+        PUBLIC, and not only because seven call sites inside this class want it:
+        it is the directory an ``@path`` is resolved against, so the widgets that
+        answer questions about a path have to ask it rather than guess. The file
+        list scans against it (``on_file_query_opened``), ``Session.prompt``
+        expands tokens against it, and the composer's ``@path`` ink asks for it
+        through ``Editor._reference_cwd`` — the same ``getattr``-looked-up hook
+        pattern the composer already uses for its other session facts, which is
+        also what keeps a bare widget host in a test working. One name for the
+        one directory, or the three answers can disagree about whether a path
+        exists.
         """
         session = self._session
         session_cwd = getattr(session, "_cwd", None) if session is not None else None
@@ -25302,7 +25313,7 @@ class OperatorApp(App[None]):
             suggest_targets,
         )
 
-        cwd = self._session_cwd()
+        cwd = self.session_cwd()
         try:
             targets = suggest_targets(cwd, config_dir=config_dir())
         except Exception:  # noqa: BLE001 — a picker that cannot suggest still opens
@@ -25366,7 +25377,7 @@ class OperatorApp(App[None]):
             self._system_notice(body, kind)
             return
         try:
-            target = validate_target(expand_path(raw, cwd=self._session_cwd()))
+            target = validate_target(expand_path(raw, cwd=self.session_cwd()))
         except MoveError as error:
             notice(str(error), "warning")
             return
@@ -25377,7 +25388,7 @@ class OperatorApp(App[None]):
             return
 
         destination = str(target)
-        if destination == self._session_cwd():
+        if destination == self.session_cwd():
             notice(f"already in {format_label(destination)}")
             return
         # NARRATED BEFORE the transition, exactly as `/resume` does one method
@@ -34699,7 +34710,7 @@ class OperatorApp(App[None]):
         The message carries the DIRECTORY, not the whole query, because the
         editor re-posts whenever that directory changes rather than once per
         token — a file vocabulary is not fixed for the session the way the skill
-        vocabulary is. Resolution is against :meth:`_session_cwd`, the same cwd
+        vocabulary is. Resolution is against :meth:`session_cwd`, the same cwd
         an ``@path`` is expanded against at submit, so the list can never offer
         a row the expander would then fail to find.
 
@@ -34716,17 +34727,22 @@ class OperatorApp(App[None]):
         An empty directory sets a notice rather than leaving a bare list, exactly
         as an empty skill vocabulary does: "this directory has nothing to offer"
         is a real answer, and the row says so instead of showing an empty box.
+
+        It also passes on how many entries the scan's own cap kept OUT
+        (``unlisted``), because the picker's overflow row is where the user finds
+        out how much of the directory is not on screen and the picker has no way
+        to know it: it holds the rows it was given (design round 1, D6).
         """
         message.stop()
         picker = self._editor().picker
-        choices = scan_directory(message.directory, self._session_cwd())
+        choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         if not choices:
             picker.set_choices([])
             where = message.directory or "this directory"
             picker.set_notice(f"nothing to reference in {where}")
             return
         picker.set_notice("")
-        picker.set_choices(choices)
+        picker.set_choices(choices, unlisted=unlisted)
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         """The buffer just entered ``/<command> …`` — fill that command's list.
@@ -34849,7 +34865,7 @@ class OperatorApp(App[None]):
             from local_operator.tui.move_targets import suggest_targets
 
             try:
-                targets = suggest_targets(self._session_cwd(), config_dir=config_dir())
+                targets = suggest_targets(self.session_cwd(), config_dir=config_dir())
             except Exception:  # noqa: BLE001 — an unreadable store is an empty list
                 logger.debug("could not assemble move argument rows", exc_info=True)
                 targets = []
@@ -36897,7 +36913,7 @@ class OperatorApp(App[None]):
             """Refuse without asking — see the chain above for why."""
             return False
 
-        result = await expand_references(text, self._session_cwd(), request_approval=_decline)
+        result = await expand_references(text, self.session_cwd(), request_approval=_decline)
         for notice in result.notices:
             self._notice(notice, "warning")
         return result.sent
