@@ -4452,3 +4452,99 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
     # warning with a traceback, from the vendor leg.
     noisy = [record for record in caplog.records if record.levelno >= logging.WARNING]
     assert not noisy, [record.getMessage() for record in noisy]
+
+
+@pytest.mark.asyncio
+async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``warm_up`` runs where the seam is built, and nowhere else.
+
+    WHY A TEST rather than reading the call site: the prewarm only ever SAVES time, so
+    nothing fails when it is dropped — the cost simply arrives on a session's first
+    message instead, which no test notices and only a measurement shows. The
+    enabled-only half is a real constraint, not a detail: a default install must not
+    import the package, build a service or open a client for a feature that is off.
+
+    Counted on the METHOD rather than with a recording subclass, because a subclass
+    would inherit this stub and then prove nothing about the shipped body — which is
+    exactly how the first version of this test passed its own mistake. The shipped body
+    gets the test below it.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.classification import ClassificationService
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    warmed: list[str] = []
+    monkeypatch.setattr(ClassificationService, "warm_up", lambda self: warmed.append("warm"))
+
+    on_dir = tmp_path / "on"
+    on_config = ConfigManager(on_dir)
+    on_config.set_config_value("classification", {"auto": True})
+    on_session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        on_config,
+        CredentialManager(on_dir),
+        AgentRegistry(on_dir),
+    )
+    try:
+        assert warmed == ["warm"], "the composition root must prewarm the seam it builds"
+    finally:
+        await on_session.dispose()
+
+    off_dir = tmp_path / "off"
+    off_session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(off_dir),
+        CredentialManager(off_dir),
+        AgentRegistry(off_dir),
+    )
+    try:
+        assert warmed == ["warm"], "an install with the layer off must not prewarm"
+    finally:
+        await off_session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What ``warm_up`` actually does, on the body the session build calls.
+
+    Two claims, and the second is why this is not a network test: the keep-alive client
+    exists after session build (the object is the whole saving), and NO leg has been
+    built, so no request was made and no credential was read. Unstubbed, deliberately —
+    this is the shipped method, on the real service the composition root builds.
+    """
+    import httpx
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.classification import ClassificationService
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    built: list[Any] = []
+
+    class _Recording(ClassificationService):
+        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+            super().__init__(manager=manager, settings=settings)
+            built.append(self)
+
+    monkeypatch.setattr("local_operator.classification.ClassificationService", _Recording)
+    config = ConfigManager(tmp_path)
+    config.set_config_value("classification", {"auto": True})
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_path),
+        AgentRegistry(tmp_path),
+    )
+    try:
+        assert built, "the layer was on, so a service was built"
+        assert isinstance(
+            getattr(built[0], "_http", None), httpx.AsyncClient
+        ), "session build must build the keep-alive client, or the prewarm is a no-op"
+        assert built[0]._vendors == {}, "no leg may be built — that would be a credential read"
+    finally:
+        await session.dispose()

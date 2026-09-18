@@ -872,3 +872,40 @@ async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
     for task in hooks.classification_outstanding:
         task.cancel()
     await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# The notice's memory is what the user SAW (review round 3, NIT 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_line_its_own_gate_suppressed_is_not_remembered() -> None:
+    """A notice nobody painted must not silence the next message's identical set.
+
+    ``classification_last_announced`` means "the set the user last SAW". Recording it
+    before the paint made a suppressed line — the seam's own gate, or a sink that
+    failed — read as delivered, so the next message with the same resources stayed
+    quiet about something the user had never been told. Two messages, same one-resource
+    set: the first says nothing (its seam renders no line), the second must speak.
+    """
+    classifier = _FakeClassifier(
+        _Recommendation(
+            resources=(_Candidate("guide", "tunnel", "tunnel guide", "guide://tunnel"),),
+        ),
+        notice_line=None,
+    )
+    hooks = _hooks(_FakeIndex(picked=[]), classifier=classifier)
+    delivered: list[str] = []
+    hooks.notice_sink = lambda text, kind="info": delivered.append(text)
+
+    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
+    assert delivered == [], "the seam's gate said nothing to announce"
+    assert (
+        hooks.classification_last_announced is None
+    ), "a line nobody saw must not be recorded as announced"
+
+    classifier.notice_line = "Suggestion added for this message: guide://tunnel"
+    await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
+
+    assert delivered == ["Suggestion added for this message: guide://tunnel"], delivered

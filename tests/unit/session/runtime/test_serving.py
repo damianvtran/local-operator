@@ -2430,7 +2430,10 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
     monkeypatch.setattr(handle, "_refresh_state", lambda: None)
 
     with pytest.raises(ValueError) as refused:
-        await handle.set_model_effort("typesafe", "jev-1.13", None)
+        # MIXED CASE, deliberately: the wire takes the frame's strings verbatim, so the
+        # spelling is the client's and not a user's — a lowercase-only test would pass
+        # on the very hole this closes (review round 3, MAJOR 1).
+        await handle.set_model_effort("TypeSafe", "jev-1.13", None)
 
     assert "serves decision-model calls, not chat completions" in str(refused.value)
     assert applied == [], "the session must not be switched onto a provider that cannot chat"

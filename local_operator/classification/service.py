@@ -550,15 +550,24 @@ class ClassificationService:
     def warm_up(self) -> None:
         """Build the keep-alive client NOW, so a session's first message does not.
 
-        WHY, with the number: the first ``httpx.AsyncClient`` construction measured
-        **139 ms** on this machine (the SSL context it builds dominates; the second
-        costs 0.0 ms), and it happens SYNCHRONOUSLY — before the call reaches its
-        first await, so no wait budget can bound it. A session's first message
-        therefore paid it inside the turn's prompt build (measured 75-107 ms of our
-        own time in total, against the operator's 100 ms ceiling), where a warm
-        message costs 3-56 ms. The composition root calls this where it builds the
-        seam — session construction already spends seconds on skill discovery and
-        embeddings, so the one-off sits where someone is already waiting.
+        WHAT IT COSTS AND WHAT IT BUYS, measured (``scripts/classification_latency_probe.py
+        --clients-only``, a fresh process per run, five constructions each): **19-36 ms
+        for the first ``httpx.AsyncClient``, then 3-4 ms each** — 19.4 / 23.0 / 36.0 ms
+        across three runs, because the SSL context it builds dominates and the shared
+        machine varies. It is built synchronously, before the call reaches its first
+        await, so no wait budget can bound it; ``--prewarm`` pays it at session build.
+
+        AN HONEST LIMIT ON THE CLAIM: paired runs of that probe (three per arm, same
+        machine, same roster) put a session's FIRST message at +22 to +32 ms of our own
+        time either way — 30.7 ms median without this call, 32.0 ms with it — so the
+        prewarm did NOT measurably move the first message here, and an earlier draft of
+        this docstring (which attributed the whole first-message cost to the client
+        construction, at a 139 ms figure that does not reproduce) was wrong. What this
+        does demonstrably is take a known one-off out of the first call and pay it where
+        the operator is already waiting on skill discovery. The residual first-message
+        cost is the package's own first-call setup — ``build_state`` measures 0.05 ms,
+        so it is not the state build either — and the contract records it as open
+        rather than explaining it away here.
 
         NOT a network call and NOT a credential read: this builds the client object
         only, and nothing connects until a request is made, which is what keeps it

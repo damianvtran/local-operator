@@ -720,7 +720,14 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         is_decision_only,
     )
 
-    canonical = "test" if hosting == "noop" else hosting
+    # NORMALISED before anything looks it up, and that is the guard's other half
+    # (review round 3, MAJOR 1): ``get_provider_definition`` is a dict keyed by
+    # lowercase ids, so a mixed-case spelling used to sail through every
+    # decision-only check and build a spec with ``base_url=None`` — the wire's
+    # ``set_model`` op takes the frame's string verbatim, and a hand-edited
+    # ``config.yml`` is just as easy. Stripping too, because " deepseek" is the same
+    # provider as "deepseek" to a human and was a lookup miss to the harness.
+    canonical = "test" if hosting.strip().lower() == "noop" else hosting.strip().lower()
     if is_decision_only(canonical):
         # THE LAST DOOR, and the one a running session reaches: this function is the
         # single chokepoint every surface that can put a model on a LIVE session

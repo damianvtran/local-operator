@@ -7479,13 +7479,32 @@ class Session:
             return
         self._queued_notices.append((text, kind))
 
+    def _discard_queued_notices(self) -> None:
+        """Drop the notices of a turn that never produced an answer.
+
+        The counterpart to :meth:`_flush_queued_notices`, called from ``_run_turn``'s
+        ``finally``: queued state may only ever be released by the turn that raised
+        it, because every line in the queue is attributed to THAT message's answer.
+        Logged rather than silent, so a turn that dies before its reply still leaves
+        a trace of what the user did not see."""
+        if not self._queued_notices:
+            return
+        dropped, self._queued_notices = self._queued_notices, []
+        logger.debug(
+            "session: dropped %d queued notice(s) from a turn with no answer", len(dropped)
+        )
+
     async def _flush_queued_notices(self) -> None:
         """Release the notices whose turn has finished. Never raises.
 
         Called from ``_run_turn`` once the answer has landed and been persisted, so
         the line reads as a note about the turn that just finished rather than as
-        part of the reply. One that fails to paint is logged and dropped: a notice
-        is never worth failing the teardown it rides on.
+        part of the reply. The ORDER is the contract, not an accident of where the
+        call sits: the answer's own events are emitted by the persist above it, so a
+        subscriber sees the assistant's message BEFORE this notice (pinned by
+        ``test_a_queued_notice_lands_after_the_answer``), and the queue is swapped out
+        atomically, so a second flush cannot re-emit it. One that fails to paint is
+        logged and dropped: a notice is never worth failing the teardown it rides on.
         """
         if not self._queued_notices:
             return
@@ -8323,6 +8342,15 @@ class Session:
             # write that fails must not replace the original exception (which
             # is what the caller and the incident journal need to see).
             await self._persist_progress(self._context.messages)
+            # …and the notices that turn queued are DISCARDED, not flushed. Reaching
+            # here means the turn never got past the flush point above (an exception
+            # out of the loop, Ctrl+C, dispose, a steering teardown), so no answer
+            # landed and every line it queued describes a prompt whose reply never
+            # arrived. Flushing them would print "for this message" under a turn that
+            # produced nothing; keeping them for the NEXT turn is worse, and was the
+            # bug: the stale line arrived ahead of that turn's own, misattributed to a
+            # message that delivered nothing at all (review round 3, MINOR 2).
+            self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
 

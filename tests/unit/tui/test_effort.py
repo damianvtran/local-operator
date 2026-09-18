@@ -1248,7 +1248,7 @@ async def test_the_typed_model_command_cannot_switch_onto_a_decision_only_provid
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         before = _model(app)
-        await _submit(pilot, app, "/model typesafe/jev-1.13")
+        await _submit(pilot, app, "/model TypeSafe/jev-1.13")
         after = _model(app)
         notices = _notices(app)
     assert after == before, "the session was switched onto a provider that cannot chat"
@@ -1272,7 +1272,7 @@ async def test_the_viewer_slash_result_refuses_a_decision_only_provider() -> Non
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         before = _model(app)
-        result = await app._model_slash_result("typesafe/jev-1.13", SlashResult)
+        result = await app._model_slash_result("TYPESAFE/jev-1.13", SlashResult)
         after = _model(app)
     assert result.kind == "notice"
     assert "decision-model calls" in result.text

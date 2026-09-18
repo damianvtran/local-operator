@@ -676,12 +676,23 @@ def is_decision_only(provider_id: str | None) -> bool:
     the same way everywhere, and a second ``get_provider_definition`` call spelled
     out per surface is how one of them ends up testing the raw string.
 
+    CASE AND PADDING ARE NORMALISED HERE, which is load-bearing rather than tidy:
+    ``get_provider_definition`` is a plain dict lookup over lowercase ids, so
+    ``TypeSafe``/``TYPESAFE``/`` typeSafe `` used to answer ``False`` — a spelling
+    in a wire frame or a hand-edited ``config.yml`` was enough to put a session on
+    a provider that 400s every turn (review round 3, MAJOR 1, reproduced on a real
+    session). Normalising here fixes every door at once and can only ever refuse
+    MORE, never less: it never turns a ``True`` into a ``False``.
+
     Alias-aware through :func:`get_provider_definition`, and tolerant of ``None``
     because every call site here is a filter over data that may carry no provider
     at all. ``False`` for an unknown provider: "do not offer this" is a claim
     only a resolved definition may make.
     """
-    definition = get_provider_definition(str(provider_id)) if provider_id else None
+    if not provider_id:
+        return False
+    canonical = str(provider_id).strip().lower()
+    definition = get_provider_definition(canonical)
     return bool(definition is not None and definition.decision_only)
 
 

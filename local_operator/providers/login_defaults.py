@@ -163,30 +163,34 @@ def plan_login_defaults(
         # state of all — a working hosting already configured — which is exactly the
         # silent-login failure this branch exists to remove (review round 1, Q4).
         #
-        # The COPY is design round 1's D5, and it is deliberately in the user's terms:
-        # the first version named Jev, decision-model calls, chat completions and
-        # resource recommendations (149 characters of the harness's own vocabulary,
-        # never one row at any width) and never said what would actually serve their
-        # chats. What it says instead is the answer to the only question the person
-        # who just pasted a key has — "did this change my model?" — plus the name of
-        # whatever IS serving, which is the fact they can act on. The period is part
-        # of the sentence (D6): the CLI used to append one and the TUI did not, so the
-        # same receipt ended two ways depending on where it was read.
+        # The COPY is design round 1's D5 and round 2's D8, and it is deliberately in
+        # the user's terms: the first version named Jev, decision-model calls, chat
+        # completions and resource recommendations (149 characters of the harness's own
+        # vocabulary, never one row at any width) and never said what would actually
+        # serve their chats. What it says instead is the answer to the only question
+        # the person who just pasted a key has — "did this change my model?" — plus the
+        # name of whatever IS serving, which is the fact they can act on.
+        #
+        # The length is a MEASUREMENT, not a preference: the designer read the rendered
+        # row capacity at 100 columns and found it is exactly 90 cells, and the round-2
+        # sentence was 94 ("Nothing changed: this key only adds suggestions, chats keep
+        # running on <hosting>/<model>."), so it still wrapped to two rows. The clause
+        # that went is the one explaining WHY nothing changed — the line above already
+        # says the key was stored, and "nothing changed" is the half the user asked for.
+        #
+        # The capital is part of the sentence (D9): the CLI used to upper-case the first
+        # letter while the TUI rendered the string verbatim, so "set default hosting…"
+        # reached two front ends with two openings. Both now print what the planner
+        # wrote, and the planner writes a sentence — capital, and its own full stop (D6).
         #
         # Which sentence depends on the CURRENT routing, and the unusable case is not
         # the configured one: naming a hosting this build refuses to boot on would be
         # the opposite of the reassurance being given.
         if hosting and not is_unusable_hosting(hosting):
             serving = f"{hosting}/{model_name}" if model_name else str(hosting)
-            receipt = (
-                "Nothing changed: this key only adds suggestions, chats keep running "
-                f"on {serving}."
-            )
+            receipt = f"Nothing changed — chats keep running on {serving}."
         else:
-            receipt = (
-                "Nothing changed: this key only adds suggestions, and no chat model is "
-                "configured yet — pick one with /model."
-            )
+            receipt = "Nothing changed — pick a chat model with /model first."
         return LoginDefaults(
             hosting=None,
             model_name=None,
@@ -206,7 +210,7 @@ def plan_login_defaults(
         # Always overwrite: the stored model belonged to the provider being
         # replaced. "" clears it rather than leaving a dead id behind.
         model_to_write: str | None = default_model
-        receipt = f"replaced unusable hosting '{hosting}' with '{resolved}'"
+        receipt = f"Replaced unusable hosting '{hosting}' with '{resolved}'"
         if default_model:
             receipt += f", model to '{default_model}'"
         else:
@@ -217,15 +221,15 @@ def plan_login_defaults(
         # First-run: only fill an EMPTY model, so a user who deliberately chose
         # one keeps it.
         model_to_write = default_model if (default_model and not model_name) else None
-        receipt = f"set default hosting to '{resolved}'"
+        receipt = f"Set default hosting to '{resolved}'"
         if model_to_write:
             receipt += f", model to '{model_to_write}'"
 
-    # The sentence carries its own full stop (design round 1, D6): the two front
-    # ends used to punctuate the SAME receipt differently — the CLI appended one,
-    # the TUI did not — so where it was read decided how it ended. Each of the four
-    # strings above is therefore complete, and neither front end touches it beyond
-    # the capital it gives the first word.
+    # The sentence carries its own full stop AND its own capital (design round 1, D6,
+    # D9): the two front ends used to punctuate and capitalise the SAME receipt
+    # differently — the CLI appended a period and upper-cased the first letter, the TUI
+    # did neither — so where it was read decided how it was written. Each of the four
+    # strings above is therefore complete, and neither front end touches it at all.
     receipt += "."
 
     return LoginDefaults(

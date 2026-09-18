@@ -276,11 +276,14 @@ Rules, each of which has to be provable:
    cannot move account routing.
 3. **One persistent HTTP client with keep-alive, built at session build.** A fresh TCP + TLS
    handshake per call is 50-150 ms on its own and would consume the entire budget before the
-   request is sent. The client OBJECT is also expensive to construct — 139 ms cold / 29-39 ms
-   warm-cache on this machine, all of it SSL-context setup, all of it synchronous before the
-   call's first await and therefore unreachable by any wait budget — so the composition root
-   builds it when it builds the seam (`ClassificationService.warm_up`), not on a session's first
-   message. No connection is opened, and a session with the layer off still opens no client.
+   request is sent. The client OBJECT is also expensive to construct — **19-36 ms for the first
+   `httpx.AsyncClient` in a process, 3-4 ms each after** (19.4 / 23.0 / 36.0 ms across three runs of
+   `scripts/classification_latency_probe.py --clients-only`, and independently measured at
+   19.4 / 4.1 / 4.0 / 3.5 ms) — all of it
+   SSL-context setup, all of it synchronous before the call's first await, so no wait budget can
+   reach it. The composition root therefore builds it when it builds the seam
+   (`ClassificationService.warm_up`), not on a session's first message. No connection is opened,
+   and a session with the layer off still opens no client.
 4. **The roster half of the state is serialized once per roster digest**, so a warm turn
    serializes only the user message.
 5. **The concurrent gather.** Wiring awaits this layer alongside the existing selection work, so
@@ -296,12 +299,21 @@ Rules, each of which has to be provable:
    27-candidate roster, an answer takes ~250 ms median against OpenRouter, and the budget excludes
    that model time by its terms.
 
-   Measured on the real path (`/tmp/classify_wait_probe.py`, 27-candidate roster, real vendor,
-   default settings), reported as the DIFFERENCE against the layer being off: a warm message costs
-   **+3 ms median / +47 ms worst**, a cache hit ~**+4 ms**, and **a session's first message ~+49 ms**
-   — the one-off first-call setup that runs before the first await, which no wait budget can reach.
-   Before the client prewarm (above) that first message measured ~+63 ms. Every warm number is
-   inside the budget; the first message of a session is the honest exception, paid once.
+   Measured on the real path (`scripts/classification_latency_probe.py`, 27-candidate roster, real
+   vendor, default settings), reported as the DIFFERENCE against the layer being off: a warm message
+   costs **+2 to +4 ms median / +33 to +56 ms worst** (the spread is the shared machine — the OFF
+   arm shows +24 to +28 ms worst in the same runs), a cache hit ~**+2 to +4 ms**, and **a session's
+   first message +22 to +32 ms** — the one-off first-call setup that runs before the first await,
+   which no wait
+   budget can reach. Every warm number is inside the budget; the first message of a session is the
+   honest exception, paid once.
+
+   THE FIRST MESSAGE'S COST IS NOT FULLY EXPLAINED, and this section says so rather than
+   attributing it: three paired runs of that probe per arm put it at 30.7 ms median without the
+   client prewarm and 32.0 ms with it, so the prewarm (which moves a measured 19-23 ms first
+   `AsyncClient` to session build) does not account for it, and `build_state` measures 0.05 ms.
+   Recorded as an open item; the number to plan from is that a session's first message costs a few
+   tens of milliseconds once, and every message after it is inside the budget.
 7. **Server side.** `POST /v1/decisions` must ride the agent-server's existing Redis `AuthCache`
    (`internal/cache/auth_cache.go`, 5-minute TTL for API-key→identity and billing balances),
    which is why the route sits on `jwtOrAPIKeyBillingMiddleware`. It must not introduce uncached
@@ -482,6 +494,12 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
    timing.
 
 ## 12. Open questions, recorded rather than guessed
+
+- **What the first message of a session pays** (round 3): +22 to +32 ms of our own time, measured,
+  and NOT explained by the pieces we can name — not the client construction (the prewarm did not
+  move it), not `build_state` (0.05 ms), not the roster (0.04 ms once per session). It is bounded
+  and paid once, so it is not a blocker, but a reader planning from the budget deserves the honest
+  figure rather than a mechanism. Next step would be a sampling profile of that single call.
 
 - Whether the recommendation should be allowed to *remove* an embedder-selected resource when
   its confidence is high. Today: no — additive only. Revisit with data.

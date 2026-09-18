@@ -5111,7 +5111,8 @@ def test_the_legacy_escape_hatch_for_a_hand_built_spec_still_works():
 # ---------------------------------------------------------------------------
 
 
-def test_build_model_spec_refuses_a_decision_only_provider() -> None:
+@pytest.mark.parametrize("spelling", ["typesafe", "TypeSafe", "TYPESAFE", " typeSafe "])
+def test_build_model_spec_refuses_a_decision_only_provider(spelling: str) -> None:
     """The chokepoint every LIVE switch builds through refuses Jev.
 
     WHY here rather than in each surface: ``/model`` (typed), the viewer's routed
@@ -5124,12 +5125,21 @@ def test_build_model_spec_refuses_a_decision_only_provider() -> None:
 
     The sentence is asserted, not just the raise: a refusal nobody can read is a
     session that looks broken.
+
+    EVERY SPELLING is parametrised, which is the whole point of this test since round
+    3: ``get_provider_definition`` is a dict keyed by lowercase ids, so a mixed-case
+    ``TypeSafe`` used to sail past every decision-only check and put a live session on
+    a provider that 400s every turn (reproduced on a real session). A lowercase-only
+    test cannot see that class — and the wire's ``set_model`` op takes the frame's
+    string verbatim, so the spelling is not the user's alone.
     """
     with pytest.raises(ValueError) as refused:
-        build_model_spec("typesafe", "jev-1.13")
+        build_model_spec(spelling, "jev-1.13")
     message = str(refused.value)
     assert "serves decision-model calls, not chat completions" in message
-    assert "typesafe" in message
+    # The id is NORMALISED in the message, so a user who typed "TypeSafe" is told
+    # about the provider that exists rather than about their spelling of it.
+    assert "'typesafe'" in message
     # …and it is NOT the local-spec shortcut answering: a chat provider still builds.
     assert build_model_spec("deepseek", "deepseek-flash").provider == "deepseek"
 
@@ -5149,5 +5159,5 @@ def test_the_provider_controller_refuses_it_where_both_tui_paths_call_it() -> No
     # it would test the construction rather than the refusal.
     controller = ProviderController.__new__(ProviderController)
     with pytest.raises(ValueError) as refused:
-        controller.resolve_model("typesafe", "jev-1.13")
+        controller.resolve_model("TypeSafe", "jev-1.13")
     assert "not chat completions" in str(refused.value)

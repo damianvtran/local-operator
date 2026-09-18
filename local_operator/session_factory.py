@@ -1355,21 +1355,22 @@ DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
 #: DIFFERENCE against the layer being off so the pre-existing cost of the turn path
 #: is not claimed as ours:
 #:
-#: - warm message: +3 ms median, +47 ms worst (the spread is the shared machine, not
-#:   the code — the same run shows the layer-OFF arm at +29 ms worst);
-#: - cache hit: ~+4 ms;
+#: - warm message: +2 to +4 ms median, +33 to +56 ms worst (the spread is the shared
+#:   machine, not the code — the layer-OFF arm shows +24 to +28 ms worst in the same runs);
+#: - cache hit: ~+2 to +4 ms;
 #: - THE FIRST MESSAGE OF A SESSION is the expensive one, and it is honest to say so:
-#:   ~+63 ms of our own time, because the first call pays one-off setup before its
-#:   first await, where no wait budget can reach it. ~30-40 ms of that was the first
-#:   ``httpx.AsyncClient`` (139 ms cold, 29-39 ms warm-cache — SSL context setup),
-#:   which the composition root now builds at session build instead
-#:   (``ClassificationService.warm_up``), leaving ~+49 ms on a first message. The
-#:   rest is the package's own first-call setup, and a session that never sends a
-#:   message pays none of it.
+#:   +22 to +32 ms of our own time across runs
+#:   (``scripts/classification_latency_probe.py``, 27-candidate roster, real vendor),
+#:   because the first call pays one-off setup before its first await, where no wait
+#:   budget can reach it. That cost is NOT explained by the client construction: the
+#:   paired arms — with and without ``ClassificationService.warm_up``, which moves a
+#:   measured 19-36 ms first ``httpx.AsyncClient`` to session build — came out level
+#:   (30.7 vs 32.0 ms median), and ``build_state`` measures 0.05 ms. Open in the
+#:   contract, not explained here.
 #:
-#: So: the ceiling holds on the steady state, and a session's first message can
-#: exceed it once. Anything slower than the wait is delivered by the next message
-#: instead (see ``_harvest_classification``).
+#: So: the ceiling holds on the steady state, and a session's first message costs a
+#: few tens of milliseconds once. Anything slower than the wait is delivered by the
+#: next message instead (see ``_harvest_classification``).
 DEFAULT_CLASSIFICATION_WAIT_MS = 50
 
 #: How many background classification calls may be outstanding before the oldest is
@@ -1766,8 +1767,9 @@ def _attach_classification(
     all, because ``auto`` is read first and without it.
 
     The seam's keep-alive CLIENT is warmed here too, for the same reason and with a
-    number: see ``ClassificationService.warm_up`` (139 ms of SSL-context setup, per
-    session, otherwise paid by the first message).
+    number: see ``ClassificationService.warm_up`` (19-36 ms of SSL-context setup, once
+    per process, otherwise paid by a session's first call; the same docstring records
+    that the first message did not measurably get faster in paired runs).
 
     Degrades rather than failing the boot, exactly as the sibling knowledge
     wiring does: a layer that cannot be built is a line in ``warnings_out`` and a
@@ -1785,12 +1787,11 @@ def _attach_classification(
         )
 
         hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
-        # …and its keep-alive client is built HERE, not on the first message. That
-        # construction is ~139 ms of SSL-context setup (measured) paid before the
-        # call's first await, so no wait budget can bound it, and the client is per
-        # SESSION — so the first message of every session paid it inside its own
-        # prompt build, against a 100 ms ceiling. No connection is opened: this builds
-        # the object only. See ``ClassificationService.warm_up``.
+        # …and its keep-alive client is built HERE, not on the first message: a
+        # measured 19-36 ms of SSL-context setup (first construction in a process),
+        # paid before the call's first await, so no wait budget can bound it. No
+        # connection is opened — the object only — and the paired-run caveat on what
+        # this buys is in ``ClassificationService.warm_up``.
         #
         # ``getattr`` and a try of its own: warming is an OPTIMISATION, so a seam that
         # does not publish it (the seam contract is ``recommend_resources`` +
@@ -2228,7 +2229,7 @@ def _log_classification_cost(recommendation: Any) -> None:
     )
 
 
-async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: Any) -> None:
+async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: Any) -> bool:
     """Emit the seam's one-line notice through the session's own notice event.
 
     Called once per admitted user message — the same cadence the frozen
@@ -2237,6 +2238,13 @@ async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: An
     ``values.classification.notice`` inside ``notice()`` (it returns ``None``
     when the key is off, or when there is nothing to announce), so the harness
     does not read that key a second time and cannot disagree with it.
+
+    RETURNS whether a line was actually handed to the sink, and the caller uses
+    that to decide what to remember: the D7 repeat-suppression key may only be
+    updated for a line the user really saw, or a notice suppressed by its own
+    gate (``notice`` off, or a seam that renders nothing) would silence the next
+    message's identical set too — a small version of the failure the harness has
+    already paid for once, where a suppressed paint was recorded as delivered.
 
     A MISSING SINK IS NOT A FALLBACK POINT: a provider rendered without a
     session (the benchmark preflight) or a host that never bound one simply gets
@@ -2247,22 +2255,24 @@ async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: An
     sink = hooks.notice_sink
     notice = getattr(seam, "notice", None)
     if sink is None or not callable(notice):
-        return
+        return False
     try:
         line = notice(recommendation)
         if inspect.isawaitable(line):
             line = await line
     except Exception:  # noqa: BLE001 — a notice is never worth a turn
         logger.debug("classification: notice rendering failed", exc_info=True)
-        return
+        return False
     if not line:
-        return
+        return False
     try:
         delivered = sink(str(line), "info")
         if inspect.isawaitable(delivered):
             await delivered
     except Exception:  # noqa: BLE001 — a notice is never worth a turn
         logger.debug("classification: notice delivery failed", exc_info=True)
+        return False
+    return True
 
 
 async def _empty_selection() -> list[Skill]:
@@ -2416,7 +2426,7 @@ async def _select_knowledge_block(
         # resources on it came from an earlier message, the attribution has to say
         # so, or the sentence reads as advice about the message it sits under.
         announced_late = announced_late or late
-    if announced:
+    if announced and not _already_announced(hooks, announced_urls):
         # THE NOTICE RIDES DELIVERY, not the call: it is emitted here, once, for the
         # resources this prompt actually gained. A call that missed the wait is not
         # announced when it is abandoned (nothing was delivered then) or when it
@@ -2424,11 +2434,16 @@ async def _select_knowledge_block(
         # (``values.classification.notice``) stays inside ``notice()``. The view is
         # what keeps the line from naming a resource the dedupe or the cap dropped,
         # and ``late`` is what stops it reading as an answer to the wrong question.
-        if not _already_announced(hooks, announced_urls):
-            await _emit_classification_notice(
-                hooks,
-                _delivered_view(announced[-1], announced_urls, late=announced_late),
-            )
+        #
+        # Remembered only once the paint really happened: the D7 key means "the set
+        # the user last saw", and a line its own gate suppressed was not seen.
+        if await _emit_classification_notice(
+            hooks,
+            _delivered_view(announced[-1], announced_urls, late=announced_late),
+        ):
+            hooks.classification_last_announced = tuple(announced_urls)
+    elif announced:
+        logger.debug("classification: the same resources were just announced; staying quiet")
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
     hooks.frozen_task_id = task_id
@@ -2445,13 +2460,16 @@ def _already_announced(hooks: _KnowledgeHooks, urls: Sequence[str]) -> bool:
     not the delivery. Only the IMMEDIATELY preceding set counts: a resource that
     comes back later in the session is worth its line again, because by then the
     user has read other things.
+
+    A PREDICATE, and deliberately not the recorder: it answers the question and
+    leaves ``classification_last_announced`` alone, because what that field means is
+    "the set the user last SAW". The caller updates it after the paint succeeds
+    (review round 3, NIT 1) — recording here marked a line as shown even when the
+    seam's own gate or a failed delivery meant nothing was painted, which silenced
+    the next message's identical set as though it had been announced.
     """
     signature = tuple(urls)
-    if not signature or signature != hooks.classification_last_announced:
-        hooks.classification_last_announced = signature
-        return False
-    logger.debug("classification: the same resources were just announced; staying quiet")
-    return True
+    return bool(signature) and signature == hooks.classification_last_announced
 
 
 def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | None]:

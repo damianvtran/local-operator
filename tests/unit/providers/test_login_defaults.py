@@ -290,10 +290,14 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
     # and names what is actually serving — the fact they can act on. Design round 1's
     # D5 took the harness's vocabulary off it: no "Jev", no "decision-model calls",
     # no "resource recommendations", and it ends with its own full stop (D6).
-    assert configured.receipt == (
-        "Nothing changed: this key only adds suggestions, chats keep running "
-        "on deepseek/deepseek-chat."
-    )
+    assert configured.receipt == "Nothing changed — chats keep running on deepseek/deepseek-chat."
+    # FITS ONE ROW, which is design round 2's D8 measured against the RENDERED row
+    # capacity rather than guessed: the designer read the transcript's 100-column
+    # content box at exactly 90 cells, and the round-2 sentence was 94 — so it still
+    # wrapped to two rows under the answer it was pinned to. The clause that went is
+    # the one explaining WHY nothing changed; the line above already says the key was
+    # stored, and "nothing changed" is the half the user asked for.
+    assert len(configured.receipt) <= 90, len(configured.receipt)
 
     # Case 2: hosting empty (a fresh config, or `hosting: ""`).
     for empty in ("", None):
@@ -307,8 +311,7 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
         # the reason and the provider a user recognises.
         assert plan.receipt is not None
         # No routing to name, so the sentence names the way out of that state.
-        assert "no chat model is configured yet" in plan.receipt
-        assert "/model" in plan.receipt
+        assert plan.receipt == "Nothing changed — pick a chat model with /model first."
         # The wire vocabulary the design round took off the default copy.
         assert "Jev" not in plan.receipt
         assert "decision-model" not in plan.receipt
@@ -360,8 +363,12 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     auth_cli._apply_login_defaults("typesafe")
     printed = capsys.readouterr().out
 
-    assert "Nothing changed: this key only adds suggestions" in printed
-    assert "chats keep running on deepseek/deepseek-chat." in printed
+    # BYTE-FOR-BYTE the planner's sentence, capital and full stop included: the CLI and
+    # the TUI render the same string, and the CLI used to upper-case its first letter
+    # while the TUI did not (design round 2, D9) — so this assertion is the two front
+    # ends agreeing, not a wording check.
+    assert plan_receipt_when_configured() in printed
+    assert "Nothing changed — chats keep running on deepseek/deepseek-chat." in printed
     # ...and the routing is untouched: the configured pair, unchanged.
     assert manager.get_config_value("hosting") == "deepseek"
     assert manager.get_config_value("model_name") == "deepseek-chat"
@@ -371,9 +378,16 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     monkeypatch.setenv(CONFIG_DIR_ENV, str(fresh))
     auth_cli._apply_login_defaults("typesafe")
     fresh_out = capsys.readouterr().out
-    assert "no chat model is configured yet" in fresh_out
+    assert "Nothing changed — pick a chat model with /model first." in fresh_out
     # One full stop, from the receipt itself — not the CLI's own punctuation (D6).
     assert fresh_out.count(".") == 1, fresh_out
+    # The lowercase-start case, which is where the two front ends used to diverge: the
+    # CLI upper-cased it and the TUI did not (D9). Both now print what the planner
+    # wrote, so a receipt that starts lowercase stays lowercase everywhere.
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    deepseek_receipt = plan_login_defaults("deepseek", "", None).receipt
+    assert deepseek_receipt is not None and deepseek_receipt.startswith("Set default")
     reloaded = ConfigManager(fresh)
     assert not reloaded.get_config_value("hosting")
     assert not reloaded.get_config_value("model_name")
@@ -382,3 +396,12 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     # write receipt — the two paths share one print site.
     auth_cli._apply_login_defaults("deepseek")
     assert "Set default hosting to 'deepseek'" in capsys.readouterr().out
+
+
+def plan_receipt_when_configured() -> str:
+    """The receipt a decision-only login produces with a working hosting configured."""
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("typesafe", "deepseek", "deepseek-chat")
+    assert plan.receipt is not None
+    return plan.receipt
