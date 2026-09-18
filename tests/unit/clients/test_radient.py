@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -978,6 +978,157 @@ def test_create_transcription_forwards_provider_without_a_model(
     assert "model" not in fields
 
 
+# --- Upstream failures on the transcription path -------------------------------
+#
+# WHY THESE USE A REAL `requests.Response` AND NOT A MagicMock: the callers of
+# these helpers are responses, not mocks, and that difference is load-bearing --
+# `requests.Response.__bool__` returns `response.ok`, so a 4xx/5xx is falsy while a
+# MagicMock is always truthy. The mocked tests around this path stayed green
+# through the bug that discarded every error body. `real_response` (tests/unit/
+# conftest.py) builds the real thing.
+
+# The refusal Radient actually returned on 2026-09-17: the provider's own words,
+# in the body of a 500.
+UPSTREAM_QUOTA_BODY = (
+    b'{"error":"[internal] Transcription failed: OpenAI API error: OpenAI API error '
+    b"(insufficient_quota): You have no credits remaining. Add credits to your plan to "
+    b'continue."}'
+)
+
+
+def test_create_transcription_http_error_keeps_the_upstream_reason(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """A refused transcription carries the upstream status and the provider's words.
+
+    The route classifies on those attributes, so losing either would take the
+    failure's truthfulness with it: a status alone cannot tell a Radient edge
+    refusal from a provider one, and the body is where the provider names itself.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+
+    with patch("requests.post", MagicMock(return_value=real_response(500, UPSTREAM_QUOTA_BODY))):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 500
+    assert exc.body == UPSTREAM_QUOTA_BODY.decode()
+    assert "500" in str(exc)
+    assert "insufficient_quota" in str(exc)
+    assert "You have no credits remaining" in str(exc)
+
+
+def test_create_transcription_http_error_without_a_body_says_so(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """An empty 500 keeps the status and carries no body to quote.
+
+    The status is what tells the two apart for a reader of the message: a 500
+    that said nothing is not the same failure as a request that never arrived,
+    and the latter reports no status at all.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+
+    with patch("requests.post", MagicMock(return_value=real_response(500, b""))):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 500
+    assert exc.body is None
+    assert "500" in str(exc)
+    assert NO_RESPONSE_BODY in str(exc)
+
+
+def test_create_transcription_network_failure_keeps_its_own_text(
+    radient_client: RadientClient, tmp_path: Path
+) -> None:
+    """A request that never reached Radient carries the transport error alone."""
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    error = requests.exceptions.ConnectionError("Connection refused")
+
+    with patch("requests.post", MagicMock(side_effect=error)):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code is None
+    assert exc.body is None
+    assert "Connection refused" in str(exc)
+
+
+def test_create_transcription_error_in_a_200_body_is_an_upstream_failure(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """Radient reports provider failures in a 200 body as well as in a 500.
+
+    That branch used to be raised as a runtime error inside the try and then
+    re-wrapped by the catch-all, so the message read "Failed to create
+    transcription: Failed to create transcription: ..." and the shape of the
+    failure was lost with it.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+
+    with patch("requests.post", MagicMock(return_value=real_response(200, UPSTREAM_QUOTA_BODY))):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 200
+    assert exc.body == UPSTREAM_QUOTA_BODY.decode()
+    assert str(exc).count("Failed to create transcription") == 1
+
+
+def test_create_transcription_reports_a_non_json_body_as_upstream(
+    radient_client: RadientClient,
+    tmp_path: Path,
+    real_response: Callable[[int, bytes], requests.Response],
+) -> None:
+    """A 200 that is not the documented shape is an upstream protocol failure."""
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    response = real_response(200, b"<html>gateway error</html>")
+
+    with patch("requests.post", MagicMock(return_value=response)):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_transcription(file_path=str(audio_file))
+
+    exc = exc_info.value
+    assert exc.status_code == 200
+    assert "gateway error" in (exc.body or "")
+
+
+def test_create_transcription_without_an_api_key_stays_internal(
+    base_url: str, tmp_path: Path
+) -> None:
+    """The missing-key failure is ours, so it stays a plain RuntimeError.
+
+    The route reports a plain RuntimeError as a 500 and a typed upstream error
+    as a 502/402; anything typed here would blame Radient for our own
+    misconfiguration.
+    """
+    audio_file = tmp_path / "sample.webm"
+    audio_file.write_bytes(b"sample audio data")
+    client = RadientClient(api_key=None, base_url=base_url)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        client.create_transcription(file_path=str(audio_file))
+
+    assert not isinstance(exc_info.value, APIError)
+    assert "RADIENT_API_KEY is not configured" in str(exc_info.value)
+
+
 # --- Instruction-set publication ----------------------------------------------
 #
 # The unit of publication is a bare JSON document (contract §1). The tests below
@@ -1526,3 +1677,82 @@ def test_redact_secrets_leaves_text_alone_without_a_secret() -> None:
     """A client with no credential configured changes nothing it surfaces."""
     assert redact_secrets("plain body", [None, ""]) == "plain body"
     assert redact_secrets("plain body", ["key"]) == "plain body"
+
+
+# A provider failure reported inside a 200 body, in the shape Radient uses on
+# this path too (`test_create_transcription_error_in_a_200_body_is_an_upstream_failure`
+# pins the transcription sibling). The echoed credential is what makes it matter
+# here: the speech call returns bytes, so an envelope like this used to be served
+# to the daemon's own client as audio -- a payload path no `HTTPException`
+# handler ever sees.
+SPEECH_ERROR_IN_A_200_BODY = (
+    b'{"error":"Incorrect API key provided: radient-key-with-no-published-shape-4a91"}'
+)
+
+
+def test_create_speech_returns_the_audio_body_unchanged(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """Audio is not an envelope, and the error guard must not eat it.
+
+    Both shapes a real upstream sends are covered: a text-ish fixture (what the
+    end-to-end stub answers) and a body opening with an mp3 frame sync, which is
+    what a real encoder emits and must never be parsed as JSON.
+    """
+    with patch("requests.post", MagicMock(return_value=real_response(200, b"fixture-audio"))):
+        assert (
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+            == b"fixture-audio"
+        )
+
+    frame_sync_audio = b"\xff\xfb\x90\x00" + bytes(range(64))
+    with patch("requests.post", MagicMock(return_value=real_response(200, frame_sync_audio))):
+        assert (
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+            == frame_sync_audio
+        )
+
+
+def test_create_speech_treats_a_200_error_body_as_an_upstream_failure(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """A 2xx that is an error envelope is an upstream failure, not audio.
+
+    Radient reports provider failures in a 200 body, and this call returns its
+    bytes to the route, which streams them with an audio media type. Typed as an
+    upstream failure, the route reports it as one instead of serving the
+    envelope -- and the credential an upstream echoed into it -- as audio.
+    """
+    with patch(
+        "requests.post",
+        MagicMock(return_value=real_response(200, SPEECH_ERROR_IN_A_200_BODY)),
+    ):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+
+    exc = exc_info.value
+    assert exc.status_code == 200
+    assert exc.body == SPEECH_ERROR_IN_A_200_BODY.decode()
+    # Exactly once: a second wrap would mean the catch-all swallowed the typed
+    # error and the status and body the route reads were lost with it.
+    assert str(exc).count("Failed to generate speech") == 1
+
+
+def test_create_speech_treats_a_json_content_type_as_an_upstream_failure(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """A JSON content type is not audio whatever the body does or does not parse as.
+
+    A gateway can answer a 200 with a content type that names JSON and a body
+    that is not valid JSON; the media type alone is enough to know the bytes are
+    not the audio the caller asked for.
+    """
+    response = real_response(200, b"quota exceeded")
+    response.headers["Content-Type"] = "application/json"
+
+    with patch("requests.post", MagicMock(return_value=response)):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", model="tts-1", voice="alloy")
+
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.body == "quota exceeded"
