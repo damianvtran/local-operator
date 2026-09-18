@@ -1054,16 +1054,20 @@ class FakeSessionShell(Session):
         self.mcp_manager = None
         self.mcp_startup = None
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
     def refresh_tools(self, tools) -> None:
         self.tools = list(tools)
 
-    def add_dispose_hook(self, hook) -> None:
-        self._dispose_hooks.append(hook)
+    def add_dispose_hook(self, hook, *, last: bool = False) -> None:
+        # ``last`` mirrors ``Session.add_dispose_hook``, including the ordering it
+        # buys: a late hook is what may still WRITE to the resource the ordinary
+        # hooks need, so it runs after all of them however early it registered.
+        (self._final_dispose_hooks if last else self._dispose_hooks).append(hook)
 
     async def dispose(self) -> None:
         self.disposed += 1
-        for hook in self._dispose_hooks:
+        for hook in [*self._dispose_hooks, *self._final_dispose_hooks]:
             outcome = hook()
             if inspect.isawaitable(outcome):
                 await outcome
@@ -4548,3 +4552,88 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
         assert built[0]._vendors == {}, "no leg may be built — that would be a credential read"
     finally:
         await session.dispose()
+
+
+# The credential store is the resource the OTHER teardowns write to
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_auth_store_is_closed_after_the_mcp_teardown(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dispose must close the credential store LAST, whatever order things registered in.
+
+    This is the ordering the whole "MCP grants survive a session exit" story
+    rests on, and it was wrong in a way a unit test could not see: dispose hooks
+    ran in REGISTRATION order, ``attach_auth_dispose`` registered the store's
+    close during ``create_session``, and the MCP teardown registered its own
+    ``disconnect_all`` much later — immediately, on the eager path, and from a
+    background task on the deferred one. So the store closed FIRST, and the MCP
+    teardown that follows it is exactly the code that needs the store: a refresh
+    exchange detached mid-POST persists the authorization server's rotation when
+    its answer lands, and a closed store made that write fail at DEBUG while the
+    caller was told it had succeeded. The row then kept the SPENT refresh token
+    plus a live ``grant_refresh_unconfirmed`` marker, so every later connect
+    refused to refresh for up to an hour and told the user to run ``/mcp reauth``
+    — which deletes the credential and demands a browser grant.
+
+    Built through ``create_session`` — the composition root is the claim — with
+    the MCP wiring swapped for the manager double this file already uses, since
+    the assertion is about the ORDER of the real dispose path and not about the
+    SDK. ``AuthStore.close`` is observed by wrapping the real method rather than
+    by standing a store in for it, so what is recorded is the real close on the
+    real store the session owns.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.providers.auth_store import AuthStore
+
+    order: list[str] = []
+    real_close = AuthStore.close
+
+    def _recording_close(self: Any) -> None:
+        order.append("auth_store.close")
+        real_close(self)
+
+    monkeypatch.setattr(AuthStore, "close", _recording_close)
+
+    class _RecordingManager(FakeMcpManager):
+        async def disconnect_all(self) -> None:
+            order.append("mcp.disconnect_all")
+            await super().disconnect_all()
+
+    manager = _RecordingManager()
+
+    async def _fake_wire(*args: Any, **kwargs: Any) -> Any:
+        return manager
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", _fake_wire)
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        # Recorded from here on: the session's own store closes only at dispose,
+        # and the earlier entries in ``order`` (an unrelated temporary store that
+        # construction closes while resolving the model catalogue) are filtered
+        # out by the tail assertion below rather than pretended away.
+        order.clear()
+    finally:
+        await session.dispose()
+
+    # The TAIL is the claim, not the whole list: construction closes an unrelated
+    # temporary store of its own while resolving the model catalogue
+    # (``model/configure.py``'s ``_oauth_listing_token``), so an equality assert
+    # over everything ever closed would pin that unrelated lifetime too. What
+    # matters here is that at dispose the MCP teardown runs and the session's
+    # store closes after it.
+    assert order[-2:] == ["mcp.disconnect_all", "auth_store.close"], (
+        "the credential store must be closed AFTER the MCP teardown — a rotation "
+        "still in flight at teardown is persisted through it, and closing first "
+        f"is what loses it (order was {order!r})"
+    )
