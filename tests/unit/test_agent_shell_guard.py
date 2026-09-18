@@ -361,15 +361,19 @@ def test_the_fork_window_drops_the_marker() -> None:
     # received the raw environment. Conjunction rather than last-wins: a name
     # bound to anything else, anywhere, is not trusted at the spawn.
     #
-    # EVERY BINDING FORM, too (round 7, M2): `with … as name`, `name |= …`,
-    # `for name in …` and `(name := …)` all bind a name that reaches the spawn,
-    # and none of them binds it to the helper.
+    # EVERY BINDING FORM, too (rounds 7 M2 and 8 M2): `with … as name`,
+    # `name |= …`, `for name in …`, `(name := …)`, `head, *name = …`,
+    # `except … as name` and `match …: case name:` all bind a name that reaches
+    # the spawn, and none of them binds it to the helper.
     bound_to_helper: dict[str, bool] = {}
 
     def bind(target: ast.expr, value_from_helper: bool) -> None:
         names = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
         for name in names:
-            if isinstance(name, ast.Name):
+            if isinstance(name, ast.Starred):
+                # `head, *env = (…,)` binds `env` to a LIST, never to the helper.
+                bind(name.value, False)
+            elif isinstance(name, ast.Name):
                 prior = bound_to_helper.get(name.id, True)
                 bound_to_helper[name.id] = prior and value_from_helper
 
@@ -389,6 +393,14 @@ def test_the_fork_window_drops_the_marker() -> None:
             bind(node.target, False)
         elif isinstance(node, ast.NamedExpr):
             bind(node.target, False)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound_to_helper[node.name] = False
+        elif isinstance(node, ast.MatchAs) and node.name:
+            bound_to_helper[node.name] = False
+        elif isinstance(node, ast.MatchStar) and node.name:
+            bound_to_helper[node.name] = False
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound_to_helper[node.rest] = False
 
     def drops_the_marker(env: ast.expr) -> bool:
         """The environment the spawn is handed is stripped, inline or via a name."""

@@ -96,16 +96,18 @@ desktop sidebar and the phone's list (a conversation it merely RESUMES is the
 operator's own work and is left alone). The picker is a FILTERED VIEW, not the
 store: that session is still on disk at `<config>/sessions/<id>` and
 `lop --resume <id>` opens it, which is the route back for the run that forgot to
-isolate. A `lop exec --background` run prints that id on its own stderr; a
-foreground `lop exec` and a front end driven in a pty do not, and the latter
-creates the session directory as it opens — the transcript lands on its first
-turn — so there the entry to resume is the newest one under
-`<config>/sessions/` carrying a `transcript.jsonl`, not simply the newest
-directory (an open-and-quit leaves one holding only `origin.json`, which
-`--resume` refuses; `--resume @latest` is no help either, since it reads the same
-user-filtered listing the picker does). Isolating the run
-(`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a test off the
-operator's own store; the stamp is the seatbelt for the run that forgets.
+isolate. The id is in the run's own output either way: `lop exec --background`
+prints its receipt line, a foreground `lop exec` that reaches its runtime prints
+`lop exec session: session_id=<id>`, and a pty-driven front end prints
+`lop --resume <id>` when it exits. That front end creates the session directory
+as it OPENS — the transcript lands on its first turn — so if the only thing to
+hand is the store, the entry to resume is the newest one under
+`<config>/sessions/` carrying a `transcript.jsonl`: an open-and-quit leaves a
+directory holding only `origin.json`, which `--resume` refuses, and
+`--resume @latest` reads the same user-filtered listing the picker does.
+Isolating the run (`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a
+test off the operator's own store; the stamp is the seatbelt for the run that
+forgets.
 
 **What this does not cover**, stated so the rule is not read as a boundary:
 
