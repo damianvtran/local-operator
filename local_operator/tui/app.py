@@ -29546,10 +29546,9 @@ class OperatorApp(App[None]):
             include_wedged=True,  # a wedged agent is the one a user most needs to stop
             # A session that has not run a turn yet is STILL stoppable, and this
             # is the one caller that wants it resolved: the kill switch names a
-            # target in order to end it, not to message it, and a composer
-            # window someone needs to stop is exactly the fresh `/new` this
-            # team's peer rule otherwise holds out of reach. `send` keeps the
-            # default True.
+            # target in order to end it, not to message it. A composer window
+            # someone needs to stop is exactly the fresh `/new` that `send`
+            # otherwise holds out of reach; `send` keeps the default True.
             require_started=False,
         )
         if candidates:
