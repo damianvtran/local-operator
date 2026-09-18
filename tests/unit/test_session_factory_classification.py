@@ -1320,3 +1320,66 @@ async def test_a_service_with_no_provider_is_not_waited_on_and_logs_nothing(
     assert [record for record in caplog.records if record.levelno >= logging.INFO] == []
     assert delivered == []
     assert block == await _off_block(_FakeIndex(picked=[]))
+
+
+@pytest.mark.asyncio
+async def test_superseding_the_freeze_keeps_what_the_frozen_block_selected() -> None:
+    """The provider hands ``""`` to a render it believes is unchanged — the re-render
+    that must supersede the block has to reuse the query that selected it.
+
+    Reproduced before this existed (review round 1, R1-2) by calling the callee the way
+    the provider does on a model's second step: step 1 carried the selected skill,
+    step 2 (same task, ``query=""``) carried the advisory but the skill was GONE — and
+    children inherit that emptied block. That is a worse outcome than the late answer it
+    was trying to deliver, and it fires on essentially every tool-using turn.
+    """
+    index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
+    captured: list[Any] = []
+    classifier = _slow_classifier(_slack_recommendation(), captured)
+    hooks = _hooks(index, classifier=classifier)
+    hooks.classification_wait_s = 0.01
+
+    first = await session_factory._select_knowledge_block(
+        hooks, "a question about tunnels", task_id="t1"
+    )
+    assert "alpha" in first, "the selection rides the frozen block"
+
+    await asyncio.sleep(0.3)  # the answer arrives mid-turn
+
+    # Exactly what the provider does for an unchanged render: an EMPTY query.
+    second = await session_factory._select_knowledge_block(hooks, "", task_id="t1")
+    assert "mcp://slack" in second, "the in-turn answer must be delivered"
+    assert "alpha" in second, "and it must not cost the block its selection"
+    assert len(index.calls) == 2, "the re-render re-selects with the frozen query"
+    assert len(classifier.requests) == 1, "and never asks a second time for this message"
+
+
+@pytest.mark.asyncio
+async def test_the_provider_probe_is_inside_the_wait_budget() -> None:
+    """Resolution is not free and not always local — it must be bounded by ``waitMs``.
+
+    ``resolve_vendor`` can refresh an expired Radient OAuth grant over the network, so a
+    probe awaited BEFORE the budgeted task would put that I/O outside the one bound the
+    layer promises (review round 1, R1-4). Here the probe alone takes 200x the wait.
+    """
+
+    class _SlowProbe(_FakeClassifier):
+        async def provider_available(self) -> bool:
+            await asyncio.sleep(0.5)
+            self.events.append("probe-done")
+            return True
+
+    classifier = _SlowProbe(_slack_recommendation())
+    hooks = _hooks(_FakeIndex(picked=[]), classifier=classifier)
+    hooks.classification_wait_s = 0.05
+
+    started = time.monotonic()
+    block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2, f"the probe must be bounded by the wait (took {elapsed:.2f}s)"
+    assert block == ""
+    assert len(hooks.classification_outstanding) == 1, "and it is still running, harvestable"
+    await asyncio.sleep(0.6)
+    for call in hooks.classification_outstanding:
+        call.task.cancel()

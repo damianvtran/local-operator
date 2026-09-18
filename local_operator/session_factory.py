@@ -1420,6 +1420,12 @@ class _KnowledgeHooks:
     #: transcript head is being rewritten anyway, so the prompt cache the
     #: freeze protects is already gone.
     frozen_compaction_id: str | None = None
+    #: The query ``frozen_block`` was selected with. Needed because the provider hands
+    #: an EMPTY query to a render whose freeze it believes is unchanged (see its own
+    #: comment), so a re-render that must supersede the block cannot re-derive it — and
+    #: re-selecting with ``""`` would drop the skills the frozen block carried, which is
+    #: what a review round reproduced before this existed.
+    frozen_query: str = ""
     # A new admitted user row is a task boundary, unlike tool continuations.
     # Selection updates enter history as host state, so refreshing here no
     # longer rewrites the historical system prefix.
@@ -2160,6 +2166,14 @@ def _classification_deadline_s(service: Any) -> float:
     return DEFAULT_CLASSIFICATION_TIMEOUT_MS / 1000.0
 
 
+#: What the budgeted task returns when the probe found nothing to ask. Not a
+#: ``Recommendation``: it exists so that "no provider" is distinguishable from "the
+#: vendor answered with nothing", which is what keeps the no-provider path free of both
+#: a block and a log line (``_harvest_classification`` drops anything without resources,
+#: and this has none by construction).
+_NO_PROVIDER = object()
+
+
 def _classification_wait_s(hooks: _KnowledgeHooks, service: Any) -> float:
     """How long THIS turn waits for an answer, in seconds.
 
@@ -2302,33 +2316,40 @@ async def _classification_recommendation(
     service = hooks.classifier
     if service is None:
         return None
-    # NOTHING TO ASK, NOTHING TO WAIT FOR. An install with no recommender provider
-    # configured or logged in must pay neither the wait nor a log line: the probe is
-    # a local read (the service caches the resolved legs for the session) and never a
-    # network call, so this costs microseconds and removes the call, the throttle and
-    # the "no recommendation within N ms" note from every message of such an install.
-    # A seam without the probe (an injected classifier) keeps the old behaviour: this
-    # is an optimisation for the shipped service, not a new requirement on the seam.
+    # The probe runs INSIDE the budgeted, shielded task, not before it. Resolution is
+    # not free and is not always local: ``resolve_vendor`` can refresh an expired
+    # Radient OAuth grant over the network (see ``cascade.py``), so awaiting it inline
+    # before the task would put that I/O OUTSIDE ``waitMs`` — the one thing the budget
+    # exists to bound. Inside the task it is waited on exactly as long as any other part
+    # of the call, so the turn's added wall-clock stays bounded by ``wait_s``, and an
+    # install with no provider still pays only the probe's own cost and logs nothing.
+    #
+    # A seam without the probe (an injected classifier, a host's own) keeps the old
+    # behaviour: the probe is an optimisation for the shipped service, not a new
+    # requirement on the seam.
     probe = getattr(service, "provider_available", None)
-    if probe is not None:
+
+    async def _probe_then_call() -> Any:
+        if probe is not None:
+            try:
+                available = bool(await probe())
+            except Exception:  # noqa: BLE001 — a probe fault must not change the prompt
+                logger.debug("classification: provider probe failed", exc_info=True)
+                available = True
+            if not available:
+                logger.debug(
+                    "classification: no recommender provider has a credential; nothing to ask"
+                )
+                return _NO_PROVIDER
         try:
-            available = bool(await probe())
-        except Exception:  # noqa: BLE001 — a probe fault must not change the prompt
-            logger.debug("classification: provider probe failed", exc_info=True)
-            available = True
-        if not available:
-            logger.debug(
-                "classification: no recommender provider has a credential; "
-                "skipping without waiting"
-            )
+            request = _classification_request(hooks, query)
+        except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
+            logger.warning("classification: could not build the request", exc_info=True)
             return None
-    try:
-        request = _classification_request(hooks, query)
-    except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
-        logger.warning("classification: could not build the request", exc_info=True)
-        return None
+        return await _classification_call(service, request)
+
     wait_s = _classification_wait_s(hooks, service)
-    task = asyncio.create_task(_classification_call(service, request))
+    task = asyncio.create_task(_probe_then_call())
     hooks.classification_outstanding.append(_OutstandingClassification(task, task_id))
     _prune_outstanding(hooks)
     try:
@@ -2339,7 +2360,8 @@ async def _classification_recommendation(
         # either way (§7), so the only thing worth saying is where the answer went.
         logger.info(
             "classification: no recommendation within %.0f ms; the turn continues "
-            "without one and the answer rides the next user message",
+            "without one and the answer is delivered to this turn's next step (or, "
+            "if the turn ends first, to the next user message)",
             wait_s * 1000,
         )
         return None
@@ -2653,6 +2675,13 @@ async def _select_knowledge_block(
         and not arrived_in_turn
     ):
         return hooks.frozen_block
+    # AN IN-TURN ANSWER SUPERSEDES THE FREEZE, so everything below must reproduce the
+    # block the freeze replaced — with the same query and WITHOUT a second call.
+    superseded_for_answer = arrived_in_turn and hooks.frozen_block is not None
+    if superseded_for_answer and not query.strip() and hooks.frozen_query.strip():
+        # The provider decided this render was unchanged and handed ``""``; the query
+        # that actually selected the frozen block is the only one that reproduces it.
+        query = hooks.frozen_query
 
     picked: list[Skill] = []
     recommendation: Any | None = None
@@ -2663,7 +2692,10 @@ async def _select_knowledge_block(
         # historical signature, and there is no globs matching to do without
         # a cwd anyway.
         select_kwargs: dict[str, Any] = {"cwd": Path(cwd)} if cwd else {}
-        if hooks.classifier is not None:
+        if hooks.classifier is not None and not superseded_for_answer:
+            # Not when this render EXISTS to deliver the answer already harvested: a
+            # second call would duplicate the work and could deliver its own answer
+            # later, for a message that already has one.
             # ONE gather, so the classification's latency is the DIFFERENCE
             # against the embedder selection rather than the sum (§7 step 2) —
             # and the request build, which is where the package serializes the
@@ -2793,6 +2825,7 @@ async def _select_knowledge_block(
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
     hooks.frozen_task_id = task_id
+    hooks.frozen_query = query
     # The block is now the truth at THIS fingerprint, so the next tree change is what
     # re-opens it. Recorded after the render, never before: a render that raised must
     # not claim it captured the new tree. The parked previous render is dropped HERE

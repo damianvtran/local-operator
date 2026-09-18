@@ -612,8 +612,12 @@ class ClassificationService:
                     continue
                 self._vendor_name = vendor.name
                 return response
-            if not any(kind.split(":", 1)[1] in RETRYABLE_KINDS for kind in attempts_walk):
-                # Nothing in this walk was weather: re-asking would buy the same answer.
+            if not all(kind.split(":", 1)[1] in RETRYABLE_KINDS for kind in attempts_walk):
+                # EVERY failure in the walk must be weather before re-walking. One
+                # ``auth`` in the mix is a leg that will answer the same way forever
+                # (review round 1, minor): re-walking spends an attempt on it to reach
+                # the retryable leg, and the message is better served by the next
+                # message's fresh resolution than by a second walk now.
                 break
             if walk + 1 < DEFAULT_CASCADE_ATTEMPTS:
                 logger.debug(
@@ -621,8 +625,8 @@ class ClassificationService:
                     ", ".join(attempts_walk),
                 )
                 await asyncio.sleep(DEFAULT_RETRY_BACKOFF_S * (0.5 + random.random()))
-        if last is None:
-            raise DecisionVendorError("no leg answered", kind="transport")
+        if last is None:  # defensive: a non-empty leg list always records an attempt
+            raise DecisionVendorError("no leg answered", kind="transport", attempts=len(attempts))
         counts = collections.Counter(attempts)
         summary = ", ".join(f"{name} x{count}" for name, count in counts.items())
         raise DecisionVendorError(
@@ -635,13 +639,19 @@ class ClassificationService:
         """Whether any leg has a usable credential, without calling anything.
 
         The wiring asks this before it builds a request or waits, so an install with
-        no recommender provider pays neither the wait nor a log line: the probe is a
-        local credential read (``AuthStore``'s sqlite row, cached on the service after
-        the first resolution) and never a network call. It is deliberately NOT the
-        same question as ``vendor_status``: that one is documented to perform no I/O
-        and therefore cannot see a Radient OAuth session, which is the commonest
-        configured provider here — asking it would silently disable the layer for the
-        operator whose login is the credential we want.
+        no recommender provider pays neither the wait nor a log line.
+
+        What it costs: the credential resolution the cascade would perform anyway,
+        cached on the service after the first call. That resolution is not purely
+        local — ``cascade.resolve_vendor`` can refresh an expired Radient OAuth grant
+        over the network — which is exactly why the wiring awaits this INSIDE the
+        ``waitMs``-bounded task rather than in front of it, and why "no provider" costs
+        a probe rather than nothing. What it never does is place a decision call. It is
+        deliberately NOT the same question as ``vendor_status``:
+        that one is documented to perform no I/O at all and therefore cannot see a
+        Radient OAuth session, which is the commonest configured provider here —
+        asking it would silently disable the layer for the operator whose login is
+        exactly the credential we want.
 
         Failure is reported as ``True``: a probe that cannot answer must not decide
         that there is nothing to ask.
