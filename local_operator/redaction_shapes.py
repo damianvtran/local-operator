@@ -87,6 +87,18 @@ class Shape:
     pattern: Pattern[str]
     replacement: Union[str, Callable[[Match[str]], str]]
     secret_group: Optional[int] = None
+    #: A condition the PATTERN cannot express cheaply, checked only on a match.
+    #:
+    #: **Why it is not in the pattern.** The two name-driven rules have to ask
+    #: whether an identifier ENDS in a credential word and whether it is a
+    #: count-shaped false friend (``max_tokens``). Expressing that as lookarounds
+    #: puts a fixed-width assertion per rejected word at EVERY character position
+    #: of every input, and this pass runs over every tool result and every live
+    #: pipe chunk: measured at 3.0 µs per input byte (1.4 s for 460 KB of
+    #: ordinary log output) with the guards in the pattern, against 0.4 µs with
+    #: them here, checked on the handful of positions where an assignment
+    #: actually is. The semantics are the same and the corpus pins them.
+    guard: Optional[Callable[[Match[str]], bool]] = None
 
 
 # --- shared sub-patterns -----------------------------------------------------
@@ -94,7 +106,7 @@ class Shape:
 #: The value characters an assignment may carry: a token, a URL, a base64 blob.
 #: Stops at whitespace, quotes, commas and closing braces so the mask cannot run
 #: away into the rest of a document when a value is unterminated.
-_ASSIGNED_VALUE = r"[^\s\"',;}\]]{4,}"
+_ASSIGNED_VALUE = r"[^\s\"',;}{]{4,}"
 
 #: The value of a named assignment, floored at 8 characters and required NOT to
 #: END on a separator character.
@@ -105,7 +117,7 @@ _ASSIGNED_VALUE = r"[^\s\"',;}\]]{4,}"
 #: mask lands on a header name rather than on a credential; requiring the value
 #: to end on a value character (plus the assertion at the call site) makes that
 #: match impossible instead of merely unlikely.
-_ASSIGNED_VALUE_GROUP = r"([^\s\"',;}\]{]{7,}[^\s\"',;}\]{:])"
+_ASSIGNED_VALUE_GROUP = r"([^\s\"',;}{]{7,}[^\s\"',;}{:])"
 
 #: A guard for the two rules that consume a WHOLE value: skip when that value
 #: already carries the marker.
@@ -234,6 +246,176 @@ _DSN_SCHEMES = (
 _DSN_PATTERN = re.compile(rf"(?i)\b((?:{_DSN_SCHEMES})://[^\s:/@\"']*:)([^\s/@\"']+)(@)")
 
 
+#: The words a NAME may end in, and the qualifiers that may precede one inside a
+#: run-together name (``apiKey``, ``authToken``). Kept as data rather than as a
+#: regex so the check runs on a MATCH instead of at every character position —
+#: see :attr:`Shape.guard` for the measurement that forced the move.
+_CRED_TAIL_WORDS = (
+    "key",
+    "keys",
+    "keydata",
+    "token",
+    "tokens",
+    "secret",
+    "secrets",
+    "password",
+    "passwords",
+    "passwd",
+    "pwd",
+    "credential",
+    "credentials",
+    "dsn",
+)
+_CRED_QUALIFIERS = (
+    "api",
+    "auth",
+    "access",
+    "refresh",
+    "id",
+    "session",
+    "private",
+    "public",
+    "client",
+    "proxy",
+    "secret",
+    "signing",
+    "signed",
+    "encryption",
+    "master",
+    "service",
+    "bearer",
+    "oauth",
+)
+#: Every spelling a name (or its last separator-delimited segment) may have.
+_CRED_NAME_FORMS = frozenset(
+    qualifier + tail for qualifier in _CRED_QUALIFIERS for tail in _CRED_TAIL_WORDS
+) | frozenset(_CRED_TAIL_WORDS)
+
+#: Names that RUN the qualifier into the word with no separator at all, which no
+#: split can recover: ``PGPASSWORD`` is how CI hands postgres a password.
+_RUN_TOGETHER_NAMES = frozenset(
+    {"pgpassword", "pgpassfile", "pgpass", "dbpassword", "appsecret", "sshpass"}
+)
+
+#: Prefixes that mark a name as a COUNT or a cache/handle rather than a
+#: credential (``max_tokens``, ``context_tokens``, ``cache_key``). Named
+#: explicitly because the distinction cannot be inferred from the tail word.
+_COUNT_WORDS = frozenset(
+    {
+        "max",
+        "min",
+        "num",
+        "n",
+        "total",
+        "sum",
+        "count",
+        "avg",
+        "average",
+        "context",
+        "ctx",
+        "prompt",
+        "completion",
+        "input",
+        "output",
+        "usage",
+        "used",
+        "cache",
+        "cached",
+        "remaining",
+        "left",
+        "budget",
+        "free",
+        "limit",
+        "page",
+    }
+)
+
+_SPLIT_NAME = re.compile(r"[_.\-]")
+
+
+def _name_segments(name: str) -> list[str]:
+    return [part for part in _SPLIT_NAME.split(name.strip("_.-").lower()) if part]
+
+
+def is_credential_name(name: str) -> bool:
+    """Whether an identifier ENDS in a credential word, at a segment boundary.
+
+    ``AWS_SECRET_ACCESS_KEY``, ``MONGO_DSN``, ``DB_PASSWORD``, ``_authToken``,
+    ``apiKey`` and ``PGPASSWORD`` are; ``monkey`` is not (the word must start a
+    segment), ``keyboard_layout`` is not (it does not END in one), and
+    ``num_tokens`` is not a credential either — it is rejected as a count, which
+    is the separate judgement :func:`is_count_shaped` makes.
+    """
+    lowered = name.strip("_.-").lower()
+    if not lowered:
+        return False
+    if lowered in _RUN_TOGETHER_NAMES:
+        return True
+    segments = _name_segments(lowered)
+    if not segments:
+        return False
+    tail = segments[-1]
+    if tail in _CRED_NAME_FORMS:
+        return True
+    # A trailing pair split apart by the separator: ``client-key-data`` is
+    # kubeconfig's private key, spelled in three segments.
+    return len(segments) > 1 and segments[-2] + tail in _CRED_NAME_FORMS
+
+
+def is_count_shaped(name: str) -> bool:
+    """Whether a credential-shaped name is actually a count or a cache handle.
+
+    Plural token COUNTS (``max_tokens``, ``context_tokens``) and cache handles
+    (``cache_key``) end in a credential word and carry no secret. Masking them
+    would hide numbers the agent needs while protecting nothing.
+    """
+    segments = _name_segments(name)
+    return len(segments) > 1 and segments[0] in _COUNT_WORDS
+
+
+#: ``scheme://user:password@``, for the URL-named rule's value check.
+_URL_USERINFO_PASSWORD = re.compile(r"://[^\s/@\"']*:(?!\[redacted\])[^\s/@\"']+@")
+
+#: A credential-shaped query parameter, for the same check.
+_URL_CRED_QUERY = re.compile(
+    r"(?i)(?:^|[?&])(?:api[-_]?key|apikey|key|token|access[-_]?token|secret|password|"
+    r"passwd|pwd|sig|signature)=(?!\[redacted\])"
+)
+
+#: Names whose VALUE decides whether the rule fires at all.
+_URL_NAME_HINTS = ("uri", "url", "dsn", "endpoint", "conn")
+
+
+def _assignment_guard(match: Match[str]) -> bool:
+    """The name half of the named-assignment rule, checked on the match.
+
+    The marker check is the "do not mask twice" half: rules run in order, so a
+    DSN inside ``MONGO_DSN=`` is masked by the DSN rule first — password gone,
+    user and host kept readable — and this rule would otherwise match the same
+    value again and swallow the whole thing, taking back the host it had just
+    preserved and splitting the marker on the ``]`` the value class stops at.
+    Measured while building the table: the unguarded pair produced
+    ``MONGO_DSN=[redacted]]@host``.
+    """
+    if REDACTION_MARKER in match.group(4):
+        return False
+    name = match.group(1)
+    return is_credential_name(name) and not is_count_shaped(name)
+
+
+def _url_value_guard(match: Match[str]) -> bool:
+    """A ``*_URL``/``*_URI``/``*_DSN`` name whose VALUE carries a credential.
+
+    See :data:`CREDENTIAL_SHAPES` for why the value has to prove itself: masking
+    every endpoint URL would blind the agent to ordinary output.
+    """
+    name = match.group(1).lower()
+    if not any(hint in name for hint in _URL_NAME_HINTS):
+        return False
+    value = match.group(4)
+    return bool(_URL_USERINFO_PASSWORD.search(value) or _URL_CRED_QUERY.search(value))
+
+
 #: The credential SHAPES, as ``(label, pattern, replacement, secret_group)``.
 #:
 #: ORDER IS LOAD-BEARING and runs most-specific first:
@@ -302,17 +484,13 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "credential-url-value",
         re.compile(
-            r"(?i)(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_.\-])*[_.\-]?"
-            r"(?:uri|url|endpoint|conn(?:ection)?[_.\-]?str(?:ing)?|dsn)(?![A-Za-z0-9])"
-            r"(\"?\s*[:=]\s*\"?)"
-            rf"{_NOT_ALREADY_MASKED}"
-            r"(?=[^\s\"',;}\]]*(?:"
-            r"://[^\s/@\"']*:(?!\[redacted\])[^\s/@\"']+@"
-            r"|(?!\[redacted\])[?&](?:api[-_]?key|apikey|key|token|secret|password|"
-            r"passwd|pwd|sig|signature)=))"
+            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
+            r"([\"']?\s*[:=]\s*)([\"']?)"
             rf"({_ASSIGNED_VALUE})"
         ),
-        r"\1" + REDACTION_MARKER,
+        None,  # rendered by the guarded path; the guard owns the name and value checks
+        4,
+        guard=lambda match: _url_value_guard(match),
     ),
     # A credential in a query string — how several of these services accept one
     # and therefore how one comes back in a URL that a log or an upstream quotes.
@@ -337,14 +515,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "credential-assignment",
         re.compile(
-            rf"(?i)(?:{_RUN_TOGETHER_NAMES}(?![A-Za-z0-9])"
-            rf"|{_COUNT_PREFIXES}{_CREDENTIAL_NAME})"
+            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
             # ``[\"']?`` before the separator so a QUOTED name is one of these:
             # ``"api_key": "…"`` is how JSON spells every one of them, and a
             # pattern that only accepts the bare ``name: value`` form misses the
             # whole shape on the most common surface there is.
             r"([\"']?\s*[:=]\s*)([\"']?)"
-            rf"{_NOT_ALREADY_MASKED}"
             rf"{_ASSIGNED_VALUE_GROUP}"
             # ...and the value must not be a NAME followed by its own
             # separator. Without this the rule fires on prose:
@@ -356,10 +532,10 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(?![A-Za-z0-9_.\-:/])"
         ),
         # Keep the name, the separator and the opening quote; mask only the
-        # value. A template cannot express that (the value is the LAST group and
-        # the text before it must survive), so this rule carries a callable.
-        lambda m: m.group(0)[: m.start(3) - m.start(0)] + REDACTION_MARKER,
-        3,
+        # value. Rendered by the guarded path, which knows the value group.
+        None,
+        4,
+        guard=_assignment_guard,
     ),
     # ``.netrc``: ``machine api.example.com login robot password …``. A
     # whitespace-separated assignment, so the ``[:=]`` rules above never see it.
@@ -567,7 +743,33 @@ def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
     inspect shapes without the same rules being applied to the text.
     """
     hits: list[ShapeHit] = []
-    for shape in CREDENTIAL_SHAPES:
+    if not text or not has_shape_anchor(text):
+        # Nothing in here can match any rule — see :data:`_SHAPE_ANCHORS`.
+        return text, hits
+    # Key material first: a PEM body spans lines, so it is the one pass that has
+    # to see the whole text, and it must run before anything takes it apart.
+    text = _run_shapes(_MULTILINE_SHAPES, text, hits)
+    if len(_LINE_SHAPES) == 0:  # pragma: no cover - the table would be empty
+        return text, hits
+    # Then line by line, gated per line: the rules that remain are line-anchored
+    # by construction, and ordinary lines never reach them.
+    pieces: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if not has_shape_anchor(line):
+            pieces.append(line)
+            continue
+        line_hits: list[ShapeHit] = []
+        pieces.append(_run_shapes(_LINE_SHAPES, line, line_hits))
+        hits.extend(line_hits)
+    return "".join(pieces), hits
+
+
+def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> str:
+    """Apply one group of rules, in table order."""
+    for shape in shapes:
+        if shape.guard is not None:
+            text = _apply_guarded(shape, text, hits)
+            continue
         matches = list(shape.pattern.finditer(text))
         if matches:
             for match in matches:
@@ -575,7 +777,154 @@ def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
                 if len(value) >= _MIN_REGISTERABLE_SECRET:
                     hits.append(ShapeHit(shape.label, value))
         text = shape.pattern.sub(shape.replacement, text)
-    return text, hits
+    return text
+
+
+#: Cheap necessary conditions for the whole table, as lowercase substrings.
+#:
+#: **Why a gate at all.** Every rule is a full scan of the text, and CPython's
+#: regex engine costs ~30 ns per character scanned: twenty-three ungated rules
+#: measure 1.3 µs per input byte — 5 s of loop-thread CPU for a 4 MB tool result,
+#: and more than the live pipe's whole CPU budget for a 64 KB chunk. The gate is
+#: one compiled alternation, so ordinary text (a build log, a directory listing,
+#: a JSON payload) pays ~0.03 µs per byte and none of the table runs.
+#:
+#: A SUBSET is not enough — a missing anchor would silently stop a rule from
+#: firing — so ``test_every_positive_case_trips_the_gate`` asserts that every
+#: positive corpus case carries at least one anchor, and adding a rule without
+#: one fails loudly there rather than in production.
+_SHAPE_ANCHORS: tuple[str, ...] = (
+    "://",
+    "-----begin",
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "credential",
+    "dsn",
+    "bearer",
+    "basic",
+    "cookie",
+    "machine",
+    "sig",
+    "auth",
+    "curl",
+    "docker",
+    "-pass",
+    "mysql",
+    "psql",
+    "pg_dump",
+    "pg_restore",
+    "mongo",
+    "clickhouse-client",
+    "redis-cli",
+    "influx",
+    "sk_",
+    "sk-",
+    "pk_",
+    "rk_",
+    "hf_",
+    "gsk_",
+    "xai-",
+    "tvly-",
+    "fal-",
+    "serp-",
+    "glpat",
+    "ya29",
+    "npm_",
+    "pypi",
+    "whsec",
+    "dckr_pat",
+    "shpat",
+    "shpss",
+    "lin_api",
+    "syt_",
+    "doo_v1",
+    "pat_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "akia",
+    "asia",
+    "aiza",
+    "xox",
+    "sg.",
+    "eyj",
+    "hooks.slack.com",
+)
+
+
+#: Answers "could anything in the table match?" — cheaply, and that is the whole
+#: design constraint. The obvious form, one compiled alternation of the anchors,
+#: is the WRONG shape here: CPython's ``re`` has no multi-literal fast path, so an
+#: alternation of 61 literals costs one attempt per alternative AT EVERY
+#: POSITION — measured at 1.7 s for 730 KB of ordinary log text, i.e. worse than
+#: the table it was meant to skip. ``str.__contains__`` is the C-level search the
+#: engine does not do for us: 61 of them cost ~25 ms for the same text, and the
+#: first miss short-circuits nothing but nothing needs it to.
+def has_shape_anchor(text: str) -> bool:
+    lowered = text.lower()
+    return any(anchor in lowered for anchor in _SHAPE_ANCHORS)
+
+
+#: Rules whose shape can only be complete on one line, and the ones that can span
+#: lines. Splitting them is what lets the gate run per line: a 40-line log with
+#: one candidate line pays the table for that line only.
+_MULTILINE_LABELS = frozenset({"pem-private-key", "gcp-service-account-key"})
+_MULTILINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label in _MULTILINE_LABELS)
+_LINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label not in _MULTILINE_LABELS)
+
+
+def _apply_guarded(shape: Shape, text: str, hits: list[ShapeHit]) -> str:
+    """Run one guarded rule: the pattern proposes, the guard decides.
+
+    The guard runs only where the pattern matched, so a rule whose condition
+    cannot be expressed cheaply (does this identifier END in a credential word?
+    does this URL actually carry a credential?) costs nothing on the ordinary
+    text that makes up almost every result. See :attr:`Shape.guard`.
+
+    A rejected span is re-scanned from ONE CHARACTER IN, not past its end, and
+    that is not a detail: the cheap name pattern happily matches a name that is
+    really somebody else's argument — ``--from-literal=password=hunter2`` matches
+    with the name ``--from-literal`` and the value ``password=hunter2`` — and
+    resuming past it would swallow the genuine assignment sitting inside the
+    span. Measured: the corpus's ``--from-literal=password=…`` and
+    ``vault kv get …: password=…`` cases both stopped masking.
+    """
+    guard = shape.guard
+    group = shape.secret_group
+    assert guard is not None and group is not None  # guarded rules only
+
+    pieces: list[str] = []
+    cursor = 0
+    search_from = 0
+    matched = False
+    while True:
+        match = shape.pattern.search(text, search_from)
+        if match is None:
+            break
+        if not guard(match):
+            search_from = match.start() + 1
+            continue
+        value = _hit_value(shape, match)
+        if len(value) >= _MIN_REGISTERABLE_SECRET:
+            hits.append(ShapeHit(shape.label, value))
+        # Keep everything before the credential, mask the credential: an
+        # assignment keeps its name and separator, a URL-valued name keeps the
+        # name, and the credential inside the value is what goes.
+        pieces.append(text[cursor : match.start()])
+        pieces.append(match.group(0)[: match.start(group) - match.start(0)] + REDACTION_MARKER)
+        cursor = match.end()
+        search_from = match.end()
+        matched = True
+    if not matched:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
 
 def _hit_value(shape: Shape, match: "re.Match[str]") -> str:

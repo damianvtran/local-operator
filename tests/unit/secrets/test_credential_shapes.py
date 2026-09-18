@@ -247,6 +247,69 @@ def test_scrub_shapes_and_scrub_secrets_agree_on_the_shape_half() -> None:
     assert scrub_secrets(text, ["kh17"]) == scrub_shapes(text.replace("kh17", REDACTION_MARKER))
 
 
+def test_every_positive_case_trips_the_gate() -> None:
+    """The prefilter must not be able to hide a rule.
+
+    ``redaction_shapes`` skips the whole table when a text carries none of its
+    anchor substrings, because each rule is a full scan and a tool result can be
+    megabytes. A subset of the anchors would therefore fail SILENTLY — a shape
+    that no longer fires because nothing in the gate noticed it. This is the test
+    that makes adding such a rule fail loudly instead, in CI, against the corpus.
+    """
+    from local_operator.redaction_shapes import has_shape_anchor
+
+    misses = [case.text for case in POSITIVE_CASES if not has_shape_anchor(case.text)]
+    assert not misses, f"these shapes would be skipped by the gate: {misses[:5]}"
+
+
+def test_the_gate_does_not_trip_on_ordinary_text() -> None:
+    """The other half of the gate: it exists to skip work, so it has to skip.
+
+    Asserted on the corpus negatives as a whole (they are ordinary text by
+    construction) and on a realistic tool result, because a gate that trips on
+    everything costs the table's full price on every result.
+    """
+    from local_operator.redaction_shapes import has_shape_anchor
+
+    body = ("GET /v1/items 200 12ms\n" * 200) + '{"port": 8080, "status": "ok"}\n' * 100
+    assert not has_shape_anchor(body), "an ordinary tool result must skip the table"
+    assert not has_shape_anchor("total 12\ndrwxr-xr-x  4 user staff 128 Sep 18 09:12 src")
+    assert not has_shape_anchor("SELECT id, name FROM users WHERE active = true;")
+    # Many corpus NEGATIVES DO trip it (`max_tokens`, `cache_key`, prose with
+    # "password"), and that is by design rather than a leak in the gate: the
+    # anchors are deliberately broad because a MISSING one would silently stop a
+    # rule from firing, while a FALSE POSITIVE only costs the table's price on
+    # that one line — and the corpus asserts the outcome there is unchanged. The
+    # count is recorded so a widening that makes the gate useless is visible.
+    tripped = [case.text for case in NEGATIVE_CASES if has_shape_anchor(case.text)]
+    assert len(tripped) < len(NEGATIVE_CASES) * 0.8, len(tripped)
+
+
+def test_the_gated_pass_is_fast_on_ordinary_text() -> None:
+    """A per-byte budget for the common case, with the margin stated.
+
+    Why a budget at all: this pass runs on every tool result AND on every live
+    pipe chunk, so its cost is loop-thread CPU — the resource a TUI freeze is
+    made of. The gate exists because the ungated table measured 1.3 µs/byte
+    (5 s of blocked loop for a 4 MB result), and a future rule that is
+    accidentally quadratic would otherwise be invisible until a user saw a
+    frozen screen. Measured here: 0.09 µs/byte for ordinary text after the gate
+    and the cheap guards, against 0.4 µs/byte for the same text before them.
+
+    The ceiling is 10x the measured value and is a CATASTROPHE bound, not a
+    precision one — the same convention AGENTS.md requires for timing guards on
+    a shared machine: it catches an order-of-magnitude regression (a re-added
+    per-position loop, a lost gate) without flaking when a loaded runner makes
+    this slower by a constant factor. The ratios in
+    ``test_the_shape_pass_is_linear_in_the_size_of_the_text`` are the half that
+    survives load.
+    """
+    body = ("GET /v1/items 200 12ms\n" * 2000) + '{"port": 8080, "status": "ok"}\n' * 1000
+    elapsed = _scrub_time(body)
+    per_byte = elapsed / len(body)
+    assert per_byte < 0.9e-6, f"ordinary text costs {per_byte * 1e6:.2f} µs/byte"
+
+
 def test_no_entropy_heuristic_is_applied() -> None:
     """A bare high-entropy fragment with no spelling around it is NOT masked.
 
