@@ -446,10 +446,17 @@ TIPS: tuple[str, ...] = (
     # function of the pool's LONGEST entry (`TIP_MIN_WIDTH`, pinned at 59 cells
     # in tests/unit/tui/test_keymap_pilot.py), and that threshold must not rise:
     # a longer entry would take the row away from the terminals that have it
-    # today. These two are 57 and 55 cells of content — 59 and 57 painted, so
+    # today. These two are 57 and 53 cells of content — 59 and 55 painted, so
     # the threshold moves not at all (measured, and pinned by that test).
+    #
+    # BOTH BUDGETS ARE NOW SPENT, and the next contributor should know it before
+    # adding another entry. The 59-cell floor means the row is painted from a
+    # 63-COLUMN terminal (the view is the grid minus 4 columns: 59 at 63, 56 at
+    # 60, and at 60 no tip row is drawn at all), and `len(TIPS)` sits exactly at
+    # the ceiling `test_welcome.py` asserts. An entry that needs either budget
+    # takes a slot from the pool rather than adding one.
     "lop config edit classification.auto true adds smart hints",
-    "lop login radient, typesafe or openrouter enables hints",
+    "lop login <radient|typesafe|openrouter> enables hints",
     # The KEYED entries. Held as templates in the pool and substituted at
     # render (`_resolve_tip`), which is what keeps them true after a remap —
     # a literal chord here would become a lie the moment the user changed it,
