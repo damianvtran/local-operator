@@ -38,6 +38,7 @@ from local_operator.resume import (
     is_user_session,
     session_origin,
 )
+from local_operator.session.session import Session
 
 
 @pytest.fixture
@@ -365,7 +366,14 @@ def test_a_directory_this_call_did_not_create_is_never_re_marked(
 
 
 def _factory_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: object):
-    """Build a session the way every entry point does, through the factory."""
+    """Build a session the way every entry point does, through the factory.
+
+    It is typed as `SessionProtocol` (what `create_session` returns), which
+    declares no transcript, so a test that reads one narrows with
+    `assert isinstance(session, Session)` first — the same narrowing
+    `tests/unit/test_session_factory.py` uses. The mock provider keeps this
+    offline.
+    """
     import argparse
 
     from local_operator.agents import AgentRegistry
@@ -407,8 +415,9 @@ async def test_the_factory_stamps_the_session_an_escape_opens(
     mock provider keeps this offline.
     """
     session = await _factory_session(tmp_path, monkeypatch)
+    assert isinstance(session, Session)
     try:
-        directory = session.transcript.directory
+        directory = session._transcript.directory
         assert session_origin(directory) == ORIGIN_AGENT_SHELL
         assert is_user_session(directory) is False
     finally:
@@ -429,8 +438,9 @@ async def test_the_factory_leaves_a_resumed_conversation_alone(
     monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
     monkeypatch.delenv(ALLOW_NESTED_SESSION_ENV, raising=False)
     first = await _factory_session(tmp_path, monkeypatch)
+    assert isinstance(first, Session)
     try:
-        directory = first.transcript.directory
+        directory = first._transcript.directory
         session_id = first.session_id
         # A real turn, because an unused session has no transcript and is not
         # resumable (`resume_dir` refuses it) — the control case has to be a
@@ -443,12 +453,13 @@ async def test_the_factory_leaves_a_resumed_conversation_alone(
     monkeypatch.setenv(AGENT_SHELL_ENV, "1")
     monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
     resumed = await _factory_session(tmp_path, monkeypatch, resume=session_id)
+    assert isinstance(resumed, Session)
     try:
         # FIRST that it really resumed: without this, a regression that mints a
         # fresh id instead of adopting the requested one keeps the origin
         # assertions below green while inspecting a directory the run never
         # touched (review round 3, F3).
-        assert Path(resumed.transcript.directory) == directory
+        assert Path(resumed._transcript.directory) == directory
         assert session_origin(directory) == "", "a resumed conversation is not re-marked"
         assert is_user_session(directory) is True
     finally:
@@ -469,8 +480,9 @@ async def test_an_adopted_id_the_escape_created_is_stamped(
     """
     monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
     session = await _factory_session(tmp_path, monkeypatch, resume="feedface0001")
+    assert isinstance(session, Session)
     try:
-        directory = session.transcript.directory
+        directory = session._transcript.directory
         assert directory.name == "feedface0001"
         assert session_origin(directory) == ORIGIN_AGENT_SHELL
         assert is_user_session(directory) is False
@@ -496,8 +508,9 @@ async def test_an_adopted_id_that_already_existed_is_left_to_its_owner(
     (directory / "created_at.json").write_text("1.0", encoding="utf-8")
 
     session = await _factory_session(tmp_path, monkeypatch, resume="deadbeef0001")
+    assert isinstance(session, Session)
     try:
-        assert Path(session.transcript.directory) == directory
+        assert Path(session._transcript.directory) == directory
         assert session_origin(directory) == ""
         assert is_user_session(directory) is True
     finally:
