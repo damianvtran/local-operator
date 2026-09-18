@@ -193,8 +193,11 @@ class Recommendation:
     cost_usd: float | None = None
     latency_s: float = 0.0
     skipped: str | None = None      # "disabled" | "no-vendor" | "empty-roster" | "timeout" | "error" | "circuit-open"
-    late: bool = False              # set by a CALLER whose turn stopped waiting: this answer
-                                    # is being delivered by a later message than it was asked for
+    late_urls: tuple[str, ...] = ()  # the resource_url values on this view that a CALLER's
+                                     # earlier message asked for: the answer is being delivered
+                                     # by a LATER message than it was computed for. Per RESOURCE
+                                     # because one prompt can carry a late answer and its own
+                                     # (see §7, notice)
 
 class ClassificationService:
     def __init__(self, *, manager: CredentialManager, settings: Mapping[str, Any] | None = None) -> None: ...
@@ -276,10 +279,10 @@ Rules, each of which has to be provable:
    cannot move account routing.
 3. **One persistent HTTP client with keep-alive, built at session build.** A fresh TCP + TLS
    handshake per call is 50-150 ms on its own and would consume the entire budget before the
-   request is sent. The client OBJECT is also expensive to construct — **19-36 ms for the first
-   `httpx.AsyncClient` in a process, 3-4 ms each after** (19.4 / 23.0 / 36.0 ms across three runs of
-   `scripts/classification_latency_probe.py --clients-only`, and independently measured at
-   19.4 / 4.1 / 4.0 / 3.5 ms) — all of it
+   request is sent. The client OBJECT is also expensive to construct — **tens of milliseconds for the
+   first `httpx.AsyncClient` in a process, 3-6 ms each after** (19.4 / 23.0 / 36.0 ms in three quiet
+   runs of `scripts/classification_latency_probe.py --clients-only`, 27.0 / 81.3 / 42.0 ms in three
+   on a loaded machine, and 19.4 / 4.1 / 4.0 / 3.5 ms measured independently) — all of it
    SSL-context setup, all of it synchronous before the call's first await, so no wait budget can
    reach it. The composition root therefore builds it when it builds the seam
    (`ClassificationService.warm_up`), not on a session's first message. No connection is opened,
@@ -299,21 +302,30 @@ Rules, each of which has to be provable:
    27-candidate roster, an answer takes ~250 ms median against OpenRouter, and the budget excludes
    that model time by its terms.
 
-   Measured on the real path (`scripts/classification_latency_probe.py`, 27-candidate roster, real
-   vendor, default settings), reported as the DIFFERENCE against the layer being off: a warm message
-   costs **+2 to +4 ms median / +33 to +56 ms worst** (the spread is the shared machine — the OFF
-   arm shows +24 to +28 ms worst in the same runs), a cache hit ~**+2 to +4 ms**, and **a session's
-   first message +22 to +32 ms** — the one-off first-call setup that runs before the first await,
-   which no wait
-   budget can reach. Every warm number is inside the budget; the first message of a session is the
-   honest exception, paid once.
+   Measured on the real path (`scripts/classification_latency_probe.py`, 27-candidate roster,
+   default settings), reported as the DIFFERENCE against the layer being off:
+
+   * an uncached message against a VENDOR THAT DOES NOT ANSWER inside the wait costs **the wait:
+     +50.9 to +52.1 ms median over four runs** (ON 52.75-53.80 ms, OFF 1.69-2.73 ms). This is the
+     number the budget is about, and it is bounded by `waitMs` rather than by the vendor's ~250 ms
+     answer — which is exactly what rule 6 is for;
+   * a vendor that answers INSIDE the wait — a cache hit, or a leg that fails at once — costs
+     **~0 to +2 ms**: the turn stops waiting the moment it holds an answer. With a dead credential
+     the whole steady state reads ~+0.4 ms for that reason, which is why a run must say which arm
+     it measured;
+   * a session's **first message** costs **+22 to +32 ms** more (four runs here, 26.7-31.1 ms in
+     the reviewer's) — one-off setup before the first await, which no wait budget can reach.
+
+   So the steady state is `waitMs` (≈51 ms), not "a few percent of the budget": inside the 100 ms
+   ceiling and AT the operator's 50 ms ideal rather than under it, because the wait IS the cost and
+   it is the wait the operator asked for. An answer already in hand costs ~nothing, and a session's
+   first message pays its few tens of milliseconds once.
 
    THE FIRST MESSAGE'S COST IS NOT FULLY EXPLAINED, and this section says so rather than
    attributing it: three paired runs of that probe per arm put it at 30.7 ms median without the
-   client prewarm and 32.0 ms with it, so the prewarm (which moves a measured 19-23 ms first
+   client prewarm and 32.0 ms with it, so the prewarm (which moves a tens-of-milliseconds first
    `AsyncClient` to session build) does not account for it, and `build_state` measures 0.05 ms.
-   Recorded as an open item; the number to plan from is that a session's first message costs a few
-   tens of milliseconds once, and every message after it is inside the budget.
+   Recorded as an open item.
 7. **Server side.** `POST /v1/decisions` must ride the agent-server's existing Redis `AuthCache`
    (`internal/cache/auth_cache.go`, 5-minute TTL for API-key→identity and billing balances),
    which is why the route sits on `jwtOrAPIKeyBillingMiddleware`. It must not introduce uncached
@@ -373,7 +385,12 @@ Sequence per user message:
    announced on one line: the contract sentence is once per MESSAGE. The line is attributed to the
    message it answers ("for your previous message" when the answer is late — the ordinary case
    against a 250 ms vendor and a 50 ms wait), because otherwise it reads as advice about the
-   question it happens to sit under. It names the resources and nothing else: the vendor, the
+   question it happens to sit under. A prompt that gains BOTH sets has no single true attribution,
+   so that one shape tags each resource — `Suggestion added: skill://a (your previous message),
+   guide://b (this message)` — rather than labelling the union from whichever answer arrived last,
+   which told the user a resource chosen for the question they had just asked came from the one
+   before it (QA round 4, Q1). The two uniform cases keep the short sentence, because the row is
+   the scarce thing (a receipt sentence has 71 measured cells at 100 columns). It names the resources and nothing else: the vendor, the
    duration and the six-decimal spend came off in the design round (the money bypassed the repo's
    one formatter and the tail is what pushed the line to a second row), and the spend lives at INFO
    in the harness's cost log. It is delivered after the turn's answer, through the session's own

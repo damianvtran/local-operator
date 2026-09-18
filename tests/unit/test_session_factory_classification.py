@@ -67,6 +67,10 @@ class _Recommendation:
     cost_usd: float | None = None
     latency_s: float = 0.0
     skipped: str | None = None
+    #: §4's per-resource attribution. Part of "field for field": the renderer reads it,
+    #: and a stand-in without it makes the shipped ``notice`` raise, which the wiring
+    #: swallows — so the missing field showed up as a notice that never appeared.
+    late_urls: tuple[str, ...] = ()
 
 
 @dataclass
@@ -91,6 +95,7 @@ class _FakeClassifier:
         notice_line: str | None = None,
         raises: BaseException | None = None,
         events: list[str] | None = None,
+        render_with: Any = None,
     ) -> None:
         self.recommendation = recommendation or _Recommendation()
         self.delay = delay
@@ -99,6 +104,11 @@ class _FakeClassifier:
         self.raises = raises
         self.events = events if events is not None else []
         self.requests: list[Any] = []
+        #: A real service whose ``notice`` renders the line, when the COPY is what a test
+        #: is about. ``notice_line`` is a canned string, so a test that asserts how the
+        #: sentence reads has to render it with the shipped renderer or it asserts its
+        #: own fixture.
+        self.render_with = render_with
 
     async def recommend_resources(self, request: Any) -> _Recommendation:
         self.requests.append(request)
@@ -111,6 +121,8 @@ class _FakeClassifier:
         return self.recommendation
 
     def notice(self, recommendation: _Recommendation) -> str | None:
+        if self.render_with is not None:
+            return self.render_with.notice(recommendation)
         return self.notice_line
 
 
@@ -357,6 +369,60 @@ async def test_the_notice_rides_the_session_notice_path_once_per_message() -> No
     await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
     assert len(delivered) == 2
     assert len(classifier.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_one_message_gaining_both_sets_announces_them_without_lying(tmp_path: Path) -> None:
+    """A late answer AND this message's own: one line, each resource attributed.
+
+    THE TEST THE DOCSTRING ABOVE DESCRIBED WITHOUT CHECKING (QA round 4, Q1). The line
+    used to be built from the answer that arrived LAST and labelled from it, so a
+    message that gained both sets announced the union as "for your previous message" —
+    telling the user a resource chosen for the question they had just asked came from
+    the one before it. Neither whole-line label is true of a union, so each resource
+    carries its own; the two uniform cases keep the short sentence the row budget wants.
+
+    Rendered with the SHIPPED renderer (``ClassificationService.notice``) rather than a
+    canned string: the finding is about what the sentence says, so a fixture that
+    returns its own text would assert nothing.
+    """
+    from local_operator.classification.service import ClassificationService
+    from local_operator.credentials import CredentialManager
+
+    renderer = ClassificationService(
+        manager=CredentialManager(tmp_path), settings={"classification": {"auto": True}}
+    )
+    classifier = _FakeClassifier(
+        _Recommendation(
+            resources=(_Candidate("guide", "tunnel", "Tunnel guide.", "guide://tunnel"),),
+        ),
+        delay=0.3,
+        render_with=renderer,
+    )
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.05
+    delivered: list[str] = []
+    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
+
+    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
+    await asyncio.sleep(0.35)  # call 1 lands, late — nothing announced yet
+
+    # This message's OWN call answers inside the wait, so the prompt gains both sets.
+    classifier.delay = 0.0
+    classifier.recommendation = _Recommendation(
+        resources=(_Candidate("skill", "beta", "Beta skill.", "skill://beta"),),
+    )
+    block = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
+
+    assert "guide://tunnel" in block and "skill://beta" in block
+    assert len(delivered) == 1, delivered
+    line = delivered[0]
+    assert "guide://tunnel (your previous message)" in line, line
+    assert "skill://beta (this message)" in line, line
+    # …and the whole-line label of the uniform case is what would have lied here.
+    assert "for your previous message:" not in line, line
+
+    await renderer.aclose()
 
 
 @pytest.mark.asyncio

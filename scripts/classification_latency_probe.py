@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import statistics
 import sys
@@ -90,6 +91,10 @@ async def main() -> int:
 
     # Off the repo's own path: the role of this script is to be run from a checkout,
     # and the roster it plants must not land in the operator's library.
+    # INFO, so the run explains its own numbers: the service's cost line says which
+    # vendor answered (and how long it took), and a skip reason says why nothing was
+    # attempted — the two facts that separate "the wait bit" from "no call was made".
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     sys.path.insert(0, str(REPO))
     scratch = Path(tempfile.mkdtemp(prefix="classify-probe-"))
     plant_skills(scratch, options.skills)
@@ -184,13 +189,40 @@ async def main() -> int:
     report("on, first message (cold)", miss[:1])
     report("on, uncached (rest)", miss[1:])
     report("on, cache hit", hit)
+
+    # THE DELTA IS THE NUMBER THE DOCS QUOTE, and it is the only honest one: the ON arm
+    # alone still carries the turn path's own cost, which the layer does not add. Paired
+    # by query index, because both arms ran the same queries in the same order. On a real
+    # vendor an uncached message pays ~the whole ``waitMs`` (the answer takes ~250 ms and
+    # the turn stops waiting at 50), while a cache hit answers inside the wait and costs
+    # only the layer's own overhead.
+    def delta(on_values: list[float], off_values: list[float], label: str) -> None:
+        paired = [on - base for on, base in zip(on_values, off_values)]
+        if not paired:
+            return
+        print(
+            f"added wall-clock, {label:22} median {statistics.median(paired):7.2f} ms   "
+            f"worst {max(paired):7.2f} ms   n={len(paired)}"
+        )
+
     print()
-    print(
-        "added, warm uncached: "
-        f"median {statistics.median(miss[1:]):.2f} ms worst {max(miss[1:]):.2f} ms"
-    )
-    print(f"added, session's first message: {miss[0] - off[0]:.2f} ms (on minus off)")
+    delta(miss[1:], off[1:], "warm uncached (ON-OFF)")
+    delta(hit, off, "cache hit (ON-OFF)")
+    delta(miss[:1], off[:1], "session's first message")
     print(f"late answers delivered by the next message: {deferred}/{len(QUERIES)}")
+    if deferred == 0:
+        # The delta is the VENDOR's health as much as it is our code: an uncached message
+        # costs the whole ``waitMs`` only when an answer is still outstanding when the wait
+        # expires, and a leg that fails at once (a dead credential, the common case in a
+        # scratch environment) makes the turn return in ~2 ms. A run that reports ~+0.4 ms
+        # without saying so reads as though the layer were free, which is how an earlier
+        # round's docstring ended up 20x off.
+        print(
+            "NOTE: nothing was delivered late, so the ON arm may have stopped waiting early "
+            "(see the log above).\n"
+            "      A healthy vendor that misses the wait gives the ~whole waitMs; a leg that "
+            "fails at once gives ~0."
+        )
     await service.aclose()
     return 0
 

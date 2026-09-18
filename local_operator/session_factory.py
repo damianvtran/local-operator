@@ -1350,27 +1350,33 @@ DEFAULT_CLASSIFICATION_TIMEOUT_MS = 1500
 #: roster that is ~250 ms median — waiting for it would put the vendor's model time
 #: on the turn's critical path, which the budget explicitly excludes.
 #:
-#: WHAT IT ACTUALLY COSTS, measured on the real path (27-candidate roster, real
-#: vendor, default settings, ``/tmp/classify_wait_probe.py``), and reported as the
-#: DIFFERENCE against the layer being off so the pre-existing cost of the turn path
+#: WHAT IT ACTUALLY COSTS, measured on the real path (27-candidate roster, default
+#: settings, ``scripts/classification_latency_probe.py``) and reported as the
+#: DIFFERENCE against the layer being off, so the pre-existing cost of the turn path
 #: is not claimed as ours:
 #:
-#: - warm message: +2 to +4 ms median, +33 to +56 ms worst (the spread is the shared
-#:   machine, not the code — the layer-OFF arm shows +24 to +28 ms worst in the same runs);
-#: - cache hit: ~+2 to +4 ms;
-#: - THE FIRST MESSAGE OF A SESSION is the expensive one, and it is honest to say so:
-#:   +22 to +32 ms of our own time across runs
-#:   (``scripts/classification_latency_probe.py``, 27-candidate roster, real vendor),
-#:   because the first call pays one-off setup before its first await, where no wait
-#:   budget can reach it. That cost is NOT explained by the client construction: the
-#:   paired arms — with and without ``ClassificationService.warm_up``, which moves a
-#:   measured 19-36 ms first ``httpx.AsyncClient`` to session build — came out level
-#:   (30.7 vs 32.0 ms median), and ``build_state`` measures 0.05 ms. Open in the
-#:   contract, not explained here.
+#: - a warm message against a VENDOR THAT DOES NOT ANSWER inside the wait costs the
+#:   WAIT: **+50.9 to +52.1 ms median** over four runs (ON 52.75-53.80 ms, OFF
+#:   1.69-2.73 ms). That is the number the budget is about, and it is bounded by
+#:   ``waitMs`` — never by the vendor's ~250 ms answer, which is what puts this key
+#:   between the turn and the model;
+#: - a vendor that answers INSIDE the wait — a cache hit, or a leg that fails at once
+#:   — costs **~0 to +2 ms**, because the turn stops waiting the moment it has an
+#:   answer. Measured with a dead credential the whole steady state reads ~+0.4 ms for
+#:   this reason, so a run must say which arm it measured (the committed script prints
+#:   the service's own cost/skip lines and warns when nothing was delivered);
+#: - a session's FIRST message costs **+22 to +32 ms** more (four runs here, 26.7-31.1
+#:   ms in the reviewer's): one-off setup before the first await, which no wait budget
+#:   can bound. It is NOT the client construction — the paired arms with and without
+#:   ``ClassificationService.warm_up`` (which moves a measured tens-of-milliseconds
+#:   first ``httpx.AsyncClient`` to session build) came out level at 30.7 vs 32.0 ms —
+#:   and ``build_state`` measures 0.05 ms. Open in the contract, not explained here.
 #:
-#: So: the ceiling holds on the steady state, and a session's first message costs a
-#: few tens of milliseconds once. Anything slower than the wait is delivered by the
-#: next message instead (see ``_harvest_classification``).
+#: So: an uncached message costs the wait the operator configured (~51 ms, inside the
+#: 100 ms ceiling and AT the 50 ms ideal rather than under it), a message that finds an
+#: answer already in hand costs ~nothing, and a session's first message pays a few tens
+#: of milliseconds once. Anything slower than the wait is delivered by the next message
+#: instead (see ``_harvest_classification``).
 DEFAULT_CLASSIFICATION_WAIT_MS = 50
 
 #: How many background classification calls may be outstanding before the oldest is
@@ -1767,9 +1773,10 @@ def _attach_classification(
     all, because ``auto`` is read first and without it.
 
     The seam's keep-alive CLIENT is warmed here too, for the same reason and with a
-    number: see ``ClassificationService.warm_up`` (19-36 ms of SSL-context setup, once
-    per process, otherwise paid by a session's first call; the same docstring records
-    that the first message did not measurably get faster in paired runs).
+    number: see ``ClassificationService.warm_up`` (tens of milliseconds of SSL-context
+    setup — 19-81 ms across six fresh-process runs — once per process, otherwise paid by
+    a session's first call; the same docstring records that the first message did not
+    measurably get faster in paired runs).
 
     Degrades rather than failing the boot, exactly as the sibling knowledge
     wiring does: a layer that cannot be built is a line in ``warnings_out`` and a
@@ -1787,8 +1794,8 @@ def _attach_classification(
         )
 
         hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
-        # …and its keep-alive client is built HERE, not on the first message: a
-        # measured 19-36 ms of SSL-context setup (first construction in a process),
+        # …and its keep-alive client is built HERE, not on the first message: tens of
+        # milliseconds of SSL-context setup (19-81 ms across six fresh-process runs),
         # paid before the call's first await, so no wait budget can bound it. No
         # connection is opened — the object only — and the paired-run caveat on what
         # this buys is in ``ClassificationService.warm_up``.
@@ -2154,37 +2161,40 @@ def _classification_block(
     return "\n".join(lines)
 
 
-def _delivered_view(recommendation: Any, urls: Sequence[str], *, late: bool) -> Any:
-    """The recommendation AS DELIVERED: what reached the prompt, and when it was asked for.
+def _delivered_view(
+    recommendation: Any, resources: tuple[Any, ...], *, late_urls: tuple[str, ...]
+) -> Any:
+    """The recommendation AS DELIVERED: every resource this prompt gained, and its attribution.
 
-    Handed to the seam's ``notice()`` instead of the original, for two reasons and
-    both are honesty rather than polish:
+    Handed to the seam's ``notice()`` instead of the original, for two reasons and both
+    are honesty rather than polish:
 
-    - the line it builds lists ``recommendation.resources``, and a line naming a
-      resource the dedupe or the cap dropped would be the over-claim the
-      delivery-time notice exists to avoid;
-    - ``late`` says the answer missed its own turn's wait and is being delivered by
-      THIS message, which the line has to say out loud or it reads as advice about
-      the message it now sits under (design round 1, D2). On a real vendor that is
-      the ordinary case, not the edge one: the wait is 50 ms against a ~250 ms
-      answer.
+    - ``resources`` is the UNION of what every answer delivered into THIS prompt
+      contributed, in the order the sections were appended. The original carries only
+      one answer's set (``announced[-1]``), so a prompt that gained a late answer and
+      its own could only ever have been named by half of it (QA round 4, Q1);
+    - ``late_urls`` names the resources that came from an EARLIER message, which the
+      line has to say out loud or it reads as advice about the message it now sits
+      under (design round 1, D2) — and per RESOURCE, because a mixed union has no
+      single true label.
 
-    Returned as the original object when neither fact changes anything (nothing
-    dropped, nothing late), so a host's own classifier keeps its own type unless it
-    really was trimmed. A seam whose recommendation is not a dataclass keeps the
-    untrimmed one: the line may then be optimistic by a resource, which is a
-    smaller lie than failing the notice.
+    The base object supplies everything else the line or a caller may read (vendor,
+    cost, latency, and whatever a host's own type carries), so it stays ``announced[-1]``
+    — the newest answer, whose metadata describes the run that produced the fresher half.
+
+    Returned as the original object when this prompt added nothing to it (same resources,
+    nothing late), so a host's own classifier keeps its own type. A seam whose
+    recommendation is not a dataclass keeps the original too: the line may then be
+    optimistic or misattributed by a resource, which is a smaller lie than failing the
+    notice entirely.
     """
-    resources = tuple(getattr(recommendation, "resources", ()) or ())
-    kept = tuple(
-        resource
-        for resource in resources
-        if str(getattr(resource, "resource_url", "") or "") in set(urls)
-    )
-    if len(kept) == len(resources) and not late:
+    if not resources:
+        return recommendation
+    own = tuple(getattr(recommendation, "resources", ()) or ())
+    if not late_urls and own == resources:
         return recommendation
     try:
-        return replace(recommendation, resources=kept, late=late)
+        return replace(recommendation, resources=resources, late_urls=late_urls)
     except Exception:  # noqa: BLE001 — a foreign seam's result is not a dataclass
         return recommendation
 
@@ -2401,7 +2411,8 @@ async def _select_knowledge_block(
     carried: set[str] = set()
     announced: list[Any] = []
     announced_urls: list[str] = []
-    announced_late = False
+    announced_resources: list[Any] = []
+    announced_late_urls: list[str] = []
     for answer, late in answers:
         urls: list[str] = []
         block = _classification_block(
@@ -2422,10 +2433,21 @@ async def _select_knowledge_block(
         carried.update(urls)
         announced.append(answer)
         announced_urls.extend(urls)
-        # LATENESS is a property of the LINE, not of any one answer: if any of the
-        # resources on it came from an earlier message, the attribution has to say
-        # so, or the sentence reads as advice about the message it sits under.
-        announced_late = announced_late or late
+        # THE UNION'S OWN RESOURCES, not the last answer's. The notice names what this
+        # prompt gained, and a prompt can gain an earlier message's answer AND its own —
+        # so the object handed to ``notice()`` has to carry both sets' resources, or the
+        # line can only describe one of them (QA round 4, Q1: it named the last answer's
+        # while labelling the whole thing from that answer).
+        #
+        # LATENESS is per RESOURCE for the same reason: one label over a mixed union is
+        # false of half of it, and the label used to come from whichever answer arrived
+        # last.
+        rendered = set(urls)
+        for candidate in getattr(answer, "resources", ()) or ():
+            if str(getattr(candidate, "resource_url", "") or "") in rendered:
+                announced_resources.append(candidate)
+                if late:
+                    announced_late_urls.append(str(candidate.resource_url))
     if announced and not _already_announced(hooks, announced_urls):
         # THE NOTICE RIDES DELIVERY, not the call: it is emitted here, once, for the
         # resources this prompt actually gained. A call that missed the wait is not
@@ -2439,7 +2461,11 @@ async def _select_knowledge_block(
         # the user last saw", and a line its own gate suppressed was not seen.
         if await _emit_classification_notice(
             hooks,
-            _delivered_view(announced[-1], announced_urls, late=announced_late),
+            _delivered_view(
+                announced[-1],
+                tuple(announced_resources),
+                late_urls=tuple(announced_late_urls),
+            ),
         ):
             hooks.classification_last_announced = tuple(announced_urls)
     elif announced:

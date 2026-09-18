@@ -541,11 +541,43 @@ async def test_a_late_answer_is_attributed_to_the_message_it_answers(manager, in
     line = subject.notice(fresh)
     assert line is not None and "for this message" in line
 
-    late = dataclasses.replace(fresh, late=True)
+    late = dataclasses.replace(fresh, late_urls=("skill://minerva-deploy",))
     late_line = subject.notice(late)
     assert late_line is not None
     assert "for your previous message" in late_line
     assert "for this message" not in late_line
+
+
+async def test_a_mixed_delivery_tags_each_resource_and_never_lies(manager, install_legs) -> None:
+    """One prompt, both sets: the union's only honest rendering is per resource.
+
+    The line used to be labelled from the answer that arrived LAST, so a delivery that
+    carried the previous message's answer and this message's own announced both "for
+    your previous message" — telling the user a resource chosen for the question they
+    just asked came from the one before it (QA round 4, Q1). Neither whole-line label is
+    true of the union, so each resource carries its own; the two uniform cases keep the
+    short sentence, which is what the row budget wants.
+    """
+    subject, _ = service(
+        manager,
+        install_legs,
+        radient={"script": [choice_response("recommend_skill", "minerva-deploy")]},
+    )
+    fresh = await subject.recommend_resources(request())
+    assert len(fresh.resources) == 1
+
+    other = dataclasses.replace(
+        fresh,
+        resources=(*fresh.resources, candidate("tunnel", kind="guide")),
+        late_urls=("skill://minerva-deploy",),
+    )
+    line = subject.notice(other)
+    assert line is not None
+    assert line == (
+        "Suggestion added: skill://minerva-deploy (your previous message), "
+        "guide://tunnel (this message)"
+    )
+    assert "for your previous message" not in line.replace("(your previous message)", "")
 
 
 async def test_the_notice_is_silent_when_switched_off(manager, install_legs) -> None:

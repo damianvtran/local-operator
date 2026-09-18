@@ -7480,13 +7480,17 @@ class Session:
         self._queued_notices.append((text, kind))
 
     def _discard_queued_notices(self) -> None:
-        """Drop the notices of a turn that never produced an answer.
+        """Drop whatever a finished turn left queued. The counterpart to the flush.
 
-        The counterpart to :meth:`_flush_queued_notices`, called from ``_run_turn``'s
-        ``finally``: queued state may only ever be released by the turn that raised
-        it, because every line in the queue is attributed to THAT message's answer.
-        Logged rather than silent, so a turn that dies before its reply still leaves
-        a trace of what the user did not see."""
+        Every line in the queue is attributed to the message whose ANSWER was being
+        built, so a line may only be released by the turn that raised it — and only the
+        flush, which runs once that answer is persisted, releases it as a line. What
+        reaches here is therefore either nothing (the flush emptied the queue, which is
+        what a normal turn and an aborted-but-persisted one both do) or a line whose
+        answer will never arrive: see ``_run_turn``'s ``finally`` for the three cases.
+
+        Logged rather than silent, so a turn that dies before its reply still leaves a
+        trace of what the user did not see."""
         if not self._queued_notices:
             return
         dropped, self._queued_notices = self._queued_notices, []
@@ -8342,14 +8346,26 @@ class Session:
             # write that fails must not replace the original exception (which
             # is what the caller and the incident journal need to see).
             await self._persist_progress(self._context.messages)
-            # …and the notices that turn queued are DISCARDED, not flushed. Reaching
-            # here means the turn never got past the flush point above (an exception
-            # out of the loop, Ctrl+C, dispose, a steering teardown), so no answer
-            # landed and every line it queued describes a prompt whose reply never
-            # arrived. Flushing them would print "for this message" under a turn that
-            # produced nothing; keeping them for the NEXT turn is worse, and was the
-            # bug: the stale line arrived ahead of that turn's own, misattributed to a
-            # message that delivered nothing at all (review round 3, MINOR 2).
+            # …and the notices that turn queued are DISCARDED rather than flushed. What
+            # that means depends on how the turn ended, and there are three cases:
+            #
+            # * a turn that reached the flush above — the ordinary one, and also an
+            #   ABORTED stream, which returns normally, persists the partial answer and
+            #   flushes — finds the queue already empty, so this is a no-op;
+            # * a turn CANCELLED before the flush (Ctrl+C, dispose, a steering teardown)
+            #   never produced an answer, and its line would attribute a suggestion to a
+            #   message that delivered nothing;
+            # * a turn that RAISES after the answer landed (out of
+            #   ``_persist_new_messages``, ``_drain_pending_fork``, the todo checkpoint)
+            #   did answer, but its line is dropped with the failing turn rather than
+            #   delivered onto the next message, where it would name the wrong question.
+            #   A line queued after the flush point goes the same way, by construction:
+            #   this and the flush are the only two places the queue is emptied.
+            #
+            # Flushing here instead was round 3's bug in the other direction — the
+            # stale line survived its turn and arrived ahead of the NEXT turn's own,
+            # misattributed to a message that delivered nothing (round 4, MINOR-2, for
+            # the claim that all three cases are one).
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False

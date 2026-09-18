@@ -266,6 +266,26 @@ def test_resolve_hosting_model_no_hosting_raises_hosting_error(
 # ---------------------------------------------------------------------------
 
 
+#: The one-row budget for a RECEIPT SENTENCE, and it is a measured number with a
+#: provenance rather than a round figure: at 100 columns the designer's rendered frame
+#: (`save_capture`, production stylesheet) gave the notice block 75 cells and the
+#: sentence inside it 71 — the glyph, the gutter and the indent take the rest. QA round 4
+#: (Q4) is why this replaced `<= 90`: 90 was never measured, and the sentences these
+#: tests assert are 54-63 cells, so the old bound could not fail for anything a user
+#: would see wrap.
+#:
+#: WHAT IT DOES AND DOES NOT COVER. The branches whose text is fully determined here —
+#: no-hosting (54), first-run write (60), a decision-only login against a typical
+#: configured pair (63) — are asserted against it. The branches whose length is the IDS'
+#: are not, because no copy change can bound them: measured, `openrouter/anthropic/
+#: claude-opus-5-20260101` puts the sentence at 84 and the repairing sentence
+#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-chat'`)
+#: at 83, both of which wrap. That is a real, known wrap in a branch no alternative copy
+#: would fix, and it is recorded here rather than hidden by an assertion that would pass
+#: for the wrong reason.
+RECEIPT_ROW_CELLS = 71
+
+
 def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
     """``login typesafe`` stores a credential; it must not move the routing.
 
@@ -291,13 +311,15 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
     # D5 took the harness's vocabulary off it: no "Jev", no "decision-model calls",
     # no "resource recommendations", and it ends with its own full stop (D6).
     assert configured.receipt == "Nothing changed — chats keep running on deepseek/deepseek-chat."
-    # FITS ONE ROW, which is design round 2's D8 measured against the RENDERED row
-    # capacity rather than guessed: the designer read the transcript's 100-column
-    # content box at exactly 90 cells, and the round-2 sentence was 94 — so it still
-    # wrapped to two rows under the answer it was pinned to. The clause that went is
-    # the one explaining WHY nothing changed; the line above already says the key was
-    # stored, and "nothing changed" is the half the user asked for.
-    assert len(configured.receipt) <= 90, len(configured.receipt)
+    # THIS BRANCH, named rather than assumed: the configured-hosting sentence is the
+    # only one that can name what serves, and the length below is a claim about IT —
+    # a bare ``<= RECEIPT_ROW_CELLS`` would pass on any branch's string, including one
+    # this test never meant to describe. The other branch's tell (it points at
+    # ``/model`` because there is nothing serving to name) must not appear here.
+    assert "deepseek/deepseek-chat" in configured.receipt
+    assert "/model" not in configured.receipt
+    assert len(configured.receipt) <= RECEIPT_ROW_CELLS, len(configured.receipt)
+    assert len(configured.receipt) == 63, "the measured length this test's budget is about"
 
     # Case 2: hosting empty (a fresh config, or `hosting: ""`).
     for empty in ("", None):
@@ -312,6 +334,8 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
         assert plan.receipt is not None
         # No routing to name, so the sentence names the way out of that state.
         assert plan.receipt == "Nothing changed — pick a chat model with /model first."
+        assert len(plan.receipt) == 54, len(plan.receipt)
+        assert len(plan.receipt) <= RECEIPT_ROW_CELLS
         # The wire vocabulary the design round took off the default copy.
         assert "Jev" not in plan.receipt
         assert "decision-model" not in plan.receipt
@@ -363,11 +387,12 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     auth_cli._apply_login_defaults("typesafe")
     printed = capsys.readouterr().out
 
-    # BYTE-FOR-BYTE the planner's sentence, capital and full stop included: the CLI and
-    # the TUI render the same string, and the CLI used to upper-case its first letter
-    # while the TUI did not (design round 2, D9) — so this assertion is the two front
-    # ends agreeing, not a wording check.
-    assert plan_receipt_when_configured() in printed
+    # THE LITERAL sentence, capital and full stop included — deliberately not the
+    # planner's own output run a second time, which would move with the copy and so
+    # could never fail (review round 4, NIT). The two front ends agreeing is a
+    # consequence of the print sites, not of this assertion: ``auth_cli`` prints
+    # ``plan.receipt`` and the TUI's ``_apply_login_defaults`` returns ``plan.receipt``
+    # for ``notice(..., "note")``, so pinning the bytes HERE pins what both render.
     assert "Nothing changed — chats keep running on deepseek/deepseek-chat." in printed
     # ...and the routing is untouched: the configured pair, unchanged.
     assert manager.get_config_value("hosting") == "deepseek"
@@ -395,13 +420,9 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     # A normal provider through the SAME command still adopts, and prints its
     # write receipt — the two paths share one print site.
     auth_cli._apply_login_defaults("deepseek")
-    assert "Set default hosting to 'deepseek'" in capsys.readouterr().out
-
-
-def plan_receipt_when_configured() -> str:
-    """The receipt a decision-only login produces with a working hosting configured."""
-    from local_operator.providers.login_defaults import plan_login_defaults
-
-    plan = plan_login_defaults("typesafe", "deepseek", "deepseek-chat")
-    assert plan.receipt is not None
-    return plan.receipt
+    write_receipt = capsys.readouterr().out.strip()
+    # The WRITE branch too: literal, and inside the same row budget. This is the
+    # receipt that would otherwise be the silent one — the round-4 NIT's point is that
+    # every branch of this copy is asserted against the bytes a user sees.
+    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-chat'."
+    assert len(write_receipt) == 60 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)

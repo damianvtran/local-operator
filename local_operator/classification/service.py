@@ -313,18 +313,42 @@ class ClassificationService:
         (``session_factory._log_classification_cost``), which is the operator's
         surface for it, and a user's money belongs in ``/usage``.
 
-        ATTRIBUTION is the other half of the design round. ``Recommendation.late``
-        marks an answer that missed its own turn's wait — against a real vendor
-        (~250 ms) and a 50 ms wait that is the ORDINARY case, delivered by the next
-        message — so the sentence says which message it belongs to. Without that it
-        reads as advice about the question it happens to sit under, which is
-        actively wrong rather than merely unhelpful (D2).
+        ATTRIBUTION is the other half of the design round. ``Recommendation.late_urls``
+        names the resources that were asked for by an EARLIER message — against a real
+        vendor (~250 ms) and a 50 ms wait that is the ORDINARY case, delivered by the
+        next message — so the sentence says which message each resource belongs to.
+        Without that it reads as advice about the question it happens to sit under,
+        which is actively wrong rather than merely unhelpful (D2). A prompt that gained
+        BOTH sets is the one case that tags each resource separately: one label over a
+        union would have to be false of half of it (QA round 4, Q1).
         """
         if not self.notice_enabled or not recommendation.resources:
             return None
-        urls = ", ".join(candidate.resource_url for candidate in recommendation.resources)
-        asked_for = "your previous message" if recommendation.late else "this message"
-        return f"Suggestion added for {asked_for}: {urls}"
+        resources = tuple(recommendation.resources)
+        # ``getattr``: the seam contract is these two methods, and a host's own
+        # recommendation type is whatever it says it is — the harness only guarantees
+        # the field set it was compiled against. Without the attribute the line falls
+        # back to the uniform "for this message", which is the pre-attribution sentence:
+        # worse than the truth, and much better than the AttributeError that made the
+        # whole notice disappear.
+        late = set(getattr(recommendation, "late_urls", ()) or ())
+        if not late:
+            urls = ", ".join(candidate.resource_url for candidate in resources)
+            return f"Suggestion added for this message: {urls}"
+        if len(late) == len(resources):
+            urls = ", ".join(candidate.resource_url for candidate in resources)
+            return f"Suggestion added for your previous message: {urls}"
+        # MIXED, and this is the only shape that tags per resource: the union cannot
+        # carry one attribution without lying about half of it (QA round 4, Q1 — the
+        # late-first branch used to print "for your previous message" over a set whose
+        # other half was chosen for the message the line sits under). Longer by design,
+        # and only when the two sets really did arrive together.
+        tagged = ", ".join(
+            f"{candidate.resource_url} "
+            f"({'your previous message' if candidate.resource_url in late else 'this message'})"
+            for candidate in resources
+        )
+        return f"Suggestion added: {tagged}"
 
     # -- internals ---------------------------------------------------------
 
@@ -551,11 +575,13 @@ class ClassificationService:
         """Build the keep-alive client NOW, so a session's first message does not.
 
         WHAT IT COSTS AND WHAT IT BUYS, measured (``scripts/classification_latency_probe.py
-        --clients-only``, a fresh process per run, five constructions each): **19-36 ms
-        for the first ``httpx.AsyncClient``, then 3-4 ms each** — 19.4 / 23.0 / 36.0 ms
-        across three runs, because the SSL context it builds dominates and the shared
-        machine varies. It is built synchronously, before the call reaches its first
-        await, so no wait budget can bound it; ``--prewarm`` pays it at session build.
+        --clients-only``, a fresh process per run, five constructions each): **tens of
+        milliseconds for the first ``httpx.AsyncClient``, then 3-6 ms each** — 19.4 /
+        23.0 / 36.0 ms in three quiet runs here and 27.0 / 81.3 / 42.0 ms in three on a
+        loaded machine, which is the spread to expect, because the SSL context it builds
+        dominates and the host is shared. It is built synchronously, before the call
+        reaches its first await, so no wait budget can bound it; ``--prewarm`` pays it at
+        session build.
 
         AN HONEST LIMIT ON THE CLAIM: paired runs of that probe (three per arm, same
         machine, same roster) put a session's FIRST message at +22 to +32 ms of our own
