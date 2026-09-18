@@ -463,21 +463,48 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
     orphan is a harmless zero-byte-of-data directory entry, but they accumulate
     once per crashed startup and turn ``ls <venv>/bin`` into a junkyard.
 
-    Only entries whose embedded pid is no longer alive are removed, so a plant
-    running concurrently in another worktree is never disturbed.
+    A ZOMBIE IS NOT A LIVER PLANT, and that distinction is the one this sweep
+    used to get wrong at exactly the moment it matters. ``os.kill(pid, 0)``
+    answers for an exited-but-unreaped process exactly as it does for a running
+    one — measured here: a ``kill -9``'d child reads as alive through signal 0
+    while ``ps`` reports it as ``Z``. So when a whole fleet dies at once (the
+    incident shape this repo has now seen three times) every leaked temp
+    belonged to a zombie and NONE was reclaimed, because the parent that would
+    have reaped it is the long-lived frontend that just lost all its children.
+    The zombie question is asked through :mod:`local_operator.procstate`, the
+    module that owns it, rather than through a second probe written here that
+    could answer it differently — and in ONE ``ps`` fork for the whole set of
+    signal-0 survivors, the shape ``procstate.zombie_states`` exists for. A pid
+    that is alive in any other state, or another user's (``EPERM`` on signal
+    0), is still left alone.
     """
     try:
+        # Function-local import: this sweep runs only on the REPLANT path, and
+        # ``procstate`` pulls ``subprocess`` in with it — the house rule here is
+        # that the common startup (a stat probe and no writes) pays for nothing
+        # it does not use (see the ``update`` and ``ctypes`` imports below).
+        from local_operator import procstate
+
+        gone: list[Path] = []
+        unproven: dict[int, Path] = {}
         for entry in directory.glob(f".{prefix}.*.tmp"):
             pid_text = entry.name[len(prefix) + 2 : -4]
             if not pid_text.isdigit():
                 continue
             try:
                 os.kill(int(pid_text), 0)
-                continue  # still running: not ours to clean
             except ProcessLookupError:
-                pass
+                gone.append(entry)
+                continue
             except OSError:
                 continue  # EPERM: alive but another user's — leave it
+            unproven[int(pid_text)] = entry
+        zombies = procstate.zombie_states(unproven)
+        # A pid absent from the probe's answer reads as NOT a zombie, the same
+        # fail-closed direction ``procstate`` documents: an unprobeable set may
+        # cost a leftover file, and must never cost a live plant its temp.
+        gone.extend(entry for pid, entry in unproven.items() if zombies.get(pid, False))
+        for entry in gone:
             try:
                 entry.unlink()
             except OSError:
@@ -508,6 +535,30 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
             pass
         os.link(real, tmp)
         os.replace(tmp, link)
+        # THE TEMP IS CONSUMED ONLY WHEN THE TWO NAMES ARE DIFFERENT INODES, and
+        # the ordinary replant is the case where they are the SAME one: trigger
+        # (c) (a missing or wrong companion libpython) fires while the link
+        # already names the right interpreter, so ``link`` and ``tmp`` are two
+        # hardlinks to one inode — and POSIX says ``os.replace`` of two
+        # hardlinks to one file "shall return successfully and perform no other
+        # action". The temp therefore survived EVERY such replant, one per
+        # stale-fleet startup: measured on this host as 573 leftovers across 17
+        # generations, each a real directory entry in ``<venv>/bin`` (and
+        # reproduced directly: one ``_plant_hardlink`` call onto the link's own
+        # inode leaves ``.<BRAND>.<pid>.tmp`` behind).
+        #
+        # Unlinking the NAME is safe in both shapes and touches nothing else:
+        # when the replace did consume it this raises ``ENOENT``; when it did
+        # not, the temp is a second name for ``link``'s own inode, so removing
+        # it leaves ``link`` — the file the caller asked for — exactly as it
+        # was, and every process already running that inode keeps running it.
+        # ``link`` itself is never unlinked here, and no mode or owner is
+        # changed: see the module docstring on why mutating the shared inode's
+        # metadata is forbidden.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass  # already consumed by the replace — the expected case
         return True
     except OSError as exc:
         # EXDEV, EPERM (a read-only or foreign-owned prefix), ENOSPC — all mean

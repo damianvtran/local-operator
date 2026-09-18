@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,82 @@ class TestStaleness:
 
         assert not bin_orphan.exists(), "bin/ orphan must be swept"
         assert not lib_orphan.exists(), "lib/ orphan must be swept too"
+
+    def test_replanting_onto_an_identical_link_consumes_its_temp(self, branded):
+        """REGRESSION: the ordinary replant must not leak its staging name.
+
+        Trigger (c) — the missing companion libpython — fires while ``branded``
+        ALREADY names the right inode, so the plant's ``os.replace(tmp, link)``
+        moves one hardlink onto another hardlink of the SAME file. POSIX says
+        that call "shall return successfully and perform no other action", so
+        the temp was never consumed: measured on this host as 573 leftovers
+        across 17 generations, one per stale-fleet startup, and the reproduced
+        shape below is a single plant call leaving one behind.
+
+        This is checked through the real entry point, because that is where the
+        leak reaches the operator's ``<venv>/bin`` — and because the sweep that
+        runs immediately before the plant cannot mask it: the temp carries THIS
+        process's pid, which is alive.
+        """
+        real = Path(os.path.realpath(sys.executable))
+        assert os.stat(branded).st_ino == os.stat(real).st_ino, "precondition: same inode"
+        name = procname._libpython_name()
+        assert name
+        lib = branded.parent.parent / "lib" / name
+        lib.unlink()
+        lib.symlink_to("/nonexistent/libpython.dylib")  # trigger (c), and only (c)
+
+        assert procname.ensure_branded_interpreter() == branded
+
+        leftovers = sorted(path.name for path in branded.parent.glob(f".{procname.BRAND}.*.tmp"))
+        assert leftovers == [], f"the replant leaked its temp: {leftovers}"
+        assert branded.exists(), "the link the caller asked for must survive"
+
+    def test_orphan_temp_of_a_zombie_planter_is_swept(self, branded):
+        """A SIGKILLed plant is a ZOMBIE, not a live pid, and its temp is litter.
+
+        ``os.kill(pid, 0)`` answers for an exited-but-unreaped process exactly
+        as it does for a running one — measured here on a killed child that
+        ``ps`` reports as ``Z``. The sweep therefore kept every temp of every
+        crashed plant for as long as the parent failed to reap it, which is
+        precisely the fleet-wide case it exists for: when 25 runtimes die at
+        once, the parent that would reap them is the frontend that just lost
+        them, so signal 0 goes on saying "alive" for all 25.
+
+        A pid that is alive in any other state must still be left alone —
+        ``test_orphan_temps_from_dead_plants_are_swept`` pins that half.
+        """
+        from local_operator import procstate
+
+        # ``posix_spawn`` rather than ``os.fork``/``Popen``: this runs inside an
+        # xdist worker (multi-threaded, so ``fork`` warns about deadlocks), and
+        # the child must die WITHOUT the parent reaping it — which is exactly
+        # what a Popen object cannot promise, since every poll/context-manager
+        # exit reaps it. The pid is kept, never handed to anything that waits.
+        pid = os.posix_spawn(sys.executable, [sys.executable, "-c", "pass"], dict(os.environ))
+        try:
+            # Wait on the EVENT (this pid is now a zombie), never on a clock.
+            for _ in range(500):
+                if procstate.is_zombie(pid):
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail(f"pid {pid} never became a zombie")
+            # Precondition for the bug rather than a restatement of it: the
+            # probe the sweep used to rely on cannot tell a zombie from a
+            # running plant, so this pid reads alive to it.
+            os.kill(pid, 0)
+
+            bin_dir = branded.parent
+            zombie_temp = bin_dir / f".{procname.BRAND}.{pid}.tmp"
+            zombie_temp.write_bytes(b"orphan of a killed plant")
+
+            branded.unlink()  # force the replant path, which is where the sweep runs
+            assert procname.ensure_branded_interpreter() == branded
+
+            assert not zombie_temp.exists(), "a zombie plant's temp must be swept"
+        finally:
+            os.waitpid(pid, 0)
 
     def test_unreadable_libpython_parent_does_not_raise(self, branded, tmp_path):
         """QA round 2, Q3: `_needs_replant` is contractually no-raise.
