@@ -305,13 +305,16 @@ def test_the_fork_window_drops_the_marker() -> None:
     cannot drive. What it catches is the defect round 2's F1 named: the call kept
     and its result discarded, with plain `os.environ` handed to the spawn.
 
-    PARSED rather than substring-matched (round 4, F3). The spawn rides
-    `asyncio.to_thread(backend.spawn, launch, <env>)`, so the environment is the
-    last argument of the `to_thread` call — and an equivalent refactor that binds
-    it first (`fork_env = without_agent_shell_marker(os.environ)` then
-    `to_thread(backend.spawn, launch, fork_env)`) keeps that guarantee while a
-    text pin called it a regression. A name bound to the helper is therefore
-    accepted; a raw `os.environ`, or the helper's result discarded, is not.
+    PARSED rather than substring-matched (round 4, F3), and what it asserts about
+    the environment is the ARGUMENT rather than the spelling (round 5, F1). The
+    spawn rides `asyncio.to_thread(backend.spawn, launch, <env>)`, so the
+    environment is that call's last argument; it must be
+    `without_agent_shell_marker(os.environ)`, called inline or bound to a name
+    first. The bound form is the equivalent refactor a text pin called a
+    regression, and a bound form whose value is anything else — `{}`,
+    `os.environ.copy()`, a rebinding of the name — is the helper's result
+    discarded, which is the defect this replaces an `os.environ`-shaped string
+    check for.
     """
     import ast
     import inspect
@@ -324,41 +327,57 @@ def test_the_fork_window_drops_the_marker() -> None:
     # class-level indentation, which `ast.parse` rejects outright.
     tree = ast.parse(textwrap.dedent(source))
 
-    dropped: set[str] = set()
+    def strips_the_marker(call: ast.expr) -> bool:
+        """`without_agent_shell_marker(os.environ)`, and nothing else."""
+        if not isinstance(call, ast.Call):
+            return False
+        func = call.func
+        if not (isinstance(func, ast.Name) and func.id == "without_agent_shell_marker"):
+            return False
+        if len(call.args) != 1:
+            return False
+        arg = call.args[0]
+        return (
+            isinstance(arg, ast.Attribute)
+            and arg.attr == "environ"
+            and isinstance(arg.value, ast.Name)
+            and arg.value.id == "os"
+        )
+
+    # Names bound in the method to a proper call, so the bound-name refactor is
+    # accepted while a rebinding is not — the LAST binding wins, as it would at
+    # runtime.
+    bound: dict[str, bool] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-            func = node.value.func
-            if isinstance(func, ast.Name) and func.id == "without_agent_shell_marker":
-                dropped.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bound[target.id] = strips_the_marker(node.value)
 
-    dispatches = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "to_thread"
-        and len(node.args) >= 3
-    ]
-    assert dispatches, "the fork's window must be opened through asyncio.to_thread"
+    def drops_the_marker(env: ast.expr) -> bool:
+        if strips_the_marker(env):
+            return True
+        return isinstance(env, ast.Name) and bound.get(env.id, False)
 
-    for node in dispatches:
-        first, env = node.args[0], node.args[-1]
-        assert (
-            isinstance(first, ast.Attribute) and first.attr == "spawn"
-        ), f"the threaded call is not a backend spawn: {ast.dump(first)}"
-        if isinstance(env, ast.Call):
-            assert isinstance(env.func, ast.Name) and env.func.id == "without_agent_shell_marker", (
-                "the fork window inherits the session's environment, so the marker "
-                "has to be dropped at the spawn"
-            )
-        else:
-            assert isinstance(env, ast.Name) and env.id in dropped, (
-                "the fork spawn's environment must come from "
-                "`without_agent_shell_marker`, called inline or bound to a name"
-            )
-    # And the raw copy is gone from the method entirely: it is the shape that was
-    # there before the fix.
-    assert "dict(os.environ)" not in " ".join(source.split())
+    # Both shapes a spawn can take: the threaded dispatch, and a direct
+    # `backend.spawn(launch, env)` — the environment is the LAST argument each way.
+    dispatches: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread":
+            first = node.args[0] if node.args else None
+            if isinstance(first, ast.Attribute) and first.attr == "spawn":
+                dispatches.append(node.args[-1])
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "spawn":
+            dispatches.append(node.args[-1])
+
+    assert dispatches, "the fork window's spawn must be pinned here"
+    for env in dispatches:
+        assert drops_the_marker(env), (
+            "the fork window inherits the session's environment, so the marker has "
+            "to be dropped at the spawn: pass `without_agent_shell_marker(os.environ)`"
+        )
 
 
 def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Path) -> None:

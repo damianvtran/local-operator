@@ -93,7 +93,10 @@ file and `AGENTS.md` both name it), and script harnesses declare themselves with
 not a silent equivalent either: a session it OPENS is stamped
 `origin.json` = `agent-shell`, so it stays out of the `/resume` picker, the
 desktop sidebar and the phone's list (a conversation it merely RESUMES is the
-operator's own work and is left alone). Isolating the run
+operator's own work and is left alone). The picker is a FILTERED VIEW, not the
+store: that session is still on disk at `<config>/sessions/<id>` — the id the run
+prints on its own stderr — and `lop --resume <id>` opens it, which is the route
+back for the run that forgot to isolate. Isolating the run
 (`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a test off the
 operator's own store; the stamp is the seatbelt for the run that forgets.
 
