@@ -430,15 +430,19 @@ SECTIONS: tuple[Section, ...] = (
     # ``Session._apply_config_change`` records.
     Section(
         "classification",
-        "Resource recommendations",
+        # THE NAME IS THE ONE THE TIPS USE, and it is the title rather than the
+        # description because the TUI paints the title on every settings frame
+        # while the description below reaches only the settings API. Round 1
+        # added the word to a row's help line and round 2 measured what that
+        # bought: the help paints on the SELECTED row's detail line, clipped
+        # from 78 columns down, so at rest the page said "Resource
+        # recommendations" twice and never the word a tip sent the user to look
+        # for (design round 2, D11). The runtime's own message is separate and
+        # unchanged: it says "Suggestion added…".
+        "Smart hints",
         Scope.NEW_SESSIONS,
-        # Names BOTH vocabularies deliberately. The splash tips and
-        # `guide://classification` call this feature "smart hints", so a user
-        # arriving here from a tip would otherwise search a page for a word it
-        # never uses (design round 1, D5). The label keeps its own wording: it
-        # is what the row and the runtime notice already say.
-        "Smart hints: advisory skills, guides and MCP servers a decision model "
-        "may suggest per message. Off keeps the prompt unchanged.",
+        "Advisory skills, guides and MCP servers a decision model may suggest "
+        "per message. Off keeps the prompt unchanged.",
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
@@ -2008,16 +2012,15 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.auto",
         path=("classification", "auto"),
         section="classification",
-        label="Resource recommendations",
+        label="Smart hints",
         kind=Kind.BOOL,
         default=False,
         # Same precedent as `values.effort.auto` (`model/effort_classifier.py`):
         # default OFF, because an upgrade must never silently change behaviour or
         # spend. The help says what ON does rather than what the feature is: the
-        # row's label already names the feature. It carries the word "hints"
-        # because that is what the splash tip and `guide://classification` call
-        # it, and this row is where a user who read the tip arrives (D5).
-        help="Off: the prompt is unchanged. On: adds advisory resources (smart hints).",
+        # label already names the feature, and it now names it in the one term
+        # the tips and `guide://classification` use (D11).
+        help="Off: the prompt is unchanged. On: a decision model may add advisory resources.",
         choices=_bool_choices(
             "a decision model may add advisory resources",
             "the prompt stays exactly as it is",

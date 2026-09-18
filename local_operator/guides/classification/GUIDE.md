@@ -28,12 +28,12 @@ Off by default, so an upgrade can never silently change behaviour or spend.
 lop config edit classification.auto true
 ```
 
-The same switch is `/settings → Resource recommendations`: that page, the runtime
-notice (*Suggestion added…*) and these tips each have their own words for one feature.
-The section is scoped to NEW sessions, so an edit lands on the next session you start —
-which is also when the decision vendor is resolved. In the file every key is
-`values.classification.<key>`; the CLI spells it `classification.<key>`, which is what
-`lop config list` prints:
+The same switch is `/settings → Smart hints` in the TUI — the tips, this guide and that
+page all use that name for it, while the runtime's own message says *Suggestion added…*
+and the config file calls it the classification layer. The section is scoped to NEW
+sessions, so an edit lands on the next session you start — which is also when the
+decision vendor is resolved. In the file every key is `values.classification.<key>`;
+the CLI spells it `classification.<key>`, which is what `lop config list` prints:
 
 | key | default | what it changes |
 | --- | --- | --- |
@@ -71,11 +71,14 @@ then start a new session.
 
 ## What it costs, and what it costs a turn
 
-Measured on the OpenRouter leg against a real skill library:
+Measured against a real skill library, mostly on the OpenRouter leg:
 
-- **~$0.00014–$0.00018 per call** against a full roster; input tokens are the whole
-  bill, so a small roster costs less (an isolated 14-candidate run measured $0.00006);
-- **~0.4–0.75 s** of the vendor's own model time in our own runs (0.38–0.74 s);
+- **~$0.00006–$0.00018 per call** — the bill is input tokens, so it tracks the roster: an
+  isolated 14-candidate run measured $0.00006, and a full skill library ~$0.00018 (the
+  example below is one of those calls);
+- **~0.2–0.9 s** of the vendor's own model time: eight real calls on the OpenRouter leg
+  measured 0.17 s to 0.87 s, median ~0.56 s (`scripts/classification_latency_probe.py`
+  re-measures this arm; the figure moves with the roster and the route);
 - **$0 on a repeat**: answers are cached per session, and a hit reports no spend.
 
 None of that is the turn's latency: a turn waits at most `waitMs` (50 ms) and then stops
@@ -94,9 +97,10 @@ classification: vendor=openrouter model=- tokens=4238/380 cost=$0.000178 latency
 ```
 
 `vendor` names the leg that answered, `resources` how many suggestions came back, and
-`tokens`/`cost`/`latency` are that call's own figures (`model` prints `-` where the
-answer carries no id). A cache hit keeps the vendor and reports `-` for the tokens and
-the cost, because it spent nothing.
+`tokens`/`cost`/`latency` are that call's own figures. `model` is always `-`: a
+recommendation carries no model id, so the field reports its absence rather than the
+leg's default. A cache hit keeps the vendor and reports `-` for the tokens and the cost,
+because it spent nothing.
 
 Two other lines answer the rest. `classification: no recommendation within 50 ms; the
 turn continues without one and the answer rides the next user message` (INFO) is the
@@ -109,7 +113,8 @@ recommendation (skipped=…)` (DEBUG) names why: `no-vendor` (no leg held a cred
 
 1. **No suggestions.** Check `auto` is true and that a leg holds a credential
    (`lop login-status`). An empty answer is not a failure — the block appears only when
-   the model actually picked something, which is the ordinary state with no decision key.
+   the model actually picked something. And a session that started with no usable
+   credential keeps reporting `no-vendor`: log in, then **start a new session**.
 2. **One leg misbehaving is survivable.** A leg answering 5xx or 429, or one whose key
    expired, does not break the layer — that call moves to the next leg and the layer
    reports the answer it got.
