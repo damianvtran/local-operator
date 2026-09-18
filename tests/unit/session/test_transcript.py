@@ -1802,3 +1802,168 @@ def test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises(tmp_pat
         Transcript(directory, defer_materialise=True)
 
     assert read_latest_custom(directory, "todo_snapshot") == {"x": "MARK\ufffdER-VALUE"}
+
+
+def test_a_deep_cursor_page_never_parses_the_rows_above_it(tmp_path, monkeypatch):
+    """The deep page's cost is ONE byte pass, not one decode per skipped row.
+
+    Measured on the operator's 262 MB journal before this change, a ``before_id``
+    page whose cursor sat near the HEAD cost 3.4-4.5 s against 8 ms for one near
+    the tail: the walk started at EOF and JSON-decoded every row above the cursor
+    on its way down, so the cost was the DISTANCE FROM EOF, re-paid on every page
+    of a scroll back. The cursor is now located in BYTES (``rfind`` over chunks,
+    no row parsing) and the walk runs from the located row, so what is decoded is
+    the page — whatever the cursor's depth.
+
+    STRUCTURAL, both halves, because neither alone is the claim: decodes counted
+    at ``TranscriptEntry.from_json`` (the seam the walk decodes at, and what the
+    old shape paid per skipped row) and bytes counted at ``Path.open``. A journal
+    of ~10 000 rows is used so a bound of a page cannot be met by a small file.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=10000, pad=900)
+    path = directory / TRANSCRIPT_FILENAME
+    size = path.stat().st_size
+    assert path.read_bytes().count(b"\n") == 10000  # the fixture is what it claims
+    cursor = ids[100]
+
+    decodes = {"count": 0}
+    real_from_json = TranscriptEntry.from_json
+
+    def counting_from_json(line: str) -> Any:
+        decodes["count"] += 1
+        return real_from_json(line)
+
+    monkeypatch.setattr(TranscriptEntry, "from_json", staticmethod(counting_from_json))
+
+    with _counted_reads(monkeypatch, path) as counted:
+        page = read_transcript_page(directory, before_id=cursor, limit=100)
+
+    assert [entry.id for entry in page.entries] == ids[0:100]
+    # The page (100 rows), the locator's one verification read, and the row the
+    # walk settles on. 9 900 rows went past UNDECODED — the whole point.
+    assert decodes["count"] <= 103, f"decoded {decodes['count']} rows for a 100-row page"
+    # And the bytes: one pass over the journal, never two.
+    assert counted[0] <= size + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+
+
+def test_the_windowed_search_stops_at_the_cursor_instead_of_the_file(tmp_path, monkeypatch):
+    """A cursor inside the window is answered without walking the file.
+
+    The window is a COST knob, so it is pinned small here (256 KiB on a 9.4 MB
+    journal) to make the difference visible: a cursor a few rows from the tail
+    must be found by the search itself, not by a scan that happens to be short.
+    """
+    monkeypatch.setattr(transcript_module, "_PAGE_LOCATE_WINDOW_BYTES", 256 * 1024)
+    directory, ids = _variant_journal(tmp_path, "plain", rows=10000, pad=900)
+    path = directory / TRANSCRIPT_FILENAME
+    size = path.stat().st_size
+    cursor = ids[9990]
+
+    with _counted_reads(monkeypatch, path) as counted:
+        page = read_transcript_page(directory, before_id=cursor, limit=100)
+
+    assert [entry.id for entry in page.entries] == ids[9890:9990]
+    assert counted[0] * 4 < size, "the search walked the journal past its own window"
+
+
+def test_the_cursor_locator_rejects_an_id_echoed_older_than_the_real_row(tmp_path):
+    """A nested ``{"id": …}`` must never become the page's boundary.
+
+    Checkpoint states carry nested objects with ids in them, and a real journal
+    was measured echoing a cursor id inside a payload. A boundary is only sound if
+    it is the NEWEST row carrying the id — the walk then runs from it toward the
+    older rows, so a boundary taken from an OLDER echo would sit before the real
+    cursor row and the walk would never meet it, answering "cursor gone" (a
+    reconciled tail page) instead of the page. That is why a candidate must start
+    a line AND parse with that id before the search accepts it, and this test puts
+    the echo OLDER than the real row precisely so a mis-located boundary is
+    detectable rather than harmless.
+    """
+    directory = tmp_path / "echoes"
+    directory.mkdir()
+    first = _row_line(0)
+    echo = json.dumps(
+        {
+            "id": "e" * 32,
+            "ts": 1.5,
+            "type": "custom",
+            "payload": {
+                "custom_type": "frontend_state_checkpoint_v1",
+                "details": {"state": {"jobs": [{"id": "target", "label": "nested"}]}},
+            },
+        }
+    )
+    target = TranscriptEntry("target", 2.0, ENTRY_MESSAGE, {"role": "user", "content": "here"})
+    after = _row_line(1)
+    (directory / TRANSCRIPT_FILENAME).write_text(
+        "\n".join([first, echo, target.to_json(), after]) + "\n", encoding="utf-8"
+    )
+
+    page = read_transcript_page(directory, before_id="target", limit=100)
+    # The rows before the REAL cursor row, in order — and NOT the reconciled tail
+    # page a boundary taken from the older echo would have produced.
+    assert [entry.id for entry in page.entries] == [json.loads(first)["id"], "e" * 32]
+    assert page.reconciled is False
+
+    # The same file with a cursor that genuinely does not exist: the tail page,
+    # reconciled, which is what "not found" has always meant.
+    missing = read_transcript_page(directory, before_id="f" * 32, limit=100)
+    assert [entry.id for entry in missing.entries] == [
+        json.loads(first)["id"],
+        "e" * 32,
+        "target",
+        json.loads(after)["id"],
+    ]
+    assert missing.reconciled is True
+
+
+def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypatch):
+    """Located and unlocated walks must agree: the locator is a HEAD START only.
+
+    ``_locate_cursor_row`` exists to begin the same backward walk next to the
+    cursor instead of at EOF, and the argument for letting an optimisation into
+    this reader at all is that it cannot change an answer — a candidate is
+    accepted only where it starts a line AND the row parses with that exact id,
+    and every miss falls back to the walk from EOF, which is the only path that
+    can answer whether a cursor exists. The harness that measured it when the
+    change landed (7 depths x both cursor kinds, 21 608 rows equal) lived in /tmp
+    and is not in the tree, so the equality itself is pinned here.
+
+    Over the two things that could break it: the cursor's DEPTH — a cursor near
+    the head is the one the windowed search is most likely to miss — and the
+    WINDOW, which is a cost knob and not a correctness one: pinned to 1 KiB the
+    windowed search misses every cursor above it, so the unbounded pass answers,
+    and the page must still be the one the walk from EOF produces. The absent
+    cursor is in the sweep on purpose: its answer is the RECONCILED tail page,
+    which a locator that "decided" the cursor was missing could silently turn
+    into an empty or unreconciled page.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=600, pad=300)
+    cases = [
+        ("before_id", ids[1]),
+        ("before_id", ids[len(ids) // 2]),
+        ("before_id", ids[-1]),
+        ("through_id", ids[1]),
+        ("through_id", ids[len(ids) // 2]),
+        ("through_id", ids[-1]),
+        ("before_id", "f" * 32),
+        ("through_id", "f" * 32),
+    ]
+    real_locate = transcript_module._locate_cursor_row
+
+    def _locate_nothing(*args: Any, **kwargs: Any) -> None:
+        """A locator that can vouch for no row: what a miss looks like inside."""
+        return None
+
+    for window in (transcript_module._PAGE_LOCATE_WINDOW_BYTES, 1024):
+        monkeypatch.setattr(transcript_module, "_PAGE_LOCATE_WINDOW_BYTES", window)
+        for kind, cursor in cases:
+            located = read_transcript_page(directory, **{kind: cursor}, limit=100)
+            if cursor != "f" * 32:
+                assert located.entries, f"{kind}={cursor} answered nothing to compare"
+            transcript_module._locate_cursor_row = _locate_nothing
+            try:
+                unlocated = read_transcript_page(directory, **{kind: cursor}, limit=100)
+            finally:
+                transcript_module._locate_cursor_row = real_locate
+            assert located == unlocated, f"{kind}={cursor} at window {window}"

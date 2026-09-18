@@ -1044,3 +1044,42 @@ async def test_the_rollback_drops_a_row_of_ours_under_another_row_id(root: Path)
     final = _rows_from_transcript(session_dir)
     assert [row["id"] for row in final] == ["w1"], final
     assert not any(row.get("request_id") == "REQ-B" for row in final)
+
+
+@pytest.mark.asyncio
+async def test_the_arm_read_path_never_parses_the_whole_journal(root: Path, monkeypatch) -> None:
+    """One row's question must not cost the journal (the arm path's F4).
+
+    ``_read_rows`` and ``_latest_entry_id`` both ask the transcript for the ONE
+    latest ``wake_schedules`` row and used to answer it with ``Transcript(dir)``,
+    whose constructor parses every row of the file: measured at 8.84 s and 885 MB
+    of traced peak on the operator's 262 MB transcript, on a path that asks 2-4
+    times per arm (the attempt loop, then the rollback settle). The bounded reader
+    is a backward scan that stops at the newest row of the type.
+
+    STRUCTURAL, and stated as a COUNT rather than a clock: the arm path may build
+    exactly ONE ``Transcript`` — the append, which needs one — and any second
+    construction is the read path parsing the journal again. That is the shape
+    that cannot be satisfied by a faster disk.
+    """
+    import local_operator.session.transcript as transcript_module
+
+    directory = _session(root, "read01", [_row("w1")])
+
+    constructions: list[str] = []
+    real = transcript_module.Transcript
+
+    def counting(directory: str | Path, **kwargs: Any) -> Any:
+        constructions.append(str(directory))
+        return real(directory, **kwargs)
+
+    monkeypatch.setattr(transcript_module, "Transcript", counting)
+
+    # Both halves of the read path run: the base read (an existing row to find)
+    # and the post-write verification.
+    outcome = await arm_wake(root, "read01", {"message": "second", "in": "30m"})
+
+    assert outcome.wake_id == "w2"
+    assert [row["id"] for row in _rows_from_transcript(directory)] == ["w1", "w2"]
+    reason = "the arm path built a Transcript for a one-row question: " + repr(constructions)
+    assert len(constructions) == 1, reason
