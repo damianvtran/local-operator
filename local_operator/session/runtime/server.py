@@ -3502,6 +3502,29 @@ class RuntimeServer:
                 raise ValueError("owner adopt_aside operation must be awaitable")
             return await result
         if op == "peer_message":
+            # THE RECEIVE-SIDE HALF OF THE UNENGAGED GATE, and the only one that
+            # holds against a sender this build does not control. Resolution
+            # refuses such a target and ``deliver_peer_message`` refuses it
+            # again, but a sender on an OLDER build reads a pre-field record's
+            # missing ``started`` key as True (``SessionRecord.from_json``) and
+            # dials anyway — and a peer row written through this op becomes the
+            # OPENING row of a conversation whose owner has not typed yet, which
+            # is the symptom this gate exists for. Refusing HERE makes the
+            # guarantee independent of the sender's build: the dispatch turns
+            # the ValueError into an ``error`` frame, ``peer_client`` raises it
+            # as a RuntimeError, and both send surfaces render
+            # ``could not deliver: ...``.
+            #
+            # ``self._started`` IS the published bit (``set_record_started``
+            # flips both together), so what this refuses is exactly what
+            # ``lop sessions`` reports as an unengaged composer window. The
+            # import is in-function and INSIDE the refusal branch: this module
+            # keeps its import weight off the happy path, and peer_send is only
+            # needed to name the refusal.
+            if not self._started:
+                from local_operator.mobile.peer_send import unengaged_refusal
+
+                raise ValueError(unengaged_refusal(f"session {self._record.session_id!r}"))
             # Cross-session `lop send` delivery. Optional capability — an owner
             # host that predates peer messaging (or a non-interactive exec host
             # that never wired it) answers with a clear error, which the sender

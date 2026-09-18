@@ -29512,6 +29512,9 @@ class OperatorApp(App[None]):
             pid_hint="a pid",
             session_hint="a session id",
             include_wedged=True,  # a wedged agent is the one a user most needs to stop
+            # Same kill-switch carve-out as `_stop_target_worker`: the watched
+            # session may be a composer window, and stopping it is the point.
+            require_started=False,
         )
         if record is not None and record.pid != os.getpid():
             # The RESOLVED RECORD is handed straight to the ladder. Re-entering
@@ -29541,6 +29544,13 @@ class OperatorApp(App[None]):
             pid_hint="a pid",
             session_hint="a session id",
             include_wedged=True,  # a wedged agent is the one a user most needs to stop
+            # A session that has not run a turn yet is STILL stoppable, and this
+            # is the one caller that wants it resolved: the kill switch names a
+            # target in order to end it, not to message it, and a composer
+            # window someone needs to stop is exactly the fresh `/new` this
+            # team's peer rule otherwise holds out of reach. `send` keeps the
+            # default True.
+            require_started=False,
         )
         if candidates:
             # Each candidate in the form that RESOLVES when retyped — the

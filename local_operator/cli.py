@@ -5042,6 +5042,12 @@ def _resolve_stop_target(
         # Wedged sessions are stoppable (the ladder's signal rungs exist for
         # them); `send` keeps refusing them because nobody would read it.
         include_wedged=True,
+        # A composer window is stoppable, and this is the one caller that wants
+        # it resolved: the kill switch names a target in order to END it, not to
+        # message it. `lop send` keeps the default True, so the fresh `/new`
+        # nobody has typed in stays out of reach of delivery while remaining
+        # reachable by `lop stop`.
+        require_started=False,
     )
 
 

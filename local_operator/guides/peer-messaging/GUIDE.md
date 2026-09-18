@@ -118,6 +118,12 @@ Refusals are answers too, and each names its own fix:
 - No match returns `no session matches '<target>' (searched live and stored
   sessions)` — a name only a closed session had still resolves, so a miss
   means neither the running fleet nor the store answered to it.
+- An unengaged session (`/new`, nobody has sent a message in it yet) is refused
+  rather than written to: *"… has not been engaged yet (no user message has
+  been sent in it), so it cannot receive peer messages — its owner has to send
+  a first message"*. Its owner's first message makes it a recipient again, and
+  the refusal is the same sentence whichever layer answers — including the
+  receiving session, so an older peer's send fails the same way.
 - A session cannot send to itself; the tool refuses before it dials.
 - A body over the 256 KB cap is rejected with the measured size, not truncated.
 - If the ack is lost after the peer committed the message, the tool says the
@@ -156,7 +162,10 @@ rows — sessions that are not running — shown with `—` for RSS/UPTIME, sort
 newest-first, capped by `--limit` (default 50). `send`'s `target` falls back
 to stored-session names when no live session matches: `wake=True` engages a
 runtime, a quiet mailbox drop spools to the inbox for the next open, and a
-steer on a stored session behaves as wake. A `NEEDS` row is a parked
+steer on a stored session behaves as wake. A stored session that never ran a
+turn is not a recipient either — it is skipped, so a broadcast cannot spool a
+note into a conversation nobody started, and an exact `--session` send to one
+is refused with the reason above. A `NEEDS` row is a parked
 question; idle-vs-busy is `--json`'s `busy`, not the table.
 
 **The table does not show a session's `cwd`.** `cwd` and `session_id` are
@@ -223,6 +232,27 @@ Only `live` sessions are eligible. If a substring matches several live
 sessions, `lop send` prints the candidates and exits non-zero asking you to
 disambiguate with `--pid`. If the only match is `wedged`, it says so rather
 than hanging on a dial.
+
+**A session that has not been engaged yet is not a recipient.** A fresh
+`/new` window is already listed (`live`, with its record published) while its
+owner is still composing the first prompt, and it is deliberately out of
+reach until that first message is sent:
+
+- an exact `--pid`/`--session` send is refused with the reason — *"… has not
+  been engaged yet (no user message has been sent in it), so it cannot receive
+  peer messages — its owner has to send a first message"* — and nothing is
+  delivered or spooled;
+- a substring/broadcast match skips such a session and says so, rather than
+  falling through to a stored session that merely shares its name;
+- `/stop <target>` (and `lop stop <target>`) still resolves it — the kill
+  switch names a session in order to stop it, so a composer window someone
+  needs to end stays reachable.
+
+The session becomes eligible the moment it runs its first turn: the owner's
+first message flips the record's `started` bit, and the next send lands with no
+special handling. The gate is enforced on the receiving side too, so a peer
+running an older `lop` cannot deliver into an unengaged session either — the
+delivery fails there with the same sentence rather than writing the row.
 
 **Address the session exactly one way.** A `--pid`/`--session` selector already
 names the recipient, so a positional alongside one is the MESSAGE, not a second
@@ -320,6 +350,11 @@ git log -1 --stat | lop send "release cutter"
   running an older `lop` that predates peer messaging answers with a clear
   "cannot receive peer messages" error (a soft, non-zero-exit failure, not a
   crash).
+- **A session must be engaged before it receives.** One that has not run a
+  real turn yet (a fresh `/new` with no message sent) is not a recipient: a
+  send to it is refused with the reason above and a broadcast skips it, and it
+  becomes eligible after its first turn. `/stop` is unaffected — it still
+  reaches such a session.
 - **Message size cap:** bodies are capped at 256 KB, well under the control
   socket's frame limit. A larger paste is rejected with a clear error rather
   than silently dropped.
