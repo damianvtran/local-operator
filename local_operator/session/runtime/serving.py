@@ -38,6 +38,9 @@ from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
+from local_operator.harness.approval import (
+    loosening_is_authorised as _loosening_is_authorised,
+)
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
@@ -763,31 +766,42 @@ class ServingSessionHandle(SessionHandle):
         A ``config.yml`` write is the operator's machine-wide intent ("if I
         change a setting I want it to go into effect for all my agents"), so a
         session that never made a choice of its own follows the file in BOTH
-        directions. ``source`` is ignored on purpose: the runtime is never the
-        process that wrote, so every delivery is another process's edit.
+        directions — with ONE exception, the loosening rule below, which is what
+        makes the SOURCE of a policy change part of the authorization decision
+        and not merely its value.
 
-        **The rule is asymmetric, and only for a session that chose** (review
-        round 1 R1, UX round 1 U1):
+        **The rule is asymmetric, and its loosening half has two refusal
+        reasons** (review round 1 R1, UX round 1 U1; issue #1282):
 
         * **Tightening (``auto`` → ``ask``) always follows the file**,
           unconditionally, in every session. Safety propagates without
           exception; a user ends up safer than they asked, which is never the
           wrong surprise.
-        * **Loosening (``ask`` → ``auto``) does not move a session whose human
-          typed ``/approvals ask`` in it.** That session keeps its gate and
-          reads a keep notice naming the way to adopt the file instead. It is
-          the CHOSEN MODE that is consulted, not merely the fact of a choice:
-          a session whose human chose ``auto`` has no hardening to protect and
-          follows the file in both directions like any other.
+        * **Loosening (``ask`` → ``auto``) is refused unless it is attributed**
+          (#1282). Only a write THIS process made through the operator's own
+          settings facade (``source="local"``) is an operator action; a model
+          tool's own file write, an editor, another pane, the settings API in
+          another process, and ``lop config edit`` are all unattributable from
+          here, and unattributed writes may only tighten. See
+          :func:`local_operator.harness.approval.loosening_is_authorised` for
+          the rule itself and why it is `source == "local"` rather than "not
+          disk".
+        * **Loosening does not move a session whose human typed ``/approvals
+          ask`` in it** either, and that branch is checked FIRST so the more
+          specific reason is the one printed. It is the CHOSEN MODE that is
+          consulted, not merely the fact of a choice: a session whose human
+          chose ``auto`` has no hardening to protect, but this process still
+          refused the unattributed write that would have moved it.
 
         The asymmetry is the whole point. The operator asked for settings to
         REACH running sessions, which was broken and is what this change fixes;
         they did not ask for a file write to revoke a hardening a human typed
-        into a specific pane thirty seconds earlier. The parked-prompt rule
-        below already encodes that principle — a card on screen is not
-        auto-answered *because the human's presence outranks the file* — and it
-        applies one step earlier to a human who typed the mode. This mirrors
-        the model half of the same change exactly (``Session.
+        into a specific pane thirty seconds earlier, and they did not ask for a
+        model-run shell command to remove the gate from its own later calls.
+        The parked-prompt rule below already encodes the same principle — a card
+        on screen is not auto-answered *because the human's presence outranks
+        the file* — and it applies one step earlier to a human who typed the
+        mode. This mirrors the model half of the same change exactly (``Session.
         _on_configured_model_changed``, ``_explicit_model_choice``, and its
         ``keeping …`` notice), and approvals is the more dangerous of the two
         keys: an explicit ``/model`` pick was already protected while an
@@ -839,6 +853,31 @@ class ServingSessionHandle(SessionHandle):
             self._emit_notice(
                 "keeping tool approvals: ask — set with /approvals in this session; "
                 "config.yml now says auto, /approvals auto adopts it",
+                "info",
+                headline="Approvals unchanged",
+            )
+            return
+        if wanted_auto and not _loosening_is_authorised(
+            source=getattr(change, "source", "disk"), gate_is_here=True
+        ):
+            # LOOSENING that this process cannot attribute to an operator (see
+            # ``loosening_is_authorised``): keep the gate and say so. This is
+            # the branch that makes "the party being gated is not the authority
+            # that may lower its own gate" true in the runtime, and it is why
+            # the keep sentence above is deliberately NOT reused — there, a
+            # human's own typed ``ask`` is what refused the file; here nobody
+            # in this session asked for anything.
+            #
+            # Checked AFTER the explicit-`ask` branch so that branch keeps
+            # meaning "the human typed ask" and so the more specific reason is
+            # the one printed. Refusing means exactly one thing: ``_auto_approve``
+            # does not move and no ``tool approvals: auto`` receipt is emitted.
+            # Nothing in this process writes this key through the settings
+            # facade today (`/approvals auto` here sets the flag directly), so
+            # in practice every file-originated loosening is refused here.
+            self._emit_notice(
+                "keeping tool approvals: ask — config.yml now says auto without an "
+                "operator write in this session; /approvals auto loosens it here",
                 "info",
                 headline="Approvals unchanged",
             )

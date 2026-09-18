@@ -78,6 +78,11 @@ from textual.widgets import Static
 
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
+
+# The approval gate's authorization rule, shared with the runtime host so the two
+# cannot drift on which writes may loosen a live gate (issue #1282). Pure and
+# import-cheap: `harness.approval` pulls in `inspect` and nothing else.
+from local_operator.harness.approval import loosening_is_authorised
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     batch_activity,
@@ -27615,8 +27620,14 @@ class OperatorApp(App[None]):
         own gate stayed where it was. Reproduced in review in the UNSAFE
         direction — page set to ``ask``, ``request_tool_approval`` still
         auto-approving a command tool with no prompt. A page write is also an
-        explicit user action in this pane, so it moves the gate in BOTH
-        directions.
+        explicit user action in this pane, so WHERE THIS PANE OWNS THE GATE it
+        moves the gate in BOTH directions.
+
+        Where an attached runtime owns the gate it moves nothing, and that is the
+        same #1282 rule rather than a second one: the engine consults the
+        runtime's flag, the runtime sees this process's file write as ``disk``
+        and refuses it, so painting ``auto`` on this band would report a mode the
+        session is not running under (see ``_follow_configured_approvals``).
 
         For a change from another process, ONE notice per change listing the
         registry keys compactly, with the keys whose section is not LIVE named
@@ -27844,7 +27855,7 @@ class OperatorApp(App[None]):
         add to its line (``""`` when this process has nothing to say — the mode
         did not parse, the gate did not move, or another process owns the gate
         and its own receipt is already on its way), plus ``kept``, which is True
-        only on the KEEP path below.
+        only on a KEEP path below (there are two of those since #1282).
 
         The caller needs ``kept`` separately from the clause because both a
         refusal and a silent success return no clause, and only the refusal must
@@ -27856,19 +27867,41 @@ class OperatorApp(App[None]):
         once there in full:
 
         * tightening (``auto`` → ``ask``) follows the file unconditionally;
+        * loosening (``ask`` → ``auto``) is refused unless it is ATTRIBUTED
+          (#1282): only a write this process made through the operator's own
+          settings facade (``source="local"``, which is exactly what
+          ``announce=False`` means here) AND in the process that holds the gate
+          may loosen it. A model tool's own file write, an editor, another pane,
+          the settings API in another process, and ``lop config edit`` are
+          unattributable from here, and unattributed writes may only tighten.
+          See :func:`local_operator.harness.approval.loosening_is_authorised`;
+          the runtime host applies the same predicate through
+          ``ServingSessionHandle._on_config_change`` so the two cannot drift;
         * loosening (``ask`` → ``auto``) does not move a pane whose human typed
           ``/approvals ask`` in it, and prints a keep notice instead — the
           CHOSEN MODE is what is consulted, so a pane whose human chose ``auto``
-          has no hardening to protect and still follows the file both ways;
-        * a pane that never chose follows the file in both directions, which is
-          the operator's "goes into effect for all my agents" case and is what
-          this change exists to deliver.
+          has no hardening to protect, but the unattributed refusal above still
+          holds it;
+        * a pane that never chose follows the file in every direction it is
+          allowed to, which is the operator's "goes into effect for all my
+          agents" case and is what this change exists to deliver.
+
+        There are therefore TWO keep branches, and BOTH must return ``kept=True``
+        and gate their notice on :meth:`_gate_is_owned_elsewhere` (design round
+        1 D1, extended to the second branch by round 2 D8): with a runtime
+        attached both carriers hold the same mode, both branches fire on one
+        poll, and one sentence printed twice in a viewport is one event told
+        twice.
 
         A write from THIS process (``announce=False``, the ``/settings`` page)
-        applies with no notice at all: the page is its own receipt, and it is
-        also an explicit action IN this pane, so it moves the gate in both
-        directions and re-bases the explicit-choice flag rather than being
-        blocked by it.
+        is attributed, so where it owns the gate it applies with no notice at
+        all: the page is its own receipt, and it is also an explicit action IN
+        this pane, so it moves the gate in both directions and re-bases the
+        explicit-choice flag rather than being blocked by it. In an ATTACHED
+        pane it is NOT authorised — the engine consults the runtime's flag, and
+        repainting ``auto`` on this band would report a mode the session is not
+        running under — so it takes the same refusal path, and the notice says
+        how to loosen the session that actually holds the gate.
 
         Written through :meth:`_set_approve_all`, the one writer of gate and
         band, so the band cannot say something the gate does not do; the cached
@@ -27920,6 +27953,38 @@ class OperatorApp(App[None]):
                 self._system_notice(
                     "keeping tool approvals: ask — set with /approvals in this session; "
                     "config.yml now says auto, /approvals auto adopts it",
+                    "info",
+                )
+            self._set_approve_all(self._approve_all)
+            return _ApprovalsFollow("", True)
+        if wanted_auto and not loosening_is_authorised(
+            # ``announce=False`` IS this process's write (``_on_config_change``
+            # derives it from ``change.source == "local"``), so it is passed as
+            # such rather than re-read off the change here: one place decides
+            # what the flag means, and this is not it.
+            source="disk" if announce else "local",
+            gate_is_here=not self._gate_is_owned_elsewhere(),
+        ):
+            # LOOSENING this process may not attribute to an operator (#1282):
+            # keep the gate where it is. Two shapes reach here and both refuse
+            # for the same reason — an unattributed write (another pane, a
+            # model-run shell command rewriting config.yml, an editor, the
+            # settings API elsewhere) and a page write in an ATTACHED pane,
+            # where the file write is the operator's but the flag the engine
+            # reads lives in the runtime. Neither is a mode this pane may paint
+            # on its band.
+            #
+            # Checked AFTER the explicit-`ask` branch so that branch keeps
+            # meaning "the human typed ask" and the more specific reason is the
+            # one printed. ``kept=True`` because this is a refusal: the caller
+            # must strike the key from its ``applied:`` list. The NOTICE is
+            # gated on ownership for the reason the branch above documents —
+            # with a runtime attached the runtime prints its own refusal and
+            # this one would be the same sentence twice.
+            if not self._gate_is_owned_elsewhere():
+                self._system_notice(
+                    "keeping tool approvals: ask — config.yml now says auto without an "
+                    "operator write in this session; /approvals auto loosens it here",
                     "info",
                 )
             self._set_approve_all(self._approve_all)

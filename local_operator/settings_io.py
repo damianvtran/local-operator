@@ -136,11 +136,15 @@ class Scope(enum.Enum):
     #: Takes effect immediately in every running session on this machine —
     #: on the same call stack in the process that wrote it, and within
     #: ``ConfigWatcher.POLL_INTERVAL_S`` for sessions in other processes (see
-    #: :mod:`local_operator.config_watch`). Per-key caveats live on the
-    #: SECTION description (``model``: a session that chose with ``/model``
-    #: keeps its choice; ``web_tools``: the inventory catches up at the next
-    #: turn while execution refuses at once) — the scope says WHEN, the
-    #: description says what "applied" means for that key.
+    #: :mod:`local_operator.config_watch`) — SUBJECT to the per-key caveats on
+    #: the SECTION description, which is where "applied" is spelled out for a
+    #: key whose live half is conditional: ``model`` (a session that chose with
+    #: ``/model`` keeps its choice), ``web_tools`` (the inventory catches up at
+    #: the next turn while execution refuses at once), and ``approvals`` (a
+    #: LOOSENING reaches only the session whose own process wrote it, while a
+    #: tightening is unconditional — see the section description and
+    #: :func:`local_operator.harness.approval.loosening_is_authorised`). The
+    #: scope says WHEN, the description says what "applied" means for that key.
     LIVE = "live"
     #: Read when a session is built — a ``/new`` or ``/reload`` picks it up.
     #: Only ``local_providers`` carries it now: ``approvals``, ``model`` and
@@ -372,23 +376,27 @@ SECTIONS: tuple[Section, ...] = (
         "Keys for starting and resuming conversations. Press enter on a row, "
         "then press the key you want.",
     ),
-    # LIVE — a reversal of the original design, which kept the approval mode
-    # build-time on the theory that a gate flipping under a running turn is a
-    # security-relevant surprise. The operator's actual request ("if I change
-    # a setting I want it to go into effect for all my agents") is the
-    # opposite: a disk write IS the machine-wide intent, and it overrides any
-    # per-session ``/approvals`` toggle. Two rules keep it safe: the new mode
-    # applies at the next approval DECISION (``ServingSessionHandle`` reads its
-    # flag per gate call), so a prompt already parked on screen is left for
-    # the human — never auto-answered, never auto-denied; and every viewer
-    # prints the amber "tool approvals now auto" notice. ``--yolo`` is an
-    # explicit pin that outranks the key. Its own section because ``session``
-    # (autosave + cleanup) is launch-time and scope is uniform per section.
+    # LIVE — the SCOPE is right (a config write reaches every running session
+    # within a poll) and the description below carries the key's one caveat, so
+    # it is not a lie on a section header. Two rules keep the live half safe:
+    # the new mode applies at the next approval DECISION (``ServingSessionHandle``
+    # reads its flag per gate call), so a prompt already parked on screen is left
+    # for the human — never auto-answered, never auto-denied; and a LOOSENING is
+    # only honoured when the process holding the gate made the write itself
+    # through this facade (issue #1282, ``harness.approval
+    # .loosening_is_authorised``) — a model-run shell command rewriting
+    # ``config.yml``, an editor, another pane, the settings API elsewhere, and
+    # ``lop config edit`` may all TIGHTEN a running session and none may loosen
+    # one. ``--yolo`` is an explicit pin that outranks the key. Its own section
+    # because ``session`` (autosave + cleanup) is launch-time and scope is
+    # uniform per section.
     Section(
         "approvals",
         "Approvals",
         Scope.LIVE,
-        "Whether write and command tools prompt, in every running session.",
+        "Whether write and command tools prompt, in every running session. A config "
+        "write can tighten every running session at once; loosening a running one "
+        "needs /approvals auto in it.",
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript
