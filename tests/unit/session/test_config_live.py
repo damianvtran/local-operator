@@ -493,6 +493,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "fork.cmux_placement": ("surface", lambda s, w: fork_cmux_placement(w.values)),
     "web_search.strategy": ("ordered", lambda s, w: _search_settings(w).strategy),
     "web_search.providers": (["brave"], lambda s, w: list(_search_settings(w).providers)),
+    # The opt-out list, read through the same per-call loader: an exclusion must
+    # apply on the NEXT search with no reload, exactly like the priority list.
+    "web_search.excluded_providers": (
+        ["exa"],
+        lambda s, w: list(_search_settings(w).excluded_providers),
+    ),
     "web_search.timeout_seconds": (5.0, lambda s, w: _search_settings(w).timeout_seconds),
     "web_search.searxng_endpoint": (
         "http://searx.local",

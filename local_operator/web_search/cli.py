@@ -11,7 +11,11 @@ from pathlib import Path
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.paths import config_dir
-from local_operator.web_search.models import PROVIDER_IDS, SearchProviderId
+from local_operator.web_search.models import (
+    PROVIDER_IDS,
+    SearchProviderId,
+    WebSearchSettings,
+)
 
 _API_KEY_NAMES: dict[SearchProviderId, str] = {
     "tavily": "TAVILY_API_KEY",
@@ -19,6 +23,7 @@ _API_KEY_NAMES: dict[SearchProviderId, str] = {
     "perplexity": "PERPLEXITY_API_KEY",
     "brave": "BRAVE_API_KEY",
     "exa": "EXA_API_KEY",
+    "parallel": "PARALLEL_API_KEY",
     "serpapi": "SERPAPI_API_KEY",
 }
 TAVILY_MCP_URL = "https://mcp.tavily.com/mcp/"
@@ -79,19 +84,35 @@ def _stack() -> tuple[ConfigManager, CredentialManager]:
 
 def format_search_status(manager: ConfigManager, credentials: CredentialManager) -> str:
     """Plain, width-tolerant status table shared by CLI and TUI."""
-    from local_operator.web_search.providers import provider_statuses
+    from local_operator.web_search.providers import (
+        chain_bands_label,
+        provider_ready_label,
+        provider_state_label,
+        provider_statuses,
+    )
     from local_operator.web_search.service import load_search_settings
 
     settings = load_search_settings(manager)
+    statuses = provider_statuses(settings, credentials)
     header = (
         f"Web search: {'on' if settings.enabled else 'off'} | "
-        f"balance: {settings.strategy} | order: {', '.join(settings.providers) or 'none'}"
+        f"balance: {settings.strategy}\n"
+        f"order: {', '.join(settings.providers) or 'none'} | "
+        f"excluded: {', '.join(settings.excluded_providers) or 'none'}\n"
+        # The auto bands get their own line because `order:` is only the priority
+        # prefix now -- without this line the table would still read as if the
+        # stored list were the whole chain.
+        f"auto: {chain_bands_label(statuses)}"
     )
     rows = [header]
-    for status in provider_statuses(settings, credentials):
-        enabled = "enabled" if status.enabled else "disabled"
-        ready = "ready" if status.available else "setup needed"
-        rows.append(f"{status.id:<12} {enabled:<8} {ready:<12} {status.access} | {status.detail}")
+    for status in statuses:
+        # The state column is 16 wide to hold `auto best-effort`; `off` replaced
+        # `disabled` because that word claimed a provider was unusable when it may
+        # simply not be in the chain.
+        rows.append(
+            f"{status.id:<12} {provider_state_label(status):<16} "
+            f"{provider_ready_label(status):<12} {status.access} | {status.detail}"
+        )
     rows.append("Setup: local-operator search setup <provider>")
     return "\n".join(rows)
 
@@ -134,7 +155,6 @@ def _setup_tavily_oauth() -> int:
 
 
 def _setup_provider(args: argparse.Namespace) -> int:
-    from local_operator.web_search.providers import PROVIDERS
     from local_operator.web_search.service import (
         set_provider_enabled,
         set_searxng_endpoint,
@@ -170,9 +190,24 @@ def _setup_provider(args: argparse.Namespace) -> int:
                     "DeepSeek search reuses the DeepSeek model key (one model turn "
                     "per search). If it is not set yet, run "
                     "`local-operator login deepseek`; the provider becomes available "
-                    "on the next search. Pass --api-key to store a separate key."
+                    "on the next search, and it joins the chain automatically in the "
+                    "paid band -- tried only after the free providers. Pass --api-key "
+                    "to store a separate key."
                 )
-        elif provider_id in ("brave", "exa", "serpapi"):
+        elif provider_id in ("exa", "parallel"):
+            if args.api_key:
+                _store_api_key(provider_id, credentials)
+            else:
+                # Their free tier is the DEFAULT now, so setup must not demand a
+                # credential: prompting for a key a user does not need, and failing
+                # with "API key was empty; nothing changed" when they decline, is the
+                # opposite of what this provider needs. `--api-key` is the explicit
+                # opt-in to the higher-limit keyed mode.
+                print(
+                    f"{provider_id} works keyless (free MCP tier, no key needed). Pass "
+                    f"--api-key to store a key and use the higher-limit keyed API."
+                )
+        elif provider_id in ("brave", "serpapi"):
             _store_api_key(provider_id, credentials)
         elif provider_id == "searxng":
             endpoint = str(args.endpoint or input("SearXNG base URL: ")).strip().rstrip("/")
@@ -180,14 +215,60 @@ def _setup_provider(args: argparse.Namespace) -> int:
                 raise ValueError("SearXNG endpoint must start with http:// or https://")
             set_searxng_endpoint(manager, endpoint)
         # DuckDuckGo, Tavily keyless, and Perplexity anonymous need no secret.
-        set_provider_enabled(manager, provider_id, True)
+        # Exa/Parallel always SERVED without a key too; `--api-key` only stores
+        # the higher-limit credential for them.
+        settings = set_provider_enabled(manager, provider_id, True)
     except (OSError, ValueError) as error:
         print(f"error: {error}")
         return 1
 
-    mode = PROVIDERS[provider_id].access
-    print(f"Enabled {provider_id} ({mode}).")
+    if provider_id in ("exa", "parallel"):
+        # Their free tier is the DEFAULT, and the key switches transports rather
+        # than merely raising a limit, so the landing line has to say which one is
+        # now in use -- a keyed exa is billed at the published REST rate, not free.
+        if args.api_key:
+            print(
+                f"Enabled {provider_id} with a stored key (billed at the keyed API's "
+                "rate; remove the key to fall back to the free keyless MCP tier)."
+            )
+        else:
+            print(f"Enabled {provider_id} (keyless MCP tier: free, rate-limited).")
+        return 0
+    if provider_id == "deepseek":
+        print(
+            "Enabled deepseek (auto paid; tried after the free providers, never before "
+            "a free leg). It joins the chain automatically once a key or login exists."
+        )
+        return 0
+    _print_landing(settings, credentials, provider_id)
     return 0
+
+
+def _print_landing(
+    settings: WebSearchSettings,
+    credentials: CredentialManager,
+    provider_id: SearchProviderId,
+) -> None:
+    """Say where a provider landed, so the user never has to guess.
+
+    `search enable` only clears an exclusion now: it cannot promote a provider into
+    the priority prefix, so the message names the band it will actually serve from
+    -- using the SAME state vocabulary (`provider_state_label`) and the same
+    meanings (`provider_landing_label`) that `search list` and `/search` print.
+    """
+    from local_operator.web_search.providers import (
+        provider_landing_label,
+        provider_statuses,
+    )
+
+    status = next(
+        (row for row in provider_statuses(settings, credentials) if row.id == provider_id),
+        None,
+    )
+    if status is None:
+        print(f"{provider_id} enabled.")
+        return
+    print(f"{provider_id} enabled ({provider_landing_label(status)}).")
 
 
 async def _test_search(args: argparse.Namespace) -> int:
@@ -240,8 +321,16 @@ def search_command(args: argparse.Namespace) -> int:
         print("Web search disabled. Reload a running session to remove the tool.")
         return 0
     if command in ("enable", "disable"):
-        set_provider_enabled(manager, args.provider, command == "enable")
-        print(f"{args.provider} {command}d.")
+        settings = set_provider_enabled(manager, args.provider, command == "enable")
+        if command == "disable":
+            # Name the way back: `disable` is the only verb that can leave a chain
+            # with no usable provider, and the fix is one command.
+            print(
+                f"{args.provider} excluded; it will not be used by any search until "
+                f"you run `local-operator search enable {args.provider}`."
+            )
+        else:
+            _print_landing(settings, credentials, args.provider)
         return 0
     if command == "balance":
         set_search_strategy(manager, args.strategy)
@@ -249,7 +338,13 @@ def search_command(args: argparse.Namespace) -> int:
         return 0
     if command == "order":
         set_provider_order(manager, args.providers)
-        print("Web search order: " + ", ".join(args.providers))
+        # The prefix is only the first part of the chain now, and naming an id here
+        # also clears an exclusion for it -- both facts belong in the reply.
+        print(
+            "Web search order: "
+            + ", ".join(args.providers)
+            + " (tried first; any exclusion named here was cleared)"
+        )
         return 0
     if command == "setup":
         return _setup_provider(args)

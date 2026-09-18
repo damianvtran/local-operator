@@ -51,6 +51,7 @@ def test_provider_argument_is_closed_to_supported_catalogue() -> None:
         "perplexity",
         "brave",
         "exa",
+        "parallel",
         "serpapi",
         "searxng",
     }
@@ -329,3 +330,88 @@ def test_sources_without_evidence_keep_the_plain_footer() -> None:
 
     assert "[relevance" not in rendered
     assert "Snippets are intentionally capped" in rendered
+
+
+@pytest.mark.asyncio
+async def test_the_singleflight_key_covers_auto_joined_credentials_and_ignores_rotation(
+    tmp_path, monkeypatch
+) -> None:
+    """An auto-joined provider's credential must key the call; the rotation must not.
+
+    The digest used to iterate ``settings.providers``. With a priority prefix that
+    is no longer the chain: EXA_API_KEY / PARALLEL_API_KEY / DEEPSEEK_API_KEY can
+    all sit in the chain without being listed, so two calls with different
+    credentials behind them would coalesce into one result. And because the digest
+    must be STABLE, it reads ``resolve()`` (non-rotating) rather than
+    ``candidates()``, whose first element moves with the round-robin offset.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.web_search import tool
+    from local_operator.web_search.models import (
+        SearchResponse,
+        SearchSource,
+        WebSearchSettings,
+    )
+    from local_operator.web_search.service import (
+        WebSearchService,
+        reset_round_robin_for_tests,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        tool,
+        "load_search_settings",
+        lambda _manager: WebSearchSettings(providers=["duckduckgo"], strategy="round_robin"),
+    )
+
+    calls = 0
+
+    async def search(self, query, **kwargs):
+        nonlocal calls
+        calls += 1
+        return SearchResponse(
+            provider="duckduckgo",
+            auth_mode="test",
+            sources=[SearchSource(title="answer", url="https://example.com/")],
+        )
+
+    monkeypatch.setattr(WebSearchService, "search", search)
+
+    keys: list[tuple[object, ...]] = []
+
+    class _RecordingIO:
+        def singleflight(self, key, factory):
+            keys.append(key)
+            return factory()
+
+    context = ToolContext(cwd=str(tmp_path), web_io=_RecordingIO())
+
+    async def call() -> None:
+        result = await tool.execute_web_search("search", {"query": "same"}, context=context)
+        assert result.is_error is False
+
+    reset_round_robin_for_tests()
+    await call()
+    first_key = keys[-1]
+
+    # Rotation moves `candidates()` between calls but must not move the key.
+    from local_operator.credentials import CredentialManager
+
+    reset_round_robin_for_tests()
+    rotating = WebSearchService(
+        WebSearchSettings(providers=["duckduckgo"], strategy="round_robin"),
+        CredentialManager(tmp_path / "config"),
+    )
+    ordered_first = rotating.candidates()
+    ordered_second = rotating.candidates()
+    assert (
+        ordered_first != ordered_second or len(rotating.candidates()) < 2
+    ), "the fixture needs a rotating band of at least two legs"
+    await call()
+    assert keys[-1] == first_key, "the rotation offset leaked into the singleflight key"
+
+    monkeypatch.setenv("EXA_API_KEY", "now-present")
+    await call()
+    assert keys[-1] != first_key, "an auto-joined provider's credential is outside the key"
+    assert calls == 3

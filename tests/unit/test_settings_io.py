@@ -1924,3 +1924,42 @@ class TestConfigEditQualifiesALoosening:
         assert code == 0, out
         assert "Successfully updated tool_approval_mode to ask" in out, out
         assert "Running sessions are unchanged" not in out, out
+
+
+def test_the_exclusion_row_round_trips_and_treats_empty_as_none(manager: ConfigManager) -> None:
+    """`web_search.excluded_providers` is the opt-out list, and [] is its DEFAULT.
+
+    The opposite of `web_search.providers`, where an empty list is refused: there
+    an empty priority list would be an empty chain, here `[]` means "nothing
+    excluded" -- the resting state of every existing config, which is why this
+    key needs no migration.
+    """
+    excluded = settings_io.BY_KEY["web_search.excluded_providers"]
+
+    assert settings_io.validate(excluded, ["exa"]) is None
+    assert settings_io.validate(excluded, []) is None
+    assert settings_io.validate(excluded, ["parallel", "duckduckgo"]) is None
+    # An id the catalogue does not own is still a typo, not an opt-out.
+    assert settings_io.validate(excluded, ["bing"]) is not None
+
+    assert settings_io.coerce(excluded, "exa, parallel") == ["exa", "parallel"]
+    assert settings_io.coerce(excluded, "exa,exa") == ["exa"]
+
+    settings_io.write_setting(manager, excluded, ["exa", "parallel"])
+    assert settings_io.read_setting(manager, excluded) == ["exa", "parallel"]
+
+    # An ABSENT key and an empty list are the same thing to the consumer, which is
+    # why this key needs no migration. `empty_unsets` is what lets a user clear the
+    # row (the settings view and the server route both reset the key on an empty
+    # edit) instead of being refused for choosing "none excluded".
+    assert settings_io.read_setting(manager, excluded) == ["exa", "parallel"]
+    settings_io.reset_setting(manager, excluded)
+    assert manager.get_config_value("web_search").get("excluded_providers") is None
+    assert settings_io.read_setting(manager, excluded) == []
+
+
+def test_parallel_is_a_providers_member(manager: ConfigManager) -> None:
+    providers = settings_io.BY_KEY["web_search.providers"]
+
+    assert settings_io.validate(providers, ["parallel"]) is None
+    assert settings_io.coerce(providers, "exa, parallel") == ["exa", "parallel"]

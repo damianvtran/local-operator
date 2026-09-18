@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -26,6 +26,7 @@ from local_operator.web_search.cost import estimate_search_cost
 from local_operator.web_search.models import (
     PROVIDER_IDS,
     ProviderStatus,
+    ProviderTier,
     SearchProviderId,
     SearchResponse,
     SearchSource,
@@ -1267,13 +1268,216 @@ async def _search_brave(
     )
 
 
+#: Credential-free MCP search endpoints. Both answer a bare JSON-RPC
+#: ``tools/call`` POST -- no MCP session handshake and no new dependency -- and
+#: both document anonymous use as a free tier:
+#:   * Exa: exa.ai/docs/get-started/exa-mcp ("No API key is required to get
+#:     started") and exa-labs/exa-mcp-server, whose hosted server is described as
+#:     "rate-limited free-tier access for users without a key". A 429 means that
+#:     bucket is spent; the remedy the docs give (OAuth or an API key) is this
+#:     repo's existing keyed REST path, which is why a stored key keeps using it.
+#:   * Parallel: docs.parallel.ai/integrations/mcp/quickstart and
+#:     parallel.ai/blog/free-web-search-mcp -- "The Search MCP is free to use --
+#:     no API key required". A key only raises the limits.
+#: A bare call rather than a session (``initialize`` + ``Mcp-Session-Id``) per
+#: search: the handshake is cost with no benefit for a one-shot query, and a
+#: future session requirement degrades LOUDLY here (HTTP 4xx, a JSON-RPC error
+#: envelope, or ``result.isError`` all raise) instead of silently returning
+#: nothing.
+EXA_MCP_ENDPOINT = "https://mcp.exa.ai/mcp"
+PARALLEL_MCP_ENDPOINT = "https://search.parallel.ai/mcp"
+
+#: Both media types are REQUIRED by Exa: a JSON-only ``Accept`` is refused with
+#: 406 "Client must accept both application/json and text/event-stream"
+#: (reproduced 2026-09-18). Parallel accepts the same header.
+_MCP_ACCEPT = "application/json, text/event-stream"
+_MCP_USER_AGENT = "local-operator (+https://github.com/damianvtran/local-operator)"
+
+
+async def _mcp_call(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    tool: str,
+    arguments: dict[str, Any],
+    *,
+    label: str,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """One JSON-RPC ``tools/call`` against an MCP search server."""
+    response = await client.post(
+        endpoint,
+        headers={
+            "Accept": _MCP_ACCEPT,
+            "Content-Type": "application/json",
+            "User-Agent": _MCP_USER_AGENT,
+            **(headers or {}),
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        },
+    )
+    _ensure_success(label, response)
+    return _mcp_payload(response, label)
+
+
+def _mcp_payload(response: httpx.Response, label: str) -> dict[str, Any]:
+    """The JSON-RPC envelope, from either framing these servers use.
+
+    Exa answers SSE (``event: message`` + ``data: {...}``) and Parallel answers
+    plain JSON -- both reproduced 2026-09-18 -- so a parser for only one of them
+    would report the other as unparseable. An envelope that parses but carries an
+    ``error``, or a ``result.isError``, is raised HERE: no parsing path may
+    fabricate results out of an error envelope, and the service treats the raise
+    as the fallback trigger.
+    """
+    payload: Any = None
+    try:
+        payload = json.loads(response.text)
+    except ValueError:
+        for line in response.text.splitlines():
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                candidate = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(candidate, dict) and ("result" in candidate or "error" in candidate):
+                payload = candidate
+                break
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} MCP returned an unparseable response")
+    error = payload.get("error")
+    if isinstance(error, dict):
+        raise RuntimeError(f"{label} MCP error {error.get('code')}: {error.get('message')}")
+    result = payload.get("result")
+    if isinstance(result, dict) and result.get("isError"):
+        raise RuntimeError(f"{label} MCP error: {_mcp_text(payload) or 'unknown error'}")
+    return payload
+
+
+def _mcp_text(payload: dict[str, Any]) -> str:
+    """The first text block of an MCP result -- both servers' payload carrier."""
+    result = payload.get("result")
+    content = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(content, list):
+        return ""
+    for block in content:
+        if isinstance(block, dict) and str(block.get("text") or "").strip():
+            return str(block["text"])
+    return ""
+
+
+#: Exa's MCP answer is a rendered TEXT blob rather than structured fields:
+#: repeated ``Title:`` blocks (shape reproduced 2026-09-18). Splitting on the
+#: block header is what makes the blob map onto the same ``SearchSource`` every
+#: other provider builds, so the url/title/snippet/date caps apply here too.
+_EXA_BLOCK_HEADER = re.compile(r"(?m)^Title:[ \t]*")
+
+
+def parse_exa_mcp_text(text: str, limit: int) -> list[SearchSource]:
+    """Map Exa's rendered text blob onto normalized sources."""
+    sources: list[SearchSource] = []
+    for block in _EXA_BLOCK_HEADER.split(text)[1:]:
+        lines = block.splitlines()
+        title = lines[0].strip() if lines else ""
+        url = ""
+        published: str | None = None
+        snippet_lines: list[str] = []
+        in_highlights = False
+        for line in lines[1:]:
+            if in_highlights:
+                snippet_lines.append(line.rstrip())
+                continue
+            stripped = line.strip()
+            if stripped.startswith("URL:"):
+                # First URL in the block wins; later lines are body text.
+                url = url or stripped[len("URL:") :].strip()
+            elif stripped.startswith("Published:"):
+                value = stripped[len("Published:") :].strip()
+                published = None if value in ("", "N/A") else value
+            elif stripped.startswith("Highlights:"):
+                in_highlights = True
+        source = _source(
+            title=title,
+            url=url,
+            snippet="\n".join(value for value in snippet_lines if value.strip()),
+            published_date=published,
+        )
+        if source is None:
+            # No usable URL, or one past the shared cap: dropped by ``_source``,
+            # the same rule every other provider's rows go through.
+            continue
+        sources.append(source)
+        if len(sources) >= limit:
+            break
+    return sources
+
+
+def parse_parallel_mcp_text(text: str, limit: int) -> list[SearchSource]:
+    """Map Parallel's ``content[0].text``, a JSON *string*, onto sources."""
+    try:
+        payload = json.loads(text)
+    except ValueError as error:
+        raise RuntimeError("Parallel MCP returned an unparseable response") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("Parallel MCP returned an unparseable response")
+    sources: list[SearchSource] = []
+    for item in payload.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        excerpts = [
+            str(value).strip() for value in item.get("excerpts") or [] if str(value).strip()
+        ]
+        source = _source(
+            title=item.get("title"),
+            url=item.get("url"),
+            # The first two excerpts, joined: Parallel returns full page crops, and
+            # ``_source`` caps what survives (2 000 chars) like every other row.
+            snippet="\n".join(excerpts[:2]) or None,
+            published_date=item.get("publish_date"),
+        )
+        if source is None:
+            continue
+        sources.append(source)
+        # The service returns ~10 results regardless of ``limit`` (reproduced), so
+        # the slice is ours to apply.
+        if len(sources) >= limit:
+            break
+    return sources
+
+
 async def _search_exa(
     client: httpx.AsyncClient,
     credentials: CredentialManager,
-    _settings: WebSearchSettings,
+    settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
+    # A stored key keeps the REST transport deliberately: it returns a
+    # query-grounded ``summary`` as structured JSON, where MCP returns a text blob.
+    # Routing keyed traffic to MCP would regress the keyed experience for nothing.
+    if provider_auth_mode("exa", credentials, settings) != "api-key":
+        payload = await _mcp_call(
+            client,
+            EXA_MCP_ENDPOINT,
+            "web_search_exa",
+            {"query": query, "type": "auto", "numResults": limit, "livecrawl": "fallback"},
+            label="Exa",
+        )
+        return SearchResponse(
+            provider="exa",
+            auth_mode="keyless-mcp",
+            sources=parse_exa_mcp_text(_mcp_text(payload), limit),
+            # Keyless is a FREE TIER, not a missing price: without this flag the
+            # ledger would charge the keyed $5/1,000 rate for an anonymous search.
+            usage=SearchUsage(keyless=True),
+        )
     key = _credential(credentials, "EXA_API_KEY")
     response = await client.post(
         "https://api.exa.ai/search",
@@ -1305,6 +1509,49 @@ async def _search_exa(
         is not None
     ]
     return SearchResponse(provider="exa", auth_mode="api-key", sources=sources[:limit])
+
+
+async def _search_parallel(
+    client: httpx.AsyncClient,
+    credentials: CredentialManager,
+    _settings: WebSearchSettings,
+    query: str,
+    limit: int,
+) -> SearchResponse:
+    """Keyless-first Parallel MCP search.
+
+    COST HONESTY. Parallel's payload carries its own meter --
+    ``_meta."parallel/usage" = [{"name": "sku_search", "count": 1,
+    "cost_usd": 0.001}]`` -- and this transport deliberately does NOT book it as
+    spend. That figure is Parallel's internal cost of goods at an account nobody
+    has: there is no key, so there is nothing to bill, and the endpoint is
+    documented as free (docs.parallel.ai/integrations/mcp/quickstart;
+    parallel.ai/blog/free-web-search-mcp). Booking $0.001 would report money the
+    operator never paid, which is the same class of error as inferring "free":
+    the row is marked ``keyless`` and priced as the free tier it is. If a reviewer
+    ever wants the vendor's meter surfaced, it belongs in ``SearchUsage`` -- never
+    in ``usd``.
+    """
+    key = _credential(credentials, "PARALLEL_API_KEY")
+    payload = await _mcp_call(
+        client,
+        PARALLEL_MCP_ENDPOINT,
+        "web_search",
+        # ``session_id`` is omitted: it is optional (reproduced: 200 without it)
+        # and this stateless transport has no session handle to pass.
+        {"objective": query, "search_queries": [query]},
+        label="Parallel",
+        headers={"Authorization": f"Bearer {key}"} if key else None,
+    )
+    return SearchResponse(
+        provider="parallel",
+        auth_mode="api-key" if key else "keyless-mcp",
+        sources=parse_parallel_mcp_text(_mcp_text(payload), limit),
+        # Keyless is a free tier, and the keyed Search API has no rate we can
+        # verify -- see ``cost.PROVIDER_USD_PER_SEARCH``, which marks it unpriced
+        # rather than free.
+        usage=SearchUsage(keyless=not key),
+    )
 
 
 async def _search_serpapi(
@@ -1424,10 +1671,21 @@ PROVIDERS: dict[SearchProviderId, ProviderDefinition] = {
     "exa": ProviderDefinition(
         "exa",
         "Exa",
-        "API key",
-        "AI-native semantic search; requires EXA_API_KEY",
+        "free keyless MCP / API key",
+        (
+            "Keyless MCP search (free, rate-limited); EXA_API_KEY switches to the "
+            "REST API with query summaries"
+        ),
         ("EXA_API_KEY",),
         _search_exa,
+    ),
+    "parallel": ProviderDefinition(
+        "parallel",
+        "Parallel",
+        "free keyless MCP / API key",
+        "Keyless MCP search (free, rate-limited); PARALLEL_API_KEY raises the limits",
+        ("PARALLEL_API_KEY",),
+        _search_parallel,
     ),
     "serpapi": ProviderDefinition(
         "serpapi",
@@ -1448,41 +1706,248 @@ PROVIDERS: dict[SearchProviderId, ProviderDefinition] = {
 }
 
 
-def provider_available(
+#: Which automatic band each provider joins when the user has NOT named it in
+#: ``web_search.providers``. DECLARATION ORDER is the within-band order, so this
+#: table is the single source of truth for the automatic half of the chain -- the
+#: resolver, `search list` and `/search` all read it, and a provider cannot be
+#: load-balanced by one surface while another describes it as off.
+#:
+#: ``rotate`` is the credential-free pool that round-robin balances; ``fallback``
+#: is credential-free but best-effort (perplexity's anonymous tier is documented
+#: "best-effort" and refused live on this machine during the investigation), so it
+#: is never a first attempt; ``metered`` spends money or a model turn.
+AUTO_PROVIDER_TIERS: dict[SearchProviderId, ProviderTier] = {
+    "duckduckgo": "rotate",
+    "tavily": "rotate",
+    "exa": "rotate",
+    "parallel": "rotate",
+    "searxng": "rotate",
+    "perplexity": "fallback",
+    "deepseek": "metered",
+    "brave": "metered",
+    "serpapi": "metered",
+}
+
+#: Auth modes that spend a credential -- money, or a model turn billed to one. A
+#: provider whose EFFECTIVE mode is one of these is metered whatever the table
+#: above says: a keyed exa or tavily the user never listed must not be rotated
+#: into the free pool, because that would spend on their behalf.
+METERED_AUTH_MODES = frozenset({"api-key", "login"})
+
+
+class ProviderBands(NamedTuple):
+    """The chain split into its parts, in the order a search walks them."""
+
+    prefix: list[SearchProviderId]
+    rotate: list[SearchProviderId]
+    fallback: list[SearchProviderId]
+    metered: list[SearchProviderId]
+
+
+def provider_auth_mode(
     provider_id: SearchProviderId,
     credentials: CredentialManager,
     settings: WebSearchSettings,
-) -> bool:
-    """Whether the provider can make a request with current local configuration."""
-    if provider_id in ("duckduckgo", "tavily", "perplexity"):
-        return True
+) -> str:
+    """The transport this provider would use HERE, or "" when it cannot serve.
+
+    One function answers two questions that used to be answered separately --
+    "can this provider serve" (:func:`provider_available`) and "what would it use"
+    -- so the chain and the status view cannot disagree about WHY a provider is or
+    is not in play.
+    """
+    if provider_id == "duckduckgo":
+        return "credential-free"
+    if provider_id == "tavily":
+        return "api-key" if _credential(credentials, "TAVILY_API_KEY") else "keyless"
+    if provider_id == "perplexity":
+        return "api-key" if _credential(credentials, "PERPLEXITY_API_KEY") else "anonymous"
+    if provider_id == "exa":
+        # Both modes exist and BOTH serve without a key, so this is a mode choice
+        # rather than an availability one.
+        return "api-key" if _credential(credentials, "EXA_API_KEY") else "keyless-mcp"
+    if provider_id == "parallel":
+        return "api-key" if _credential(credentials, "PARALLEL_API_KEY") else "keyless-mcp"
     if provider_id == "deepseek":
         # The search key IS the model key, and ``login`` writes it to the auth
         # store rather than to ``credentials.env``. Both tiers are checked, or
         # `search list` would report "setup needed" for a provider whose calls
         # would in fact succeed -- and, worse, the reverse for a keyless branch
         # that has no key at all.
-        return bool(_credential(credentials, "DEEPSEEK_API_KEY")) or _deepseek_login_present()
+        if _credential(credentials, "DEEPSEEK_API_KEY"):
+            return "api-key"
+        return "login" if _deepseek_login_present() else ""
     if provider_id == "searxng":
-        return settings.searxng_endpoint.startswith(("http://", "https://"))
+        endpoint = settings.searxng_endpoint
+        return "self-hosted" if endpoint.startswith(("http://", "https://")) else ""
     definition = PROVIDERS[provider_id]
-    return bool(_credential(credentials, *definition.credential_keys))
+    return "api-key" if _credential(credentials, *definition.credential_keys) else ""
+
+
+def provider_available(
+    provider_id: SearchProviderId,
+    credentials: CredentialManager,
+    settings: WebSearchSettings,
+) -> bool:
+    """Whether the provider can make a request with current local configuration."""
+    return provider_auth_mode(provider_id, credentials, settings) != ""
+
+
+def provider_tier(
+    provider_id: SearchProviderId,
+    credentials: CredentialManager,
+    settings: WebSearchSettings,
+) -> ProviderTier | None:
+    """The automatic band ``provider_id`` joins on this install, or None.
+
+    The EFFECTIVE auth mode wins over the table: a provider whose transport would
+    use a credential here is metered even where the table says ``rotate``. That is
+    what keeps a keyed exa/tavily out of the free rotation.
+    """
+    mode = provider_auth_mode(provider_id, credentials, settings)
+    if not mode:
+        return None
+    if mode in METERED_AUTH_MODES:
+        return "metered"
+    return AUTO_PROVIDER_TIERS[provider_id]
+
+
+def resolve_provider_bands(
+    settings: WebSearchSettings,
+    credentials: CredentialManager,
+) -> ProviderBands:
+    """Split this install's provider chain into its bands.
+
+    ``web_search.providers`` is a PRIORITY PREFIX, not an allowlist: whatever it
+    names is tried first, in the order it names them, and every other usable
+    provider follows in its automatic band. ``excluded_providers`` is the only
+    way to say never -- exclusion beats listing, so a user who disabled a
+    provider does not have to also edit the priority list.
+    """
+    excluded: set[SearchProviderId] = set(settings.excluded_providers)
+    prefix: list[SearchProviderId] = [
+        value for value in settings.providers if value not in excluded
+    ]
+    rotate: list[SearchProviderId] = []
+    fallback: list[SearchProviderId] = []
+    metered: list[SearchProviderId] = []
+    bands: dict[ProviderTier, list[SearchProviderId]] = {
+        "rotate": rotate,
+        "fallback": fallback,
+        "metered": metered,
+    }
+    for provider_id in AUTO_PROVIDER_TIERS:  # declaration order IS the band order
+        if provider_id in prefix or provider_id in excluded:
+            continue
+        tier = provider_tier(provider_id, credentials, settings)
+        if tier is None:
+            continue
+        bands[tier].append(provider_id)
+    return ProviderBands(prefix, rotate, fallback, metered)
+
+
+def resolve_providers(
+    settings: WebSearchSettings,
+    credentials: CredentialManager,
+) -> list[SearchProviderId]:
+    """The chain as a search will walk it, before rotation."""
+    bands = resolve_provider_bands(settings, credentials)
+    return [*bands.prefix, *bands.rotate, *bands.fallback, *bands.metered]
+
+
+def provider_state_label(status: ProviderStatus) -> str:
+    """The ONE state vocabulary `search list` and `/search` print.
+
+    Shared so the two surfaces cannot drift into describing the same provider
+    differently: the operator's original complaint was a status line saying
+    "disabled" about a provider the chain was in fact using.
+    """
+    if status.excluded:
+        return "excluded"
+    if not status.enabled:
+        return "off"
+    if status.listed:
+        return "enabled"
+    if status.tier == "rotate":
+        return "auto free"
+    if status.tier == "fallback":
+        return "auto best-effort"
+    return "auto paid"
+
+
+def provider_ready_label(status: ProviderStatus) -> str:
+    """Whether the provider can serve right now (its counterpart to the state)."""
+    return "ready" if status.available else "setup needed"
+
+
+#: What each state label MEANS for the user's next search. It lives beside the
+#: labels themselves (not in the CLI and the TUI) for the same reason the labels
+#: do: a surface that prints `auto paid` and a surface that explains it must not be
+#: able to drift into saying different things.
+STATE_MEANINGS: dict[str, str] = {
+    "enabled": "in your priority order",
+    "auto free": "with the free providers",
+    "auto best-effort": "after the free providers",
+    "auto paid": "tried after the free providers, never before a free leg",
+    "excluded": "never used, whatever else is configured",
+    "off": "not usable yet",
+}
+
+
+def provider_landing_label(status: ProviderStatus) -> str:
+    """`"auto paid; tried after the free providers"` -- the state plus its meaning.
+
+    Both `search enable` landing lines read this, so `enable` telling the user
+    where a provider landed cannot disagree with the label printed by `search
+    list` for the same provider.
+    """
+    state = provider_state_label(status)
+    return f"{state}; {STATE_MEANINGS[state]}"
+
+
+def chain_bands_label(statuses: list[ProviderStatus]) -> str:
+    """One line naming the AUTO-JOINED providers: "free: Exa · paid: DeepSeek".
+
+    Listed providers are left out on purpose -- the `order:` line already names
+    them, and repeating them here would read as a second, competing chain.
+    ``(none)`` is printed rather than omitted so a reader can tell an empty band
+    from a surface that forgot to print one.
+    """
+    groups: dict[str, list[str]] = {"rotate": [], "fallback": [], "metered": []}
+    for status in statuses:
+        if status.enabled and not status.listed and status.tier in groups:
+            groups[status.tier].append(status.label)
+    parts = (
+        f"free: {', '.join(groups['rotate']) or '(none)'}",
+        f"best-effort: {', '.join(groups['fallback']) or '(none)'}",
+        f"paid: {', '.join(groups['metered']) or '(none)'}",
+    )
+    return " · ".join(parts)
 
 
 def provider_statuses(
     settings: WebSearchSettings,
     credentials: CredentialManager,
 ) -> list[ProviderStatus]:
-    """Return every provider in the stable, user-facing catalogue order."""
-    enabled = set(settings.providers)
+    """Return every provider in the stable, user-facing catalogue order.
+
+    ``enabled`` reports the provider's membership in THIS session's resolved chain
+    (listed, or auto-joined), which is what a reader of `search list` is asking;
+    ``listed`` and ``excluded`` keep the stored state visible beside it.
+    """
+    chain = set(resolve_providers(settings, credentials))
     return [
         ProviderStatus(
             id=provider_id,
             label=PROVIDERS[provider_id].label,
-            enabled=provider_id in enabled,
+            enabled=provider_id in chain,
             available=provider_available(provider_id, credentials, settings),
             access=PROVIDERS[provider_id].access,
             detail=PROVIDERS[provider_id].detail,
+            listed=provider_id in settings.providers,
+            excluded=provider_id in settings.excluded_providers,
+            tier=provider_tier(provider_id, credentials, settings) or "",
+            mode=provider_auth_mode(provider_id, credentials, settings),
         )
         for provider_id in PROVIDER_IDS
     ]

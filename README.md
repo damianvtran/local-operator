@@ -551,7 +551,7 @@ The agent's built-in tools, each with its own card in the transcript:
   kernel: variables survive across calls).
 - **Work with files**: `read`, `write`, `edit` (surgical search/replace),
   `glob`, `grep`, plus `lsp` for Jedi-backed Python code intelligence.
-- **Reach the web**: load-balanced `web_search` across seven providers,
+- **Reach the web**: load-balanced `web_search` across eight providers,
   `web_fetch` for reading pages headlessly, and a `browser` tool for pages
   that need rendering, a login, or interaction.
 - **Stay organized**: a visible `todo` list for multi-step work, `ask` to
@@ -567,28 +567,44 @@ The agent's built-in tools, each with its own card in the transcript:
 
 ### 🔎 Web search
 
-Search works out of the box. DuckDuckGo and Tavily's keyless endpoint are
-enabled by default, and requests rotate across providers with automatic
-fallback when one is rate-limited or down:
+Search works out of the box. The chain walks **free legs first and metered legs
+last**: a priority prefix you control, then the credential-free providers this
+install can reach, then the best-effort ones, then anything that would spend
+money or a model turn.
 
 ```bash
 lop search list
 lop search test "Python 3.13 release notes"
-lop search enable perplexity
+lop search enable perplexity          # clears an exclusion
+lop search disable brave             # excludes it from every search
+lop search order duckduckgo tavily   # the priority prefix (also clears exclusions)
 lop search setup brave --api-key
 lop search setup tavily --oauth      # official Tavily MCP server
 lop search setup searxng --endpoint https://search.example.com
 ```
 
+`web_search.providers` is a **priority prefix, not an allowlist**: those
+providers are tried first, in that order, and every other usable provider joins
+automatically behind them. `web_search.excluded_providers` is the only way to
+say never — an id there is skipped in the prefix *and* in the automatic bands.
+A provider that becomes usable mid-session (a DeepSeek login, an Exa key) joins
+its band on the next search with no further configuration; `lop search list`
+states each provider's state, so the chain is never a guess.
+
+`round_robin` rotates only the free rotating band, never across a band boundary,
+so a metered leg can never be rotated ahead of a free one.
+
 | Provider | Access | Default |
 | --- | --- | --- |
-| DuckDuckGo | Credential-free | Enabled |
-| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Enabled |
-| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Disabled |
-| Brave | `BRAVE_API_KEY` | Disabled |
-| Exa | `EXA_API_KEY` | Disabled |
-| SerpApi | `SERPAPI_API_KEY` | Disabled |
-| SearXNG | Self-hosted endpoint URL | Disabled |
+| DuckDuckGo | Credential-free | Priority prefix |
+| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Priority prefix |
+| Exa | Keyless MCP (no key needed), or `EXA_API_KEY` | Automatic (free) |
+| Parallel | Keyless MCP (no key needed), or `PARALLEL_API_KEY` | Automatic (free) |
+| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Automatic (best-effort) |
+| DeepSeek | Model login or `DEEPSEEK_API_KEY` | Automatic (paid) |
+| Brave | `BRAVE_API_KEY` | Automatic (paid) |
+| SerpApi | `SERPAPI_API_KEY` | Automatic (paid) |
+| SearXNG | Self-hosted endpoint URL | Automatic (free, with an endpoint) |
 
 The same controls are available in-app via `/search`.
 

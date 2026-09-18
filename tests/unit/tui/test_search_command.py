@@ -21,7 +21,11 @@ async def test_search_command_shows_status_and_applies_provider_toggle(
         first = _transcript_text(app)
         assert "Web search" in first
         assert "Round Robin" in first
-        assert "DuckDuckGo" in first and "enabled · available" in first
+        assert "DuckDuckGo" in first and "enabled · ready" in first
+        # The header names the automatic bands: `order:` is the priority prefix
+        # only, and a surface that printed just that would keep claiming the
+        # stored list is the whole chain.
+        assert "auto" in first and "free:" in first and "paid:" in first
         assert "/search enable|disable <provider>" in first
         assert "/search balance round_robin|ordered" in first
         assert "search setup tavily --oauth|--api-key" in first
@@ -33,7 +37,7 @@ async def test_search_command_shows_status_and_applies_provider_toggle(
         await pilot.pause()
         after = _transcript_text(app)
         assert "run in a shell: local-operator search setup tavily --oauth" in after
-        assert "tavily disabled; applies to the next search" in after
-        assert "Tavily" in after and "disabled · available" in after
+        assert "tavily excluded; it will not be used by any search until" in after
+        assert "Tavily" in after and "excluded · ready" in after
 
     assert session.prompts == []

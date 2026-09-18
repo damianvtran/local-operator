@@ -20,7 +20,12 @@ from local_operator.web_search.models import (
     SearchStrategy,
     WebSearchSettings,
 )
-from local_operator.web_search.providers import PROVIDERS, provider_available
+from local_operator.web_search.providers import (
+    PROVIDERS,
+    provider_available,
+    resolve_provider_bands,
+    resolve_providers,
+)
 
 _ROUND_ROBIN_LOCK = threading.Lock()
 _ROUND_ROBIN_OFFSET = 0
@@ -40,6 +45,19 @@ def coerce_search_settings(raw: object) -> WebSearchSettings:
         # configs. One typo must not prevent every other provider from loading.
         merged["providers"] = list(
             dict.fromkeys(value for value in providers if value in PROVIDER_IDS)
+        )
+
+    # Same de-dupe and unknown-id drop as the priority list, with one deliberate
+    # difference: a malformed value (a string, a mapping, None) reads as "nothing
+    # excluded" rather than raising. The absent key and its empty list mean the
+    # same thing -- no exclusions -- so there is no migration to write and no
+    # config that a hand-edited typo can turn into a disabled chain.
+    excluded = merged.get("excluded_providers")
+    if not isinstance(excluded, list):
+        merged["excluded_providers"] = []
+    else:
+        merged["excluded_providers"] = list(
+            dict.fromkeys(value for value in excluded if value in PROVIDER_IDS)
         )
 
     try:
@@ -72,12 +90,26 @@ def set_provider_enabled(
     provider_id: SearchProviderId,
     enabled: bool,
 ) -> WebSearchSettings:
-    """Enable/disable a provider without disturbing the chosen priority order."""
+    """Enable = clear the exclusion; disable = commit one.
+
+    ONE writer per fact. ``enable`` deliberately does NOT append to
+    ``web_search.providers`` any more: that append would promote the provider into
+    the priority prefix -- for a metered provider (deepseek, or a keyed exa) that
+    is a spend decision the user did not make. ``set_provider_order`` is the verb
+    for priority, and `search enable` now only says "not excluded".
+
+    ``disable`` does not remove the id from ``providers`` either: removal could
+    empty the prefix into a value the settings registry rejects, and exclusion
+    already beats listing at resolve time -- so the stored list stays readable and
+    both status surfaces print the row as ``excluded``.
+    """
     settings = load_search_settings(manager)
-    if enabled and provider_id not in settings.providers:
-        settings.providers.append(provider_id)
-    elif not enabled:
-        settings.providers = [value for value in settings.providers if value != provider_id]
+    if enabled:
+        settings.excluded_providers = [
+            value for value in settings.excluded_providers if value != provider_id
+        ]
+    elif provider_id not in settings.excluded_providers:
+        settings.excluded_providers = [*settings.excluded_providers, provider_id]
     save_search_settings(manager, settings)
     return settings
 
@@ -96,9 +128,18 @@ def set_provider_order(
     manager: ConfigManager,
     providers: list[SearchProviderId],
 ) -> WebSearchSettings:
-    """Replace the enabled provider order; callers validate ids before this point."""
+    """Replace the priority prefix; callers validate ids before this point.
+
+    Naming a provider here also CLEARS its exclusion: it is an explicit request to
+    use it, and honouring an older "never" over the user's most recent instruction
+    is the same class of lie this ordering model exists to fix.
+    """
     settings = load_search_settings(manager)
-    settings.providers = list(dict.fromkeys(providers))
+    ordered = list(dict.fromkeys(providers))
+    settings.providers = ordered
+    settings.excluded_providers = [
+        value for value in settings.excluded_providers if value not in ordered
+    ]
     save_search_settings(manager, settings)
     return settings
 
@@ -132,12 +173,15 @@ TavilyOAuthSearch = Callable[[str, int], Awaitable[SearchResponse]]
 
 
 class WebSearchService:
-    """Resolve configured providers and execute one search with fallback.
+    """Resolve this install's provider chain and execute one search with fallback.
 
-    ``round_robin`` rotates the first attempt per call, then walks the remaining
-    providers as a fallback chain. This spreads successful traffic without
-    sacrificing availability when a free tier is rate-limited or a scraper is
-    challenged. ``ordered`` always starts from the configured first provider.
+    The chain is ``prefix ++ rotating band ++ free-fallback band ++ metered band``
+    (see ``providers.resolve_provider_bands``). ``round_robin`` rotates the start
+    of the ROTATING band only -- never a band boundary, so a metered leg can never
+    be rotated in front of a free one -- which spreads successful traffic across
+    the free pool without sacrificing availability when a free tier is rate-limited
+    or a scraper is challenged. ``ordered`` always walks the bands in declared
+    order.
     """
 
     def __init__(
@@ -155,21 +199,44 @@ class WebSearchService:
         self.tavily_oauth_search = tavily_oauth_search
         self.io = io
 
+    def resolve(self) -> list[SearchProviderId]:
+        """The chain as this session will walk it, before rotation.
+
+        NON-rotating on purpose: the singleflight key and every status surface
+        need a value that is stable within a call (the rotation offset moves).
+        """
+        return resolve_providers(self.settings, self.credentials)
+
     def candidates(self, forced_provider: SearchProviderId | None = None) -> list[SearchProviderId]:
         if not self.settings.enabled:
             raise RuntimeError("Web search is disabled. Run `local-operator search on`.")
-        configured = list(self.settings.providers)
+        bands = resolve_provider_bands(self.settings, self.credentials)
         if forced_provider is not None:
-            if forced_provider not in configured:
+            # Allowed iff it is in the resolved chain, so an EXCLUDED provider is
+            # still refused (the forced path is also web_read's pin, and a pin must
+            # not override an explicit "never"), while an available provider that
+            # auto-joined the metered band is allowed.
+            if forced_provider not in (
+                *bands.prefix,
+                *bands.rotate,
+                *bands.fallback,
+                *bands.metered,
+            ):
                 raise RuntimeError(
-                    f"Search provider {forced_provider!r} is disabled. "
-                    f"Run `local-operator search enable {forced_provider}`."
+                    f"Search provider {forced_provider!r} is not in this session's provider "
+                    f"chain. Run `local-operator search list` to see why, or "
+                    f"`local-operator search enable {forced_provider}`."
                 )
             return [forced_provider]
-        if self.settings.strategy == "round_robin" and len(configured) > 1:
-            offset = _next_offset(len(configured))
-            configured = configured[offset:] + configured[:offset]
-        return configured
+        rotate = list(bands.rotate)
+        if self.settings.strategy == "round_robin" and len(rotate) > 1:
+            offset = _next_offset(len(rotate))
+            rotate = rotate[offset:] + rotate[:offset]
+        # THE BAND INVARIANT: rotation happens INSIDE the rotating band only, so a
+        # metered leg -- money, or a model turn -- can never be rotated ahead of a
+        # free one. The prefix and the two trailing bands are always walked in
+        # their declared order.
+        return [*bands.prefix, *rotate, *bands.fallback, *bands.metered]
 
     async def search(
         self,
@@ -186,8 +253,9 @@ class WebSearchService:
         candidates = self.candidates(forced_provider)
         if not candidates:
             raise RuntimeError(
-                "No web search providers are enabled. Run "
-                "`local-operator search enable duckduckgo`."
+                "No web search providers are in this session's chain. Run "
+                "`local-operator search enable duckduckgo`, or `local-operator search "
+                "list` to see what is excluded."
             )
 
         timeout = httpx.Timeout(self.settings.timeout_seconds)
@@ -229,6 +297,10 @@ class WebSearchService:
                             return oauth_response
                         failures.append("tavily OAuth MCP: returned no results")
                 if not provider_available(provider_id, self.credentials, self.settings):
+                    # Kept INSIDE the loop on purpose: a provider the user LISTED but
+                    # that has no usable credential stays in the chain and reports
+                    # `not configured` here, rather than being silently dropped from
+                    # the chain the status surfaces describe.
                     failures.append(f"{provider_id}: not configured")
                     continue
                 try:
