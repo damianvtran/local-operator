@@ -2666,31 +2666,31 @@ def _transcript_dir_and_agent_id(
 ) -> tuple[Path, str, bool]:
     """Pick where this session's JSONL transcript lives (CL-02).
 
-        ``--resume <id>`` wins over every rule below: it names an existing session
-        directory, and reusing it is what makes the transcript replay (the same
-        mechanism ``--train`` uses for an agent directory).
+    ``--resume <id>`` wins over every rule below: it names an existing session
+    directory, and reusing it is what makes the transcript replay (the same
+    mechanism ``--train`` uses for an agent directory).
 
-        The THIRD element is ``is_new``: this call brings a SESSION directory into
-        existence — a conversation the operator has not been using. It is returned
-        rather than recomputed by the caller because only this frame sees the directory
-        at the moment before anything creates it — the adopt branch below creates it
-        itself, and the lease the caller takes creates it too, so a `not path.exists()`
-        read one frame later answers "no" for every session (review round 3, F1: that is
-        exactly how the escape stamp silently never fired on the phone's first message
-        and the desktop draft). `False` for an ``agents/`` directory, which is not a
-        session at all and which the branch below may well create itself (review round
-        4, F4: the wording is "a session directory", not "any directory").
+    The THIRD element is ``is_new``: this call brings a SESSION directory into
+    existence — a conversation the operator has not been using. It is returned
+    rather than recomputed by the caller because only this frame sees the directory
+    at the moment before anything creates it — the adopt branch below creates it
+    itself, and the lease the caller takes creates it too, so a `not path.exists()`
+    read one frame later answers "no" for every session (review round 3, F1: that is
+    exactly how the escape stamp silently never fired on the phone's first message
+    and the desktop draft). `False` for an ``agents/`` directory, which is not a
+    session at all and which the branch below may well create itself (review round
+    4, F4: the wording is "a session directory", not "any directory").
 
-        Legacy ``--train`` semantics:
+    Legacy ``--train`` semantics:
 
-        - named agent + ``--train`` -> the agent's own directory, so history is
-          replayed at startup and appended after each turn;
-        - named agent WITHOUT ``--train`` -> an ephemeral per-session directory:
-          history is neither replayed from nor appended to the agent dir;
-        - no agent but ``--train`` -> the registry's autosave agent (legacy
-          ``create_autosave_agent`` semantics);
-        - otherwise an ephemeral per-session directory under ``sessions/``: the
-          default agent must not persist its session.
+    - named agent + ``--train`` -> the agent's own directory, so history is
+      replayed at startup and appended after each turn;
+    - named agent WITHOUT ``--train`` -> an ephemeral per-session directory:
+      history is neither replayed from nor appended to the agent dir;
+    - no agent but ``--train`` -> the registry's autosave agent (legacy
+      ``create_autosave_agent`` semantics);
+    - otherwise an ephemeral per-session directory under ``sessions/``: the
+      default agent must not persist its session.
     """
     config_dir = Path(agent_registry.config_dir)
     resume = getattr(args, "resume", None)
