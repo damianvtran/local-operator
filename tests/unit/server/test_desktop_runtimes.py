@@ -254,3 +254,42 @@ async def test_a_dead_pid_does_not_make_the_route_wait(
     assert response.status_code == 200
     assert response.json()["result"]["runtimes"][0]["reachability"] == "gone"
     assert asyncio.get_event_loop().time() - started < 5.0
+
+
+@pytest.mark.asyncio
+async def test_the_response_does_not_wait_out_the_probe_queue(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A roster bigger than the probe pool must still return inside its budget.
+
+    ``ThreadPoolExecutor``'s context manager joins the QUEUE, so forty rows against
+    a 0.1 s budget cost ``ceil(40 / 8) x 0.25 s`` — the budget was a hope, and QA
+    measured 1.69 s at this endpoint against a 0.1 s request (review round 1, R1-4).
+    The rows here are real records with real ports and a probe that never answers
+    inside the budget, which is the shape that used to queue.
+    """
+    _bare, client, root = desktop
+    pids = list(range(MINE + 1, MINE + 41))
+    for pid in pids:
+        _write(root, _record(pid, session_id=f"s{pid}", port=19000 + pid))
+    # Liveness is what gates the dial, and these synthetic pids are not processes:
+    # without this the rows would be `gone` and no probe would be queued at all.
+    # The census is emptied too, so the roster is exactly these forty rows and not
+    # whatever runtimes happen to be live on the machine running the suite.
+    monkeypatch.setattr(roster, "runtime_processes", lambda **kw: [])
+    monkeypatch.setattr(reclaim.registry, "pid_alive", lambda pid, **kwargs: True)
+    monkeypatch.setattr(roster, "socket_evidence", lambda **kw: SocketEvidence())
+    # A listener whose accept queue never drains: the connect blocks for the whole
+    # probe timeout rather than refusing.
+    monkeypatch.setattr(roster, "_connect_ok", lambda port, timeout: time.sleep(timeout) or False)
+
+    started = time.monotonic()
+    response = await client.get("/v1/desktop/runtimes?budget_s=0.1")
+    elapsed = time.monotonic() - started
+    assert response.status_code == 200
+    assert elapsed < 1.0, elapsed
+    rows = response.json()["result"]["runtimes"]
+    assert len(rows) == len(pids)
+    # Every row is ANSWERED, and the ones the budget cut short say so rather than
+    # claiming the runtime did not answer.
+    assert {row["reachability"] for row in rows} == {"unknown"}
