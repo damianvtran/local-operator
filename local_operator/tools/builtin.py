@@ -376,6 +376,15 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 #: the recovery route instead of just announcing a loss.
 BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
 
+# The key the harness marks elided content with, inside a JSON payload. It is
+# deliberately NOT `_truncated`: that key belongs to the Minerva toolproxy, whose
+# shape is `{"_truncated": true, "reason": "max_depth"}` — a bool with a sibling
+# `reason`. Writing that shape into a trimmed OBJECT would mean inventing a
+# `reason` key inside a payload's own namespace and overwriting an upstream
+# `_truncated`, so a model could no longer tell which layer elided what, or why
+# (review round 1, F4). One harness-owned key cannot collide with either.
+ELISION_MARKER_KEY = "_elided"
+
 
 def _clip_head_tail(text: str, limit: int) -> tuple[str, str]:
     """``(head, tail)`` slices of ``text`` totalling at most ``limit`` chars.
@@ -477,18 +486,27 @@ def _spill_footer(meta: SpillMeta, suggested: ElisionSpan | None = None) -> str:
         )
     )
     if unit == "chars":
-        # No line coordinate space exists for this payload, so a `range` here
-        # resolves to the whole (already reduced) line and a line span is
-        # unrepresentable. Print only the routes that work — a footer that
-        # prints a call which cannot resolve teaches the model the handle is
-        # useless, which is the failure this function exists to prevent.
-        return (
-            f"\n[Output was {last} chars and is SAVED in full at {handle}; this result "
-            f"shows {first} of them — expand it, do not re-run the command:\n"
+        # No line coordinate space exists for this payload, so a `range` cannot
+        # help here. The second route is printed ONLY when the stored copy has
+        # line structure to page: for a payload that is one unbroken line — every
+        # MCP JSON result — `read(path=handle)` returns that same single line and
+        # its own continuation then names a range the store rejects, i.e. the
+        # footer would be teaching a call that cannot resolve, which is the
+        # failure this function exists to prevent (review round 1, F2).
+        saved = "in full" if meta.complete else "head+tail (see the note)"
+        routes = (
             f'  read(path="{handle}?q=<regex>")  -> find matching lines first, then read '
-            f"around them\n"
-            f'  read(path="{handle}")  -> the stored payload, itself capped at the same '
-            f"budget when it is one unbroken line{partial}]"
+            f"around them"
+        )
+        if meta.lines > 1:
+            routes += (
+                f'\n  read(path="{handle}")  -> the stored payload, itself capped at the same '
+                f'budget per page\n  read(path="{handle}", range="1-200")  -> first page'
+            )
+        return (
+            f"\n[Output was {last} chars and is SAVED {saved} at {handle}; this result "
+            f"shows {first} of them — expand it, do not re-run the command:\n"
+            f"{routes}{partial}]"
         )
     # Suggest ONE PAGE, not the whole gap. A footer that prints
     # range="462-3596" invites a call whose own answer is truncated at the
@@ -551,47 +569,124 @@ def _elide_json(text: str, limit: int) -> str | None:
 
     Object KEYS are kept wherever the budget allows: which keys survive is a
     decision about meaning, and the arbitrary one (alphabetical order, since Go
-    marshals maps sorted) drops exactly the fields a reader wants. Trim markers
-    reuse the ``_truncated`` shape the Minerva toolproxy already writes into
-    domain payloads, so a model meets one convention rather than two.
+    marshals maps sorted) drops exactly the fields a reader wants.
 
-    ``None`` means "not JSON, or not fitting at any rung": the caller falls
-    back to the line-based path, which is the only thing it can do.
+    Trim markers use the harness-owned :data:`ELISION_MARKER_KEY`, deliberately
+    NOT the ``_truncated`` key the Minerva toolproxy writes into domain payloads.
+    The proxy's shape is ``{"_truncated": true, "reason": "max_depth"}`` — a
+    bool plus a SIBLING ``reason`` — and this function trims *objects* as well as
+    lists, so writing that shape into an object would mean inventing a ``reason``
+    key inside a payload's own namespace (clobbering a real field) and would
+    overwrite an upstream ``_truncated``, destroying the signal that the proxy,
+    not the harness, elided it. A distinct key cannot collide with either.
+
+    ``None`` means "not JSON": the caller falls back to the line-based path,
+    which is the only thing it can do for a non-JSON payload. A JSON payload
+    never returns ``None``: when no rung fits, the answer is the envelope from
+    :func:`_elision_envelope`, because the alternative — declining to the
+    head+tail path — splices a marker into the document and hands the caller a
+    payload ``json.loads`` rejects, which is exactly the defect this function
+    was written to remove.
     """
+    # A UTF-8 BOM survives the transport of some tool results, and `json.loads`
+    # rejects one in `str` input. Without this a BOM'd payload was classified
+    # "not JSON", took the head+tail path, and came back with the marker spliced
+    # into its first line — reproduced on a 20,010-char BOM'd document as
+    # "Expecting value: line 1 column 1" (review round 1, F1a).
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text.lstrip("\ufeff"))
     except (ValueError, RecursionError):
         return None
-    if not isinstance(parsed, (dict, list)):
-        return None
     for rung in JSON_ELISION_RUNGS:
-        candidate = json.dumps(_elide_json_value(parsed, rung, 0), separators=(",", ":"))
+        candidate = json.dumps(
+            _elide_json_value(parsed, rung, 0), separators=(",", ":"), ensure_ascii=False
+        )
         if len(candidate) <= limit:
             return candidate
-    return None
+    return _elision_envelope(parsed, limit, len(text))
+
+
+def _elision_envelope(parsed: Any, limit: int, original_chars: int) -> str:
+    """The answer for JSON that no rung fits — a document of oversized KEYS, or a
+    top-level scalar, which cannot be shortened without ceasing to be the value.
+
+    Returning a small valid object beats returning ``None``: ``None`` sends the
+    payload down the head+tail path, whose marker lands inside the document and
+    leaves the caller with a string ``json.loads`` refuses. The envelope states
+    what was there — the kind of value, how large it was, and for a container
+    how many top-level members — so a reader can decide whether to expand the
+    handle instead of re-running the call blind (review round 1, F1b/F1c).
+    """
+    detail: dict[str, Any] = {"reason": "too_large", "original_chars": original_chars}
+    if isinstance(parsed, dict):
+        detail["top_level"] = "object"
+        detail["keys"] = len(parsed)
+    elif isinstance(parsed, list):
+        detail["top_level"] = "array"
+        detail["items"] = len(parsed)
+    else:
+        detail["top_level"] = "scalar"
+    envelope = json.dumps({ELISION_MARKER_KEY: detail}, separators=(",", ":"), ensure_ascii=False)
+    if len(envelope) <= limit:
+        return envelope
+    minimal = json.dumps({ELISION_MARKER_KEY: True}, separators=(",", ":"))
+    return minimal if len(minimal) <= limit else "{}"
 
 
 def _elide_json_value(value: Any, rung: tuple[int | None, int, int, int], depth: int) -> Any:
     """``value`` reduced to fit ``rung``, with every reduction marked in band."""
     string_limit, array_limit, object_limit, depth_limit = rung
     if depth >= depth_limit:
-        return {"_truncated": {"reason": "max_depth"}}
+        return {ELISION_MARKER_KEY: {"reason": "max_depth"}}
     if isinstance(value, dict):
         keys = list(value)
         kept = keys[:object_limit] if object_limit < len(keys) else keys
         out: dict[str, Any] = {key: _elide_json_value(value[key], rung, depth + 1) for key in kept}
         if len(kept) < len(keys):
-            out["_truncated"] = {"omitted_keys": len(keys) - len(kept), "total_keys": len(keys)}
+            # The marker is added under this harness's own key, so a payload that
+            # already carries the proxy's `_truncated` keeps it: a reader must be
+            # able to tell which layer elided what, and why.
+            out[ELISION_MARKER_KEY] = {
+                "omitted_keys": len(keys) - len(kept),
+                "total_keys": len(keys),
+            }
         return out
     if isinstance(value, list):
         out_list = [_elide_json_value(item, rung, depth + 1) for item in value[:array_limit]]
         if len(value) > array_limit:
             dropped = {"omitted_items": len(value) - array_limit, "total_items": len(value)}
-            out_list.append({"_truncated": dropped})
+            out_list.append({ELISION_MARKER_KEY: dropped})
         return out_list
     if isinstance(value, str) and string_limit is not None and len(value) > string_limit:
-        return value[:string_limit] + "...[truncated]"
+        return _elide_string_middle(value, string_limit)
     return value
+
+
+def _elide_string_middle(value: str, string_limit: int) -> str:
+    """A long string reduced to head + tail around a marker that states the COUNT.
+
+    Head-only cut with a bare ``...[truncated]`` told a reader nothing about the
+    scale of the loss and destroyed whatever the field concluded with, which for
+    a disposition or a finding summary is usually the part that matters. The
+    count is what makes the marker usable: 100 characters lost and 48,000 lost
+    call for different follow-ups (review round 1, F3).
+
+    The count is the characters ACTUALLY dropped, not ``len(value) - string_limit``
+    — that would count the marker's own length as content that survived, so a
+    300-character budget reported 19,700 dropped where 19,729 were.
+    """
+    total = len(value)
+    # Size the kept content from an upper-bound marker first, then state the real
+    # count in the marker we return.
+    room = max(0, string_limit - len(f"...[{total} of {total} chars elided]..."))
+    head_chars = (room * 2) // 3
+    tail_chars = room - head_chars
+    marker = f"...[{total - room} of {total} chars elided]..."
+    if len(marker) >= string_limit:
+        return marker
+    head = value[:head_chars]
+    tail = value[total - tail_chars :] if tail_chars else ""
+    return f"{head}{marker}{tail}"
 
 
 def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, ElisionSpan | None]:
@@ -3176,14 +3271,24 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if len(body) > READ_OUTPUT_LIMIT_CHARS:
         head, tail = _clip_head_tail(body, READ_OUTPUT_LIMIT_CHARS - len(BASH_TRUNCATION_MARKER))
         shown = len(head.splitlines())
-        body = (
-            head
-            + BASH_TRUNCATION_MARKER
-            + tail
-            + f"\n[this page was itself truncated. Continue with "
-            f'read(path="{ref.handle}", range="{start + shown}-{start + shown + 200}") '
-            f'or narrow first with read(path="{ref.handle}?q=<regex>")]'
-        )
+        body = head + BASH_TRUNCATION_MARKER + tail
+        # Offer the next page only when the stored copy HAS one. `total` is the
+        # entry's own line count, so a payload stored as one unbroken line — the
+        # shape every MCP JSON result is stored as — has no second page, and
+        # naming a range past its end is the same class of defect as
+        # `lines 2-0`: a printed call that cannot resolve (review round 1, F2).
+        if start + shown <= total:
+            body += (
+                f"\n[this page was itself truncated. Continue with "
+                f'read(path="{ref.handle}", range="{start + shown}-{start + shown + 200}") '
+                f'or narrow first with read(path="{ref.handle}?q=<regex>")]'
+            )
+        else:
+            body += (
+                f"\n[this page was itself truncated and the stored copy is one "
+                f"unbroken line, so there is no next range: narrow it with "
+                f'read(path="{ref.handle}?q=<regex>")]'
+            )
     header = f"{ref.handle} — lines {start}-{start + len(selected) - 1} of {total}"
     if not meta.complete:
         header += " (stored copy is head+tail of an over-cap output)"
