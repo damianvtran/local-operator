@@ -44,12 +44,12 @@ from local_operator.server.routes.desktop_sessions import errors
 from local_operator.session import store_failures
 from local_operator.session.store_failures import (
     BUSY_MESSAGE,
-    StoreFailure,
     FULL_VOLUME_FLOOR_BYTES,
     OUT_OF_SPACE_MESSAGE,
     STORE_BUSY,
     STORE_OUT_OF_SPACE,
     STORE_UNAVAILABLE,
+    StoreFailure,
     display_root,
     out_of_space_message,
     sqlite_store_failure,
