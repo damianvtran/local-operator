@@ -378,7 +378,9 @@ def test_the_fork_window_drops_the_marker() -> None:
             for target in node.targets:
                 bind(target, strips_the_marker(node.value))
         elif isinstance(node, ast.AnnAssign):
-            bind(node.target, strips_the_marker(node.value))
+            # `x: dict[str, str]` with no value is an annotation, not a binding.
+            if node.value is not None:
+                bind(node.target, strips_the_marker(node.value))
         elif isinstance(node, ast.AugAssign):
             bind(node.target, False)
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
