@@ -494,14 +494,21 @@ def _spill_footer(meta: SpillMeta, suggested: ElisionSpan | None = None) -> str:
         # footer would be teaching a call that cannot resolve, which is the
         # failure this function exists to prevent (review round 1, F2).
         saved = "in full" if meta.complete else "head+tail (see the note)"
-        routes = (
-            f'  read(path="{handle}?q=<regex>")  -> find matching lines first, then read '
-            f"around them"
-        )
         if meta.lines > 1:
+            routes = (
+                f'  read(path="{handle}?q=<regex>")  -> find matching lines first, then read '
+                f"around them"
+            )
             routes += (
                 f'\n  read(path="{handle}")  -> the stored payload, itself capped at the same '
                 f'budget per page\n  read(path="{handle}", range="1-200")  -> first page'
+            )
+        else:
+            # One line: there is no "around them", and saying otherwise invites a model
+            # to budget for a cheap follow-up it will not get (review round 2, N2).
+            routes = (
+                f'  read(path="{handle}?q=<regex>")  -> the whole line comes back (the copy is '
+                f"one line), so search to confirm what it holds rather than to page it"
             )
         return (
             f"\n[Output was {last} chars and is SAVED {saved} at {handle}; this result "
@@ -580,23 +587,45 @@ def _elide_json(text: str, limit: int) -> str | None:
     overwrite an upstream ``_truncated``, destroying the signal that the proxy,
     not the harness, elided it. A distinct key cannot collide with either.
 
-    ``None`` means "not JSON": the caller falls back to the line-based path,
-    which is the only thing it can do for a non-JSON payload. A JSON payload
-    never returns ``None``: when no rung fits, the answer is the envelope from
-    :func:`_elision_envelope`, because the alternative — declining to the
-    head+tail path — splices a marker into the document and hands the caller a
-    payload ``json.loads`` rejects, which is exactly the defect this function
-    was written to remove.
+    ``None`` means "no complete JSON document at the head of this text" — NOT
+    "not JSON". The difference is the point: the parser this asks is CPython's,
+    which is stricter than JSON. It refuses a number past its int-conversion
+    guard (4,301 digits, CVE-2020-10735), a document nested past the recursion
+    limit, and any document followed by non-whitespace, and all three are JSON a
+    model's own parser accepts. So the question is asked with ``raw_decode``
+    (a complete document at the head, trailing region ignored), and a payload
+    that is JSON-SHAPED but that the parser refused gets the envelope from
+    :func:`_refused_json_envelope` rather than ``None`` — because ``None`` is the
+    one value that routes into the head+tail path, which splices a marker into
+    bytes the model was about to parse. Nothing is ever spliced into a
+    document-shaped payload; prose and logs still take the line path, where a
+    spliced marker is readable and correct.
     """
     # A UTF-8 BOM survives the transport of some tool results, and `json.loads`
     # rejects one in `str` input. Without this a BOM'd payload was classified
     # "not JSON", took the head+tail path, and came back with the marker spliced
     # into its first line — reproduced on a 20,010-char BOM'd document as
     # "Expecting value: line 1 column 1" (review round 1, F1a).
+    head = text.lstrip("\ufeff \t\r\n")
+    document_shaped = _json_document_shaped(head)
     try:
-        parsed = json.loads(text.lstrip("\ufeff"))
+        parsed, consumed = json.JSONDecoder().raw_decode(head)
     except (ValueError, RecursionError):
+        if not document_shaped:
+            # Not a document shape: prose, a log line, a truncated fragment. The
+            # line path is the right answer for those, and a spliced marker in a
+            # log line is readable.
+            return None
+        # JSON-shaped and refused: never hand these bytes to the splice path.
+        return _refused_json_envelope(head, limit, len(text))
+    if not document_shaped and head[consumed:].strip():
+        # A SCALAR followed by more text: that is a log line that happens to start
+        # with a number ("2026-09-17T01:23 …"), not a document with a trailer, and
+        # eliding it structurally would throw the line away. A container keeps its
+        # trailer elided-out (the shape review round 2 F1 named): the document is
+        # what a caller parses, and the trailer is outside it.
         return None
+    parsed = _scrub_surrogates(parsed)
     for rung in JSON_ELISION_RUNGS:
         candidate = json.dumps(
             _elide_json_value(parsed, rung, 0), separators=(",", ":"), ensure_ascii=False
@@ -604,6 +633,74 @@ def _elide_json(text: str, limit: int) -> str | None:
         if len(candidate) <= limit:
             return candidate
     return _elision_envelope(parsed, limit, len(text))
+
+
+# A JSON document is an object or an array; a bare numeric scalar is also JSON the
+# parser can refuse (CPython's 4,301-digit int-conversion guard, CVE-2020-10735)
+# and cannot be prose, because prose has letters or spaces. Deliberately NOT "any
+# character that can start a JSON value": `n`, `t`, `f` and a leading digit also
+# start ordinary log lines ("no adverse media found", "2026-09-17T01:23 …"), and
+# sending those to the envelope would trade a readable log for a shape note.
+_NUMERIC_CHARS = frozenset("0123456789+-.eE")
+
+
+def _json_document_shaped(head: str) -> bool:
+    """Whether a payload the parser REFUSED is still a JSON document. Only used on
+    the failure path: a payload this says yes to is never spliced into."""
+    if head.startswith(("{", "[")):
+        return True
+    return bool(head) and len(head.split()) == 1 and set(head) <= _NUMERIC_CHARS
+
+
+def _refused_json_envelope(head: str, limit: int, original_chars: int) -> str:
+    """The answer for a JSON-SHAPED payload that the interpreter's parser refused.
+
+    Three shapes land here and all three are valid JSON: a number past CPython's
+    int-conversion guard (4,301 digits, CVE-2020-10735), a document nested past
+    its recursion limit, and a document whose head is a complete value followed by
+    text. The first two raise inside the parser, so no structural elision is
+    available; the alternative to this envelope is declining to the head+tail
+    path, whose marker lands inside the document and hands the model output its
+    ``json.loads`` rejects — the exact failure this module exists to remove, and
+    one that a model's looser parser would otherwise have accepted (review round
+    2, F1). The head preview is a JSON string, so the envelope is a clean document
+    and the reader still learns what the payload started with.
+    """
+    detail: dict[str, Any] = {
+        "reason": "not_parseable",
+        "original_chars": original_chars,
+        "head": _scrub_surrogates(head[:96]),
+    }
+    envelope = json.dumps({ELISION_MARKER_KEY: detail}, separators=(",", ":"), ensure_ascii=False)
+    if len(envelope) <= limit:
+        return envelope
+    minimal = json.dumps({ELISION_MARKER_KEY: True}, separators=(",", ":"))
+    return minimal if len(minimal) <= limit else "{}"
+
+
+def _scrub_surrogates(value: Any) -> Any:
+    """Lone surrogates replaced with U+FFFD, recursively.
+
+    A payload can carry ``\\ud800`` (an upstream encoder emitting one for invalid
+    input), and ``json.loads`` turns that into a lone surrogate in the ``str``. With
+    ``ensure_ascii=False`` that character would reach the body raw, where any plain
+    UTF-8 write of it raises ``UnicodeEncodeError`` — the agent persists these
+    bodies to ``execution_history.jsonl`` through a UTF-8 handle, so the elided
+    body would be the one result that cannot be written down (review round 2, F3).
+    Scrubbing keeps ``ensure_ascii=False`` for real characters, which is what stops
+    a CJK payload from spending six characters of budget per glyph.
+    """
+    if isinstance(value, str):
+        if not any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            return value
+        return "".join(
+            "\ufffd" if 0xD800 <= ord(character) <= 0xDFFF else character for character in value
+        )
+    if isinstance(value, dict):
+        return {_scrub_surrogates(key): _scrub_surrogates(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_surrogates(item) for item in value]
+    return value
 
 
 def _elision_envelope(parsed: Any, limit: int, original_chars: int) -> str:
@@ -683,7 +780,11 @@ def _elide_string_middle(value: str, string_limit: int) -> str:
     tail_chars = room - head_chars
     marker = f"...[{total - room} of {total} chars elided]..."
     if len(marker) >= string_limit:
-        return marker
+        # Nothing survives beside the marker, so the count must be the whole value:
+        # `total - room` would under-report the loss by `room`. Unreachable with the
+        # shipped rungs (the smallest string limit is 60 and the marker is ~40), and
+        # kept true by construction anyway (review round 2, N1).
+        return f"...[{total} of {total} chars elided]..."
     head = value[:head_chars]
     tail = value[total - tail_chars :] if tail_chars else ""
     return f"{head}{marker}{tail}"
@@ -3285,8 +3386,8 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
             )
         else:
             body += (
-                f"\n[this page was itself truncated and the stored copy is one "
-                f"unbroken line, so there is no next range: narrow it with "
+                f"\n[this page was itself truncated and this page's last line is only "
+                f"partly shown, so there is no next range: narrow it with "
                 f'read(path="{ref.handle}?q=<regex>")]'
             )
     header = f"{ref.handle} — lines {start}-{start + len(selected) - 1} of {total}"

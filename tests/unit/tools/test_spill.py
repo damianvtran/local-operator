@@ -574,9 +574,11 @@ def test_json_elision_never_declines_a_json_payload() -> None:
         assert len(out) <= 16 or out == "{}"
         assert json.loads(out)  # or :: it parses
 
-    # Only a non-JSON payload declines.
+    # Only a payload that is NOT a document shape declines, so the line path
+    # keeps its job: prose, logs, and a truncated fragment are readable with a
+    # spliced marker, and a document is not.
     assert builtin._elide_json("not json at all", 16) is None
-    assert builtin._elide_json('{"unterminated": ', 16) is None
+    assert builtin._elide_json("2026-09-17T01:23:45Z starting up\n" * 40, 16) is None
 
 
 def test_elision_span_declines_a_payload_with_no_interior_line() -> None:
@@ -965,3 +967,103 @@ def test_non_ascii_payload_keeps_its_characters() -> None:
     assert out is not None
     assert len(out) <= 8_000
     assert "日本語" in out, "the reader gets the characters, not their escapes"
+
+
+# ---------------------------------------------------------------------------
+# review round 2: payloads that ARE JSON but that CPython's parser refuses, and
+# the small honesty gaps around them
+# ---------------------------------------------------------------------------
+
+
+def _parseable_head(body: str) -> Any:
+    """The document at the head of a served body, or a failure that names why."""
+    parsed, end = json.JSONDecoder().raw_decode(body.lstrip("\ufeff"))
+    assert end > 0
+    return parsed
+
+
+def test_json_the_stdlib_refuses_is_never_spliced(context: ToolContext) -> None:
+    # `json.loads` is stricter than JSON: it refuses a number past its
+    # int-conversion guard (4,301 digits, CVE-2020-10735), a document nested past
+    # the recursion limit, and a document followed by text. All three are JSON a
+    # model's own parser accepts, so declining to the head+tail path handed the
+    # model the exact signature this module removes (review round 2, F1).
+    # A 20,000-deep document cannot be BUILT by json.dumps either (the encoder hits
+    # the same recursion limit), so it is spelled out as text.
+    shapes = {
+        "4301-digit integer": '{\n  "notes": "'
+        + "n" * 4_000
+        + '",\n  "big": '
+        + "1" * 4_301
+        + "\n}",
+        "40000-digit integer": "1" * 40_000,
+        "nesting depth 20000": "[" * 20_000 + "1" + "]" * 20_000,
+        "JSON + trailing text": json.dumps({"assessment_id": "ra_1", "notes": "n" * 9_000})
+        + "\nnot-json trailing region",
+    }
+
+    for name, text in shapes.items():
+        body, details = builtin.spill_truncate(text, "get_assessment", context)
+        assert details is not None
+        parsed = _parseable_head(body)
+        assert parsed is not None, name
+        assert (
+            builtin.BASH_TRUNCATION_MARKER not in body
+        ), f"{name}: the marker must never be spliced into a payload that is JSON-shaped"
+        # The recovery route is still the footer's, so the model can get the rest.
+        assert details["spill"]["handle"] in body
+
+
+def test_lone_surrogate_escape_never_reaches_the_body_raw(context: ToolContext) -> None:
+    # `\ud800` decodes to a lone surrogate. With ensure_ascii=False it would reach
+    # the body raw, and every plain UTF-8 write of that body — including the one
+    # this agent does when it persists a result — raises UnicodeEncodeError
+    # (review round 2, F3).
+    text = json.dumps({"a": "\ud800", "blob": "b" * 20_000})
+    body, details = builtin.spill_truncate(text, "get_assessment", context)
+    assert details is not None
+    body.encode("utf-8")  # must not raise
+    parsed = _parseable_head(body)
+    assert parsed is not None
+    assert "blob" in parsed
+
+
+def test_partial_last_line_is_not_described_as_an_unbroken_copy(
+    tools: dict[str, AgentTool], context: ToolContext
+) -> None:
+    # Withholding the next range is right; calling the copy "one unbroken line"
+    # was not, because a multi-line entry reaches that branch whenever the page
+    # starts at its last line and that line is longer than the clip (round 2, F2).
+    import asyncio
+
+    text = "short first line\n" + "y" * 9_000
+    body, details = builtin.spill_truncate(text, "bash", context)
+    assert details is not None
+    handle = details["spill"]["handle"]
+    page = asyncio.run(_call(tools, "read", {"path": handle, "range": "2-2"}, context))
+    assert page.is_error is False
+    assert "one unbroken line" not in page.text, page.text[-400:]
+    assert "only partly shown" in page.text, page.text[-400:]
+
+
+def test_string_marker_keeps_the_identity_when_nothing_survives() -> None:
+    # Review round 2, N1: on the marker-only branch the count must be the whole
+    # value, not `total - room`, which under-reported the loss by `room`.
+    value = "v" * 5_000
+    out = builtin._elide_string_middle(value, 20)
+    assert out.startswith("...")
+    elided = re.search(r"\[(\d+) of (\d+) chars elided\]", out)
+    assert elided, out
+    assert int(elided.group(2)) == 5_000
+    assert int(elided.group(1)) == 5_000, "nothing survived, so nothing was kept"
+
+
+def test_one_line_copy_search_route_says_what_it_returns(context: ToolContext) -> None:
+    # Review round 2, N2: for a one-line copy `?q=` is the ONLY route, and it
+    # returns that whole line — there is no "read around them" step to budget for.
+    payload = json.dumps({"assessment_id": "ra_1", "notes": "n" * 20_000})
+    body, details = builtin.spill_truncate(payload, "get_assessment", context)
+    assert details is not None
+    assert "?q=<regex>" in body
+    assert "read around them" not in body, "a one-line copy has no lines to read around"
+    assert "the whole line comes back" in body
