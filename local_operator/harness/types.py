@@ -977,6 +977,21 @@ class ToolContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     cwd: str = "."
+    #: This session's own ``scratchpad://`` root (``<session dir>/scratchpad``),
+    #: absolute, or ``None`` on a host with no session directory. The scratchpad
+    #: is scratch the AGENT owns: ``read``/``write``/``edit`` take
+    #: ``scratchpad://<name>`` and this is the one place the scheme resolves to
+    #: disk.
+    #:
+    #: A string like ``cwd`` rather than a ``Path``, because it is a path and
+    #: not a handle. Declared here because every capability a built-in tool
+    #: looks for is declared (see the class docstring), and DERIVED per turn by
+    #: the session from its transcript directory rather than passed into
+    #: ``Session.__init__`` — a value a host can configure is a value a host can
+    #: configure and then drop on the way to the executor, which is precisely
+    #: the class of bug ``tests/unit/session/test_tool_context_parity.py``
+    #: exists to catch.
+    scratchpad_dir: str | None = None
     # Session-owned transport and duplicate-read coordinator. Kept off wire
     # payloads; its lifecycle belongs to the session that constructs tools.
     web_io: Any | None = Field(default=None, exclude=True)
