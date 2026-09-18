@@ -25,7 +25,7 @@ import os
 import signal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -33,15 +33,18 @@ from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 
-#: This module is about POSIX-signal semantics, so on a platform with no SIGUSR1 it
-#: skips as a whole rather than failing: `RELOAD_SIGNAL` is optional precisely so
-#: `local_operator.server` can be IMPORTED there (serve-reload review round 7, R7-1).
-if serve_reload.RELOAD_SIGNAL is None:  # pragma: no cover - Windows
-    pytest.skip("this platform has no SIGUSR1", allow_module_level=True)
+#: Narrowed for the type checker. `RELOAD_SIGNAL` is optional because the module must
+#: IMPORT where there is no SIGUSR1 (serve-reload review round 7, R7-1), and `cast` is
+#: a no-op at runtime — which is safe because the tests that actually use it are the
+#: two marked `NEEDS_SIGUSR1` below. Skipping the WHOLE module was the first attempt
+#: and threw away 19 of 21 tests that pass unchanged without the signal (serve-reload
+#: review round 8, R8-2).
+RELOAD_SIGNAL = cast("signal.Signals", serve_reload.RELOAD_SIGNAL)
 
-#: Narrowed once for the type checker, which cannot carry the module-level check
-#: above into each test body.
-RELOAD_SIGNAL: signal.Signals = serve_reload.RELOAD_SIGNAL
+#: For the two tests that genuinely exercise POSIX-signal delivery.
+NEEDS_SIGUSR1 = pytest.mark.skipif(
+    serve_reload.RELOAD_SIGNAL is None, reason="this platform has no SIGUSR1"
+)
 
 
 class FakeApp:
@@ -286,6 +289,7 @@ def test_exec_hands_over_the_fd_the_new_interpreter_and_a_safe_path(
     assert seen["env"]["PATH"] == os.environ["PATH"]
 
 
+@NEEDS_SIGUSR1
 @pytest.mark.asyncio
 async def test_install_arms_the_handler_and_the_signal_sets_the_flag(
     install: dict[str, Any],
@@ -300,6 +304,7 @@ async def test_install_arms_the_handler_and_the_signal_sets_the_flag(
     assert watch.pending is True
 
 
+@NEEDS_SIGUSR1
 def test_exec_ignores_the_signal_across_the_replace(
     install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
