@@ -9,7 +9,6 @@ side-effect authority cannot be reconstructed from bytes after a crash.
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import os
 import secrets
@@ -563,6 +562,23 @@ class EvidenceWriter:
 
     @staticmethod
     def _supported() -> None:
+        """Refuse by name before any POSIX syscall is attempted.
+
+        ``fcntl`` is imported HERE rather than at module scope, and that is the
+        whole fix for the audit's D5: at module scope the POSIX-only import
+        made this module — and, through
+        ``local_operator.evaluation.runner.episode``, the entire evaluation
+        runner — unimportable on Windows with a bare ``ModuleNotFoundError``,
+        raised before this function could say anything. Moved here, the
+        refusal below is what a caller on such a platform actually sees, and it
+        already names the reason. Nothing else in the module touches
+        ``fcntl``: the only other user is :meth:`_lock`, which has both of its
+        callers behind this check.
+        """
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - win32, where the guard below refuses
+            fcntl = None  # type: ignore[assignment]
         if os.name != "posix" or sys.platform.startswith("win") or not hasattr(fcntl, "flock"):
             raise EvidenceUnsupported(
                 "evidence bundles require POSIX flock and directory descriptors"
@@ -578,6 +594,10 @@ class EvidenceWriter:
 
     @staticmethod
     def _lock(root_fd: int) -> int:
+        # Both callers run `_supported()` first, so reaching this line means the
+        # platform has flock and the import cannot fail here.
+        import fcntl
+
         fd = os.open(_LOCK, _WRITE_FLAGS | os.O_CREAT, 0o600, dir_fd=root_fd)
         try:
             _safe_file(fd)

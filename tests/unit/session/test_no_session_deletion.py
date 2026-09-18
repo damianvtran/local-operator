@@ -841,9 +841,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # with a suffixed supervisor name inherits that file, and leaving it
         # behind made `uninstall` report success while the daemon kept running.
         # Both are supervisor config FILEs the user asked to remove — never a
-        # session, transcript or state directory.
-        "plist/unit FILEs (own + one inherited from a pre-per-root build)",
-        4,
+        # session, transcript or state directory. Five calls because this daemon
+        # has one registration FILE per platform (LaunchAgent plist, systemd
+        # user unit, the recorded Windows task definition), plus the one a
+        # pre-per-root build left behind.
+        "plist/unit/task FILEs (own + one inherited from a pre-per-root build)",
+        5,
     ),
     (
         "local_operator/browser_bridge/install.py::uninstall",
@@ -871,7 +874,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "one-shot fork-boundary sidecar FILE",
     ),
-    ("local_operator/mobile/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    (
+        "local_operator/mobile/install.py::uninstall",
+        "<path>.unlink",
+        "ONE registration FILE per platform: LaunchAgent plist, systemd user unit, "
+        "or the recorded Windows task definition",
+        3,
+    ),
     (
         "local_operator/model/catalogue.py::_ListingFetchLease.acquire",
         "<path>.unlink",
@@ -1091,7 +1100,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "cleanup of this function's own mkstemp temp FILE",
     ),
-    ("local_operator/wakes/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    (
+        "local_operator/wakes/install.py::uninstall",
+        "<path>.unlink",
+        "the LaunchAgent plist, or the systemd SERVICE + TIMER units, or the "
+        "recorded Windows task definition — one platform's set, never a directory",
+        4,
+    ),
     ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
     # -- container/in-memory .remove()/.replace(), not the filesystem --------
@@ -1252,6 +1267,42 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only the probe FILE mkstemp just created in a scratch base "
         "($TMPDIR//tmp-class); never a directory, never under sessions/",
+    ),
+    # -- the supervisor layer's file removals (2026-09-18) --------------------
+    # Making the four daemons work off macOS (a systemd user unit, a Task
+    # Scheduler task) added file removals in the shared supervisor module and in
+    # the password store. Every path in this block is one of:
+    #
+    #   * a supervisor REGISTRATION FILE the user asked to remove —
+    #     `~/.config/systemd/user/<unit>`, `~/Library/LaunchAgents/<label>.plist`,
+    #     or the task definition this installer wrote under the CONFIG ROOT;
+    #   * a PASSWORD FILE in the config root's `mobile/` directory, removed by an
+    #     explicit `uninstall --purge`;
+    #   * the temp FILE `tempfile` just created and returned inside `create_task`.
+    #
+    # None of them is derived from a session id, a transcript path, or any
+    # caller-supplied name, and none can name a DIRECTORY: the registration paths
+    # are built from a fixed unit/label name plus the real home or the config
+    # root, and the unlink calls are `missing_ok=True` no-ops on an absent file.
+    (
+        "local_operator/supervisors.py::create_task",
+        "<path>.unlink",
+        "the temp task-definition FILE mkstemp just created, removed in a finally",
+    ),
+    (
+        "local_operator/mobile/auth.py::_store_secret_tool",
+        "<path>.unlink",
+        "the plaintext password FILE a keyring write just superseded",
+    ),
+    (
+        "local_operator/mobile/auth.py::delete_password",
+        "<path>.unlink",
+        "the password FILEs (0600 fallback + DPAPI blob) that --purge removes",
+    ),
+    (
+        "local_operator/tunnels/install.py::_uninstall_task",
+        "<path>.unlink",
+        "our recorded copy of the Windows task definition FILE",
     ),
 )
 

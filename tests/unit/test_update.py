@@ -1135,6 +1135,37 @@ class TestServiceDaemonRefresh:
         assert refresh.lines == () and refresh.warnings == ()
         run.assert_not_called()
 
+    def test_a_platform_without_launchd_says_so_instead_of_saying_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Silence reads as success, so a platform the scan cannot address speaks.
+
+        The scan is ``~/Library/LaunchAgents``, so on Linux and Windows it finds
+        nothing and the empty ``DaemonRefresh`` printed nothing at all — in the
+        upgrade summary that is indistinguishable from "there was nothing to
+        do", while a systemd unit or a scheduled task is still running the
+        previous interpreter. Re-registering those units is a follow-up; what is
+        pinned here is that the step reports what it did NOT do (audit A24).
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        # The launchd scan must not even be consulted: on a host that has no
+        # LaunchAgents directory it would answer "nothing installed" and the
+        # line would be wrong rather than absent.
+        with (
+            patch.object(
+                update_mod, "_installed_daemon_plists", side_effect=AssertionError("scanned")
+            ),
+            patch("subprocess.run") as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_not_called()
+        assert refresh.warnings == ()
+        assert len(refresh.lines) == 1
+        assert "not refreshed" in refresh.lines[0]
+        assert sys.platform in refresh.lines[0], "the line names this host's platform"
+        assert "lop browser install" in refresh.lines[0], "and the way to fix it"
+
     def test_the_child_is_the_new_wheel_and_is_named(self, branded_image) -> None:
         plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
         completed = subprocess.CompletedProcess(

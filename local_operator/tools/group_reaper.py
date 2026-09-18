@@ -1,9 +1,9 @@
 """Reap orphaned process groups whose owning ``lop`` process died hard.
 
-Every shell command the bash tool runs is spawned ``start_new_session=True``
-(`builtin.py`), so each command becomes its own session + process group, and
-``execute_bash`` kills that group on every in-process stop path via
-``_kill()`` -> ``os.killpg(...)``. Those paths — foreground timeout, real
+Every shell command the bash tool runs is detached into its own session +
+process group on POSIX (``procstate.detached_popen_kwargs``), and
+``execute_bash`` kills that group on every in-process stop path via ``_kill()``
+-> ``procstate.terminate_process_tree``. Those paths — foreground timeout, real
 abort, steering-detach, background-job cleanup, the final reap after a normal
 exit — are complete and correct for any death the owning process is alive to
 observe.
@@ -42,10 +42,23 @@ a killer into the never-delete module would blur the single guarantee that file
 exists to make. This module imports ``_process_alive`` from retention and
 nothing else.
 
-POSIX-only by nature. The leak is POSIX-specific (``start_new_session``
-orphaning); ``os.killpg`` / ``os.getpgid`` do not exist on Windows, and
+POSIX-only by nature. The leak is POSIX-specific (a new session orphaning the
+group); ``os.killpg`` / ``os.getpgid`` do not exist on Windows, and
 ``_process_alive`` cannot probe there, so every entry point early-returns a
 no-op on win32 and nothing is ever registered or reaped.
+
+WHAT WINDOWS DOES INSTEAD, so the gap is not mistaken for an oversight: a
+command killed while the owner is ALIVE still dies correctly there, because
+``terminate_process_tree`` walks the tree with ``taskkill /T /F`` — the rungs
+this module does not replace. What is missing is only the HARD-death reclaim,
+and the platform has no equivalent to substitute silently: the native mechanism
+is a kill-on-close Job Object per child, whose ``KILL_ON_JOB_CLOSE`` limit the
+kernel fires when the LAST handle closes — which is not only the owner's death
+but also a clean exit, so it would kill a deliberately detached survivor (a
+``start``-ed server) that POSIX leaves running. Choosing between those two is a
+product decision, not a port, so nothing here pretends to have made it:
+:func:`_note_unsupported_platform_once` says so once, on the path where a user
+would otherwise be told nothing.
 
 Out of scope, on purpose: ``exec_mode --background`` workers. Those spawn
 ``python -m local_operator.exec_worker`` as a SEPARATE detached process (not via
@@ -93,6 +106,39 @@ _PLATFORM = sys.platform
 #: ``_LIVENESS_IS_VERIFIABLE``). Named rather than inlined so every entry point
 #: reads the same decision.
 _REAPING_IS_SUPPORTED = _PLATFORM != "win32"
+
+#: Latched so the platform notice below is emitted at most once per process:
+#: ``register_group`` runs on EVERY shell command, and a warning per command
+#: would be noise the reader learns to skip.
+_unsupported_notice_logged = False
+
+
+def _note_unsupported_platform_once() -> None:
+    """Say once that orphan reaping does not exist on this platform.
+
+    WHY A LOG LINE AT ALL: the early returns below are the one part of this
+    mechanism that is a SILENT no-op, and "silent" is the property that makes a
+    missing safety net indistinguishable from a working one. It names the OS
+    and the consequence because the reader of a session log is usually the one
+    deciding whether a leaked process on a hard kill matters here. Once per
+    process, on the first registration attempt — the moment the mechanism would
+    have been used.
+    """
+    global _unsupported_notice_logged
+    if _unsupported_notice_logged:
+        return
+    _unsupported_notice_logged = True
+    logger.warning(
+        "group reaper: process-group ledgers are POSIX-only, so on %s a shell "
+        "command that outlives a HARD death of this process (Task Manager, "
+        "console close, crash) is NOT reclaimed at the next startup; a command "
+        "stopped while this process is alive is killed normally. The platform "
+        "mechanism would be a kill-on-close Job Object, which also kills "
+        "deliberately detached children on a clean exit — a product decision, "
+        "not yet made (see local_operator/tools/group_reaper.py).",
+        _PLATFORM,
+    )
+
 
 #: First N chars of the command, stored for the LOG LINE only. Never a decision
 #: input. Bounded so a pathological one-line command cannot bloat the ledger.
@@ -320,6 +366,7 @@ def register_group(
     behaviour — one leaked group on a hard owner death.
     """
     if not _REAPING_IS_SUPPORTED:
+        _note_unsupported_platform_once()
         return
     resolved = _resolve_config_dir(config_dir)
     if resolved is None:
@@ -685,6 +732,7 @@ def sweep_orphan_groups(
     """
     result = ReaperSweepResult()
     if not _REAPING_IS_SUPPORTED:
+        _note_unsupported_platform_once()
         return result
     me = os.getpid() if self_pid is None else self_pid
     groups_dir = config_dir / PROC_GROUPS_DIRNAME

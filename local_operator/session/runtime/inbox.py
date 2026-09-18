@@ -243,8 +243,12 @@ class _NonBlockingLock:
     def __enter__(self) -> "_NonBlockingLock":
         if os.name == "nt":
             # No fcntl on Windows, and msvcrt.locking's non-blocking mode
-            # raises rather than waiting. The atomic O_APPEND write stands on
-            # its own there.
+            # raises rather than waiting. The lock is skipped rather than
+            # emulated, and BOTH users are written to be correct without it:
+            # the writer relies on the atomic O_APPEND write, and
+            # `drain_inbox` falls through to the staged-remainder rewrite
+            # whenever the lock was not acquired — on this platform as much as
+            # on a contended POSIX one.
             return self
         import fcntl
 
@@ -530,6 +534,7 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return []
+    closed = False
     try:
         with _NonBlockingLock(fd) as lock:
             raw = _read_all(fd)
@@ -554,7 +559,7 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
             # goes, and a recall has done its job once the batch it applied to is
             # gone.
             deliverable = _deliverable(lines)
-            if lock.acquired or os.name == "nt":
+            if lock.acquired:
                 os.ftruncate(fd, 0)
             else:
                 # Unlocked, a truncate could discard a row an appender wrote
@@ -563,6 +568,22 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
                 # appender's row lands in a file we just replaced, which the
                 # NEXT open drains.
                 #
+                # **Windows takes THIS branch too, and must close first.** The
+                # ``or os.name == "nt"`` this replaces sent the platform with
+                # no locking (see _NonBlockingLock) straight to the one
+                # operation the sentence above identifies as able to discard a
+                # row. Nothing about the remainder path is POSIX-specific, but
+                # it DOES need the handle gone before it runs: on Windows
+                # ``os.replace`` is ``MoveFileExW(MOVEFILE_REPLACE_EXISTING)``,
+                # and an existing open of the DESTINATION path makes that call
+                # fail — CPython's own issue 46003 records that delete sharing
+                # does not save it, and our fd shares neither delete nor
+                # anything else the CRT offers. Left open, every unlocked drain
+                # would fail the rename, warn, and redeliver the whole spool.
+                # Closing first is a no-op on POSIX, where a rename over an
+                # open descriptor is ordinary.
+                os.close(fd)
+                closed = True
                 # ``latest``, not ``raw``: rows that arrived between the two
                 # reads are part of this batch, so they must not survive as a
                 # remainder to be delivered twice.
@@ -572,7 +593,8 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
         logger.warning("inbox drain failed for %s", session_dir.name, exc_info=True)
         return []
     finally:
-        os.close(fd)
+        if not closed:
+            os.close(fd)
 
 
 def _read_all(fd: int) -> bytes:

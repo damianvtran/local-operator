@@ -66,6 +66,8 @@ from local_operator.paths import config_dir
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from local_operator.agents import AgentRegistry
 
 from local_operator.helpers import setup_cross_platform_environment
@@ -2829,9 +2831,14 @@ def browser_command(args: argparse.Namespace) -> int:
         command_line = browser_install.logs_command(args.lines, follow=args.follow)
         # A log file that was never created means the daemon has not run under
         # a supervisor here, which is a different thing from "it ran and said
-        # nothing". Say which, instead of leaving the user with `tail`'s
-        # "No such file or directory" on a path they never chose.
-        if command_line[0] == "tail" and not browser_install.log_path().exists():
+        # nothing". Say which, instead of leaving the user with the log
+        # reader's "No such file or directory" on a path they never chose.
+        # Asked of the install ("does this platform's command read the log
+        # file?") rather than of the argv's first token: only the installer
+        # knows which platforms redirect into that file and which read the
+        # journal instead, and the Windows arm's command is PowerShell's
+        # Get-Content, not a tail.
+        if browser_install.logs_read_the_log_file() and not browser_install.log_path().exists():
             print(
                 f"no daemon log at {browser_install.log_path()}.\n"
                 "The bridge has not run under a service supervisor on this machine. "
@@ -5407,6 +5414,124 @@ def _format_duration(seconds: float) -> str:
     return format_age(seconds)
 
 
+def _tail_last_lines(text: str, count: int) -> list[str]:
+    """The last ``count`` lines of ``text``, newline-terminated for printing.
+
+    Split on ``\n`` alone, not ``str.splitlines``: the latter also breaks on
+    ``\v``, ``\f`` and the Unicode line separators, so it would report line
+    numbers ``tail`` does not (a log line carrying a form feed would count as
+    two). A trailing newline does not open a further empty line.
+    """
+    if count <= 0:
+        return []
+    parts = text.split("\n")
+    if parts and parts[-1] == "":
+        parts.pop()
+    return [part + "\n" for part in parts[-count:]]
+
+
+def _python_tail(paths: Sequence[Path], lines: int, *, follow: bool) -> int:
+    """Print log tails in-process, for hosts whose userland has no ``tail``.
+
+    Windows ships no ``tail``, and it has no ``/bin/sh`` to borrow one from, so
+    this is the *whole* implementation there rather than a second behaviour
+    beside ``tail`` on the platforms that have it — the caller only reaches here
+    after ``subprocess.call`` has already raised ``FileNotFoundError``.
+
+    ``follow`` is the ``-F`` shape for the reasons in the caller's comment: a
+    runtime log created after the follow started must still be picked up, and
+    rotation (a RENAME here, because the handler bounds the file by renaming)
+    must not leave the reader watching a dead inode. Both fall out of re-stat'ing
+    the PATH every poll and comparing identity, which is what ``-F`` does.
+    """
+    offsets: dict[Path, int] = {}
+    keys: dict[Path, tuple[int, int] | None] = {}
+    if not follow:
+        for index, path in enumerate(paths):
+            if index:
+                print()
+            print(f"==> {path} <==")
+            for line in _tail_last_lines(_read_text(path), lines):
+                sys.stdout.write(line)
+        return 0
+    try:
+        while True:
+            for path in paths:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    # Not created yet, or mid-rotation and the replacement has
+                    # not been renamed into place. ``-F`` retries a missing file
+                    # quietly; so does this.
+                    continue
+                identity = (stat.st_ino, stat.st_dev)
+                if keys.get(path) != identity:
+                    # First sight, or the file was replaced under us: header and
+                    # the tail, exactly as ``tail`` prints on opening a file.
+                    keys[path] = identity
+                    print(f"==> {path} <==")
+                    try:
+                        with path.open("r", encoding="utf-8", errors="replace") as handle:
+                            text = handle.read()
+                            offsets[path] = handle.tell()
+                    except OSError:
+                        continue
+                    for line in _tail_last_lines(text, lines):
+                        sys.stdout.write(line)
+                    sys.stdout.flush()
+                    continue
+                offset = offsets.get(path, 0)
+                if stat.st_size < offset:
+                    # Truncated in place (a copytruncate-style rotation): what is
+                    # there now is all there is.
+                    offsets[path] = 0
+                    continue
+                if stat.st_size == offset:
+                    continue
+                try:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        handle.seek(offset)
+                        chunk = handle.read()
+                        offsets[path] = handle.tell()
+                except OSError:
+                    continue
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        return 0
+
+
+def _read_text(path: Path) -> str:
+    """Read a log file for the no-``tail`` path, tolerating a missing one.
+
+    ``errors="replace"`` because a daemon's stdout and a runtime's records can
+    interleave a partial multi-byte sequence; losing one line's glyphs beats
+    failing the command the operator ran to read the log.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _run_tail(argv: Sequence[str], paths: Sequence[Path], lines: int, *, follow: bool) -> int:
+    """Run ``tail``, or read the tails in-process on a host that has none.
+
+    ``tail`` stays the only path taken on POSIX: the comments at the call site
+    record measurements against the system ``tail`` (``-F`` follows by NAME,
+    where ``-f`` does not), and reimplementing that for hosts which already have
+    it would be a second behaviour to keep in step. Windows has no ``tail``, so
+    ``subprocess.call`` raised ``FileNotFoundError`` straight out of ``lop mobile
+    logs`` — a traceback instead of the log. Catching exactly that exception and
+    falling back keeps the POSIX path byte-identical.
+    """
+    try:
+        return subprocess.call(list(argv))
+    except FileNotFoundError:
+        return _python_tail(paths, lines, follow=follow)
+
+
 def mobile_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop mobile …``. Imports are lazy: the mobile package pulls
     starlette/uvicorn only on commands that serve, and the CLI startup path
@@ -5421,6 +5546,8 @@ def mobile_command(args: argparse.Namespace) -> int:
     from local_operator.mobile import install as mobile_install
 
     if command == "install":
+        from local_operator.mobile.auth import store_description
+
         result = mobile_install.install()
         steps = result.get("steps", [])
         assert isinstance(steps, list)
@@ -5429,7 +5556,10 @@ def mobile_command(args: argparse.Namespace) -> int:
         if result.get("ok"):
             print("\nmobile daemon installed and healthy.")
             print("  open http://127.0.0.1:4098 and sign in with your portal password")
-            print("  the password is in the login Keychain (service lop-mobile).")
+            # The store is per-platform now (Keychain, Secret Service, DPAPI), so
+            # the sentence is built from the one function that answers where this
+            # machine keeps it — the same answer install's own steps print.
+            print(f"  the password is in {store_description()}.")
             print("  retrieve it yourself with `lop mobile password` at a TTY —")
             print("  it is never printed here, so it cannot leak into a transcript.")
             return 0
@@ -5465,8 +5595,6 @@ def mobile_command(args: argparse.Namespace) -> int:
         return 0
 
     if command == "logs":
-        import subprocess
-
         from local_operator.paths import runtime_log_path
 
         log = mobile_install.log_path()
@@ -5490,7 +5618,7 @@ def mobile_command(args: argparse.Namespace) -> int:
             # for a header.
             tail.append("-F")
             tail.extend([str(log), str(runtime_log)])
-            return subprocess.call(tail)
+            return _run_tail(tail, [log, runtime_log], args.lines, follow=True)
         existing = [path for path in (log, runtime_log) if path.exists()]
         if not existing:
             # `tail` with no operand reads STDIN and would hang the command on a
@@ -5498,12 +5626,13 @@ def mobile_command(args: argparse.Namespace) -> int:
             print(f"no log files yet: {log} (and {runtime_log})")
             return 0
         tail.extend(str(path) for path in existing)
-        return subprocess.call(tail)
+        return _run_tail(tail, existing, args.lines, follow=False)
 
     if command == "password":
         from local_operator.mobile.auth import (
             generate_password,
             load_password,
+            store_description,
             store_password,
         )
 
@@ -5512,7 +5641,11 @@ def mobile_command(args: argparse.Namespace) -> int:
         # TTY. Rotation still works non-interactively via --rotate once we
         # have a TTY confirmation; without a TTY we only say where it lives.
         if not sys.stdout.isatty():
-            print("portal password is in the login Keychain (service lop-mobile).")
+            # Built from the store question rather than written out: the password
+            # is in the login Keychain on macOS and nowhere else, and naming the
+            # Keychain on Linux or Windows sends the user looking for a store
+            # their OS does not have.
+            print(f"portal password is in {store_description()}.")
             print("run `lop mobile password` in a terminal to view or rotate it.")
             return 0
 
@@ -5553,8 +5686,9 @@ def _bind_serve_socket(host: str, port: int) -> socket.socket:
     daemons cannot collide on a fixed one.
 
     Mirrors ``uvicorn.Config.bind_socket()``: the address family follows a host
-    with a colon in it (an IPv6 literal), ``SO_REUSEADDR`` is set, and the
-    socket is bound WITHOUT listening — ``loop.create_server`` calls ``listen``
+    with a colon in it (an IPv6 literal), ``SO_REUSEADDR`` is set (see the
+    platform note below for Windows, where a different option is required), and
+    the socket is bound WITHOUT listening — ``loop.create_server`` calls ``listen``
     on the socket it is handed, which is the same sequence uvicorn uses on its
     own path. Raising is deliberate: the caller reports a bind failure through
     :func:`_refuse_serve_bind`, rather than letting it surface as a traceback.
@@ -5571,10 +5705,32 @@ def _bind_serve_socket(host: str, port: int) -> socket.socket:
     was refused. So the friendly refusal below is guaranteed against a LISTENING
     holder; against a merely-bound one on Linux the collision instead surfaces
     from uvicorn's own ``listen``, as its own error.
+
+    On Windows the option is ``SO_EXCLUSIVEADDRUSE`` instead, and that is a
+    correctness fix rather than a preference: there ``SO_REUSEADDR`` does let a
+    second bind succeed over a LISTENING holder (Microsoft, "Using SO_REUSEADDR
+    and SO_EXCLUSIVEADDRUSE"), so the refusal above would be silent on the one
+    platform where a port collision is easiest to create.
     """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family=family)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # ``getattr`` rather than ``socket.SO_EXCLUSIVEADDRUSE``: the constant exists
+    # only in CPython's Windows build (``socketmodule.c`` guards it with
+    # ``#ifdef SO_EXCLUSIVEADDRUSE``), so naming it directly is an attribute the
+    # type checker and every POSIX run would have to be told to ignore.
+    exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+    if exclusive is not None:
+        # Windows only, and the choice is not cosmetic: the two options are
+        # mutually EXCLUSIVE, and on Windows SO_REUSEADDR lets a second socket
+        # bind an address a first, LISTENING socket already holds — the
+        # documented hijack vector — so the friendly "a daemon already holds
+        # 1111" refusal below would never fire and two `lop serve` processes
+        # would split the port in silence. On Linux/macOS the same bind over a
+        # listening holder is refused, which is why SO_REUSEADDR was (correctly)
+        # kept there for fast crash restarts.
+        sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((host, port))
     except OSError:

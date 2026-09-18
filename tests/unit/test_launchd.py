@@ -33,7 +33,9 @@ from __future__ import annotations
 import os
 import plistlib
 import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -598,3 +600,97 @@ class TestReloadJob:
         assert result.outcome == "not-addressable"
         assert f"passwd entry for uid {os.getuid()}" in result.detail, result.detail
         assert "reinstall" not in result.detail
+
+
+# ---------------------------------------------------------------------------
+# The non-POSIX guards (A13/A14/D25)
+#
+# `local_operator.launchd` is the macOS half of a three-platform supervisor
+# layer, and it must refuse on the other two rather than raise. It did raise:
+# `real_home()` had `import pwd` OUTSIDE its try (so Windows got
+# `ModuleNotFoundError`, from the one function whose answer decides whether
+# launchd is addressed at all), `os.getuid()` would have raised `AttributeError`
+# immediately after, and `job_domain()` used it directly — from inside
+# `reload_job`, whose documented contract is that nothing in its sequence raises.
+#
+# `os.getuid`/`pwd` cannot be removed from this host, so the calls themselves are
+# what is made to fail: the import is what is simulated, exactly as it fails on
+# Windows.
+# ---------------------------------------------------------------------------
+
+
+def test_real_home_answers_none_when_there_is_no_pwd_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows has no `pwd`; the answer is None, not ModuleNotFoundError."""
+    import builtins
+    import sys
+
+    real_import = builtins.__import__
+
+    def no_pwd(
+        name: str,
+        globals_: Mapping[str, object] | None = None,
+        locals_: Mapping[str, object] | None = None,
+        fromlist_: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> ModuleType:
+        """``__import__`` with ``pwd`` missing; everything else is forwarded.
+
+        The five parameters are spelled out rather than taken as ``*args:
+        object`` because ``builtins.__import__`` DECLARES them
+        (``Mapping``/``Sequence``/``int``) and forwarding ``object``s made the
+        forwarding call unverifiable. They are handed over POSITIONALLY, which
+        is how CPython's ``IMPORT_NAME`` always calls ``__import__``; the names
+        differ from the builtins they shadow only to keep that shadowing out of
+        this module's namespace.
+        """
+        if name == "pwd":
+            raise ModuleNotFoundError("No module named 'pwd'")
+        return real_import(name, globals_, locals_, fromlist_, level)
+
+    monkeypatch.setattr(builtins, "__import__", no_pwd)
+    monkeypatch.delitem({}, "", raising=False)  # no-op; keeps monkeypatch handles distinct
+    monkeypatch.delitem(sys.modules, "pwd", raising=False)
+    try:
+        assert launchd.real_home() is None
+    finally:
+        sys.modules.pop("pwd", None)
+
+
+def test_real_home_answers_none_without_getuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second half of the same trap: a `pwd` module with no `os.getuid`."""
+    monkeypatch.delattr(launchd.os, "getuid", raising=False)
+
+    assert launchd.real_home() is None
+    assert launchd.config_lives_in_real_home(Path("/tmp/anything")) is False
+    assert launchd.is_own_plist(Path("/tmp/x.plist"), "com.local-operator.wakes") is False
+
+
+def test_job_domain_names_its_own_refusal_without_getuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(launchd.os, "getuid", raising=False)
+
+    with pytest.raises(launchd.JobDomainUnavailable):
+        launchd.job_domain()
+
+
+def test_reload_job_still_never_raises_without_getuid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The contract, at the one function that has it.
+
+    `reload_job` is called by an installer that has just taken a daemon down, so
+    an escaping AttributeError would hand the operator a traceback while the
+    service was already stopped.
+    """
+    monkeypatch.delattr(launchd.os, "getuid", raising=False)
+    monkeypatch.setattr(launchd, "real_home", lambda: None)
+
+    reloaded = launchd.reload_job(
+        label="com.local-operator.wakes", path=tmp_path / "x.plist", runner=lambda *a: None
+    )
+
+    assert reloaded.ok is False
+    assert reloaded.outcome == "not-addressable"

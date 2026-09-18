@@ -754,6 +754,26 @@ def test_win32_is_a_total_noop(tmp_path, monkeypatch):
     kill_own_groups(config_dir=tmp_path, owner_pid=os.getpid())  # no raise
 
 
+def test_win32_noop_says_so_once_rather_than_silently(tmp_path, monkeypatch, caplog):
+    """The platform gate is the one part of this mechanism that cannot act, so
+    it must SAY so — a missing safety net and a working one are otherwise
+    indistinguishable in a session log. Once per process: this runs on every
+    shell command, and a warning per command is noise a reader learns to skip."""
+    monkeypatch.setattr(group_reaper, "_REAPING_IS_SUPPORTED", False)
+    monkeypatch.setattr(group_reaper, "_unsupported_notice_logged", False)
+
+    with caplog.at_level("WARNING", logger=group_reaper.logger.name):
+        sweep_orphan_groups(tmp_path)
+        sweep_orphan_groups(tmp_path)
+        register_group(11, "a", config_dir=tmp_path, owner_pid=os.getpid())
+
+    notices = [record for record in caplog.records if "POSIX-only" in record.getMessage()]
+    assert len(notices) == 1, [record.getMessage() for record in caplog.records]
+    message = notices[0].getMessage()
+    assert "HARD death" in message  # names the consequence, not just the platform
+    assert "Job Object" in message  # and the alternative a future fix would use
+
+
 # --------------------------------------------------------------------------- #
 # R2: the owner's own start token is derived once, not on every hot-path call.
 # --------------------------------------------------------------------------- #
