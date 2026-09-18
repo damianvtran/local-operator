@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -167,6 +168,10 @@ def test_the_interactive_path_refuses_before_building_a_session(
     assert cli_main() == 1
     assert built == []
     assert "`task`" in capsys.readouterr().err
+    # The refusal sits AHEAD of the config override and the autosave-agent
+    # lookup, so a refused run leaves the store untouched as well — not merely
+    # unconversationed. Asserted against the scratch HOME the suite redirects.
+    assert not (Path(os.environ["HOME"]) / ".local-operator").exists()
 
 
 def _explode() -> None:
