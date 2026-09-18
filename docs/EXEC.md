@@ -8,6 +8,7 @@ that same team; the prompt is never rewritten into a simulated slash command.
 
 ```sh
 lop exec 'Review the implementation' --team release --background
+lop exec --tools read,mcp__vendor_screen 'Screen these names'
 printf 'Summarize this report' | lop exec --profile reviewer
 lop exec --goal 'Finish the acceptance checklist' --loop 3 --name 'Night audit'
 lop exec --resume SESSION_ID --loop-goal 'All acceptance checks are verified'
@@ -29,6 +30,7 @@ lop --resume SESSION_ID
 | `--loop N` | Run 1–25 continuation iterations **after** an optional initial prompt. Requires a new or resumed standing goal. |
 | `--loop-goal TEXT` | Run continuation/judge iterations until achieved. No fixed iteration cap; repeated undecidable judge results fail safely. Mutually exclusive with `--loop`. |
 | `--name TEXT` | Set the persisted conversation title. |
+| `--tools NAMES` | Declare this run's whole reach: a comma-separated list of tools, and the only ones the session may reach — an excluded tool is unreachable by name, not merely unapproved, and delegated children inherit the bound. The declaration is **one-way** for the session's life (a second declaration may only tighten it; a host that needs a different set starts a session with it) and it is not persisted, so a later `--resume` without the flag is unrestricted. It also stands as the APPROVAL for the names it lists *where nobody can be asked* — a non-TTY run without `--control`; on a terminal, and under `--control`, every write/exec call is still put to the gate. Overrides an attached role's `tools:` allow-list, and inherits it when the flag is absent. A name this build does not have is unreachable, and reported at the end of the run. |
 | `--effort LEVEL` | Set reasoning effort using the selected model's existing validation. Unsupported levels fail before a turn. |
 | `--resume [ID]` | Reopen the same transcript; omit the ID to select the most recent session. A live headless runtime is refused rather than raced; `lop --resume ID` attaches the TUI to that runtime instead. |
 | `--background` | Detach a worker. The launcher prints a bounded readiness receipt, not a claim that the work completed. |
@@ -78,6 +80,14 @@ headless gate. Publishing a discovery record does not replace that gate with
 an interactive one. With `--control`, work may park for a supervisor. Choose
 `--yolo` only when you intend that override; it is not required for an
 unattended run. Viewer attach/detach does not end the worker's work.
+
+`--tools` is a reach bound and not an approval override, so it does not change
+that: the declaration stands as the approval for the names it lists only where
+nobody can answer — a non-TTY run without `--control`, which includes a
+`--background` worker. On a terminal the per-call prompt remains, for every
+declared write/exec call as much as any undeclared one: naming a tool says
+which tools this run may reach, never that each command it is about to run has
+been agreed to in advance.
 
 A parked run stays `running` for as long as nobody answers it, so the status
 names what it is waiting on: `--status` reports `"pending": "approval"`

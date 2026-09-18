@@ -1,6 +1,7 @@
 """Bounded startup adapters retain actual team/profile and loop semantics."""
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,7 +13,11 @@ from local_operator.exec_mode import (
     job_status,
     resolve_prompt,
 )
-from local_operator.exec_startup import apply_startup, resolve_startup
+from local_operator.exec_startup import (
+    apply_startup,
+    report_unresolved_declared_tools,
+    resolve_startup,
+)
 from local_operator.session.goal_loop import GoalLoop
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -217,3 +222,229 @@ def test_generation_reconciliation_marks_interrupted_not_success(monkeypatch):
     assert job_status("j")["status"] == "interrupted"
     assert checked == [(123, "old")]
     assert exec_mode.read_job_records()[0]["status"] == "running"
+
+
+# --------------------------------------------------------------------------
+# --tools: the declared tool inventory (lop-harness-gaps)
+# --------------------------------------------------------------------------
+
+
+class RecordingSession:
+    """The smallest host that can answer the inventory questions.
+
+    A hand-written double rather than ``Mock()``, because the behaviour under
+    test is partly "a host that cannot answer is not an error": a ``Mock``
+    fabricates ``attached_profile_tools`` and ``tool_inventory`` on demand, and
+    the startup path has to survive that (see ``_name_tuple``).
+    """
+
+    def __init__(self, reachable=("read",), attached=()):
+        self._reachable = tuple(reachable)
+        self._attached = tuple(attached)
+        self._declared: set[str] = set()
+        self.declared: list[tuple[tuple[str, ...], bool]] = []
+        self.attached_profiles: list[str] = []
+
+    def attach_team(self, team):
+        pass
+
+    def attach_agent_profile(self, name):
+        self.attached_profiles.append(name)
+        return name
+
+    @property
+    def attached_profile_tools(self):
+        return self._attached
+
+    @property
+    def tool_inventory(self):
+        return self._reachable
+
+    def unresolved_declared_tools(self):
+        # The real Session answers this (see its docstring): an absent name is a
+        # typo unless MCP is still connecting. This host has no MCP at all.
+        if not self._declared:
+            return ()
+        return tuple(name for name in sorted(self._declared) if name not in self._reachable)
+
+    def set_tool_inventory(self, names, *, unattended=False):
+        self._declared = set(names)
+        self.declared.append((tuple(names), unattended))
+        allowed = set(names)
+        self._reachable = tuple(name for name in self._reachable if name in allowed)
+
+    def set_goal(self, text):
+        pass
+
+    def set_conversation_name(self, text):
+        pass
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (None, None),
+        ("read", ("read",)),
+        ("read,grep", ("read", "grep")),
+        (" read , grep ", ("read", "grep")),
+        ("read,read,grep", ("read", "grep")),
+        ("", ()),
+        (",,", ()),
+    ],
+)
+def test_parse_tool_inventory(text, expected):
+    from local_operator.exec_startup import parse_tool_inventory
+
+    assert parse_tool_inventory(text) == expected
+
+
+def test_empty_tools_declaration_is_refused_at_preflight():
+    """``None`` and ``()`` are different answers: one leaves the session
+    unrestricted, the other strands it with nothing to reach. A declaration the
+    operator typed and got nothing for would read as a harness bug."""
+    with pytest.raises(ValueError, match="at least one tool"):
+        resolve_startup(ExecArgs(tools=""))
+
+
+def test_tools_declares_the_inventory_and_approves_it_when_unattended():
+    session = RecordingSession(reachable=("read", "bash", "write"))
+    apply_startup(session, ExecArgs(tools="read"), team=None)
+    assert session.declared == [(("read",), True)]
+    assert session.tool_inventory == ("read",)
+
+
+def test_a_run_started_with_stdin_closed_still_reads_its_declaration(monkeypatch):
+    """fd 0 CLOSED is a shape a launcher can produce.
+
+    Python leaves ``sys.stdin`` as ``None`` for it rather than raising, and the
+    tty probe above assumed a stream: the whole run died at startup with
+    ``'NoneType' object has no attribute 'isatty'`` before it reached a provider
+    request. A stdin that cannot be asked is the same answer a pipe gives, so
+    the declaration stands as the approval exactly as it does for
+    ``--background``'s ``DEVNULL``.
+    """
+    monkeypatch.setattr(sys, "stdin", None)
+    session = RecordingSession(reachable=("read", "bash"))
+    apply_startup(session, ExecArgs(tools="read"), team=None)
+    assert session.declared == [(("read",), True)]
+
+
+def test_a_foreground_tty_run_does_not_treat_the_declaration_as_consent(monkeypatch):
+    """Naming a tool is not consent on a terminal.
+
+    ``unattended`` used to mean "no ``--control``", which conflated "no
+    supervisor" with "no human" and silently removed a live per-call safety
+    prompt: `lop exec --tools bash,write "…"` typed at a terminal ran every
+    bash call with nothing shown, while the same command without --tools
+    prompts. The tree's existing test for "somebody can answer" is a tty
+    (``session_factory._make_request_approval`` prompts there and denies
+    without one), so the declaration may stand as the approval for its own
+    members only when there is no tty — the two tests above run with pytest's
+    non-tty stdin and keep auto-approving, which is also what a
+    ``--background`` worker sees (``exec_mode`` spawns it with
+    ``stdin=DEVNULL``).
+    """
+
+    class Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(sys, "stdin", Tty())
+    session = RecordingSession(reachable=("read", "bash"))
+    apply_startup(session, ExecArgs(tools="read"), team=None)
+    assert session.declared == [(("read",), False)]
+
+
+def test_a_supervised_run_declares_the_inventory_but_leaves_the_gate_alone():
+    """``--control`` means a supervisor can answer, so a declared tool must still
+    be ASKED about — the supervisor's gate replaces the session's, and an
+    approval granted by declaration here would bypass it."""
+    session = RecordingSession(reachable=("read", "bash"))
+    apply_startup(session, ExecArgs(tools="read", control=True), team=None)
+    assert session.declared == [(("read",), False)]
+
+
+def test_an_attached_roles_allow_list_bounds_the_run(tmp_path):
+    """``--profile reviewer`` used to stamp instructions only: the reviewer seed's
+    ``tools:`` allow-list was enforced solely where the profile is launched as a
+    SUBAGENT, so a headless reviewer could still write the patch it was asked to
+    review."""
+    session = RecordingSession(reachable=("read", "bash", "edit"), attached=("read", "bash"))
+    apply_startup(session, ExecArgs(profile="reviewer"), team=None)
+    assert session.attached_profiles == ["reviewer"]
+    assert session.declared == [(("read", "bash"), True)]
+    assert "edit" not in session.tool_inventory
+
+
+def test_tools_wins_over_the_attached_roles_allow_list(tmp_path):
+    """The explicit flag states THIS run's reach; a role's allow-list is a weaker
+    statement about the role."""
+    session = RecordingSession(reachable=("read", "bash"), attached=("read", "bash"))
+    apply_startup(session, ExecArgs(profile="reviewer", tools="read"), team=None)
+    assert session.declared == [(("read",), True)]
+
+
+def test_a_role_declaring_no_tools_leaves_the_run_unrestricted():
+    """The negative case: today's behaviour, byte for byte. Most seeds declare no
+    ``tools:`` of their own, and a session they bound to nothing must not become
+    a session that can reach nothing."""
+    session = RecordingSession(reachable=("read", "bash", "edit"))
+    apply_startup(session, ExecArgs(profile="coder"), team=None)
+    assert session.declared == []
+
+
+def test_no_declaration_at_all_never_touches_the_inventory():
+    session = RecordingSession(reachable=("read", "bash"))
+    apply_startup(session, ExecArgs(name="Audit"), team=None)
+    assert session.declared == []
+
+
+def test_a_host_that_cannot_answer_the_inventory_questions_is_not_an_error(capsys):
+    """A reduced host fabricates any attribute it is asked for — ``getattr`` with
+    a default never fires — so the startup path must treat "cannot say" as
+    "declares nothing" rather than iterating a fabricated object."""
+    session = Mock()
+    apply_startup(session, ExecArgs(profile="reviewer"), team=None)
+    assert session.set_tool_inventory.call_count == 0
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_a_declared_name_that_matches_nothing_is_reported_at_the_end_of_the_run(capsys):
+    """Fail-closed is right, silent is not: with no matching tool the run answers
+    nothing and every call returns "Tool not found", which reads as a harness
+    fault rather than as the typo it is.
+
+    Reported at the END of the run — MCP servers connect in the background, so at
+    startup an unreachable name and a server that is still connecting are
+    indistinguishable."""
+    session = RecordingSession(reachable=("read", "grep"))
+    args = ExecArgs(tools="read,reed,grep")
+    apply_startup(session, args, team=None)
+    assert capsys.readouterr().err == ""  # nothing claimed before the run settles
+
+    report_unresolved_declared_tools(session, args)
+    assert "Warning: --tools names no tool this run could reach: reed." in capsys.readouterr().err
+
+
+def test_a_roles_unmatched_tool_is_not_reported(capsys):
+    """Deliberately silent for the role-derived case: a profile naming a tool that
+    exists on another machine is ordinary (see ``agent_profiles.filter_tools``)."""
+    session = RecordingSession(reachable=("read",), attached=("read", "mcp__elsewhere_tool"))
+    apply_startup(session, ExecArgs(profile="reviewer"), team=None)
+    report_unresolved_declared_tools(session, ExecArgs(profile="reviewer"))
+    assert capsys.readouterr().err == ""
+
+
+def test_worker_argv_carries_the_tool_declaration():
+    """``--background`` is the same request run elsewhere: a declaration dropped
+    at the process boundary would leave the worker unrestricted while the
+    launcher reported a bounded run."""
+    argv = build_worker_argv("t", ExecArgs(tools="read,mcp__vendor_screen"))
+    assert "--tools=read,mcp__vendor_screen" in argv
+
+
+def test_the_worker_parser_accepts_the_tool_declaration():
+    from local_operator.exec_worker import build_parser
+
+    parsed = build_parser().parse_args(["--prompt=p", "--tools=read,mcp__vendor_screen"])
+    assert parsed.tools == "read,mcp__vendor_screen"

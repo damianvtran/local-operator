@@ -986,6 +986,35 @@ def test_headless_approval_denial_notice(fake_factory, monkeypatch, capsys) -> N
     assert "approval required but no tty; run with --yolo to auto-approve" in err
 
 
+def test_headless_approval_denial_notice_with_fd_0_closed(
+    fake_factory, monkeypatch, capsys
+) -> None:
+    """CL-04 holds when fd 0 is CLOSED, where ``sys.stdin`` is ``None``.
+
+    A launcher or daemoniser may start the process with fd 0 closed, and Python
+    leaves ``sys.stdin`` as ``None`` for that shape rather than raising on it.
+    The unconditional ``sys.stdin.isatty()`` therefore raised
+    ``'NoneType' object has no attribute 'isatty'`` out of the gate, which the
+    loop answers as an approval-gate FAULT: the call still did not run (fail
+    closed), but the user was told "This is a harness fault, not a refusal by
+    the user" instead of the actionable notice below. An absent stdin has to
+    read the way a pipe does — nobody can be asked — so this asserts the same
+    CL-04 line ``/dev/null`` already produces.
+    """
+    monkeypatch.setattr(sys, "stdin", None)
+    import local_operator.session_factory as sf
+
+    gate = sf._make_request_approval(yolo=False)
+
+    async def _gate() -> bool:
+        return await gate("exec", "rm -rf /")
+
+    approved = asyncio.run(_gate())
+    assert approved is False
+    err = capsys.readouterr().err
+    assert "approval required but no tty; run with --yolo to auto-approve" in err
+
+
 def test_yolo_gate_approves_without_tty(monkeypatch) -> None:
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     import local_operator.session_factory as sf

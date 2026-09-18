@@ -1053,6 +1053,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "--agent/--agent-id select legacy agent data and are mutually exclusive.\n"
             "Default non-TTY approvals deny. --control may wait for a supervisor; --yolo\n"
             "is an explicit override, never implied by --background or --team.\n"
+            "--tools bounds what the run can reach: excluded tools are unreachable.\n"
             "Foreground events/text use stdout; receipts use stderr. Detached runs log\n"
             "both streams and print distinct job/session IDs. Use lop --resume SESSION_ID\n"
             "to view a live run or resume a finished one; exec refuses a live owner."
@@ -7727,6 +7728,7 @@ def main() -> int:
                 # only subcommand routed through this Namespace in tests, and a
                 # missing attribute must read as "off", never raise.
                 control=bool(getattr(args, "control", False)),
+                tools=getattr(args, "tools", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast
