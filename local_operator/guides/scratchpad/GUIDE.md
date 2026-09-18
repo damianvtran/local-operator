@@ -36,7 +36,8 @@ Every kind of text file you would otherwise drop into their tree:
   whole check; add each item to it as you report it, so the next wake does not
   repeat it.
 - **A long tool result worth keeping** across turns, when a `spill://` handle is
-  not enough because you need to grep, edit or re-read it.
+  not enough: a handle is read-only and cannot be edited in place. Read it and
+  write what you need into `scratchpad://`, then work on it there.
 
 None of this is the user's business, and left in their tree it is litter they
 cannot tell apart from output.
@@ -45,10 +46,14 @@ cannot tell apart from output.
 
 - Anything the user asked for as an output → the working directory, at the path
   they would expect.
-- Anything that must outlive this conversation → the scratchpad is this
-  session's own folder, and it is deleted with the session.
+- Anything that must outlive this conversation → not here — nothing here outlives
+  it. The store is deleted with the session (it lives INSIDE the session's own
+  directory, so deleting the session takes the whole folder, and the automatic
+  cleanup pass does too when its policy is switched on). An output that has to
+  survive belongs in the working directory, or wherever the user wants it.
 - Binary files (an image, an archive, a model file) → not here: this store is
-  text (markdown, JSON, CSV/TSV, TXT, YAML, logs, script sources).
+  text (markdown, JSON, CSV/TSV, TXT, YAML, logs, script sources), and a binary
+  file put here cannot be read back — the reader refuses it.
 
 ## The protocol
 
@@ -63,9 +68,9 @@ Five calls, all through the tools you already have:
 | `edit(path="scratchpad://logs/run.md", edits=[…])` | change it in place with SEARCH/REPLACE hunks |
 
 A result that succeeds names the URL as you typed it and the resolved absolute
-path it maps to (`<url> -> <path>`), so the two can never be confused, and its
-verb says whether the file was created or overwritten. That real path is what `bash`,
-`ls`, `grep`, `glob` and `eval` need — a shell cannot resolve a scheme — so use
+path it maps to (`<url> -> <path>`), so the two can never be confused, and a
+write's verb says whether it created or overwrote the file. That real path is what
+`bash`, `ls`, `grep` and `eval` need — a shell cannot resolve a scheme — so use
 it whenever you step outside the tools. A listing prints its entries as relative
 names and carries the resolved folder in its header.
 
@@ -81,13 +86,16 @@ gets no tile and no viewer. One file per subject; subdirectories are free
 ## Rules the tool enforces
 
 - `..`, absolute paths and dotfiles are refused outright, as are `?` and `#`
-  (they open a query or fragment — percent-encode as `%3F`/`%23`).
-- One directory level per listing, and a listing is bounded, so a wide
-  directory cannot flood the transcript. The FOLDER itself is not capped: a
-  single write is not refused for its size, so keep the files to what you need —
-  the session's cleanup takes the whole folder when the session goes, and only if
-  the cleanup policy is on. Reading a
-  very large file comes back truncated with the `read` call that continues it.
+  (they open a query or fragment — percent-encode as `%3F`/`%23`). A name
+  containing `://` is refused too: a second scheme inside a name is a URL, not a
+  file name.
+- One directory level per listing, and a listing is bounded, so a wide directory
+  cannot flood the transcript. Reading a very large file comes back truncated,
+  with the `read` call that continues it.
+- The folder itself is NOT size-capped: a single write is not refused for its
+  size, so keep the files to what you need. Nothing caps it later either — the
+  only thing that removes it is the session going away, by the cleanup pass (when
+  its policy is switched on) or by the session being deleted.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.
 - Any other URL scheme in a path argument is refused: a scheme the tools do not

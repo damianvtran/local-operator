@@ -157,8 +157,11 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: tree with the schema change already in it — so that comment called 163 "the
 #: whole of the increase" when the branch's real delta was 211. Round 1 then
 #: removed the duplication that clause created (the pointer says the scheme, the
-#: schema field does not have to), which gives the current head 27,949: pointer
-#: +163 tokens, schema -1 token (a 137-character edit), net +162. The ceiling is
+#: schema field does not have to), which gives the current head 27,949 — net
+#: +162 against the base: pointer +163 tokens, schema -1 token (44,228 -> 44,225
+#: characters, a 3-character edit). The round-1 trim was the LARGER step and it is
+#: not the -1: it ran 44,362 -> 44,228, i.e. -137 characters = -49 tokens measured
+#: against the pre-trim head. The ceiling is
 #: set 51 above that, the same order of headroom as the ``secret`` (49) and
 #: ``web_read`` (71) raises, so the ratchet stays tight — and the tighten band
 #: below (1,200) is nowhere near tripped.
