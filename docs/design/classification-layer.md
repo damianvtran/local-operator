@@ -230,11 +230,30 @@ class ClassificationService:
   `skipped="timeout"`.
 - Is safe to call concurrently; one in-flight call per (session, cache key) is enough.
 
-## 5. Context budget — the 32k cap and the truncation policy
+## 5. Context budget — the 32k input window and the truncation policy
 
-The model's per-request budget is 64k tokens (32k for `state` plus the longest question). Our
-own ceiling is much lower because the entire point is to be cheap, and because a recommendation
-that costs more than the resources it saves is a net loss.
+The model's input window is **32k tokens** (operator, 2026-09-18). Until then this section said
+"64k tokens (32k for `state` plus the longest question)", which nothing had measured — no vendor
+surface reports a 64k window for `jev-1.13`. Our own ceiling is far below the window regardless,
+because the entire point is to be cheap: a recommendation that costs more than the resources it
+saves is a net loss.
+
+MEASURED AT CATALOGUE SCALE (2026-09-18, this branch, defaults for `maxStateChars` and
+`maxCandidates`, a 537-resource roster — 500 skills, 30 guides, 7 servers — each skill and guide
+carrying a realistic ~85-character description, and an 8×-repeated user message): state 3 279
+chars, question options 3 170 chars, question instructions 449 chars, i.e. **6 898 chars ≈ 1 724
+tokens ≈ 5.3% of the 32 768-token window**. What bounds this is the candidate cap, not the window:
+at `maxCandidates: 40` the same roster produces 13 887 chars ≈ 3 471 tokens ≈ 10.6%. Hundreds of
+skills are affordable, and `maxCandidates` is the operator's lever.
+
+THE SAME ROSTER IS BUILT IN THE TEST, and the figures above are that test's own measurements:
+`tests/unit/classification/test_context.py`'s `_catalogue_roster()` builds those 537 rows and both
+budget tests assert EQUALITY against these component figures (3 279 / 3 170 / 449, and 5 336 /
+8 102 at 40 a kind), so a change on either side fails a test rather than drifting quietly. (Three
+review rounds moved these numbers: round 1 found toy one-line descriptions and a `<= 3000` bound
+that accepted a 5× regression, round 2 found the doc and the test quoting different rosters, and
+round 3 found the cap-40 test still building the older 530-row roster with the 7 server rows
+missing.)
 
 Non-negotiable: **the transcript is never sent.** Not the history, not the compaction summary,
 not tool results. What goes out is:
@@ -266,6 +285,17 @@ state is the user message plus the roster.
 
 A user message longer than the whole budget is classified on its head. That is acceptable
 because every answer here is advisory, and the head of a request is where the intent is.
+
+WHICH CANDIDATES TRAVEL is a separate question as soon as the catalogue is bigger than the cap.
+`maxCandidates` is 12 per kind, and "the first twelve in discovery order" is an arbitrary
+permanent shortlist: with hundreds of installed skills the same dozen would be offered on every
+message for the life of the session while the rest of the catalogue stayed unreachable — exactly
+when scaling is the thing that matters. The wiring therefore shortlists LOCALLY
+(`classification.context.shortlist`: a Jaccard overlap of the candidate line against the message,
+plus a bonus when the resource's own name appears in it — no network call, no embedding request,
+tens of microseconds for hundreds of rows) whenever a kind exceeds the cap, and returns the
+survivors in the caller's discovery order, so the request's line and option order is still the
+caller's.
 
 ## 5a. Latency budget (operator requirement, 2026-09-18)
 
@@ -377,7 +407,15 @@ reusing it means one classification per user message with no new freeze machiner
 Sequence per user message:
 
 1. build the candidate list — the same discovered skills/guides the router sees, plus the
-   configured MCP server names with their capability hints;
+   configured MCP server names with their capability hints. The list is resolved **per message**
+   for freshness: the cached roster is keyed on a fingerprint of the skill tree (roots plus
+   per-file `(mtime_ns, size)`, ~0.29 ms at 8 roots / 57 skills), so a skill installed
+   mid-conversation is a candidate on the very next message — after a steer, in the parent session
+   and in any child started afterwards. The same signal RE-OPENS the frozen knowledge block, whose
+   previous render is parked in `superseded_block` because a subagent's block is built
+   synchronously and must not come back empty in the window before the next render. An unchanged
+   tree costs one stat walk and nothing else. Candidates past `maxCandidates` per kind are chosen
+   by `shortlist`, not by discovery order (§5);
 2. `await asyncio.gather(...)` the existing selection and the classification, so the added
    latency is the *difference*, not the sum — and bound the WAIT for the classification by
    `values.classification.waitMs` rather than by its deadline (see §5a rule 6: a call that misses
@@ -402,6 +440,28 @@ Sequence per user message:
    in the harness's cost log. It is delivered after the turn's answer, through the session's own
    post-turn notice queue, so it does not occupy the answer slot. A resource set identical to the
    previous message's is not announced again.
+
+   TWO CONSEQUENCES OF THE LINE ALWAYS PAINTING (design review round 1, 2026-09-18). While the layer
+   shipped off, the notice's ink and height were only ever seen by operators who opted in; on by
+   default they are everybody's. (1) **Height**: the row count is a function of
+   `maxRecommendations` (3 by default, so 2 rows at 100 columns and 3 at 80), which is now a default
+   surface rather than an opt-in one — `maxRecommendations` is the lever for that, exposed beside
+   `maxCandidates` in `/settings`. (2) **Ink — a recorded EXCEPTION, and the fix is NOT in this
+   layer.** The line is delivered as `info`, which maps to the theme's `dim` token: measured 3.77:1
+   on the light theme, below the 4.5:1 AA floor, with 13 of the 16 light builtins under it. `note`
+   (`muted`: 7.18:1 on paper, 8.62:1 on the dark ground) is the right ink — it is what
+   `tui/session_presentation.py` already chose for a replayed marker — and delivering it that way
+   was implemented and then WITHDRAWN: ``NoticeEvent.kind`` is
+   ``Literal["info", "warning", "error"]``, so the violation lands at the session's notice FLUSH,
+   one hop after delivery is reported: ``Session.queue_notice`` accepts the tuple and
+   ``_emit_classification_notice`` returns True (which is how the "last announced" key came to
+   record a line nobody had seen), and the flush's own guard then catches the pydantic
+   ``ValidationError``, logs ``session queued notice failed to emit`` at WARNING and drops it — so
+   the line never painted on the TUI, CLI or server and the repeat was suppressed (agent review
+   round 2, blocker; the attribution corrected in round 4). Adding
+   `note` to the event contract, the server's kind allowlists and the session's annotations is its
+   own cross-surface change and does not belong inside a default flip; §12 carries it as an open
+   item, and the glyph (`·`) is shared by both kinds so the ink is the only difference.
 
 Rendered block (this is the whole token cost — target ≤ 6 lines):
 
@@ -429,18 +489,23 @@ entry in `_consumer_defaults()` in `tests/unit/test_settings_io.py`:
 
 | key | kind | default | meaning |
 | --- | --- | --- | --- |
-| `auto` | bool | `false` | master switch; off means the prompt is unchanged |
+| `auto` | bool | `true` | master switch; off means the prompt is unchanged (and nothing is imported) |
 | `vendor` | choice | `auto` | `auto` \| `radient` \| `typesafe` \| `openrouter` (pins one leg) |
 | `model` | text | `""` | override the vendor's model id |
 | `timeoutMs` | int | `1500` | per-call deadline (the vendor's budget, and the breaker's clock) |
 | `waitMs` | int | `50` | how long a TURN waits for an answer; a slower one rides the next message (§5a rule 6) |
 | `maxStateChars` | int | `6000` | hard cap on the serialized state |
-| `maxCandidates` | int | `12` | candidates sent per kind |
+| `maxCandidates` | int | `12` | candidates sent per kind, chosen by local relevance when the catalogue is larger |
 | `maxRecommendations` | int | `3` | recommendations injected per message |
 | `notice` | bool | `true` | emit the one-line host notice |
 
-`values.effort.auto` is the precedent for the shape and for defaulting off
-(`model/effort_classifier.py:17-23`): an upgrade must never silently change behaviour or spend.
+`values.effort.auto` is the precedent for the SHAPE (`model/effort_classifier.py:17-23`); its
+"off, because an upgrade must never silently change behaviour or spend" rule was followed until
+2026-09-18, when `auto` flipped to ON. The three measurements that replaced the analogy: the spend
+is bounded (~1 091 tokens ≈ $0.00003 per user message at catalogue scale, measured on the Radient
+route), the latency is off the turn's critical path (the turn waits `waitMs`; a slower answer
+rides the next message), and the failure mode is a line of context rather than a wrong action. An
+explicit `auto: false` remains the byte-identical, no-import path.
 
 ## 9. Provider login for Jev (API key only)
 
@@ -515,6 +580,12 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
 7. Latency evidence per §5a: the hermetic overhead assertion, the measured added wall-clock per
    user message (median and worst case), and on the server the cache-hit proof plus the warm-path
    timing.
+8. **Scale, freshness and the credential ladder** (2026-09-18): the per-request accounting at a
+   537-resource roster (§5), a roster larger than the cap shortlisting by relevance, a skill
+   installed mid-session becoming a candidate without a restart, the frozen block re-opening on the
+   same signal, and the credential order — the login row preferred when both credentials exist, a
+   refused row that does not rotate falling back to the legacy key, and every tier walked at most
+   once.
 
 ## 12. Open questions, recorded rather than guessed
 
@@ -546,8 +617,18 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
   its confidence is high. Today: no — additive only. Revisit with data.
 - Whether a second question ("is one of these actually needed at all?" as a `noul`) earns its
   tokens. The renderer already says "ignore the rest", so it is not required for safety.
-- The right default for `values.classification.auto`. Off is the conservative choice that matches
-  `values.effort.auto`; a proving run may justify on.
+- ~~The right default for `values.classification.auto`~~ **RESOLVED 2026-09-18: ON**, with the
+  cost, latency and blast-radius measurements the note asked for (§5, §5a, §8). What it leaves
+  open: the embedder's own `<skills>` selection is still a startup snapshot — re-embedding a whole
+  matrix mid-session is not affordable on a message path — so a brand-new skill is REACHABLE (the
+  classifier offers it, and `skill://` resolves it through the miss-path rescan) but does not
+  appear in the embedder's top-k until the session restarts.
+- **The notice line's ink on light themes** (design review round 1, D1): `info` → `dim` measures
+  3.77:1 on the light theme, below AA, and 13 of the 16 light builtins sit under it. Delivering it
+  as `note` (`muted`, 7.18:1) is the right fix and needs `note` added to ``NoticeEvent.kind``
+  (`harness/types.py`) plus the server's kind allowlists and the session's own annotations — a
+  cross-surface change of its own, deliberately not folded into a default flip (§7 records the
+  measurement, and the attempt that had to be withdrawn).
 - §5's `context` half is UNBUILT on the caller side: the contract suggests "the newest compaction
   summary line or the last assistant message's first line", and the wiring always passes
   `context=None` (argued in `session_factory._RecommendationRequest`). Benign for an advisory
