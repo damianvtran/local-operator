@@ -53,9 +53,13 @@ def main() -> int:
     # other harness here (review round 2, F5): what it reproduces is a chord
     # arriving at the real terminal's prompt, and an empty store boots into
     # first-run setup instead of that prompt — the evidence would be of a
-    # different screen. It types text and never submits, so no session is
-    # created; if one ever were, the escape also stamps it `agent-shell`, so it
-    # still cannot be mistaken for a chat the operator opened.
+    # different screen. What that costs the operator's store is stated exactly
+    # (round 3, F4): the TUI engages a runtime at MOUNT, before any keystroke
+    # (`tui/app.py:10044`), and a warm engage leaves one lease-only session
+    # directory — `.execution-lease`, `.session.pid`, `origin.json` and no
+    # transcript. The stamp writes that `origin.json`, so the directory stays
+    # out of the operator's picker and sidebar, and no conversation is ever
+    # appended to it.
     env = harness_child_env()
     env.update(
         {

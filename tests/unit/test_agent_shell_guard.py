@@ -308,10 +308,14 @@ def test_the_fork_window_drops_the_marker() -> None:
 
     from local_operator.tui.app import OperatorApp
 
-    source = inspect.getsource(OperatorApp._on_fork_complete)
-    assert "without_agent_shell_marker(" in source, (
-        "the fork window inherits the session's environment, so it must drop the "
-        "agent-shell marker, or a /fork in a harness-driven session opens a "
+    # THE CALL SHAPE, not merely the presence of the helper (review round 3,
+    # F5): keeping the call and discarding it — passing plain `os.environ` —
+    # passed the first version of this pin. Whitespace is normalised because a
+    # reflow of those two lines is not the regression.
+    source = " ".join(inspect.getsource(OperatorApp._on_fork_complete).split())
+    assert "backend.spawn, launch, without_agent_shell_marker(os.environ)" in source, (
+        "the fork window inherits the session's environment, so the marker has to "
+        "be dropped AT the spawn, or a /fork in a harness-driven session opens a "
         "window that dies on the refusal"
     )
     assert "dict(os.environ)" not in source, "the raw copy is the regression"
@@ -440,10 +444,64 @@ async def test_the_factory_leaves_a_resumed_conversation_alone(
     monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
     resumed = await _factory_session(tmp_path, monkeypatch, resume=session_id)
     try:
+        # FIRST that it really resumed: without this, a regression that mints a
+        # fresh id instead of adopting the requested one keeps the origin
+        # assertions below green while inspecting a directory the run never
+        # touched (review round 3, F3).
+        assert Path(resumed.transcript.directory) == directory
         assert session_origin(directory) == "", "a resumed conversation is not re-marked"
         assert is_user_session(directory) is True
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_id_the_escape_created_is_stamped(
+    escaped: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime's engage shape — round 3's major, pinned.
+
+    Under `LOP_RUNTIME_ADOPT_SESSION` the id resolver CREATES the session
+    directory itself, one frame before the stamp is handed a freshly read
+    `exists()` — which therefore answered "no" for every adopted session, so the
+    phone's first message and the desktop draft came out unstamped while the
+    docs named their lists. The answer now travels from the frame that knows.
+    """
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+    session = await _factory_session(tmp_path, monkeypatch, resume="feedface0001")
+    try:
+        directory = session.transcript.directory
+        assert directory.name == "feedface0001"
+        assert session_origin(directory) == ORIGIN_AGENT_SHELL
+        assert is_user_session(directory) is False
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_id_that_already_existed_is_left_to_its_owner(
+    escaped: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of `is_new`: a directory the caller did not make is not ours.
+
+    This is the desktop plane's draft — the app creates the session directory
+    before the runtime is ever asked for the id — so the chat in it is the
+    operator's own and must stay in their picker. Marking it would be the
+    mirror-image bug, and it is the case `is_new` has to keep false rather than
+    "any escaped run's session" being stamped wholesale.
+    """
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+    directory = tmp_path / ".local-operator" / "sessions" / "deadbeef0001"
+    directory.mkdir(parents=True)
+    (directory / "created_at.json").write_text("1.0", encoding="utf-8")
+
+    session = await _factory_session(tmp_path, monkeypatch, resume="deadbeef0001")
+    try:
+        assert Path(session.transcript.directory) == directory
+        assert session_origin(directory) == ""
+        assert is_user_session(directory) is True
+    finally:
+        await session.dispose()
 
 
 # --- a session restarting its own front end ----------------------------------
