@@ -44,6 +44,7 @@ from local_operator.server.routes.desktop_sessions import errors
 from local_operator.session import store_failures
 from local_operator.session.store_failures import (
     BUSY_MESSAGE,
+    StoreFailure,
     FULL_VOLUME_FLOOR_BYTES,
     OUT_OF_SPACE_MESSAGE,
     STORE_BUSY,
@@ -339,7 +340,7 @@ def test_every_ladder_call_site_passes_the_request() -> None:
     from pathlib import Path
 
     routes = Path(__file__).resolve().parents[3] / "local_operator" / "server" / "routes"
-    calls: list[tuple[str, int, int]] = []
+    calls: list[tuple[str, int, int, bool]] = []
     for path in sorted(routes.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -348,12 +349,26 @@ def test_every_ladder_call_site_passes_the_request() -> None:
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "errors"
             ):
-                calls.append((path.name, node.lineno, len(node.args)))
+                first = node.args[0] if node.args else None
+                calls.append(
+                    (
+                        path.name,
+                        node.lineno,
+                        len(node.args),
+                        isinstance(first, ast.Name) and first.id == "request",
+                    )
+                )
     # 53 at the time of writing, across six modules: a floor rather than an exact
     # count so an unrelated route does not fail this test, but high enough that a
     # walk which silently stopped finding them cannot pass.
     assert len(calls) >= 50, calls
-    assert [call for call in calls if call[2] != 1] == []
+    # The REQUEST is what must be named first, so that is what the walk pins. The
+    # ladder takes an optional second argument now — a route's own sentence
+    # composer, which ``POST /v1/desktop/attention/seen`` passes because a receipt
+    # clear is not a message send (QA round 2, Q1) — and an exact arity would turn
+    # every future composer into a failure of this test rather than of its own.
+    assert [call for call in calls if not call[3]] == [], calls
+    assert [call for call in calls if call[2] not in (1, 2)] == [], calls
 
 
 async def test_a_full_volume_answers_out_of_space_and_says_what_to_do(
@@ -562,3 +577,45 @@ async def test_the_volume_probe_reads_and_never_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(store_failures, "shutil", _RecordingShutil())
     assert volume_is_full(tmp_path) in (True, False)
     assert consulted == [str(tmp_path)]
+
+
+async def test_the_default_refusal_keeps_the_classifiers_send_path_sentence(tmp_path):
+    """The per-route composer is OPT-IN: every other route still says "message".
+
+    QA round 2 (Q1) found the receipts route painting the classifier's send-path
+    copy about a receipt clear, and the fix gives that one route its own composer.
+    This pins the other half of the boundary — a ladder arm with no composer still
+    answers with the classifier's sentence — so a later tidy-up cannot move the
+    send path's copy without a test saying it did.
+    """
+    with pytest.raises(HTTPException) as raised:
+        async with errors(ladder_request(tmp_path)):
+            raise simulated("SQLITE_FULL")
+    detail = cast("dict[str, Any]", raised.value.detail)
+    assert detail["code"] == STORE_OUT_OF_SPACE
+    assert detail["message"] == out_of_space_message(tmp_path)
+    assert "the message could not be written" in detail["message"]
+
+
+async def test_a_composer_passed_to_the_ladder_replaces_only_the_sentence(tmp_path):
+    """What a route supplies is the SENTENCE, never the status, code or level.
+
+    The receipts route composes its own copy; the contract it must not touch is the
+    rest of the refusal, because a client keys on the code (the renderer withholds
+    its retry hint by matching ``store_unavailable``) and the log record is the
+    operator's evidence.
+    """
+    seen: list[tuple[str, Any]] = []
+
+    def composed(failure: StoreFailure, root: Any) -> str:
+        seen.append((failure.code, root))
+        return "SENTINEL-COMPOSED"
+
+    with pytest.raises(HTTPException) as raised:
+        async with errors(ladder_request(tmp_path), composed):
+            raise simulated("SQLITE_FULL")
+    detail = cast("dict[str, Any]", raised.value.detail)
+    assert raised.value.status_code == 507, "the status is the classifier's"
+    assert detail["code"] == STORE_OUT_OF_SPACE, "the code is the classifier's"
+    assert detail["message"] == "SENTINEL-COMPOSED"
+    assert seen == [(STORE_OUT_OF_SPACE, tmp_path)], "the composer gets the store root"

@@ -225,11 +225,13 @@ re-derive differently:
   `session/store_failures.py`, consumed by the desktop ladder and by the TUI —
   whose codes and log levels decide the condition and the ink (contention is
   retryable; a full disk and an unopenable store are not). The SENTENCE is
-  composed per surface, deliberately: the desktop's strings are the send path's
-  ("the message could not be written", "send it again") and are false about a
-  receipt clear, which has no message in it. Both surfaces do say the same three
-  things — which condition they met, what could not happen, and whether retrying
-  is the remedy. A failed read also means no write: an acknowledgement that cannot be
+  composed per surface AND per route, deliberately: the classifier's strings are
+  the send path's ("the message could not be written", "send it again") and are
+  false about a receipt clear, which has no message in it — so both the TUI's
+  command and the desktop route that clears receipts (`POST
+  /v1/desktop/attention/seen`, `receipts_refusal`) compose their own. All three
+  surfaces say the same things — which condition they met, what could not happen,
+  and whether retrying is the remedy. A failed read also means no write: an acknowledgement that cannot be
   verified is not a receipt.
 - **The word is `unread` on both surfaces, and `unseen` is the store's field.**
   The TUI's sidebar tooltip for the same mark says "Unseen completion"

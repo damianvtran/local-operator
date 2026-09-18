@@ -10,7 +10,7 @@ import pathlib
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal, NamedTuple
+from typing import Annotated, Any, Callable, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -67,7 +67,10 @@ from local_operator.server.utils.desktop_sessions import (
     resolve_working_directory,
 )
 from local_operator.server.utils.store_failures import (
+    STORE_BUSY,
+    STORE_OUT_OF_SPACE,
     StoreFailure,
+    display_root,
     sqlite_store_failure,
     store_failure,
 )
@@ -971,7 +974,62 @@ def store_root(request: Request) -> pathlib.Path:
     return config_dir()
 
 
-def _store_refusal(request: Request, failure: StoreFailure, error: BaseException) -> HTTPException:
+#: Composes a route's refusal sentence from a classified store failure and the
+#: volume the store lives on. ``None`` means the classifier's own sentence, which
+#: is what every route that carries a MESSAGE gets -- see :func:`_store_refusal`.
+StoreRefusalCopy = Callable[[StoreFailure, pathlib.Path | None], str]
+
+
+def receipts_refusal(failure: StoreFailure, root: pathlib.Path | None) -> str:
+    """``POST /v1/desktop/attention/seen``'s own refusal sentence.
+
+    WHY THIS ROUTE COMPOSES ITS OWN COPY (QA round 2, Q1). The classifier's
+    sentences are the SEND path's and were written for a request carrying a
+    message: on a full volume this route answered "the message could not be
+    written ... and send it again" about a BULK READ RECEIPT, which has no message
+    in it and sends nothing. That is the same defect this PR already fixed on the
+    TUI (agent review round 1 F1 / UX round 1 U8), left standing on the other
+    surface, and the fix has the same shape: the CLASSIFICATION stays shared, the
+    SENTENCE says what this route was doing.
+
+    Three conditions, three answers, because they need three different actions:
+    contention is retryable and the remedy is to ask again -- the desktop client
+    paints this sentence and reads the retry case from the CODE, so the sentence
+    still has to carry the instruction; a full volume needs space freed on the
+    volume this store lives on, then the request again; anything else needs the
+    machine looked at and will not clear by retrying.
+
+    ``root`` is the config root :func:`store_root` resolved, and it is named for
+    the same reason the classifier names it: a machine has several volumes, and
+    "check the disk" with no destination is not an instruction. No exception text
+    is composed in here -- a store error names file paths, the rule
+    :func:`_store_refusal` states at length.
+
+    The shape follows the arm above it: the ``SessionStoreUnavailable`` arm
+    already composes its own sentence rather than taking the exception's, and
+    carries its own code. This is the same move for the same reason, one arm
+    down.
+    """
+    where = display_root(root)
+    if failure.code == STORE_BUSY:
+        return "Read state is busy right now, so nothing was written. Try again in a moment."
+    if failure.code == STORE_OUT_OF_SPACE:
+        return (
+            "This computer is out of disk space, so nothing was written. "
+            f"Free some space on the volume holding {where}, then try again."
+        )
+    return (
+        "The read state could not be written. Retrying will not help; "
+        f"check {where} and the disk it is on."
+    )
+
+
+def _store_refusal(
+    request: Request,
+    failure: StoreFailure,
+    error: BaseException,
+    copy: StoreRefusalCopy | None = None,
+) -> HTTPException:
     """Log what really happened, and build the client's vetted refusal.
 
     THE LOG RECORD IS THE DELIVERABLE, not a courtesy. This ladder used to raise
@@ -982,6 +1040,12 @@ def _store_refusal(request: Request, failure: StoreFailure, error: BaseException
     other times. The exception is logged where it is still live, with the route
     and the session, because the client's copy may never carry it (a store error
     names file paths -- the rule the ConnectionError arm below states at length).
+
+    ``copy`` is the route's own sentence composer, and ``None`` is every route that
+    carries a message and can say so honestly: those keep the shared classifier's
+    sentence, which a client paints verbatim rather than keeping a second copy of.
+    The arms that need their own nouns say why at their own composer --
+    :func:`receipts_refusal` today, because a receipt clear is not a message send.
     """
     session_id = request.path_params.get("session_id")
     logger.log(
@@ -997,17 +1061,30 @@ def _store_refusal(request: Request, failure: StoreFailure, error: BaseException
         # reading (review round 1, R5). The line itself is emitted either way.
         exc_info=error if failure.traceback else None,
     )
-    return HTTPException(failure.status, {"code": failure.code, "message": failure.message})
+    return HTTPException(
+        failure.status,
+        {
+            "code": failure.code,
+            "message": failure.message if copy is None else copy(failure, store_root(request)),
+        },
+    )
 
 
 @asynccontextmanager
-async def errors(request: Request) -> AsyncIterator[None]:
+async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> AsyncIterator[None]:
     """The control plane's shared failure ladder.
 
     ``request`` is taken rather than reached for, the way ``host(request)`` and
     ``receipts(request)`` beside it are: two arms below must name the route they
     failed on and the volume the store lives on, and a ladder shared by six
     route modules cannot invent either.
+
+    ``copy`` is the calling ROUTE's sentence composer for a classified store
+    failure, and it is optional because almost every route here carries a message
+    and can let the classifier speak for it. The routes that cannot pass their
+    own: ``POST /v1/desktop/attention/seen`` clears read receipts, so the send
+    path's nouns are false about it (QA round 2, Q1 -- see
+    :func:`receipts_refusal`).
     """
     try:
         yield
@@ -1127,9 +1204,12 @@ async def errors(request: Request) -> AsyncIterator[None]:
         # classification and the copy; ``_store_refusal`` owns the log record.
         #
         # The text is still NOT echoed for the reason the ConnectionError arm
-        # below refuses to echo: a store error can name file paths.
+        # below refuses to echo: a store error can name file paths. ``copy`` is
+        # the calling route's own sentence where it has one -- a receipt clear is
+        # not a message send, and saying so is the route's job rather than the
+        # classifier's (QA round 2, Q1).
         raise _store_refusal(
-            request, sqlite_store_failure(error, store_root(request)), error
+            request, sqlite_store_failure(error, store_root(request)), error, copy
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
@@ -2034,7 +2114,10 @@ async def seen_many(body: SeenMany, request: Request):
     the middle rather than a ``/v1/desktop/sessions/seen`` that the path
     parameter could shadow.
     """
-    async with errors(request):
+    # This route composes its own refusal copy: a bulk read receipt has no
+    # message in it and sends nothing, so the classifier's send-path sentences
+    # are false about it (see ``receipts_refusal``).
+    async with errors(request, receipts_refusal):
         result = await host(request).acknowledge_attention_many(
             [(item.session_id, item.completion_token) for item in body.items]
         )

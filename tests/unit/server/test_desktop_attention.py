@@ -596,8 +596,18 @@ async def test_store_contention_costs_the_whole_batch_and_writes_nothing(tmp_pat
             holder.rollback()
             holder.close()
         assert response.status_code == 503, response.text
-        assert response.json()["detail"]["code"] == "store_busy", response.text
-        assert "busy" in response.json()["detail"]["message"]
+        detail = response.json()["detail"]
+        assert detail["code"] == "store_busy", response.text
+        assert "busy" in detail["message"]
+        # The remedy rides the sentence because a client paints this text and
+        # reads only the code: "it will catch up on its own" would be unearned for
+        # a write the caller initiated (QA round 2, Q1).
+        assert "Try again in a moment" in detail["message"], detail["message"]
+        assert "catch up on its own" not in detail["message"], detail["message"]
+        # …and this route is not a message send, so the send path's nouns are
+        # absent from every arm of its refusal (QA round 2, Q1).
+        assert "message" not in detail["message"], detail["message"]
+        assert "send it again" not in detail["message"], detail["message"]
         with contextlib.closing(sqlite3.connect(tmp_path / "attention.db")) as conn:
             receipts = conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
         assert receipts == 0, "a refused batch left a receipt behind"
@@ -632,3 +642,71 @@ async def test_an_unreadable_store_costs_the_whole_batch_and_writes_nothing(tmp_
         with contextlib.closing(sqlite3.connect(tmp_path / "attention.db")) as conn:
             receipts = conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
         assert receipts == 0, "a refused batch left a receipt behind"
+
+
+@pytest.mark.asyncio
+async def test_a_full_volume_answers_with_the_receipts_own_sentence(tmp_path, monkeypatch):
+    """QA round 2, Q1: the receipts route is not a message send, and says so.
+
+    The classifier's out-of-space sentence belongs to the send path — "the message
+    could not be written ... and send it again" — and a bulk read receipt has no
+    message in it and sends nothing. Driven through the real handler, because the
+    sentence is chosen at the route's arm, and the assertion that the send path's
+    phrasings are ABSENT is what makes it evidence rather than a restatement of
+    the code.
+    """
+    async with _bulk_client(tmp_path, monkeypatch) as (client, pool):
+        sid, token = await _session_with_completion(pool, tmp_path, "result-1")
+
+        def full(self, items):  # noqa: ANN001 — mirrors the bound method's shape
+            error = sqlite3.OperationalError("database or disk is full")
+            error.sqlite_errorname = "SQLITE_FULL"
+            raise error
+
+        monkeypatch.setattr(AttentionStore, "acknowledge_many", full)
+        response = await client.post(
+            "/v1/desktop/attention/seen",
+            json={"items": [{"session_id": sid, "completion_token": token}]},
+        )
+
+    assert response.status_code == 507, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "store_out_of_space", response.text
+    assert "out of disk space" in detail["message"], detail["message"]
+    assert "nothing was written" in detail["message"], detail["message"]
+    assert "then try again" in detail["message"], detail["message"]
+    assert "message" not in detail["message"], detail["message"]
+    assert "send it again" not in detail["message"], detail["message"]
+    with contextlib.closing(sqlite3.connect(tmp_path / "attention.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 0
+
+
+def test_every_receipts_refusal_arm_is_composed_for_this_route():
+    """The three arms, pinned as copy: what a client paints, per condition.
+
+    The codes and the statuses are the classifier's (and are asserted elsewhere);
+    this pins the SENTENCES, which are this route's, because that split is the
+    whole finding.
+    """
+    from local_operator.server.utils.store_failures import (
+        STORE_BUSY,
+        STORE_OUT_OF_SPACE,
+        STORE_UNAVAILABLE,
+        StoreFailure,
+    )
+
+    arms = (
+        # code, what the sentence must make true for a receipt clear
+        (STORE_BUSY, "nothing was written", "Try again in a moment."),
+        (STORE_OUT_OF_SPACE, "nothing was written", "Free some space on the volume holding"),
+        (STORE_UNAVAILABLE, "could not be written", "Retrying will not help;"),
+    )
+    for code, claim, remedy in arms:
+        failure = StoreFailure(500, code, "SENTINEL-SEND-PATH-PROSE", 40, False)
+        text = desktop_sessions.receipts_refusal(failure, None)
+        # The classifier's own sentence never reaches this route's client...
+        assert "SENTINEL-SEND-PATH-PROSE" not in text, text
+        assert "message" not in text and "send it again" not in text, text
+        # ...and the arm is still true about the operation and actionable.
+        assert claim in text, (code, text)
+        assert remedy in text, (code, text)
