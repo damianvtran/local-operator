@@ -24,8 +24,10 @@ ONES — ``bench/analytics-rollup-before.json`` / ``-after.json``, produced by
 ``scripts/bench_panel_latency.py`` against a copy of that ledger, p50 — and they
 are the only set any comment or document should quote; a second sample of the
 same code is not a second opinion, it is a second measurement. That pair left the
-tree with the rest of ``bench/`` (AGENTS.md §7) and is quoted from the last
-``main`` that carried it, ``git show ba225070:bench/analytics-rollup-after.json``.
+tree with the rest of ``bench/`` (AGENTS.md, "Evidence goes on the PR, never into
+the repository") and is quoted from ``ba225070``, the ``main`` this sweep branched
+from, where the whole store is still present:
+``git show ba225070:bench/analytics-rollup-after.json``.
 On the operator's 342.8 MB, 1 155 845 call ledger the panel's 30-day window costs
 4 868 ms wall / 3 179 ms CPU on the raw ledger (2 764 ms / 2 134 ms CPU for the
 first read of a fresh copy), while the rollup answers the same window in 187 ms
@@ -307,7 +309,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 --
 -- WHY THIS EXISTS. ``aggregate()`` used to be three full scans of ``calls`` with
 -- a non-covering index range scan, so every one of the ledger's 1.16 M rows cost
--- a random table lookup: the committed measurement is 4 868 ms wall / 3 179 ms CPU
+-- a random table lookup: the recorded measurement is 4 868 ms wall / 3 179 ms CPU
 -- for the desktop panel's 30-day window on the operator's 342.8 MB ledger, and
 -- 2 764 ms / 2 134 ms CPU for the FIRST touch of a fresh copy, which is what a
 -- cold start feels like. The rollup answers the same window in 187 ms wall /

@@ -1170,7 +1170,8 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
         # reconnect/connect tests are the ones that assert the strict 50 ms
         # CPU bar against the parse regression. Bench numbers were recorded in
         # bench/before.json vs after.json — out of the tree now, one `git show`
-        # away at ba225070 (AGENTS.md §7).
+        # away at ba225070 (AGENTS.md, "Evidence goes on the PR, never into the
+        # repository").
         recorder.assert_no_stall_loaded()
 
 

@@ -32,7 +32,8 @@ Run:
     PYTHONPATH=. .venv/bin/python scripts/bench_state_field_reads.py
     PYTHONPATH=. .venv/bin/python scripts/bench_state_field_reads.py --json out.json
 
-``PYTHONPATH=.`` matters for the reason ``bench/README.md`` gives: the script
+``PYTHONPATH=.`` matters for the reason ``bench/README.md`` gives (the store left
+the tree in the evidence sweep; ``git show ba225070:bench/README.md``): the script
 must import THIS checkout rather than whatever an editable install resolves to.
 """
 
