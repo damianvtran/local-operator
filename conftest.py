@@ -545,6 +545,27 @@ _CPU_SHARE = 0.5
 #: is closed and ours.
 _AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
 
+
+def _in_agent_shell() -> bool:
+    """The production predicate, so the hook and the guard cannot disagree.
+
+    The hook tested mere PRESENCE of the variable while
+    ``agent_shell.in_agent_shell`` reads ``1``/``true``/``yes``/``on`` — so
+    ``LOCAL_OPERATOR_AGENT_SHELL=0`` denied the CI core grab here and allowed
+    the run in the guard: one variable, two answers (review round 1, F4).
+
+    Guarded because this runs at COLLECTION, where a conftest that raises takes
+    the whole suite with it; falling back to the old presence test is strictly
+    better than that. The module it imports is stdlib-only, so the cost is one
+    import of os/pathlib/typing.
+    """
+    try:
+        from local_operator.agent_shell import in_agent_shell
+    except Exception:  # noqa: BLE001 — collection must not fail on this import
+        return bool(os.environ.get(_AGENT_SHELL_ENV))
+    return in_agent_shell()
+
+
 #: Memory held back from the budget entirely, in MB, computed per host.
 #:
 #: WHY: ``_MEMORY_SHARE`` claims a fraction of what REMAINS, so N sibling
@@ -1117,7 +1138,7 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
         # cores" on the shared laptop the share exists to protect, and only
         # there. Denying that marker keeps every real provider at full
         # parallelism; see `_AGENT_SHELL_ENV` for why this is not an allowlist.
-        on_ci = bool(os.environ.get("CI")) and not os.environ.get(_AGENT_SHELL_ENV)
+        on_ci = bool(os.environ.get("CI")) and not _in_agent_shell()
 
         cpu_arm = cpus if on_ci else max(1, int(cpus * _CPU_SHARE))
         cap = cpu_arm

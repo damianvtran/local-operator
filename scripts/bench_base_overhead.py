@@ -216,7 +216,13 @@ def _child_env(config_dir: Path) -> dict[str, str]:
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     env["LO_BENCH_CONFIG_DIR"] = str(config_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
-    return env
+    # Every probe drives the real CLI (`exec`), and this script is a harness, so
+    # it declares itself one: run from an agent's shell the child inherits the
+    # agent-shell marker and each sample would fail instead of being measured
+    # (`agent_shell.harness_child_env`).
+    from local_operator.agent_shell import harness_child_env
+
+    return harness_child_env(env)
 
 
 def _run_probe(code: str, argv: list[str], env: dict[str, str]) -> dict[str, Any]:

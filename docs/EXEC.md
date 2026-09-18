@@ -83,15 +83,32 @@ appeared in the operator's sidebar as chats they had opened. `lop exec --status`
 starts nothing and is unaffected.
 
 **The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
-waives the refusal for one invocation. It exists because testing evidence here
-comes from exercising the REAL CLI, which a QA run of exec itself cannot do
-through the guard, and it is deliberately NOT named in the refusal text — that
-text is model-facing and its job is to route the reader to `task`/`hub`/`wake`.
-It is not a silent equivalent either: a session opened under it is stamped
+waives the refusal for one invocation, on BOTH entry points. It exists because
+testing evidence here comes from exercising the REAL CLI — including the TUI in
+a pty — which a QA run of the front end itself cannot do through the guard. It is
+deliberately NOT named in the refusal text (that text is model-facing and its job
+is to route the reader to `task`/`hub`/`wake`; obscurity, not secrecy — this
+file and `AGENTS.md` both name it), and script harnesses declare themselves with
+`agent_shell.harness_child_env()` rather than copying the variable by hand. It is
+not a silent equivalent either: a session opened under it is stamped
 `origin.json` = `agent-shell`, so it stays out of the `/resume` picker, the
 desktop sidebar and the phone's list. Isolating the run
 (`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a test off the
 operator's own store; the stamp is the seatbelt for the run that forgets.
+
+**What this does not cover**, stated so the rule is not read as a boundary:
+
+* The marker is set by the `bash` tool alone. A subprocess spawned by the
+  `eval` tool, or one started with `env -u LOCAL_OPERATOR_AGENT_SHELL`, does not
+  carry it, so it is not refused.
+* The guard lives at `cli.main`: a marked process that starts `lop serve`, or
+  engages a runtime, mints sessions through the server/runtime composition root
+  and is not refused there.
+* A session's own front end opening a conversation for its user is deliberately
+  exempt — the TUI restart, `/fork`'s new window and a notification click's
+  terminal all drop the marker before they re-exec
+  (`agent_shell.without_agent_shell_marker`), because those are the user's
+gestures, not an agent's command.
 
 ## Divergence from `/goal`
 

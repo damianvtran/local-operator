@@ -67,8 +67,8 @@ _AMBIENT_VARS = (
     # (`local_operator/agent_shell.py`), so an inherited value would refuse the
     # sessions a spawned CLI is meant to build — the whole suite would be
     # testing the refusal on every real-CLI path instead of the feature under
-    # it. The worker-count hook above reads it at COLLECTION time and is
-    # unaffected by the fixture.
+    # it. The worker-count hook in the ROOT `conftest.py` reads it at COLLECTION
+    # time and is unaffected by the fixture.
     "LOCAL_OPERATOR_AGENT_SHELL",
     # The escape hatch for that rule. Inherited, every guard test would assert
     # the allow path while looking like it tested the refusal, and a QA test

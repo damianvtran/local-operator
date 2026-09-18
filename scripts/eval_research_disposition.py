@@ -57,7 +57,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -67,6 +66,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from local_operator.agent_shell import harness_child_env
 
 WEB_TOOLS = {"web_search", "web_fetch"}
 
@@ -292,7 +293,11 @@ def run_one(
     sessions_root = home / "sessions"
     started = time.time()
     with tempfile.TemporaryDirectory(prefix="lo-eval-") as scratch:
-        env = dict(os.environ)
+        # This driver is a harness: it runs the real CLI in both arms, so it
+        # declares itself one rather than inheriting the agent-shell marker from
+        # whoever launched it and having every turn refused
+        # (`agent_shell.harness_child_env`).
+        env = harness_child_env()
         env["PYTHONPATH"] = str(repo)
         env["LOCAL_OPERATOR_CONFIG_DIR"] = str(home)
         # Empty value disables ecosystem skill scanning (``skills/api.py:64-67``).

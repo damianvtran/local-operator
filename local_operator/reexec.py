@@ -33,7 +33,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from local_operator.agent_shell import AGENT_SHELL_ENV
+from local_operator.agent_shell import without_agent_shell_marker
 
 #: Private exit from the TUI that means "replace this process", not "the
 #: user quit". ``run_tui`` suppresses the ``session ended — resume with:``
@@ -159,15 +159,12 @@ def replace_self(plan: RestartPlan) -> None:
     argv = list(plan.argv)
     if not argv:
         raise RuntimeError("RestartPlan.argv is empty")
-    env = os.environ.copy()
+    env = without_agent_shell_marker(os.environ)
     # A restart is the SESSION re-launching its OWN front end, not a command an
-    # agent's tool call started — so the marker that says the latter must not
-    # ride along. ``cli.main`` refuses to open a session when it sees it, and a
-    # restart of a session that was deliberately started from an agent's shell
-    # (under the escape in `agent_shell.py`) would otherwise be refused by the
-    # very check that let the session start. Nothing downstream loses the fact:
-    # every `bash` command sets it for its own process.
-    env.pop(AGENT_SHELL_ENV, None)
+    # agent's tool call started, so the marker must not ride along — otherwise
+    # `cli.main` refuses to re-open a session that was deliberately started from
+    # an agent's shell (under the escape) and the guard turns on the one run it
+    # allowed. The reasoning and the other two callers are in the helper.
     if _on_windows():
         _replace_windows(argv, env)
         return

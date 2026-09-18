@@ -178,7 +178,69 @@ def _explode() -> None:
     raise AssertionError("a session was built where the guard should have refused")
 
 
-# --- the escape hatch is not silent ------------------------------------------
+def test_the_interactive_path_honours_the_escape(
+    escaped: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A QA run that must drive the real front end is let through.
+
+    Asserted by what happens NEXT — the config manager, the first thing past the
+    guard — because "allowed" has no exit code to observe: the run continues
+    into a session build a test cannot stand up. The stub raises ``SystemExit``
+    on purpose: ``cli.main`` catches ``Exception`` (and would report the failure
+    as its own), while ``SystemExit`` is a ``BaseException`` and arrives here.
+    """
+    reached: list[int] = []
+
+    def stop(*args: object, **kwargs: object) -> None:
+        reached.append(1)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("local_operator.cli.setup_cross_platform_environment", lambda: None)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", stop)
+    monkeypatch.setattr("sys.argv", ["local-operator"])
+
+    with pytest.raises(SystemExit):
+        cli_main()
+    assert reached == [1], "an escaped run must reach the config manager, not the guard"
+
+
+# --- the two environments around the marker ----------------------------------
+
+
+def test_a_front_end_opening_a_conversation_drops_the_marker(in_agent: None) -> None:
+    """`/fork`, a notification click and a restart are the USER's gestures.
+
+    They re-exec `lop --resume` with the session's own environment, so the child
+    would inherit the answer to a question about its parent and the window would
+    die on the refusal. Everything else in the environment rides along: this
+    helper drops one key, and a copy that also dropped PATH would break the
+    spawn in a way no assertion here would notice.
+    """
+    from local_operator.agent_shell import without_agent_shell_marker
+
+    stamped = without_agent_shell_marker(os.environ)
+    assert AGENT_SHELL_ENV not in stamped
+    assert stamped.get("PATH") == os.environ.get("PATH")
+
+
+def test_a_harness_declares_itself_to_its_children() -> None:
+    """The benches and the eval driver drive the real CLI as a subprocess.
+
+    Run from an agent's shell they inherit the marker, so without this every
+    inner invocation would be refused and a bench would record "the product is
+    broken" instead of numbers (review round 1, F2). The marker is deliberately
+    left in place: this describes an environment, it does not rewrite the
+    caller's identity.
+    """
+    from local_operator.agent_shell import harness_child_env
+
+    child = harness_child_env({AGENT_SHELL_ENV: "1", "PATH": "/usr/bin"})
+    assert child[ALLOW_NESTED_SESSION_ENV] == "1"
+    assert child[AGENT_SHELL_ENV] == "1"
+    assert child["PATH"] == "/usr/bin"
+    # The caller's own environment is not read when one is passed in, and is the
+    # base when it is not.
+    assert harness_child_env()[ALLOW_NESTED_SESSION_ENV] == "1"
 
 
 def _session_on(directory: Path) -> SimpleNamespace:

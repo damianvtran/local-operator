@@ -42,13 +42,18 @@ correctly, which is the whole intent.
 THE ESCAPE, AND WHY IT IS NOT SILENT. ``LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1``
 exists for this harness's own tests and for the QA runs that must drive the real
 CLI (a standing rule of the operator's: testing evidence comes from exercising
-the real path). It is deliberately NOT named in :func:`nested_session_refusal`
-— that text is model-facing, and its job is to route the model to
-``task``/``hub``/``wake`` — but it is documented for the human in
-``docs/EXEC.md``. It is not an equivalent path: a session opened under it is
-stamped :data:`local_operator.resume.ORIGIN_AGENT_SHELL`, so even then the run
-stays out of the picker, the sidebar and the phone's list rather than appearing
-as a chat the operator opened (:func:`stamp_escaped_session`).
+the real path). Both entry points honour it, and
+:func:`harness_child_env` is how a harness declares itself to its children. It
+is deliberately NOT named in :func:`nested_session_refusal` — that text is
+model-facing, and its job is to route the model to ``task``/``hub``/``wake`` —
+but it is documented for the human in ``docs/EXEC.md``, and (obscurity, not
+secrecy) named for agents in this repository's own ``AGENTS.md`` section on the
+rule: a QA run that legitimately needs the real front end must be able to find
+it, and the source is readable either way. It is not an equivalent path: a
+session opened under it is stamped :data:`local_operator.resume.ORIGIN_AGENT_SHELL`,
+so even then the run stays out of the picker, the sidebar and the phone's list
+rather than appearing as a chat the operator opened
+(:func:`stamp_escaped_session`).
 
 The pytest suite never sees either variable. ``LOCAL_OPERATOR_AGENT_SHELL`` and
 ``LOCAL_OPERATOR_ALLOW_NESTED_SESSION`` are both scrubbed by
@@ -61,6 +66,7 @@ happened to launch pytest.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +107,48 @@ def escaped_agent_shell_run() -> bool:
     the pair describes a session that must be marked as machine-started.
     """
     return in_agent_shell() and nested_session_allowed()
+
+
+def without_agent_shell_marker(env: Mapping[str, str]) -> dict[str, str]:
+    """``env`` with the marker removed: a SESSION opening a conversation.
+
+    The marker answers one question — "is this process a command an agent's
+    tool call started" — and this codebase has three places where a session,
+    not an agent, opens a conversation for its user: the TUI's own restart
+    (:func:`local_operator.reexec.replace_self`), ``/fork``'s new window
+    (``tui/app.py``) and a notification click's terminal
+    (``tui/resume_click.py``). Each passes the session's environment to a child
+    that runs `lop --resume`, and each is a user gesture, so that child must not
+    inherit the parent's answer.
+
+    Measured consequence of not doing it (review round 1, F1): `/fork` and the
+    click open a window that dies on the refusal whenever the session they were
+    running in was itself started from an agent's shell — which is exactly what
+    a QA session driving the real TUI is.
+    """
+    merged = dict(env)
+    merged.pop(AGENT_SHELL_ENV, None)
+    return merged
+
+
+def harness_child_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a HARNESS gives the real CLI it drives.
+
+    The benches and the eval driver under ``scripts/`` run `lop exec` — or the
+    TUI in a pty — as subprocesses with a copy of ``os.environ``. Run from an
+    agent's shell, which is how this repository tells agents to measure, they
+    inherit the marker and every inner invocation would be refused: the bench
+    would record "the product is broken" instead of numbers, and the failure
+    would read as a regression rather than as a guard (review round 1, F2).
+    They declare themselves harnesses instead, which is what
+    :data:`ALLOW_NESTED_SESSION_ENV` is for.
+
+    A NEW script that drives the real CLI belongs here too, and an existing one
+    that stops using it is the drift this helper exists to make visible.
+    """
+    merged = dict(os.environ if env is None else env)
+    merged[ALLOW_NESTED_SESSION_ENV] = "1"
+    return merged
 
 
 def refusal_message() -> str:

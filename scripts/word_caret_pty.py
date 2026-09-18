@@ -18,6 +18,11 @@ from pathlib import Path
 
 WORKTREE = str(Path(__file__).resolve().parent.parent)
 PYTHON = os.path.expanduser("~/local-operator/.venv/bin/python")
+
+sys.path.insert(0, WORKTREE)
+
+from local_operator.agent_shell import harness_child_env  # noqa: E402
+
 SAMPLE = "alpha beta gamma delta"
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[=>]")
 
@@ -39,7 +44,11 @@ def read_for(fd: int, seconds: float) -> bytes:
 
 
 def main() -> int:
-    env = dict(os.environ)
+    # This script drives the real TUI in a pty, so it is a harness: the child
+    # inherits the agent-shell marker from whoever launched this, and without
+    # declaring the harness the TUI would refuse to open at all
+    # (`agent_shell.harness_child_env`).
+    env = harness_child_env()
     env.update(
         {
             "TERM": "xterm-256color",
