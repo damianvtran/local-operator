@@ -2579,6 +2579,44 @@ class DesktopSessions:
                 return f"a runtime being started for session {bridge.session_id}"
         return None
 
+    def reload_blocker(self) -> str | None:
+        """Why an in-place RELOAD should wait, or ``None``.
+
+        DELIBERATELY NARROWER THAN :meth:`in_flight_reason`, and the difference is
+        the whole reason this method exists rather than that one being reused. A
+        reload keeps this process's pid, socket, cwd and environment and only
+        replaces its code image, so the terms that matter are the ones a
+        replacement CANNOT recover:
+
+        * **A runtime being started** — the engage is a ~1.2 s handshake with a
+          child process whose conversation, journal and first advertisement live
+          in the half of it that has already happened. Both the spawn and the
+          handshake are this process's, so cutting it in the middle loses work
+          that a reconnect cannot rebuild.
+
+        NOT listed, on purpose:
+
+        * **An in-flight HTTP operation.** An ordinary desktop request is tens of
+          milliseconds and a client retries it; the long ones on this plane are
+          the relays, below.
+        * **A standing attachment** — ``GET /v1/desktop/sessions/{id}/events``
+          holds a bridge for the whole life of the view, and the watch lease
+          beside it is renewed every 15 s. Those are EXACTLY what a reload is
+          allowed to cut and a latch is not: the app re-opens the relay and
+          re-reads history, and the turn itself is running inside the runtime,
+          which never stopped. Gating on them would mean a reload that never
+          fires on the only machine it exists for — an app-attached daemon is
+          never idle by ``in_flight_reason``'s own definition.
+
+        Read without ``watch_lock``, exactly as :meth:`in_flight_reason` is and
+        for its reason: a synchronous filter over an in-process dict on the event
+        loop, so it cannot interleave with a mutation.
+        """
+        for bridge in list(self.bridges.values()):
+            if bridge.warm_task is not None and not bridge.warm_task.done():
+                return f"a runtime being started for session {bridge.session_id}"
+        return None
+
     async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
         """A read receipt never admits work, binds a viewer, or starts a runtime.
 
