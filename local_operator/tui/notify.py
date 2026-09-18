@@ -123,7 +123,19 @@ logger = logging.getLogger(__name__)
 #: the shimmer/nerd-icon gates. Wanted by anything that records raw terminal
 #: output (a demo capture, CI, ``script(1)``) and by a user who simply does not
 #: want to be interrupted, without editing config.
-_ENV_DISABLE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+#:
+#: PUBLIC, and paired with the value that turns it on, because the NAME is also
+#: what a harness hands its CHILDREN
+#: (:func:`local_operator.agent_shell.harness_child_env`): a script driving the
+#: real CLI has to silence the sessions it starts, the child is the process that
+#: decides, and a second spelling of the name at that call site is the drift
+#: that leaves a child un-gated. One definition here, used by the reader, the
+#: in-process setter and the harness env.
+ENV_DISABLE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+
+#: The value that turns :data:`ENV_DISABLE` ON. Every reader tests truthiness,
+#: so the pair is spelled once here rather than guessed at each call site.
+ENV_DISABLE_VALUE = "1"
 
 #: The app name every backend attributes the toast to. The window title spends
 #: its budget on `lo` because a sidebar row clips at ~24 cells; a notification
@@ -421,7 +433,7 @@ def notifications_enabled(env: EnvMap | None = None) -> bool:
     ``cmux_surface_id``) and an injected mapping stays deterministic in tests.
     """
     source = os.environ if env is None else env
-    if source.get(_ENV_DISABLE):
+    if source.get(ENV_DISABLE):
         return False
     return bool(settings_get("display.notifications", True))
 
@@ -453,9 +465,9 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     notifications sets ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` in their own shell or
     turns ``display.notifications`` off.
     """
-    if os.environ.get(_ENV_DISABLE):
+    if os.environ.get(ENV_DISABLE):
         return  # Already suppressed; keep the FIRST reason rather than relabelling.
-    os.environ[_ENV_DISABLE] = "1"
+    os.environ[ENV_DISABLE] = ENV_DISABLE_VALUE
     logger.debug(
         "notifications suppressed for this process%s",
         f": {reason}" if reason else " (no reason given)",

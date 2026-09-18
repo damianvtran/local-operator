@@ -44,6 +44,8 @@ from local_operator.harness.types import (
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+from local_operator.tui.resume_click import DESKTOP_LAUNCH_REFUSED_ENV
 
 #: The notification kill switch every bespoke child-environment builder in this
 #: suite must re-assert, spelled ONCE so it cannot drift between them.
@@ -58,14 +60,21 @@ from local_operator.session.transcript import Transcript
 #: mock model it announces a completion whose body is the mock's own reply.
 #: Both have fired from this suite before.
 #:
+#: WHY NOT ``agent_shell.harness_child_env``, which carries the same gate: that
+#: helper is for a SCRIPT driving the real CLI, and it also injects the
+#: nested-session marker — a cell that boots a TUI or a runtime child must not
+#: have that waiver in its environment. So the pairs are separate on purpose,
+#: sourced from the product constants, and pinned together by
+#: ``tests/unit/test_notification_isolation.py``.
+#:
 #: ``tests/conftest.py`` also arms it at import time, which covers the builders
 #: that copy ``os.environ``; this mapping is for the ones that do not, and is
 #: guarded by ``tests/unit/test_notification_isolation.py``, which walks the
 #: ``env=`` builders under ``tests/e2e/`` and ``scripts/`` and fails on one that
 #: spawns a local-operator child without it.
 NO_NOTIFY_ENV: dict[str, str] = {
-    "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
-    "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH": "1",
+    ENV_DISABLE: ENV_DISABLE_VALUE,
+    DESKTOP_LAUNCH_REFUSED_ENV: "1",
 }
 
 

@@ -50,18 +50,29 @@ from local_operator.providers.clients import client_for_spec
 from local_operator.providers.registry import is_mock_provider
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.tui.notify import (
+    ENV_DISABLE,
+    ENV_DISABLE_VALUE,
     Notifier,
     notifications_enabled,
     suppress_notifications_for_process,
 )
 
 #: The kill switch itself, and the spellings a module may use to carry it.
-#: ``NO_NOTIFY_ENV`` is ``tests/e2e/harness.py``'s mapping, ``probe_isolation``
-#: and ``rig_safety`` are the two script-side helpers that set it. A module that
-#: mentions any one of them has made the gate its own business rather than
-#: inheriting it by accident.
+#: ``NO_NOTIFY_ENV`` is ``tests/e2e/harness.py``'s mapping (a bespoke, filtered
+#: child environment cannot use the product helper — it builds the mapping from
+#: scratch); ``harness_child_env`` is the product's own carrier for a script that
+#: drives the real CLI; ``suppress_notifications_for_process`` is the in-process
+#: form; ``probe_isolation`` is the import-time sandbox. A module that mentions
+#: any one of them has made the gate its own business rather than inheriting it
+#: by accident.
 GATE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
-_GATE_SPELLINGS = (GATE, "NO_NOTIFY_ENV", "probe_isolation", "rig_safety")
+_GATE_SPELLINGS = (
+    GATE,
+    "NO_NOTIFY_ENV",
+    "harness_child_env",
+    "suppress_notifications_for_process",
+    "probe_isolation",
+)
 
 #: Strings that mark a module as one that spawns LOCAL-OPERATOR children rather
 #: than a git or a flake8. A syntactic sweep that ignored this would demand the
@@ -452,31 +463,84 @@ def test_the_walker_sees_a_builder_that_forgets_the_gate(tmp_path: Path) -> None
     assert _modules_that_gate_their_children(stages=(tmp_path,)) == [offending]
 
 
-def test_the_test_tree_and_the_script_tree_declare_the_same_gates() -> None:
-    """One rule, declared once per tree, checked — the trees cannot import each
-    other, so without this they would drift the first time a switch is added."""
-    import scripts.rig_safety as rig_safety
+def test_the_test_harness_and_the_product_declare_the_same_switch() -> None:
+    """The suite's child gate and the product's are ONE switch, not two.
+
+    ``tests/e2e`` builds filtered child environments from scratch, so it cannot
+    use ``harness_child_env`` (which is for a script driving the real CLI, and
+    would inject the nested-session marker these tests must not carry); it keeps
+    its own mapping. This pins the pair together, so a rename on the product
+    side cannot leave the suite's children silently un-gated.
+    """
     from tests.e2e.harness import NO_NOTIFY_ENV
 
-    assert dict(NO_NOTIFY_ENV) == dict(rig_safety.NO_NOTIFY_ENV)
+    assert NO_NOTIFY_ENV[ENV_DISABLE] == ENV_DISABLE_VALUE
 
 
-@pytest.mark.parametrize("module", ["scripts/probe_isolation.py"])
-def test_probe_isolation_carries_every_gate(module: str) -> None:
-    """The import-time sandbox carries every desktop switch.
+def test_harness_child_env_carries_the_gate() -> None:
+    """A harness's child is a session nobody is watching, so it is gated.
 
-    Textual rather than behavioural because the module's whole point is that it
-    acts on IMPORT (and refuses if anything under ``local_operator`` is already
-    loaded), so a test cannot re-import it in-process. Accepts the shared helper
-    as well as the literal names — referencing the mapping IS carrying it.
+    ``harness_child_env`` is the one place a script under ``scripts/`` says "I
+    am a harness driving the real CLI", which makes it the right carrier: the
+    benches seed ``hosting: test``, whose reply is the mock's own sentence, and
+    a notification body is a snippet of the session's last assistant line. It
+    must also not clobber what the caller already decided.
     """
-    import scripts.rig_safety as rig_safety
+    from local_operator.agent_shell import harness_child_env
 
-    source = (Path(__file__).resolve().parents[2] / module).read_text(encoding="utf-8")
-    if "rig_safety" in source:
-        return
-    missing = [name for name in rig_safety.NO_NOTIFY_ENV if name not in source]
-    assert not missing, f"{module} does not carry {missing}"
+    env = harness_child_env({"PATH": "/usr/bin"})
+
+    assert env[ENV_DISABLE] == ENV_DISABLE_VALUE
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_a_harness_child_reports_notifications_disabled() -> None:
+    """The claim in a REAL child, which is the process that decides.
+
+    Behavioural rather than textual: the switch is read from the environment of
+    whoever composes a banner, and ``harness_child_env``'s whole job is to be
+    that environment. The control arm (a child without the switch) is not
+    asserted here — it would answer from the developer's own
+    ``display.notifications`` flag — and the flag path is covered in-process by
+    ``test_a_real_hosting_leaves_the_gate_alone``.
+    """
+    import subprocess
+    import sys
+
+    from local_operator.agent_shell import harness_child_env
+
+    code = (
+        "from local_operator.tui.notify import notifications_enabled; "
+        "print(notifications_enabled())"
+    )
+    child = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=harness_child_env(),
+        check=False,
+    )
+
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "False", child.stdout
+
+
+def test_the_sandboxes_carry_the_switch_by_literal() -> None:
+    """The two capture sandboxes set the switches BEFORE any product import.
+
+    That is their whole contract (``probe_isolation`` raises if anything under
+    ``local_operator`` is already loaded), so they cannot ask the product for the
+    names. They spell them, and this pins the spelling to
+    ``tui.notify.ENV_DISABLE`` and ``tui.resume_click.DESKTOP_LAUNCH_REFUSED_ENV``
+    — next to the constants they must match, which is where a rename is read.
+    """
+    from local_operator.tui.resume_click import DESKTOP_LAUNCH_REFUSED_ENV
+
+    root = Path(__file__).resolve().parents[2]
+    for module in ("scripts/probe_isolation.py", "scripts/visual_capture.py"):
+        source = (root / module).read_text(encoding="utf-8")
+        for name in (ENV_DISABLE, DESKTOP_LAUNCH_REFUSED_ENV):
+            assert name in source, f"{module} does not carry {name}"
 
 
 def test_the_capture_sandbox_turns_every_gate_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -487,16 +551,17 @@ def test_the_capture_sandbox_turns_every_gate_on(monkeypatch: pytest.MonkeyPatch
     screenshot run ends up putting fixture text in Notification Centre. Driven
     for real: the function is called and the environment is read back.
     """
-    import scripts.rig_safety as rig_safety
+    from local_operator.tui.resume_click import DESKTOP_LAUNCH_REFUSED_ENV
     from scripts import visual_capture
 
-    for name in rig_safety.NO_NOTIFY_ENV:
+    names = (ENV_DISABLE, DESKTOP_LAUNCH_REFUSED_ENV)
+    for name in names:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(visual_capture, "_SANDBOX", None)
 
     visual_capture.isolate_capture()
 
-    for name in rig_safety.NO_NOTIFY_ENV:
+    for name in names:
         assert os.environ[name] == "1", name
     # HOME comes with it, which is the rest of the sandbox.
     assert "lop-visual-" in os.environ["HOME"]

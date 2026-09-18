@@ -167,9 +167,9 @@ def main() -> int:
     # This driver builds REAL sessions on the ``test``/mock hosting against the
     # scratch store it was pointed at, and a mock completion's banner body is
     # the mock's own reply. Gated once, before any session exists.
-    from scripts.rig_safety import disable_notifications
+    from local_operator.tui.notify import suppress_notifications_for_process
 
-    disable_notifications()
+    suppress_notifications_for_process("session-cleanup driver")
 
     import logging
 

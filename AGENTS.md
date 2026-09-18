@@ -1338,7 +1338,16 @@ broken product instead of a guard. Call
 obscurity, not secrecy, and `docs/EXEC.md` documents the limits of the whole
 rule). Use it against an isolated `LOCAL_OPERATOR_CONFIG_DIR`; the session the
 child opens is stamped `agent-shell`, so it cannot be mistaken for one the
-operator started. The same applies to a manual QA run: that escape is for
+operator started. The helper also carries the notification gate
+(`tui.notify.ENV_DISABLE`), because a harness's child is a session nobody is
+watching: the benches seed the test hosting, whose only reply is the mock's own
+sentence, and a notification's body is a snippet of the session's last
+assistant line — so an un-gated child finishes a turn and puts that sentence on
+the operator's lock screen. A rig that runs a session in ITS OWN process
+instead calls `tui.notify.suppress_notifications_for_process()` before it
+starts one; the two capture sandboxes (`probe_isolation`, `visual_capture`)
+spell the switch literally, because they must act before any product import.
+The same applies to a manual QA run: that escape is for
 driving the real front end, never for opening a peer to hand work to.
 
 ## Who may merge: two tiers
