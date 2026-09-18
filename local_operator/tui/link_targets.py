@@ -52,12 +52,13 @@ WHAT COUNTS AS A URL
 
 Three rules, each stated once:
 
-* :func:`_body_end` — the characters a URL is made of, and where it stops,
-  shared by BOTH captures so a markdown link's target and a bare URL are cut at
-  the same place. A parenthesised run is included only when it is BALANCED, at
-  any depth, which is what keeps ``…/wiki/Foo_(bar)`` and ``…/a_(b_(c))_d``
-  whole. Review round 1 found what happens when that rule lived on one path
-  only: the markdown capture stopped at the link's own terminator, and the
+* :func:`_body_end` — the characters a URL is made of, where it stops, and the
+  ``](`` that ends a markdown link's label, shared by BOTH captures so a markdown
+  link's target and a bare URL are cut at the same place. A parenthesised run is
+  included only when it is BALANCED, at any depth, which is what keeps
+  ``…/wiki/Foo_(bar)`` and ``…/a_(b_(c))_d`` whole. Review round 1 found what
+  happens when that rule lived on one path only: the markdown capture stopped at
+  the link's own terminator, and the
   picker painted two rows for one link with the cursor on the truncated one
   (MAJOR-1). Review round 2 found the other half — a rule written as a
   nesting-level PATTERN rather than as a balance is a rule with a silent edge,
@@ -93,6 +94,14 @@ _URL_START_RE = re.compile(_SCHEME, re.IGNORECASE)
 #: usually inside them. Whitespace is left to :meth:`str.isspace` in the scan,
 #: so every character Python counts as whitespace ends a URL rather than the
 #: four an ASCII list would name.
+#:
+#: ``]`` is deliberately NOT in this set, and adding it would be a bug rather
+#: than a tightening: a ``]`` is legal URL text — the IPv6 literal
+#: ``https://[2001:db8::1]/path`` is whole today — so the one place a ``]`` ends
+#: a body is markdown's ``](`` seam, which :func:`_body_end` looks ahead for as
+#: a PAIR. :data:`_BODY_STOP` is "the characters that are never URL text";
+#: ``](`` is "where a markdown link's label ends", and only one of the two is a
+#: character set.
 _BODY_STOP = frozenset("<>\"'`")
 
 
@@ -120,6 +129,18 @@ def _body_end(text: str, start: int) -> int:
     there, which is what makes ``[label](url)``'s own terminator a terminator
     and keeps the closer of ``(see …)`` out of the URL.
 
+    A body also ends at ``](`` — markdown's own label-to-target seam — because a
+    label may itself HOLD the URL (``[see https://a.test/x](https://b.test/y)``
+    is what a citation looks like). With no rule for the pair, the scan balanced
+    the label's URL straight across the seam and returned
+    ``https://a.test/x](https://b.test/y)``: a string that begins with
+    ``https://``, so :func:`is_openable` cannot refuse it, that the card paints
+    under the cursor, and that ``enter`` hands to the browser (review round 3,
+    MAJOR-1). The rule is a lookahead on the two characters rather than a ``]``
+    in :data:`_BODY_STOP`, and that distinction is load-bearing: ``]`` alone is
+    legal URL text (the IPv6 literal above), while ``](`` is markdown syntax and
+    RFC 3986 requires both characters percent-encoded inside a component anyway.
+
     Shared by both captures, and it has to be: ``[label](…)``'s own terminator
     is a ``)``, so a body that stopped at the FIRST ``)`` truncated the target
     — and because the bare finder then found the correct form at the same
@@ -136,6 +157,10 @@ def _body_end(text: str, start: int) -> int:
     while index < limit:
         char = text[index]
         if char in _BODY_STOP or char.isspace():
+            break
+        # Markdown's seam, not the ``]`` alone — see the docstring: ``]`` is
+        # legal URL text (an IPv6 literal), ``](`` is not.
+        if char == "]" and index + 1 < limit and text[index + 1] == "(":
             break
         if char == "(":
             if depth == 0:

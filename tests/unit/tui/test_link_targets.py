@@ -18,10 +18,15 @@ and the one the app's safety rests on:
   an attacker can choose.
 
 No timing assertions: nothing here is about how long anything takes (AGENTS.md,
-"Timing, flakes, and how to assert that something is fast").
+"Timing, flakes, and how to assert that something is fast"). The single deadline
+in this module is the hang guard's, and it is not a speed assertion: it exists to
+turn a NON-TERMINATING regression into a failure that carries this test's name.
 """
 
 from __future__ import annotations
+
+import subprocess
+import sys
 
 import pytest
 
@@ -224,6 +229,57 @@ def test_a_stop_character_inside_a_parenthesised_run_ends_the_url() -> None:
     assert extract_links("https://a.test/x_(a'b)") == ["https://a.test/x_"]
 
 
+def test_a_markdown_label_does_not_swallow_its_target() -> None:
+    """Markdown's ``](`` seam ends a body, and the label's URL is still a URL.
+
+    ``[https://a.test/x](https://a.test/x)`` — a citation whose label IS the URL
+    — is a shape a model writes, and ``]`` is not in :data:`_BODY_STOP` (it must
+    not be: an IPv6 literal is legal URL text), so the scan used to balance the
+    label's URL straight across the seam and return
+    ``https://a.test/x](https://a.test/x)``. It begins with ``https://``, so
+    :func:`is_openable` cannot refuse it: the card painted that string under
+    ``❯`` and ``enter`` handed it to the browser, which is the round-1 MAJOR's
+    failure class — a silently wrong target, painted and opened — on a second
+    shape. Review round 3, MAJOR-1.
+
+    The first assertion is the one the round pinned; the last is the reason the
+    fix is a lookahead on the PAIR and not ``]`` in the character set.
+    """
+    assert extract_links("[see https://a.test/x](https://b.test/y)") == [
+        "https://a.test/x",
+        "https://b.test/y",
+    ]
+    assert extract_links("[https://a.test/x](https://a.test/x)") == ["https://a.test/x"]
+    assert extract_links("![https://a.test/alt](https://b.test/i.png) more") == [
+        "https://a.test/alt",
+        "https://b.test/i.png",
+    ]
+    assert extract_links("See also: https://a.test/x](https://b.test/y)") == [
+        "https://a.test/x",
+        "https://b.test/y",
+    ]
+    # Why `]` is not a stop character: this is a legal URL, and it is whole.
+    assert extract_links("https://[2001:db8::1]/path") == ["https://[2001:db8::1]/path"]
+
+
+#: The hang guard's probe. It is run by that test in a CHILD process, because a
+#: hang inside pytest is reported by the JOB's timeout with no test name on it;
+#: see the test's docstring. The text arrives as ``argv[1]`` so the shape stays
+#: visible in the test that owns it rather than buried in this string.
+_BACKTRACK_PROBE = (
+    "import sys\n"
+    "from local_operator.tui.link_targets import extract_links\n"
+    "print(extract_links(sys.argv[1]))\n"
+)
+
+
+#: How long that child may run before it is killed and this test fails by name.
+#: The fix needs milliseconds on this text and ~1.1 s of that is interpreter and
+#: import startup; the deadline is sized for a machine arbitrarily slower than
+#: this one, not for the fix's cost.
+_BACKTRACK_DEADLINE_S = 30
+
+
 def test_the_body_is_scanned_not_backtracked() -> None:
     """The round-2 head's body pattern was a nested quantifier.
 
@@ -239,9 +295,25 @@ def test_the_body_is_scanned_not_backtracked() -> None:
     holds a second ``http://``. It is here as the guard for the pattern, and its
     failure mode is a HANG rather than a red assertion — so if this test hangs,
     the body has gone back to a repetition of a repetition.
+
+    AND THE FAILURE HAS TO CARRY THIS NAME, which is why the probe runs in a
+    child with a deadline rather than in this process. A hung test is reported
+    by the JOB's timeout, as a job that ran out of time with nothing pointing at
+    the shape that did it; ``subprocess.run(timeout=…)`` kills the child and
+    raises ``TimeoutExpired`` in this frame, so the regression arrives as
+    ``test_the_body_is_scanned_not_backtracked`` — review round 3, NIT-1. The
+    cost is one interpreter start (~1.1 s measured here) against ~30 µs in
+    process, paid on every green run to name a failure that is otherwise
+    anonymous.
     """
     text = "**[Foo (bar)](https://a.test/a_#fraghttp://b.test/**"
-    assert extract_links(text) == ["https://a.test/a_#fraghttp://b.test/"]
+    finished = subprocess.run(
+        [sys.executable, "-c", _BACKTRACK_PROBE, text],
+        capture_output=True,
+        text=True,
+        timeout=_BACKTRACK_DEADLINE_S,
+    )
+    assert finished.stdout.strip() == "['https://a.test/a_#fraghttp://b.test/']", finished.stderr
 
 
 def test_text_without_a_link_yields_nothing() -> None:
