@@ -743,7 +743,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # row and the answer now use one verb for one act.
     SlashCommand(
         "notifications",
-        "Unread completions; `read` marks them read",
+        "Unread completions; read marks them read",
         arguments=ArgumentMode.OPTIONAL,
         # The vocabulary is one word (`read`). Declared `WORD` rather than
         # `NONE` because the trailing text IS read by the handler, which is the

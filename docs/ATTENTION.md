@@ -221,11 +221,15 @@ re-derive differently:
 
 - **A store that could not be READ is not an empty pile.** The empty states
   (`No unread completions.`, `Nothing unread.`) are findings, and a failed read
-  supports neither. Both surfaces therefore branch on one classification —
+  supports neither. Both surfaces therefore branch on ONE classification —
   `session/store_failures.py`, consumed by the desktop ladder and by the TUI —
-  and both say which of the three conditions they met (contention is retryable;
-a full disk and an unopenable store are not) with the sentence that condition
-  owns. A failed read also means no write: an acknowledgement that cannot be
+  whose codes and log levels decide the condition and the ink (contention is
+  retryable; a full disk and an unopenable store are not). The SENTENCE is
+  composed per surface, deliberately: the desktop's strings are the send path's
+  ("the message could not be written", "send it again") and are false about a
+  receipt clear, which has no message in it. Both surfaces do say the same three
+  things — which condition they met, what could not happen, and whether retrying
+  is the remedy. A failed read also means no write: an acknowledgement that cannot be
   verified is not a receipt.
 - **The word is `unread` on both surfaces, and `unseen` is the store's field.**
   The TUI's sidebar tooltip for the same mark says "Unseen completion"
