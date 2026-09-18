@@ -288,7 +288,12 @@ def test_the_kill_switch_still_resolves_an_unstarted_session(fake_scan) -> None:
     form, because a session someone needs to stop is not a delivery."""
     fresh = _Record(10, session_id="fresh-id", conversation_name="release", started=False)
     fake_scan([(fresh, "live")])
-    for kwargs in ({"pid": 10}, {"session": "fresh-id"}, {"target": "release"}):
+    addresses: list[dict[str, Any]] = [
+        {"pid": 10},
+        {"session": "fresh-id"},
+        {"target": "release"},
+    ]
+    for kwargs in addresses:
         record, candidates, error = peer_send.resolve_peer_target(require_started=False, **kwargs)
         assert record is fresh, f"kwargs={kwargs} error={error}"
         assert candidates == []
