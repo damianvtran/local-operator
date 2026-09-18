@@ -53,8 +53,8 @@ logger = logging.getLogger("local_operator.services")
 
 #: How long one daemon has to come back on the new build before it is reported.
 #:
-#: Sized against the phases it covers, MEASURED rather than assumed (review
-#: serve-reload review round 2, R2-2: the first version was 30 s while the daemon's own budgets
+#: Sized against the phases it covers, MEASURED rather than assumed (serve-reload
+#: review round 2, R2-2: the first version was 30 s while the daemon's own budgets
 #: summed to 40 s, so the caller could give up while the daemon was still
 #: working and report a failure for a reload that then succeeded):
 #:
@@ -254,13 +254,13 @@ def reload_serve_daemons(
         # versions of this sentence listed the mobile daemon, the browser bridge and
         # the tunnel as well, and both overclaimed — see below.)
         #
-        # THE BLAST RADIUS IS THE SERVES, not the whole fleet (review round 3,
-        # R3-4: an earlier version of this comment listed the mobile daemon, the
+        # THE BLAST RADIUS IS THE SERVES, not the whole fleet (serve-reload review
+        # round 3, R3-4: an earlier version of this comment listed the mobile daemon, the
         # browser bridge and the tunnel, and overclaimed — `_repair_refusal`
         # already refuses an editable caller inside the plist refresh child).
         #
-        # AND NOT THE MOBILE DAEMON EITHER, except on one path (review round 4,
-        # R4-4): a checkout's `lop update --no-services` does still reach the mobile
+        # AND NOT THE MOBILE DAEMON EITHER, except on one path (serve-reload review
+        # round 4, R4-4): a checkout's `lop update --no-services` does still reach the mobile
         # bounce, which has no guard of this kind and never did. That is
         # pre-existing behaviour rather than anything this change added —
         # `--no-services` is deliberately the pre-change path — so it is named here

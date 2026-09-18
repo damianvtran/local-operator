@@ -4,7 +4,8 @@
 # WHY THIS IS A SCRIPT AND NOT A PYTEST: every claim below needs a REAL process to
 # be replaced by a real `execve` and signalled by a real `SIGUSR1`. No unit test
 # can assert that a pid survived an image change, and a mocked one asserts nothing.
-# Review round 1 asked for the rig to be runnable from the repository rather than
+# Serve-reload review round 1 asked for the rig to be runnable from the repository,
+# rather than
 # described in a PR body, which is what this is.
 #
 # FOUR CLAIMS, each measured rather than reasoned about:
@@ -14,7 +15,7 @@
 #   4. the PORT NEVER HAD A GAP                    (a client dialling throughout
 #      the change is served; only the already-established connection is cut)
 #
-# AND ONE REGRESSION, R1-1: a SECOND request inside the successor's boot window
+# AND ONE REGRESSION, serve-reload R1-1: a SECOND request inside the successor's boot window
 # used to kill the daemon it was moving — the old record is still live and still
 # advertising `reloadable` while the successor has not yet reached
 # `add_signal_handler`, so SIGUSR1 is still at its default disposition of
@@ -138,7 +139,7 @@ sleep 2.0
 kill -USR1 "$SERVE_PID"
 echo "sent SIGUSR1 to $SERVE_PID"
 
-# R1-1: the same signal again, inside the successor's boot window.
+# serve-reload R1-1: the same signal again, inside the successor's boot window.
 sleep 0.6
 kill -USR1 "$SERVE_PID" 2>/dev/null \
   && echo "sent a SECOND SIGUSR1 mid-boot (the R1-1 window)" \

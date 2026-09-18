@@ -133,7 +133,7 @@ DRAIN_POLL_S = 0.1
 #: a loaded machine is seconds rather than milliseconds — but it has to FIT INSIDE
 #: the caller's patience, because this runs before the exec and a caller that gave
 #: up first would report a failure for a reload that then succeeded (serve-reload
-#: serve-reload review round 2, R2-2: the first version was 30 s, which with the 10 s drain
+#: review round 2, R2-2: the first version was 30 s, which with the 10 s drain
 #: overran ``services.RELOAD_WAIT_S``). Thirty was never a measurement; ten is
 #: still an order of magnitude over the measured cold import, and an expiry is
 #: treated as "the check could not run" — see :func:`_smoke`.
@@ -305,8 +305,8 @@ class ReloadWatch:
         # what a reload is for. `to_thread` rather than a second loop: the body is
         # a single bounded subprocess call, so there is nothing to serialise.
         await asyncio.to_thread(_smoke, plan.interpreter)
-        # THE DRAIN DOES NOT COVER THAT AWAIT, SO IT IS RE-ASKED (review round 3,
-        # R3-1). Moving the smoke off the loop made the pre-exec phase longer than
+        # THE DRAIN DOES NOT COVER THAT AWAIT, SO IT IS RE-ASKED (serve-reload review
+        # round 3, R3-1). Moving the smoke off the loop made the pre-exec phase longer than
         # the wait that guards it, and the term the wait exists for — a runtime
         # being SPAWNED, whose ~1.2 s handshake is the one cut this module calls
         # unrecoverable — can begin inside that window. A first drain that returned
@@ -316,6 +316,14 @@ class ReloadWatch:
         # It refuses rather than proceeds if the second budget expires, which is
         # the fail-closed direction: staying on the loaded build costs a skew, and
         # cutting a handshake costs a runtime.
+        #
+        # AND IT NARROWS THE WINDOW RATHER THAN CLOSING IT (serve-reload review round
+        # 5, R5-1, whose last named edit this is). A spawn can still begin between the
+        # second drain's final poll and the `execve` — one poll period, `DRAIN_POLL_S`,
+        # because a predicate cannot be sampled at the same instant it is acted on.
+        # The first version left the whole smoke duration (up to `SMOKE_TIMEOUT_S`)
+        # exposed; this leaves 0.1 s of it, and the honest statement is that one, not
+        # "closed".
         await self.drain()
         logger.info(
             "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
@@ -407,10 +415,16 @@ class ReloadWatch:
         if not callable(check):
             return None
         try:
-            return check()
+            reason = check()
         except Exception:  # noqa: BLE001 — an unreadable probe may not decide this
             logger.warning("serve reload: the drain probe could not be read", exc_info=True)
             return None
+        # A PROBE THAT ANSWERS WITH SOMETHING THAT IS NOT A REASON HAS NOT ANSWERED, which
+        # is the same rule as an absent or raising one and the reason this is not a bare
+        # `return check()`: the value is formatted into a refusal message and compared for
+        # truth, so anything but a string is unreadable rather than a blocker. (pyright
+        # flagged the bare form: `getattr` types the callable as `object`.)
+        return reason if isinstance(reason, str) else None
 
 
 def _same_tree(left: Path, right: Path) -> bool:

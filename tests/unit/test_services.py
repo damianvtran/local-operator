@@ -146,7 +146,8 @@ def test_the_identity_check_is_a_real_health_read(monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_missing_stamp_moves_nothing_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    """R2-1's fence: a comparison against an absent right-hand side is not a verdict.
+    """serve-reload R2-1's fence: a comparison against an absent right-hand side is not a
+    verdict.
 
     With no readable stamp, `_serves_current_build` answers False for EVERY
     daemon — so without this guard the whole fleet looks stale to a caller that
