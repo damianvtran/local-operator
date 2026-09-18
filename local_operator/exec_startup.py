@@ -291,9 +291,20 @@ def apply_startup(session: Any, args: Any, team: Any) -> None:
         # pipe does). Deriving it from the terminal rather than from the flag
         # also keeps this correct for any future host that runs attended without
         # ``--control``.
+        #
+        # ``sys.stdin`` is checked for ``None`` BEFORE ``isatty()`` is called
+        # because a launcher or daemoniser may start the process with fd 0
+        # CLOSED, and Python leaves ``sys.stdin`` as ``None`` for that shape
+        # rather than raising on it. The unconditional call crashed every such
+        # run at startup with ``'NoneType' object has no attribute 'isatty'`` —
+        # before it reached a single provider request — so an absent stdin has to
+        # read the same way a pipe does: nobody can be asked. Same guard, and the
+        # same reason, as ``session_factory._make_request_approval``'s own tty
+        # test at its first approval.
+        stdin_is_tty = sys.stdin is not None and sys.stdin.isatty()
         session.set_tool_inventory(
             inventory,
-            unattended=not getattr(args, "control", False) and not sys.stdin.isatty(),
+            unattended=not getattr(args, "control", False) and not stdin_is_tty,
         )
     if getattr(args, "clear_goal", False):
         session.set_goal("")

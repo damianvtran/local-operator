@@ -6033,7 +6033,11 @@ class Session:
           means ENFORCED by this method rather than stated in this docstring: a
           call naming anything outside the set already in force raises
           ``ValueError`` and changes nothing, and ``names=None`` — the value an
-          absent declaration has — does not lift one in force.
+          absent declaration has — does not lift one in force;
+          * the APPROVAL half is one-way in the same direction, and enforced the
+          same way: a later call may turn the declaration's auto-approval OFF
+          (``unattended=False``) but never ON. A narrowing call cannot be the
+          loosening one.
         """
         incoming = None if names is None else frozenset(names)
         in_force = self._declared_tools
@@ -6063,7 +6067,44 @@ class Session:
                     f"widen {sorted(in_force)} with {widened}"
                 )
         self._declared_tools = incoming
-        self._declared_tools_unattended = bool(unattended)
+        # ``unattended`` is one-way in the direction that matters, for the same
+        # reason the reach above is: whoever can reach this method must not be
+        # able to LOOSEN what a declaration in force granted. Before this, the
+        # plain assignment let the *allowed* subset call be the loosening one —
+        # declare ``['read', 'bash']`` with a human at the gate, then narrow to
+        # ``['read']`` with ``unattended=True``, and the declared gate answered
+        # ``True`` for ``read`` without consulting the base gate at all (measured
+        # on a real session: the reach stayed bounded, the approval did not).
+        #
+        # Call shapes reachable after this change, against before:
+        #
+        #   * a FIRST declaration — either value applies, unchanged; this is the
+        #     call that decides whether the declaration stands as the approval;
+        #   * a later call with ``unattended=False`` — still applies: tightening
+        #     is not a loosening. A host that narrows and wants the human asked
+        #     again keeps the flow it had, and fails CLOSED on a run with no tty,
+        #     because every remaining call then goes to the base gate;
+        #   * a later call with ``unattended=True`` against a declaration in force
+        #     without it — IGNORED and logged, which is the hole this closes.
+        #
+        # The trade-off, stated rather than left implicit: a host that declares
+        # ``unattended=True`` and later re-declares a SUBSET with
+        # ``unattended=False`` turns its own auto-approval off, so where nobody
+        # can be asked the remaining calls are refused. That is the caller
+        # explicitly asking for the human back, and refusing is the direction to
+        # fail in; freezing the flag at its first value instead would silently
+        # ignore the request rather than honour it.
+        if in_force is None:
+            self._declared_tools_unattended = bool(unattended)
+        elif not unattended:
+            self._declared_tools_unattended = False
+        elif not self._declared_tools_unattended:
+            logger.warning(
+                "set_tool_inventory(unattended=True) ignored: this session's declaration "
+                "(%s) was made with a human at the gate, and a later call cannot turn "
+                "auto-approval on",
+                ", ".join(sorted(in_force)),
+            )
         # Re-published through ``refresh_tools`` so the narrowing reaches the
         # model-facing view (``self._context.tools``) by the same route every
         # other inventory change takes, rather than by a second assignment that
