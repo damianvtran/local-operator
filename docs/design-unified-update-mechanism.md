@@ -601,6 +601,20 @@ invent a second one.
 is reading, (2) tell the consumer the build moved, (3) let it leave at its own
 boundary, (4) only then start anything.
 
+**One class takes an in-place variant of that shape, and it is the `serve`
+daemon.** The shape above assumes the consumer must LEAVE and be replaced, which
+is why successor readiness is its hard part: a daemon that exits hands its port,
+its record and its desktop claim to a process that has to be proven ready first.
+A daemon does not have to leave. It can hand its **listening socket** to the new
+build's interpreter and come back as the same pid, with the same cwd and the same
+environment (`local_operator/server/reload.py`), at which point (1) and (4) are
+fused, there is no successor to prove, and (3) has no meaning — nothing is being
+left. What that trades away is stated in §5.1's row: steps (2) and (3) do not
+happen for the daemon, so the app's standing relay is CUT rather than released,
+and it re-attaches through its own reconnect path. The design accepts that cost
+deliberately; it is recorded as a cost rather than as a recovery that happens to
+work.
+
 ### 5.1 Per component class
 
 | class | can it be updated in place? | mechanism | what the user sees meanwhile |
@@ -608,8 +622,9 @@ boundary, (4) only then start anything.
 | uv-tool install (generations) | no — and that is the feature | `lop update` builds a new generation and flips `current` (`update.py:2038`, `:1547`). **The subject is the pointer, not whatever `lop` on PATH resolves** (§1.6) | nothing on the install side; running sessions keep working |
 | session runtimes | no, and never killed | idle → `_refresh_for` (`process.py:862`); busy → `_begin_drain`/`_drain_for` (`:962`, `:1188`), which stops admissions and leaves when the turn ends | the viewer gets a `retiring` frame and re-engages onto the successor; no `⊘ interrupted` is painted (`docs/design-runtime-autorefresh.md` §4.1) |
 | app-managed env | no (today it is, and that is the bug) | new venv generation + pointer flip (§4.4) | the running daemon keeps serving the old tree; Settings shows both numbers once §3 lands |
-| app-owned serve daemon | n/a | **land → announce → the app releases its own relay → the daemon's probe empties → it latches and leaves → the app re-attaches to the successor.** Each step is load-bearing and the order is the code's, verbatim: "the announcement has to precede the drain, because this stream is only released when the client decides to" (`retire.py:145-159`, `desktop_sessions.py:2474-2481`). The app's `GET /v1/desktop/sessions/{id}/events` relay is a **standing** term — no turn boundary, no TTL — so the release is a step only the CLIENT can take, and §6 makes it part of the action's contract rather than assuming it | the app's stream drops and reconnects onto the successor. A turn in flight on a *session runtime* is untouched: those are separate processes with their own control sockets (§2 row 10), so they are not a term in the daemon's retirement at all |
-| adopted/foreign serve daemon | n/a | never bounced by the app. Announce in the record, state the skew, and **name the exact command for the install that owns it** — the `needs-a-package-manager` shape of §6.1: a named remedy, not a silent wait. §7's PR 5 is deliberately scoped to the app-owned case; this is the class it leaves to a person, and that is said there rather than here | the skew is *stated* with a remedy and a reason, not acted on |
+| `serve` daemon, whichever build started it | its process image, not its install | **requested in-place replacement**: `lop update` (or `lop services restart`) asks, the daemon drains, and it `execve`s the pointer's interpreter with `-P`, keeping its pid, its **listening socket**, its cwd and its environment (`server/reload.py`; `services.py` owns the fleet-wide request). The request is `SIGUSR1`, so the capability is **authored by the daemon that has it** — the record's `reloadable` field — because that signal's default disposition is to terminate. Fail-closed: no pointer, no listener of its own, a drain that does not empty inside its budget, or a request to move onto the build it is already running all leave the daemon serving what it loaded. **This supersedes the earlier "never bounced by the app" rule for this class, deliberately** (operator decision, 2026-09-18): the alternative was a machine whose install was current and whose backend stayed on the build it booted, with the skew named and nobody to act on the name — which is the reported defect. The standing objection was *standing* ("the app has no more standing to restart it than it has to write its tree"), and it is answered rather than ignored: nothing external kills, owns or respawns anything, because the daemon moves ITSELF on a request from the operator's own update command | the app's stream drops and reconnects onto the same pid and port. **Accepted cost, stated:** the relay is cut rather than released — §5's steps (2) and (3) do not happen — so the app's own reconnect path does the recovery; and the drain deliberately does NOT gate on daemon-owned `SchedulerService` work, which no probe can report |
+| app-owned serve daemon (the successor handover route, not taken) | n/a | **land → announce → the app releases its own relay → the daemon's probe empties → it latches and leaves → the app re-attaches to the successor.** Each step is load-bearing and the order is the code's, verbatim: "the announcement has to precede the drain, because this stream is only released when the client decides to" (`retire.py:145-159`, `desktop_sessions.py:2474-2481`). The app's `GET /v1/desktop/sessions/{id}/events` relay is a **standing** term — no turn boundary, no TTL — so the release is a step only the CLIENT can take, and §6 makes it part of the action's contract rather than assuming it | the app's stream drops and reconnects onto the successor. A turn in flight on a *session runtime* is untouched: those are separate processes with their own control sockets (§2 row 10), so they are not a term in the daemon's retirement at all |
+| ~~adopted/foreign serve daemon~~ | — | **Superseded** by the `serve` daemon row above. This class used to be left to a person — "announce in the record, state the skew, name the exact command, and do not act" — and that is exactly the state the reported machine was stuck in. The in-place reload reaches it without anyone needing standing over the process | the skew is acted on, at the next request, by the daemon itself |
 | mobile daemon | n/a | bounce at idle (no phone stream, no in-flight op); today it is bounced unconditionally | the phone reconnects |
 | browser bridge | n/a | bounce at idle (no extension attached, no command in flight) | the extension reconnects |
 | tunnel | n/a | bounce, but as a *stated* cost: the public URL is dark for the reconnect window | the phone shows a tunnel error for a few seconds |
@@ -661,9 +676,21 @@ reported as a queued move rather than a failure (`control.py:1572-1594`).
   daemon; re-parenting is incidental, the socket is the point — so a daemon
   restart is survivable *for them*. What a restart cuts is the app's own event
   stream and any phone stream, and the app holds its stream until it decides to
-  let go (`retire.py:145-159`). That is why the daemon's terms are an
-  announcement, then the client's release, then a drain, and why the design
-  keeps the app out of a daemon a person started.
+  let go (`retire.py:145-159`). That is why an *exit-and-replace* daemon's terms
+  would be an announcement, then the client's release, then a drain.
+
+  **A RELOAD does not have to ask, and that is the change of position recorded
+  in §5.1.** The client-release ordering exists because a leaving daemon needs
+  its successor to be ready and its clients to have let go. A daemon that keeps
+  its pid and its listening socket needs neither: the app's stream is cut, and
+  the app reconnects — measured on the reporting host, where it re-read the
+  record, re-claimed the plane and re-attached (`Claimed the desktop plane on
+  http://127.0.0.1:1111.` → `Attached to daemon … (pid 61225, v0.59.0, uv-tool)`)
+  with eight live runtimes untouched. The design's earlier sentence — "the
+  design keeps the app out of a daemon a person started" — is withdrawn for this
+  class on the operator's own decision (2026-09-18), because the remedy it named
+  (state the skew, name a command, act never) left the reported machine on
+  0.56.14 with a *current* install and no route out.
 
 ### 5.4 One gap this leaves, stated rather than smoothed over
 
@@ -790,7 +817,7 @@ reason is in §7.1.
 | 2 | local-operator-ui | resolve the backend update plan from the **serving install** (`/health.prefix` + `install_kind`, cross-checked with the serve record), make app- vs externally-owned a fact about the tree, and **name which reading is the subject** — `disk_build()`/the pointer for a daemon, the serving prefix for the app — never the console script's tree (§1.6) | this is the change that makes the *plan* right; separating it from PR 1 means each can be reviewed on its own evidence and PR 1 can ship first |
 | 3 | local-operator-ui | app-owned environment updates by **publishing a new generation** (prepare → install → smoke → pointer flip) instead of `pip install --upgrade` in place | it is the only PR that writes to a live tree's neighbour; it needs PR 2's ownership resolution to know when it applies |
 | 4 | local-operator | supervised daemons take the new build **without a unit rewrite**: the refresh path restarts a daemon whose *install* moved, where "its install" is **the pointer the shim resolves** (`disk_build()`), not the console script's tree — at its idle boundary, on launchd **and** systemd, and reports it | this is the `update.py`/unit half of §1.5 items 3–4; it is language-separate from PRs 1–3 and independently testable (fake units, fake `launchctl`/`systemctl`). Without the two readings named apart it restarts a daemon onto the build it was already loading (§1.6) |
-| 5 | local-operator | `serve` daemons gain a bounded, announced handover for an **app-owned, unsupervised** daemon — announce → client release → drain → re-attach, with the release window stated — and `lop refresh --all`'s vocabulary covers them | depends on nothing in PRs 1–3; the safety argument (successor readiness) is the hard part and deserves its own round. Scope is app-owned only: an adopted daemon a person started is **named with its remedy and not moved** (§5.1), because the app has no more standing to restart it than it has to write its tree |
+| 5 | local-operator | `serve` daemons take the new build **in place**: a requested reload per daemon (`SIGUSR1`, capability published in the record) that keeps pid, listening socket, cwd and environment, driven fleet-wide by `lop services restart` and finishing `lop update` — **superseding** the announced exit-and-re-attach handover this row used to specify | **Delivered differently from the original scope, by operator decision (2026-09-18).** The hard part named here — successor readiness — is dissolved rather than solved: a daemon that does not leave has no successor to prove. The cost it accepts instead is that the app's standing relay is cut rather than released (§5.1), which the app already recovers from; and `SchedulerService` work is not gated, recorded as a known limit. Scope is **not** app-owned only, which is the sentence this amendment retires |
 | 6 | local-operator-ui | the one-click `updateAll()` action, its per-component report, and the consent-taking convergence it owns (the third note below) | last, because it is the surface over results PRs 2–5 produce; building it first would freeze a contract against unbuilt behaviour |
 
 Four notes the table cannot carry:
@@ -902,14 +929,20 @@ Unit-first, because every rule above is a pure decision:
   command (`launchd.reload_failure`, and the systemd equivalent). A test that
   compares the console script's reading here would pass on the broken machine,
   which makes this the discriminating case for the whole of PR 4.
-* **PR 5** — the handover, asserted on the RIGHT term: an app-owned daemon whose
-  client still holds the relay must not latch (the relay is the standing term —
-  `retire.py:145-159` — not a turn), and must latch once the client releases it;
-  a client that never releases must leave the daemon serving and the result
-  `awaiting-client-release`, not a silent hang; an unsupervised daemon must not
-  exit without a successor; the refusal must be typed and carried on the wire. A
-  *session runtime* mid-turn is a different process and must be shown to be
-  unaffected by the daemon's restart.
+* **PR 5** — the reload, asserted on the RIGHT terms. The old list assumed an
+  exit and is kept only where it still bites: an unsupervised daemon must not
+  exit without a successor (it does not exit at all here), and a refusal must be
+  typed and carried rather than silent. What the in-place mechanism must prove
+  instead, and what the tests in `tests/unit/server/test_serve_reload.py`
+  assert: a daemon whose record says it CANNOT reload is **never signalled**
+  (the request's default disposition is death); a same-version rebuild is not
+  read as a no-op (only `source_ref` moves on this host); the successor keeps
+  the fd, the interpreter and `-P`; every refusal path leaves the daemon serving
+  what it loaded; an established connection is CUT and a dialling client is not
+  refused — the second is the property a stop-and-start cannot have, and the
+  end-to-end rig measures both (`82 dials, 0 refusals`). A *session runtime*
+  mid-turn is a different process and must be shown to be unaffected, which the
+  same rig does by counting the runtimes either side.
 * **PR 6** — the report: a component that was not checked renders `not-checked`
   and the summary says nothing about it; a deferred component never renders
   "up to date".

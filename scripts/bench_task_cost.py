@@ -45,6 +45,8 @@ from typing import Any, Callable, Iterator, Sequence
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from local_operator.agent_shell import harness_child_env  # noqa: E402
+
 DEFAULT_HOSTING = "openrouter"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 #: Per-task ceiling. Long enough for a real multi-turn build, short enough
@@ -999,6 +1001,11 @@ def run_fixture(
             capture_output=True,
             text=True,
             cwd=REPO,
+            # The child is the real CLI, and this script IS a harness: run from
+            # an agent's shell it inherits the marker, and without this every
+            # task would be refused and the bench would report the refusal as a
+            # product failure (`agent_shell.harness_child_env`).
+            env=harness_child_env(),
             timeout=timeout,
         )
         stdout, exit_code = proc.stdout, proc.returncode

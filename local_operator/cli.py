@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
+from local_operator.agent_shell import nested_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
@@ -68,6 +69,45 @@ if TYPE_CHECKING:
     from local_operator.agents import AgentRegistry
 
 from local_operator.helpers import setup_cross_platform_environment
+
+#: The `lop services restart --wait` default, in seconds.
+#:
+#: DUPLICATED ON PURPOSE, WITH A TEST AS THE GUARD. The number it must agree with is
+#: ``services.RELOAD_WAIT_S``, and ``cli.py`` may not import that module: this file's
+#: startup path is asserted stdlib-light, and ``services`` reaches ``asyncio`` (the
+#: test is ``tests/unit/test_import_graph.py::test_cli_import_does_not_load_asyncio``).
+#: Naming the wrong default in ``--help`` while the tool used another was design review
+#: D2 — a flag that misreports its own behaviour is worse than one that has no default
+#: text — so the literal lives here and
+#: ``tests/unit/test_services.py::test_the_documented_wait_default_is_the_one_used``
+#: fails if the two ever drift apart.
+DEFAULT_SERVICES_WAIT_S = 45.0
+
+
+def _positive_seconds(text: str) -> float:
+    """argparse ``type`` for a wait budget that must be greater than zero.
+
+    REFUSED AT PARSE TIME, NOT AFTER THE WORK STARTS (design review D2). The first
+    version accepted anything: ``--wait -1`` ran the whole restart and then reported
+    "within -1s", and ``--wait 0.5`` reported "within 0s" because the message
+    formatted to whole seconds. A budget the tool cannot honour is a usage error, and
+    argparse says so before a single daemon is touched.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not math.isfinite(value):
+        # ``nan``/``inf``/``1e400`` passed the ``<= 0`` test below, because every
+        # comparison against ``nan`` is False. Measured by review round 10: the
+        # relocation poll never expired against ``nan`` (51 polls, 10.4 s, deadline
+        # never fired), and the echo printed "within nans" — so the validator admitted
+        # exactly the budget it exists to refuse.
+        raise argparse.ArgumentTypeError("must be a finite number of seconds")
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return value
+
 
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
@@ -428,6 +468,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--reload",
         action="store_true",
         help="Enable hot reload for the server",
+    )
+    serve_parser.add_argument(
+        "--listener-fd",
+        type=int,
+        default=None,
+        help=(
+            "Adopt an already-bound listening socket instead of binding one. "
+            "Set by a daemon replacing its own process image onto a new build "
+            "(`server/reload`), so the port never has a moment with nothing "
+            "behind it. Not a user-facing flag."
+        ),
     )
 
     # Mobile command: the phone-facing control plane (daemon + supervision).
@@ -966,6 +1017,77 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=(
             "Install a local source tree (a directory, or a git ref of the current "
             "repository) into its own install generation, instead of upgrading from PyPI"
+        ),
+    )
+    update_parser.add_argument(
+        "--no-services",
+        dest="no_services",
+        action="store_true",
+        help=(
+            "Do not bring the `lop serve` daemons onto the new build; the supervised "
+            "daemons are still repaired. Use this only when something else will "
+            "start the serves, e.g. a script that owns their launch."
+        ),
+    )
+
+    # The NON-RUNTIME SERVICES, as one verb group. A service is a long-lived
+    # non-conversational process (a serve daemon, the mobile daemon, the browser
+    # bridge, the tunnel, the wakes supervisor); a runtime is a conversation, and
+    # nothing here ever touches one. `restart` is the same stage `lop update`
+    # finishes with, exposed on its own so the recovery sentences the update path
+    # prints can name a command that exists.
+    services_parser = subparsers.add_parser(
+        "services",
+        help=(
+            "Bring this machine's non-runtime services (serve daemons and the "
+            "supervised daemons) onto the current build, without stopping any "
+            "running conversation"
+        ),
+        # A reader who opens this page is asking what a "service" IS, and the verb
+        # group defined nothing (design review D9). The distinction it draws is the
+        # one the whole feature rests on: a RUNTIME is a conversation and is never
+        # touched; everything else that serves this machine can be brought along.
+        description=(
+            "Everything local_operator runs for this machine that is not a conversation. "
+            "A 'service' is a `lop serve` daemon or a supervised LaunchAgent — the "
+            "mobile relay, the browser bridge, the tunnel and the wakes agent. "
+            "Runtimes — the processes holding your conversations — are never stopped: "
+            "'restart' reloads a serve daemon in place, keeping its pid and socket."
+        ),
+        parents=[parent_parser],
+    )
+    services_subparsers = services_parser.add_subparsers(dest="services_command")
+    services_subparsers.add_parser(
+        "status",
+        help=(
+            "Report each non-runtime service, the build it is serving, and the build "
+            "the install is on"
+        ),
+        # D9 put the distinction on the GROUP page; a reader who runs `services status
+        # --help` directly was still shown no prose at all (design review D10).
+        description=(
+            "Read-only. Names the build the install is on and, for each `lop serve` "
+            "daemon, the build it is SERVING — both sides of every comparison, because "
+            "the ordinary drift on this machine is a same-version rebuild where the "
+            "version alone cannot show that a daemon is behind."
+        ),
+        parents=[parent_parser],
+    )
+    services_restart = services_subparsers.add_parser(
+        "restart",
+        help="Move every service onto the current build (never stops a runtime)",
+        parents=[parent_parser],
+    )
+    services_restart.add_argument(
+        "--wait",
+        type=_positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long to wait for an asked daemon to come back on the new build "
+            f"(default: {DEFAULT_SERVICES_WAIT_S:g}s; must be positive). A daemon that does "
+            "not make it is reported, left serving the build it loaded, and retried by "
+            "the next `lop services restart`."
         ),
     )
 
@@ -5396,7 +5518,49 @@ def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
     return 1
 
 
-def serve_command(host: str, port: int, reload: bool) -> int:
+def adopt_serve_socket(fd: int, host: str) -> socket.socket:
+    """Take over an already-bound listener handed across ``execve``.
+
+    WHY THIS EXISTS AT ALL. A reload replaces this process's image and keeps the
+    socket fd open across the exec, so the port a client is connected to is the
+    same kernel object before and after; the successor must therefore ADOPT it
+    rather than bind. A fresh ``bind`` would fail with ``EADDRINUSE`` against the
+    socket this very process is still holding, and the tempting alternative —
+    close it and rebind — is a window in which ``connect`` gets refused, which is
+    the outage the in-place design was chosen to avoid.
+
+    THE FAMILY COMES FROM ``host``, NOT FROM A CONSTANT (serve-reload review round 1, R1-3).
+    ``socket.fromfd`` needs a family to reinterpret the descriptor under, and a
+    hardcoded ``AF_INET`` reinterprets an IPv6 listener's address bytes as IPv4:
+    measured in review, an adopted ``--host ::1`` daemon logged its peer as
+    ``::24:b503:100:0:61963`` where an ordinary bind on the same host logs
+    ``::1:62246``. The daemon still served, which is exactly why it would have
+    gone unnoticed. This is the same rule `_bind_serve_socket` already follows by
+    giving ``uvicorn.Config`` a host with a colon in it.
+
+    ``socket.fromfd`` DUPLICATES the descriptor rather than wrapping it, so the
+    inherited fd is closed here: leaving it open would leak one descriptor per
+    reload in a process that may live for months, and would keep a second handle
+    on a socket nothing is serving from.
+
+    Deliberately does NOT re-apply ``SO_REUSEADDR`` or re-bind anything: the
+    socket is already fully configured and listening, and touching it would undo
+    the only property this path is for.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.fromfd(fd, family, socket.SOCK_STREAM)
+    # The dup ``fromfd`` just made is the one we keep, and it must NOT be
+    # inherited by anything this process later spawns — only a future reload of
+    # this daemon should see it, and that reload publishes its own fd.
+    listener.set_inheritable(False)
+    try:
+        os.close(fd)
+    except OSError:  # pragma: no cover — an fd already reaped by the dup path
+        pass
+    return listener
+
+
+def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     """Start the FastAPI server using uvicorn.
 
     ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
@@ -5439,7 +5603,30 @@ def serve_command(host: str, port: int, reload: bool) -> int:
 
     listener: socket.socket | None = None
     resolved_port = port
-    if not reload:
+    if listener_fd is not None and reload:
+        # Both at once is a contradiction rather than a precedence rule: a
+        # ``--reload`` child's port belongs to uvicorn's supervisor, which is
+        # precisely why ``reload.install`` refuses to arm a reload on one. A
+        # caller that asked for both has asked for neither, and refusing by name
+        # is better than picking one silently.
+        print(
+            "--listener-fd and --reload cannot be combined: a reload child's port "
+            "belongs to its supervisor, so there is no socket of its own to adopt",
+            file=sys.stderr,
+        )
+        return 1
+    if listener_fd is not None:
+        # The reload path: this process is the replacement, and the socket is
+        # already bound and listening in the kernel. Nothing is bound here, so a
+        # failure can only be a bad descriptor — reported like a bind failure,
+        # because from the client's side the consequence is the same one.
+        try:
+            listener = adopt_serve_socket(listener_fd, host)
+        except OSError as exc:
+            print(f"--listener-fd {listener_fd} could not be adopted: {exc}", file=sys.stderr)
+            return 1
+        resolved_port = listener.getsockname()[1]
+    elif not reload:
         try:
             listener = _bind_serve_socket(host, port)
         except OSError as exc:
@@ -5482,6 +5669,13 @@ def serve_command(host: str, port: int, reload: bool) -> int:
         # inherited variable would let any of them publish a record naming OUR
         # listener as its own.
         serve_registry.announce_address(asgi_app, host, resolved_port)
+        # The fd a reload hands across ``execve``. Published on the app object
+        # for the same reason the announcement is: the socket lives in THIS
+        # frame and the reload runs in the lifespan's loop, so state is the one
+        # channel that reaches both.
+        from local_operator.server import reload as serve_reload
+
+        serve_reload.bind_listener_fd(asgi_app, listener.fileno())
         config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
@@ -7580,7 +7774,7 @@ def main() -> int:
                 return 1
         elif args.subcommand == "serve":
             # Use the provided host, port, and reload options for serving the API.
-            return serve_command(args.host, args.port, args.reload)
+            return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
         elif args.subcommand == "mobile":
             return mobile_command(args)
         elif args.subcommand == "tunnel":
@@ -7645,7 +7839,38 @@ def main() -> int:
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
+                services=not bool(getattr(args, "no_services", False)),
             )
+        elif args.subcommand == "services":
+            # Lazy for the same reason as ``update``: this pulls the serve
+            # registry, and the CLI's own startup path must stay stdlib-light.
+            from local_operator.services import (
+                print_refreshes,
+                restart_services,
+                status_lines,
+            )
+
+            command = getattr(args, "services_command", None)
+            if command == "status":
+                for line in status_lines():
+                    print(line)
+                return 0
+            if command == "restart":
+                wait = getattr(args, "wait", None)
+                refreshes = (
+                    restart_services(wait_s=wait) if wait is not None else restart_services()
+                )
+                print_refreshes(refreshes)
+                return 0
+            # Mirror `install`'s dispatch instead of argparse's (design review D8):
+            # `parser.error` dumped the WHOLE program's usage here — 223 columns of
+            # every verb under a second `usage:` prefix — when what the reader mistyped
+            # is a subcommand of this one group. It exits 2 where `install` returns 1
+            # for the same situation: 2 is argparse's own usage code and the one this
+            # path already exited with through `parser.error`, so nothing that scripts
+            # the exit status sees a change (round 11 R11-4).
+            print("usage: lop services {status, restart}", file=sys.stderr)
+            return 2
         elif args.subcommand == "install":
             # Same lazy import, same reason. The generation layout's own verbs:
             # they install nothing from a network, so they never consult PyPI.
@@ -7737,6 +7962,19 @@ def main() -> int:
                     return 1
                 print(json.dumps(state, ensure_ascii=False))
                 return 0
+            # A `lop` command an agent ran may not open a session of its own.
+            # What it would start is a TOP-LEVEL conversation: the operator's
+            # session list, desktop sidebar and phone history list it as a chat
+            # they opened, and it runs outside this session's job manager, so
+            # nothing here can see, steer, cancel or account for it (see
+            # `agent_shell.py` for the incident this answers). `--status`
+            # returned above, so the read-only form stays reachable, and the
+            # documented escape for QA runs is `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`
+            # (docs/EXEC.md) — deliberately not named to the model in the text.
+            refusal = nested_session_refusal()
+            if refusal is not None:
+                print(f"exec failed: {refusal}", file=sys.stderr)
+                return 1
             exec_args = ExecArgs(
                 background=args.background,
                 json_mode=args.json_mode,
@@ -7789,6 +8027,37 @@ def main() -> int:
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
+
+        # The interactive path is the fall-through — every subcommand returned
+        # above — so this ONE check covers `lop`, `lop --resume ID`, `--tui` and
+        # every future interactive flag together, and it sits FIRST so a refused
+        # run has written nothing: no config override, no registry row for an
+        # autosave agent. It honours the SAME escape as the exec path (the rule
+        # is `nested_session_refusal`'s, in one place, on purpose), because a
+        # pty harness drives this front end exactly as a bench drives exec.
+        # What differs between the two paths is only who DROPS the marker: the
+        # places a session opens a conversation for its user — the TUI restart,
+        # `/fork`'s window, and both rungs of a notification click (the terminal
+        # and the desktop app) — pass `agent_shell.without_agent_shell_marker`,
+        # since those are the user's gestures and not an agent's command.
+        refusal = nested_session_refusal()
+        if refusal is not None:
+            from local_operator.cli_style import ERROR, paint
+
+            # The PREFIX carries the colour, the diagnostic does not (design
+            # round 1, D1): the whole 646 bytes painted bold red is nine wrapped
+            # lines of alarm for a message whose content is "you took the wrong
+            # route", and the exec path prints the same bytes with no colour at
+            # all — one sentence must not render two ways depending on which
+            # entry point hit it.
+            #
+            # `stream=sys.stderr` because that is where this text goes (design
+            # round 2, D4): `paint`'s gate reads the stream it is told about, and
+            # with the default it read stdout — so `lop 2> log` with stdout on a
+            # terminal wrote escapes into a file, the one shape the gate exists
+            # to keep plain.
+            print(paint("Error: ", ERROR, stream=sys.stderr) + refusal, file=sys.stderr)
+            return 1
 
         config_manager = ConfigManager(base_dir)
         credential_manager = CredentialManager(base_dir)

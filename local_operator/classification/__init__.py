@@ -75,6 +75,7 @@ from local_operator.classification.context import (
     select_candidates,
     serialized_size,
     setting_int,
+    shortlist,
 )
 from local_operator.classification.recommend import (
     DEFAULT_MAX_RECOMMENDATIONS,
@@ -159,6 +160,7 @@ __all__ = [
     "select_candidates",
     "serialized_size",
     "setting_int",
+    "shortlist",
     # -- §4: the recommendation layer --------------------------------------
     "DEFAULT_MAX_RECOMMENDATIONS",
     "NONE_OPTION",

@@ -1330,6 +1330,12 @@ def _build_variable_store(cwd: str, config_manager: ConfigManager) -> VariableSt
 #: ``tests/unit/test_session_factory_classification.py`` pins the two together.
 DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS = 3
 
+#: ``values.classification.maxCandidates`` as the WIRING needs it when no seam was
+#: built from the package (a test double, or a host that supplied its own
+#: classifier). Same reason as the constant above: the request path must not import
+#: the package for a number, and the same test pins this to the registry row.
+DEFAULT_CLASSIFICATION_MAX_CANDIDATES = 12
+
 #: ``values.classification.timeoutMs`` — the CALL's deadline, as the wiring needs it.
 #:
 #: The shipped service enforces the same number itself (``timeout_s``, read from the
@@ -1455,11 +1461,36 @@ class _KnowledgeHooks:
     #: cached roster was built from. The index OBJECT, not just its size: a
     #: rebuild replaces it, and its ``skills`` list is never mutated in place.
     classification_roster_key: tuple[Any, ...] | None = None
+    #: The skill tree's signature (roots + per-file ``(mtime_ns, size)``; see
+    #: ``skills/discovery.roots_fingerprint``) as of the last roster build and of the
+    #: last knowledge-block render. ``None`` means "no roots to watch" — the unit
+    #: tests' doubles, or a provider built without discovery — and then nothing below
+    #: can fire. The two are separate because the two surfaces rebuild on different
+    #: cadences: the roster is per message, the block is frozen per task.
+    skills_fingerprint: tuple[object, ...] | None = None
+    knowledge_fingerprint: tuple[object, ...] | None = None
+    #: The block ``frozen_block`` held just before a skill-tree change invalidated it.
+    #: Kept because a SUBAGENT's knowledge block is built synchronously from
+    #: ``frozen_block``: without this, a child spawned in the window between the
+    #: invalidation and the next render would inherit an EMPTY directory instead of
+    #: yesterday's one, which is a worse failure than a stale line.
+    superseded_block: str = ""
     #: ``values.classification.maxRecommendations`` as read at session build.
     #: Carried because the REQUEST's own cap field is an upper bound over the
     #: package's reader (``min(request, settings)``), so leaving it at the
     #: dataclass default would silently cap a configured 5 at 3.
     classification_max_recommendations: int = DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS
+    #: ``values.classification.maxCandidates`` as read at session build. Read on the
+    #: message path by ``_classification_request``, which SHORTLISTS a roster larger
+    #: than this per kind rather than sending its first N in discovery order (see the
+    #: package's ``shortlist``).
+    classification_max_candidates: int = DEFAULT_CLASSIFICATION_MAX_CANDIDATES
+    #: The package's ``shortlist`` callable, captured at attach time. ``None`` when no
+    #: real seam was built (the layer is off, or a host injected its own classifier),
+    #: in which case the message path sends the roster unchanged instead of importing
+    #: the package for one function. Typed as returning a tuple of rows rather than as
+    #: ``Callable[..., Any]`` so the message path needs no cast and no re-wrapping.
+    classification_shortlist: Callable[..., tuple[Any, ...]] | None = None
     #: ``values.classification.waitMs`` in SECONDS, as read at session build (the
     #: same NEW_SESSIONS snapshot the service got). The turn waits at most this
     #: long; see :data:`DEFAULT_CLASSIFICATION_WAIT_MS` for why it is not the
@@ -1639,6 +1670,10 @@ async def _setup_knowledge(
         # happened to start in -- every other consumer here already takes the
         # session's cwd, and this one silently did not.
         hooks.skill_roots = default_skill_roots(Path(cwd) if cwd is not None else None)
+        #: The baseline the freshness checks compare against, taken HERE because the
+        #: tree has just been walked: recording it at first use instead would make a
+        #: session's first message look like a change and pay a second full scan.
+        hooks.skills_fingerprint = _skills_fingerprint(hooks)
         skills, discovery_warnings = discover_skills(hooks.skill_roots)
         warnings_out.extend(discovery_warnings)
         guides = discover_guides()
@@ -1734,25 +1769,32 @@ def _classification_enabled(section: Mapping[str, Any]) -> bool:
     """Whether ``values.classification.auto`` turns the layer on.
 
     THE ONE decision the wiring makes for itself, and it is read WITHOUT
-    importing the package: this runs at session build, and ``auto: false`` (the
-    default) must leave the process's import graph exactly as it was before the
-    layer existed. The two values it can return are pinned by
+    importing the package: this runs at session build, and ``auto: false`` must
+    leave the process's import graph exactly as it was before the layer existed.
+    With the key ABSENT the answer is the default — ON since 2026-09-18, so the
+    package IS imported on the default path — which is why the absent case is
+    still answered here, without the ``settings_io`` import, rather than by
+    importing the constant it mirrors. The two values it can return are pinned by
     ``tests/unit/test_session_factory_classification.py`` to the package's
-    ``DEFAULT_AUTO`` and the registry row's default.
+    ``DEFAULT_AUTO`` and the registry row's default, so a flip in either place
+    fails a test instead of silently disagreeing with this one.
 
     Read through ``settings_io.strict_bool``, the same reading the service's own
     ``enabled`` property applies, so a hand-edited ``auto: "false"`` is off here
     and there — two readings of one toggle is how a switch ends up honoured by
-    one path and ignored by another.
+    one path and ignored by another. The FALLBACK for an unreadable value is the
+    default for the same reason: ``DEFAULT_AUTO`` is what the service would read
+    from the same garbage, so a typo cannot leave the page painting "on" for a
+    layer the wiring skipped.
     """
     raw = section.get("auto")
     if raw is None:
         # The absent case is answered without the settings_io import, which is
         # the whole point of this function existing separately.
-        return False
+        return True
     from local_operator.settings_io import strict_bool
 
-    return strict_bool(raw, False)
+    return strict_bool(raw, True)
 
 
 def _attach_classification(
@@ -1769,8 +1811,10 @@ def _attach_classification(
     (``python -X importtime`` over ``local_operator.classification``), which must
     not land inside a turn's prompt build. Session construction already spends
     seconds on skill discovery and embeddings, so the one-off cost sits where the
-    operator is already waiting. A default install never imports the package at
-    all, because ``auto`` is read first and without it.
+    operator is already waiting. That cost is now on the DEFAULT path: ``auto``
+    absent means ON, so a stock install pays this import once per session build.
+    Only an explicit ``auto: false`` skips it — the knob is still a real off, and
+    the reason the default is worth its price is on ``DEFAULT_AUTO``.
 
     The seam's keep-alive CLIENT is warmed here too, for the same reason and with a
     number: see ``ClassificationService.warm_up`` (tens of milliseconds of SSL-context
@@ -1789,11 +1833,16 @@ def _attach_classification(
     try:
         from local_operator.classification import (
             ClassificationService,
+            max_candidates,
             max_recommendations,
             setting_int,
+            shortlist,
         )
 
         hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
+        # The message path's shortlist, captured HERE so that path never imports
+        # the package (see ``_classification_request``).
+        hooks.classification_shortlist = shortlist
         # …and its keep-alive client is built HERE, not on the first message: tens of
         # milliseconds of SSL-context setup (19-81 ms across six fresh-process runs),
         # paid before the call's first await, so no wait budget can bound it. No
@@ -1818,6 +1867,10 @@ def _attach_classification(
         # 3. Read through the package's own reader, in the one branch that has
         # already imported the package.
         hooks.classification_max_recommendations = max_recommendations(values)
+        # Same reader the package uses for the same key, so the wiring's shortlist
+        # cap and the package's own ``select_candidates`` cap cannot drift into two
+        # different numbers.
+        hooks.classification_max_candidates = max_candidates(values)
         # ``waitMs`` through the SAME reader the package uses for its integers
         # (``setting_int``): a hand-edited ``waitMs: "80"`` is a typo we can read,
         # ``waitMs: true`` is refused (``True`` is an ``int`` in Python, and a
@@ -1832,28 +1885,174 @@ def _attach_classification(
         hooks.classifier = None
 
 
+def _skills_fingerprint(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
+    """The skill tree's change-detector, or ``None`` when there is nothing to watch.
+
+    ``None`` means "cannot tell", and every caller treats it as "do not refresh":
+    a hooks object with no roots (the unit tests' doubles, a provider built
+    without discovery) must behave exactly as it did before this existed.
+
+    Cost is the reason this is affordable on a per-message path at all:
+    ``roots_fingerprint`` stats one level (per-file ``(mtime_ns, size)``, because
+    editing a ``SKILL.md`` in place bumps no directory's mtime) and measured
+    ~0.29 ms across 8 roots / 57 skills, against 17-25 ms for the full scan it
+    decides whether to run. Never raises: a filesystem fault reads as "no
+    fingerprint", which costs a refresh rather than a turn.
+    """
+    roots = list(getattr(hooks, "skill_roots", ()) or ())
+    if not roots:
+        return None
+    try:
+        from local_operator.skills.discovery import roots_fingerprint
+
+        return roots_fingerprint(roots)
+    except Exception:  # noqa: BLE001 — a fingerprint is an optimisation, never a gate
+        logger.debug("classification: skill fingerprint failed", exc_info=True)
+        return None
+
+
+def _refresh_knowledge_freshness(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
+    """Re-open the frozen knowledge block when the skill tree changed under it.
+
+    Returns the fingerprint it computed, so the caller can record it once the
+    block has actually been rendered.
+
+    WHY THE FREEZE IS THE THING TO BREAK
+    -----------------------------------
+    Selection is frozen per admitted user message (``frozen_task_id``) so a long
+    tool loop does not re-render the block every step. That freeze is also what
+    hides a skill installed mid-conversation for the rest of the session — and
+    from every SUBAGENT, since a child's knowledge directory is the parent's
+    frozen block. A fingerprint change (one skill authored, edited or deleted) is
+    the signal that the snapshot is no longer the truth, and it is cheap enough
+    to check once per admitted message.
+
+    The previous block is parked in ``superseded_block`` rather than dropped: a
+    child's block is built SYNCHRONOUSLY, so a child spawned between this
+    invalidation and the next render inherits yesterday's directory instead of an
+    empty one.
+    """
+    fingerprint = _skills_fingerprint(hooks)
+    if fingerprint is None or hooks.knowledge_fingerprint is None:
+        return fingerprint
+    if fingerprint == hooks.knowledge_fingerprint:
+        return fingerprint
+    if hooks.frozen_block:
+        hooks.superseded_block = hooks.frozen_block
+    hooks.frozen_block = None
+    hooks.frozen_task_id = None
+    hooks.frozen_compaction_id = None
+    return fingerprint
+
+
 def _classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandidate, ...]:
     """The candidate roster, cached against the inputs it was derived from.
 
     ONCE PER ROSTER, never once per user message. The walk below and the row it
     allocates per resource are session-shaped work; re-deriving them on every
-    turn is exactly the per-message overhead the latency budget forbids, and it
-    buys nothing — the inputs cannot change without the index object or the
-    configured server names changing, which is what the cache key records. A warm
+    turn is exactly the per-message overhead the latency budget forbids. A warm
     turn therefore serializes the user message and nothing else.
+
+    THE FOURTH INPUT IS THE SKILL TREE. The index object and the server names
+    catch a rebuild and a fan-out, but neither moves when a skill is installed or
+    edited underneath a running session — and the roster is the surface whose
+    whole job is to make the operator's installed resources reachable. A
+    fingerprint of the tree (``_skills_fingerprint``, ~0.3 ms, no scan) is the
+    "that changed" signal, so a skill authored mid-conversation is a candidate on
+    the very next message, in the parent session and in any child started
+    afterwards.
     """
     index = hooks.index
+    fingerprint = _skills_fingerprint(hooks)
     key: tuple[Any, ...] = (
         index,
         len(getattr(index, "skills", ()) or ()),
         hooks.mcp_server_names,
+        fingerprint,
     )
     if hooks.classification_roster is not None and hooks.classification_roster_key == key:
         return hooks.classification_roster
     roster = _build_classification_roster(hooks)
     hooks.classification_roster = roster
     hooks.classification_roster_key = key
+    # Only a REAL fingerprint becomes the baseline. Recording a ``None`` (no roots to
+    # watch) would permanently disarm the freshness check for a session whose roots
+    # appear later — ``_current_skill_resources`` compares against this value, and
+    # ``None`` there means "never rescan" (agent review round 1).
+    if fingerprint is not None:
+        hooks.skills_fingerprint = fingerprint
     return roster
+
+
+def _current_skill_resources(hooks: _KnowledgeHooks) -> list[Any]:
+    """The router's resources, plus whatever the skill tree has gained since it indexed.
+
+    THE INDEX IS A SNAPSHOT, and that is deliberate: its vectors cover the whole
+    matrix, so a rebuild re-embeds everything and belongs at session build, not in
+    a turn. The consequence is that a skill authored mid-conversation is invisible
+    to ``index.select`` for the rest of the session — and the roster, derived from
+    the same snapshot, could not offer it either, which is how a freshly authored
+    skill stayed unreachable even though its body was already readable
+    (``skills/api.py``'s miss-path refresh).
+
+    An advisory ROSTER does not need vectors: names and descriptions are enough,
+    so the fix is a fingerprint-gated ``discover_skills`` — 17-25 ms, and only
+    when the tree actually changed (the free ~0.3 ms check decides). The result is
+    a UNION, not a replacement: the index's rows stay (a transient scan failure
+    must not empty a roster that was working), and disk wins on a name collision
+    because it is the newer truth for that name.
+
+    The refreshed rows are written into ``hooks.skills_by_name`` IN PLACE for the
+    reason ``skills/api.py`` spells out: the skill resolver and every running child
+    hold that dict object, and rebinding the name would leave them on the stale one.
+    """
+    known: list[Any] = list(getattr(hooks.index, "skills", ()) or ())
+    fingerprint = _skills_fingerprint(hooks)
+    if (
+        fingerprint is None
+        or hooks.skills_fingerprint is None
+        or fingerprint == hooks.skills_fingerprint
+    ):
+        return known
+    try:
+        from local_operator.skills.discovery import discover_skills
+
+        discovered, _warnings = discover_skills(list(hooks.skill_roots))
+    except Exception:  # noqa: BLE001 — the roster must survive a scan fault
+        logger.debug("classification: live skill rescan failed", exc_info=True)
+        return known
+    if not discovered:
+        return known
+    hooks.skills_by_name.update({skill.name: skill for skill in discovered})
+    # KEYED ON (kind, name), not name alone. The index holds user skills AND the
+    # packaged guides in one list, and a user skill named after a guide (`tunnel`,
+    # `browser`, `mcp`, …) is a real collision: keying on the name alone let the
+    # skill EVICT the guide from the roster, so a resource the router still offers
+    # silently stopped being a candidate (agent review round 1). ``skills_by_name``
+    # above stays name-keyed because that is the resolver's own mapping and both
+    # entries are legitimately readable under their URL protocols.
+    merged: dict[tuple[str, str], Any] = {
+        (_resource_kind(item), str(item.name)): item for item in known
+    }
+    for skill in discovered:
+        merged[(_resource_kind(skill), str(skill.name))] = skill
+    # SORTED, matching how ``_setup_knowledge`` sorts the index it builds, so the
+    # roster's order is the same before and after a rescan rather than an artefact
+    # of which filesystem entry came back first.
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            _resource_kind(item),
+            str(item.name).lower(),
+            str(item.name),
+            str(item.file_path),
+        ),
+    )
+
+
+def _resource_kind(item: Any) -> str:
+    """The routing kind of a knowledge row (``skill`` / ``guide`` / ``agent_hint``)."""
+    return str(getattr(item, "resource_type", "") or "")
 
 
 def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandidate, ...]:
@@ -1868,7 +2067,7 @@ def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_Classificatio
     from local_operator.skills.protocol import resource_url
 
     rows: list[_ClassificationCandidate] = []
-    for resource in getattr(hooks.index, "skills", ()) or ():
+    for resource in _current_skill_resources(hooks):
         if getattr(resource, "hide", False):
             continue
         kind = str(getattr(resource, "resource_type", "") or "")
@@ -1908,11 +2107,35 @@ def _mcp_capability_hint(server: str) -> str:
 
 
 def _classification_request(hooks: _KnowledgeHooks, query: str) -> _RecommendationRequest:
-    """The request for one user message, over the CACHED roster."""
+    """The request for one user message, over the CACHED roster.
+
+    The roster is the cached object — identity is asserted by
+    ``test_a_warm_request_only_carries_the_message_and_the_cached_roster`` — and it
+    is SHORTLISTED here because this is the only place on the path that knows the
+    message. ``shortlist`` returns the roster unchanged (the same object) whenever
+    every kind already fits ``maxCandidates``, so a catalogue that fits pays one
+    length check and behaves exactly as it did before the shortlist existed.
+    """
+    roster = _classification_roster(hooks)
+    # The shortlist arrives on the hooks from ``_attach_classification``, the one
+    # place that has already imported the package: this function runs on the message
+    # path, where the wiring's rule is that a session with the layer OFF never
+    # imports it (agent review round 1). A seam injected by a host or a test carries
+    # no shortlist and gets the roster unchanged, which is the pre-shortlist
+    # behaviour rather than a degraded one.
+    shortlist_fn = hooks.classification_shortlist
+    candidates: tuple[_ClassificationCandidate, ...] = roster
+    if shortlist_fn is not None:
+        # ``tuple(...)`` is identity-preserving for the roster tuple that shortlist
+        # hands back unchanged, so the warm path still carries the cached object.
+        candidates = cast(
+            tuple[_ClassificationCandidate, ...],
+            tuple(shortlist_fn(roster, query, hooks.classification_max_candidates)),
+        )
     return _RecommendationRequest(
         user_message=query,
         context=None,
-        candidates=_classification_roster(hooks),
+        candidates=candidates,
         max_recommendations=hooks.classification_max_recommendations,
     )
 
@@ -2291,6 +2514,18 @@ async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: An
         return False
     if not line:
         return False
+    # The kind is "info", NOT "note". Design review round 1 (D1) measured `info`'s
+    # `dim` ink at 3.77:1 on the light theme (below the 4.5:1 AA floor, 13 of the 16
+    # light builtins under it) and offered two resolutions; the `note` route was taken
+    # first and had to be WITHDRAWN, because ``NoticeEvent.kind`` is
+    # ``Literal["info", "warning", "error"]`` — a real Session rejects the event with
+    # a pydantic ``ValidationError`` that this function's own guard swallows as a
+    # WARNING while still reporting the notice as delivered, so the line never painted
+    # on the TUI, CLI or server and the "last announced" key then suppressed the
+    # repeat (agent review round 2, blocker). Adding `note` to the event contract and
+    # to the server's kind allowlists is its own cross-surface change; the contrast is
+    # recorded as a documented exception in ``docs/design/classification-layer.md``
+    # §7 and §12 instead.
     try:
         delivered = sink(str(line), "info")
         if inspect.isawaitable(delivered):
@@ -2338,6 +2573,13 @@ async def _select_knowledge_block(
     the existing channel for late host state, so nothing here has to rewrite the
     cached prefix or invent a second notification path.
     """
+    # A SKILL THE TREE GAINED SINCE THE LAST RENDER, checked BEFORE the freeze below:
+    # the freeze is exactly what would hide it, and the fingerprint is the only
+    # signal that the snapshot is no longer the truth. Called here as well as in the
+    # provider (``_frozen_knowledge_query``) because the provider decides whether a
+    # query is even handed over, and invalidating after that decision would re-render
+    # the block with nothing selected.
+    fingerprint = _refresh_knowledge_freshness(hooks)
     if (
         hooks.frozen_block is not None
         and hooks.frozen_compaction_id == compaction_id
@@ -2489,6 +2731,14 @@ async def _select_knowledge_block(
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
     hooks.frozen_task_id = task_id
+    # The block is now the truth at THIS fingerprint, so the next tree change is what
+    # re-opens it. Recorded after the render, never before: a render that raised must
+    # not claim it captured the new tree. The parked previous render is dropped HERE
+    # for the same reason — once this render exists, a child reading the fallback
+    # would otherwise be handed a superseded directory even when the current one is
+    # legitimately EMPTY (agent review round 1).
+    hooks.knowledge_fingerprint = fingerprint
+    hooks.superseded_block = ""
     return hooks.frozen_block
 
 
@@ -2607,6 +2857,12 @@ def _make_system_blocks_provider(
         task = transcript.latest_user_entry() if hasattr(transcript, "latest_user_entry") else None
         task_id = task.id if task is not None else None
         compaction_id = _latest_compaction_id(transcript)
+        # BEFORE the freeze test, because this function is what decides whether
+        # ``_select_knowledge_block`` is handed a QUERY at all: a frozen block means
+        # ``query=""``, so invalidating the freeze inside the callee (where it is also
+        # checked, for direct callers) would arrive too late to re-derive the query and
+        # the block would re-render with nothing selected.
+        _refresh_knowledge_freshness(hooks)
         unchanged = (
             hooks.frozen_block is not None
             and hooks.frozen_task_id == task_id
@@ -2679,12 +2935,23 @@ def _make_system_blocks_provider(
 
 def _transcript_dir_and_agent_id(
     agent: AgentData | None, args: argparse.Namespace, agent_registry: AgentRegistry
-) -> tuple[Path, str]:
+) -> tuple[Path, str, bool]:
     """Pick where this session's JSONL transcript lives (CL-02).
 
     ``--resume <id>`` wins over every rule below: it names an existing session
     directory, and reusing it is what makes the transcript replay (the same
     mechanism ``--train`` uses for an agent directory).
+
+    The THIRD element is ``is_new``: this call brings a SESSION directory into
+    existence — a conversation the operator has not been using. It is returned
+    rather than recomputed by the caller because only this frame sees the directory
+    at the moment before anything creates it — the adopt branch below creates it
+    itself, and the lease the caller takes creates it too, so a `not path.exists()`
+    read one frame later answers "no" for every session (review round 3, F1: that is
+    exactly how the escape stamp silently never fired on the phone's first message
+    and the desktop draft). `False` for an ``agents/`` directory, which is not a
+    session at all and which the branch below may well create itself (review round
+    4, F4: the wording is "a session directory", not "any directory").
 
     Legacy ``--train`` semantics:
 
@@ -2730,36 +2997,49 @@ def _transcript_dir_and_agent_id(
             if requested in ("", ".", "..") or Path(requested).name != requested:
                 raise ValueError(f"not a session id: {requested!r}")
             adopted = config_dir / "sessions" / requested
+            # Read BEFORE the mkdir below: the answer belongs to this moment, and
+            # `is_new` is what the escape stamp turns on (see the docstring).
+            is_new = not adopted.exists()
             # Under `LOP_RUNTIME_DEFER_MATERIALISE` the directory is NOT
             # created here: a speculative warm engage (a viewer's first
             # keystroke, before the user has committed to a message) must
             # leave nothing on disk when the draft is abandoned. The first
             # real write materialises it — see `Transcript.__init__`.
             defer = os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1"
-            if not adopted.exists() and not defer:
+            if is_new and not defer:
                 # `parents` because a fresh config dir has no sessions/ yet;
                 # `exist_ok` because two contenders may race here and the
                 # lease, not this mkdir, is what arbitrates between them.
                 adopted.mkdir(parents=True, exist_ok=True)
-            return adopted, str(agent.id) if agent is not None else "main"
+            # `is_new` is true for a deferred engage too: the directory is still
+            # this run's to create, and a harness that asked for the run has its
+            # stamp written. The stamp does not decide whether the directory
+            # exists — `acquire_session_lease` and `claim_session` materialise it
+            # below either way (measured: an unmarked warm engage leaves an empty
+            # `sessions/<id>/`) — it adds `origin.json` inside it, which is what
+            # keeps a harness's engage out of the operator's listings.
+            return adopted, str(agent.id) if agent is not None else "main", is_new
         resumed = resume_dir(config_dir, str(resume))
-        return resumed, str(agent.id) if agent is not None else "main"
+        # `resume_dir` only answers an EXISTING conversation, so this is the
+        # operator's own work by construction.
+        return resumed, str(agent.id) if agent is not None else "main", False
     train = bool(getattr(args, "train", False))
     if agent is not None:
         agent_id = str(agent.id)
         if train:
-            return config_dir / "agents" / agent_id, agent_id
-        session_dir = uuid.uuid4().hex[:12]
-        return config_dir / "sessions" / session_dir, agent_id
+            return config_dir / "agents" / agent_id, agent_id, False
+        session_dir = config_dir / "sessions" / uuid.uuid4().hex[:12]
+        return session_dir, agent_id, True
     if train:
         try:
             autosave = agent_registry.create_autosave_agent()
             agent_id = str(autosave.id)
-            return config_dir / "agents" / agent_id, agent_id
+            return config_dir / "agents" / agent_id, agent_id, False
         except Exception:  # noqa: BLE001 — fall through to ephemeral
             pass
-    session_dir = uuid.uuid4().hex[:12]
-    return config_dir / "sessions" / session_dir, "main"
+    session_dir = config_dir / "sessions" / uuid.uuid4().hex[:12]
+    # A fresh id: nothing can exist there yet, which is what makes it new.
+    return session_dir, "main", True
 
 
 #: The one store-maintenance pass this process will run, or ``None`` before the
@@ -3054,7 +3334,13 @@ async def _prepare(
     )
     yolo = bool(getattr(args, "yolo", False))
 
-    transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
+    transcript_dir, agent_id, is_new = _transcript_dir_and_agent_id(agent, args, agent_registry)
+
+    # Whether no conversation existed at this path before this call, read from
+    # the frame that resolves the id — `_transcript_dir_and_agent_id`'s own
+    # docstring says why recomputing it here answers "no" for every session.
+    # Consumed by the escape stamp further down.
+    fresh_directory = is_new
 
     from local_operator.session.retention import claim_session
     from local_operator.session_lease import acquire_session_lease
@@ -3083,6 +3369,19 @@ async def _prepare(
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
     if transcript_dir.parent.name == "sessions":
+        # A session opened by a harness under the escape hatch
+        # (`agent_shell.py`) is marked as machine-started, so it can never be
+        # offered as a chat the operator opened. HERE rather than in the exec
+        # path, where it started: this is the one place every session gets its
+        # directory — foreground exec, the detached worker, the interactive
+        # viewer's runtime, the server — and the exec-only version left the
+        # interactive path unstamped while the docs promised it (review round
+        # 2, F1). ``fresh_directory`` keeps `--resume` honest: adopting the
+        # operator's own conversation must not hide their chat.
+        from local_operator.agent_shell import stamp_escaped_session
+
+        stamp_escaped_session(transcript_dir, created_here=fresh_directory)
+
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the
         # one place the harness knows it is writing into its own store —
@@ -3170,8 +3469,9 @@ async def _prepare(
     # before that background task won the race.
     _seed_mcp_routing(hooks, effective_cwd)
     # The classification seam, built here because the package's cold import must
-    # not land inside a turn (see ``_attach_classification``). A no-op — not even
-    # an import — unless values.classification.auto is on.
+    # not land inside a turn (see ``_attach_classification``). Built unless
+    # values.classification.auto is explicitly off — the default is ON, so the
+    # import happens for a stock install.
     _attach_classification(hooks, config_manager, credential_manager, knowledge_warnings)
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)

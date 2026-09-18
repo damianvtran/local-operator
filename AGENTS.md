@@ -1182,6 +1182,46 @@ the version is live on the public listing. Never claim a version is live from
 a merged PR or a workflow's success — only from the public listing or a
 successful publish call.
 
+## An agent may not start a session
+
+`lop exec` opens a TOP-LEVEL conversation — an ordinary session directory that
+`is_user_session` reports as the operator's own. From inside an agent session
+that is never what you want: the operator's session list and desktop sidebar
+show it as a chat they opened, and it runs outside the job manager that would
+let you see, steer, cancel or account for it. A subagent does it out of the
+wrong belief that it is the only way to get a review run going:
+
+```sh
+lop exec --profile reviewer --background --name lo-1281-review < brief.md
+```
+
+That happened on 2026-09-18: two sessions (`lo-1281-review`, `lo-1281-qa`)
+appeared in the operator's sidebar for a PR they had never asked about, because
+the coder that owed the review round held no `task` tool (a role that does not
+delegate runs one level deep and loses `task`/`wait`/`wake` — see
+`harness.subagent`'s prune). So the guard is in the product now: a `lop`
+invocation that descends from an agent's bash tool call may not open a session,
+and the refusal names the routes — `task` when the session holds it, `hub` back
+to the delegating session when it does not (send it the brief; it holds the
+launcher), and `wake` for work that belongs later.
+
+Delegate with `task`, always. If you think you need a separate live session —
+something a human must steer, or work that must outlive this turn — say so in
+your report instead of starting one. `lop exec --status JOB_ID` still polls a
+job that is already running.
+
+**Scripts that drive the real CLI must declare themselves.** A bench, an eval
+driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
+it inherits the marker and every inner run would be refused, which reads as a
+broken product instead of a guard. Call
+`agent_shell.harness_child_env()` for the child's environment: it sets
+`LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1` (named here for a harness that needs it —
+obscurity, not secrecy, and `docs/EXEC.md` documents the limits of the whole
+rule). Use it against an isolated `LOCAL_OPERATOR_CONFIG_DIR`; the session the
+child opens is stamped `agent-shell`, so it cannot be mistaken for one the
+operator started. The same applies to a manual QA run: that escape is for
+driving the real front end, never for opening a peer to hand work to.
+
 ## Who may merge: two tiers
 
 `main` is governed by a ruleset that requires **one approving review**, plus the
