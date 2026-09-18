@@ -1383,3 +1383,51 @@ async def test_the_provider_probe_is_inside_the_wait_budget() -> None:
     await asyncio.sleep(0.6)
     for call in hooks.classification_outstanding:
         call.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_an_invalidated_freeze_does_not_ask_for_the_same_message_twice(
+    tmp_path: Path,
+) -> None:
+    """The freeze is not the only thing a later render of a message can have lost.
+
+    A skill installed or edited mid-turn invalidates it — that is what
+    ``_refresh_knowledge_freshness`` exists for — and that render still has this message's
+    answer waiting. Keying the "do not ask again" guard on the freeze alone left that
+    window placing a second vendor call for a message that already had an answer (review
+    round 2, R2-2), which is a real call at a real price for nothing.
+    """
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha skill.")
+    index = _FakeIndex([_skill("alpha", "Alpha skill.")], picked=[_skill("alpha", "Alpha skill.")])
+    captured: list[Any] = []
+    classifier = _slow_classifier(_slack_recommendation(), captured)
+    hooks = _hooks(index, classifier=classifier)
+    hooks.skill_roots = [root]
+    # ``knowledge_fingerprint`` is what the freshness check compares against, and the real
+    # provider records it at session build; without it set, the check cannot tell the tree
+    # changed and no invalidation is possible to exercise.
+    hooks.knowledge_fingerprint = session_factory._skills_fingerprint(hooks)
+    hooks.classification_wait_s = 0.01
+
+    first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    assert "mcp://slack" not in first, "the turn gave up before the vendor answered"
+    assert len(classifier.requests) == 1
+
+    await asyncio.sleep(0.3)  # the answer lands mid-turn
+
+    # A real tree change under the running turn: the freeze is invalidated, for real.
+    _write_skill(root, "beta", "Beta skill, authored mid-turn.")
+
+    # The provider re-derives the query when it sees the invalidation (its own freshness
+    # check runs BEFORE it decides whether to hand one over), so this render is given the
+    # real query — unlike the frozen case, where it is handed ``""``.
+    second = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+
+    # A second selection proves the freeze really was invalidated: a frozen render returns
+    # the cached block without touching the index. (``superseded_block`` is parked and then
+    # dropped BY that render, so it cannot witness this after the fact.)
+    assert len(index.calls) == 2, "the tree change must have forced a real re-render"
+    assert "mcp://slack" in second, "the answer still reaches its own message"
+    assert "alpha" in second
+    assert len(classifier.requests) == 1, "and a message that has an answer is never asked twice"
