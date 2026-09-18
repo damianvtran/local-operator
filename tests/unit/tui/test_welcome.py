@@ -1072,6 +1072,25 @@ async def test_a_glow_frame_repaints_the_mark_and_moves_no_row(animation_on: Non
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
         welcome = await _settled_welcome(pilot)
+        # The interval timer is a CONCURRENT writer to `_mark_color` and reads
+        # the very `_pulse_origin` this test back-dates: it fires every
+        # `MARK_PULSE_INTERVAL_S` and re-derives the colour from the phase the
+        # test just set. Left running, the sampled phase is therefore the phase
+        # at the LAST live tick before the frame is read, not the one set here
+        # — and a pause that outlives the swell (0.8 s of a `pause()` whose own
+        # ceiling is 1.0 s, easily reached under `-n auto` contention) walks the
+        # peak down to the resting `dim` before the read. Both samples then
+        # agree, the second resolves to the colour already drawn and repaints
+        # nothing, and `differing` comes back empty: CI run 35336307899 failed
+        # exactly there, `assert [] == [2, 3, 4, ...]`. Reproduced on this box
+        # by lengthening the window to 0.9 s: 12 live ticks, colour at read
+        # `#837C6D` (rest) against the peak's `#928B7C`.
+        #
+        # The two properties under test are about what ONE tick paints, so stop
+        # the timer and let the manual ticks be the only driver — the same fix,
+        # for the same reason, as the sibling pin below. Stopping also resets
+        # `_mark_color` to `None`, so the first tick has a deterministic start.
+        welcome._stop_pulse_timer()
 
         welcome._pulse_origin = time.monotonic() - MARK_PULSE_SWELL_S / 2
         welcome._pulse_tick()
