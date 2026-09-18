@@ -2046,6 +2046,27 @@ SETTINGS: tuple[Setting, ...] = (
         gated_by="classification.auto",
     ),
     Setting(
+        key="classification.waitMs",
+        path=("classification", "waitMs"),
+        section="classification",
+        label="↳ wait budget (ms)",
+        kind=Kind.INT,
+        default=50,
+        # The operator's latency budget, in the one number that enforces it: how
+        # long a turn will WAIT for an answer. Deliberately NOT the call's
+        # deadline — a call that misses this window is left running and its
+        # answer is delivered by a later message (contract §5a, and
+        # ``session_factory._harvest_classification``), so raising this buys a
+        # fresher prompt at the price of turn latency and lowering it pushes more
+        # answers onto the following turn. The vendor's own model time is excluded
+        # from the budget by its terms, which is exactly what makes 50 ms
+        # achievable while ``timeoutMs`` stays at 1500. 0 is "use the default",
+        # like every other number in this section, never "wait forever".
+        help="Needs recommendations on. How long a turn waits; 0 uses 50 ms.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
         key="classification.maxStateChars",
         path=("classification", "maxStateChars"),
         section="classification",

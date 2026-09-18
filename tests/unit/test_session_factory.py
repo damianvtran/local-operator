@@ -4303,3 +4303,58 @@ async def test_preload_tools_cannot_surface_a_tool_the_allowlist_excludes(monkey
     await wire_mcp_into_session(session, [builtin], ".")
     assert allowed in session.tools
     assert excluded not in session.tools
+
+
+# Ownership: the seam's resources are the session's to release
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_classification_seam_is_closed_on_dispose(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session's keep-alive client and its memos are released with everything else.
+
+    The shipped service opens ONE ``httpx.AsyncClient`` per session and memoizes the
+    resolved credential and the roster lines for that session's life; its ``aclose``
+    is documented as "the session owner calls this on dispose". Nothing called it —
+    the composition root registered its siblings (``attach_auth_dispose``,
+    ``attach_stream_dispose``) and not this one, so the pool and the memos were pinned
+    once per SESSION on the planes that keep sessions alive for hours (review round
+    1, M2). The service's own ``aclose`` test proves the method works; only this test
+    proves anyone calls it, so it is built through ``create_session`` — the
+    composition root is the claim — with the package's service class swapped for a
+    recorder, so a failure points at the dispose path rather than at the cascade.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    built: list[Any] = []
+
+    class _RecordingService:
+        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+            self.closed = False
+            self.timeout_s = 1.5
+            built.append(self)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("local_operator.classification.ClassificationService", _RecordingService)
+    config = ConfigManager(tmp_config_dir)
+    config.set_config_value("classification", {"auto": True})
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert built, "the layer was on, so the composition root built the seam"
+        assert built[0].closed is False, "dispose has not run yet"
+    finally:
+        await session.dispose()
+
+    assert built[0].closed is True, "dispose must close the seam it created"

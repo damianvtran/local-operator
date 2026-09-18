@@ -374,22 +374,39 @@ async def test_a_provider_without_a_session_binds_no_sink() -> None:
     assert "guide://tunnel" in block
 
 
-def test_a_bound_sink_is_the_sessions_own_notice_event() -> None:
-    """``attach_classification_notices`` binds ``Session._stream_notice``."""
+def test_a_bound_sink_is_the_real_sessions_own_notice_event() -> None:
+    """The bound sink is ``Session._stream_notice``, the REAL attribute.
 
-    async def _stream_notice(text: str, kind: str = "warning") -> None:
-        return None
+    WHY this is asserted against the class and not against a stand-in: the first
+    version of this test hand-built an object with ``_stream_notice`` assigned to
+    it, which proves the binder's shape and NOT that the facade has that attribute
+    — rename or drop ``Session._stream_notice`` and every test in this file kept
+    passing while notices silently never appeared, because
+    ``attach_classification_notices`` fails soft on purpose (``getattr(..., None)``,
+    for a benchmark preflight that renders a prompt with no facade at all). This is
+    the assertion that can fail: reach for the attribute on the real class, then
+    check the binder put THAT callable on the hooks, bound to THIS session.
 
-    class _Session:
-        pass
+    ``Session.__new__`` rather than a constructed session: the notice method needs
+    no construction state, and paying for a real boot here would tempt the next
+    reader into driving a turn to observe the notice. The end-to-end half —
+    a session built by the composition root, with the layer on — is
+    ``test_the_classification_seam_is_closed_on_dispose`` below.
+    """
+    from local_operator.session.session import Session
 
-    session = _Session()
-    session._stream_notice = _stream_notice  # type: ignore[attr-defined]
+    assert hasattr(Session, "_stream_notice"), (
+        "the notice path the wiring binds (Session._stream_notice) must still exist; "
+        "without it a recommendation is delivered silently"
+    )
+    session = Session.__new__(Session)
     hooks = session_factory._KnowledgeHooks()
 
-    session_factory.attach_classification_notices(session, hooks)  # type: ignore[arg-type]
+    session_factory.attach_classification_notices(session, hooks)
 
-    assert hooks.notice_sink is _stream_notice
+    assert hooks.notice_sink is not None
+    assert hooks.notice_sink.__func__ is Session._stream_notice  # type: ignore[attr-defined]
+    assert hooks.notice_sink.__self__ is session  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +437,14 @@ async def test_the_classification_runs_concurrently_with_the_selection() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_slow_classifier_cannot_hold_the_turn_past_its_deadline() -> None:
-    """``values.classification.timeoutMs`` bounds the turn, whatever the seam does."""
+async def test_a_slow_seam_gets_only_the_wait_and_no_deadline_of_its_own() -> None:
+    """The turn waits ``waitMs``, never the seam's own ``timeout_s``.
+
+    The wait is ``min(waitMs, the call's deadline)``: waiting longer than the call
+    could possibly take would spend budget on nothing. Both halves are asserted
+    here, because the pair is what makes the number trustworthy — the seam's 50 ms
+    deadline is reached only because the configured wait is larger than it.
+    """
     index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
     off = await _off_block(index)
 
@@ -433,14 +456,33 @@ async def test_a_slow_classifier_cannot_hold_the_turn_past_its_deadline() -> Non
         delay=5.0,
         timeout_s=0.05,
     )
-    hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=classifier)
+    first_hooks = _hooks(
+        _FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=classifier
+    )
 
+    # A wait budget FAR past the seam's own deadline: the deadline wins.
+    first_hooks.classification_wait_s = 5.0
     started = time.monotonic()
-    block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    block = await session_factory._select_knowledge_block(first_hooks, OFF_QUERY, task_id="t1")
     elapsed = time.monotonic() - started
 
     assert elapsed < 1.0, elapsed
     assert block == off
+    # ...and a wait budget well under it: the BUDGET wins, not the seam's delay.
+    hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=classifier)
+    hooks.classification_wait_s = 0.05
+    started = time.monotonic()
+    block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, elapsed
+    assert block == off
+    # No task is left behind by either turn's own budget: the slow call is the
+    # SAME one, still outstanding, and the harvest will look at it next message.
+    assert len(hooks.classification_outstanding) == 1
+    for task in (*first_hooks.classification_outstanding, *hooks.classification_outstanding):
+        task.cancel()  # keep the loop quiet at teardown
+    await asyncio.sleep(0)
 
 
 def test_the_deadline_comes_from_the_seam_or_the_documented_default() -> None:
@@ -637,3 +679,152 @@ def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -
         session_factory._log_classification_cost(_Recommendation(skipped="no-vendor"))
 
     assert caplog.text == ""
+
+
+# ---------------------------------------------------------------------------
+# §5a rule 6: the wait is bounded, and a late answer rides the next message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
+    """The turn pays ``waitMs``, and the answer is delivered by the next message.
+
+    The operator's budget is our OWN overhead per user message, and on a real roster
+    the vendor's answer takes ~250 ms median — waiting for it would put the vendor's
+    model time on the critical path. So the turn waits ``values.classification.waitMs``
+    and no longer, and what it gave up on is not lost: the call keeps running, and the
+    next admitted user message re-renders the knowledge block WITH the late answer.
+    That re-render is the delivery mechanism (a changed knowledge section is
+    journaled by the harness as a ``[session-state]`` update), which is why nothing
+    here writes a bespoke host-state row.
+    """
+    index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
+    off = await _off_block(index)
+    classifier = _FakeClassifier(
+        _Recommendation(
+            resources=(_Candidate("guide", "tunnel", "Tunnel guide.", "guide://tunnel"),),
+            vendor="typesafe",
+        ),
+        delay=0.35,
+        timeout_s=1.5,
+        notice_line="Classification: 1 resource recommendation via typesafe",
+    )
+    hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=classifier)
+    hooks.classification_wait_s = 0.05
+    delivered: list[str] = []
+    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
+
+    started = time.monotonic()
+    first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
+    waited = time.monotonic() - started
+
+    # The BUDGET, not the vendor's 350 ms — and the prompt is byte-identical to
+    # what it would have been with no layer at all.
+    assert waited < 0.2, waited
+    assert first == off
+    # ...and NO notice: nothing was delivered to that prompt.
+    assert delivered == []
+
+    await asyncio.sleep(0.4)  # the call lands after its own turn ended
+
+    second = await session_factory._select_knowledge_block(hooks, "second task", task_id="t2")
+
+    assert "guide://tunnel" in second
+    assert second.count("guide://tunnel") == 1
+    # Announced once, at delivery — by the turn that actually carries it.
+    assert delivered == ["Classification: 1 resource recommendation via typesafe"]
+
+
+@pytest.mark.asyncio
+async def test_a_late_answer_is_delivered_once_and_only_when_it_exists() -> None:
+    """Consumed exactly once; a session whose answers never arrive appends nothing."""
+    classifier = _FakeClassifier(
+        _Recommendation(
+            resources=(_Candidate("guide", "tunnel", "Tunnel guide.", "guide://tunnel"),),
+            vendor="typesafe",
+        ),
+        delay=0.3,
+        notice_line="Classification: 1 via typesafe",
+    )
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.05
+    delivered: list[str] = []
+    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
+
+    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
+    await asyncio.sleep(0.35)  # call 1 lands, late
+    # NOTHING MORE WILL EVER BE RECOMMENDED: every later call is answered empty, so
+    # anything that appears in a later block can only be call 1's answer arriving
+    # twice — which is exactly what must not happen.
+    classifier.recommendation = _Recommendation(skipped="empty-roster")
+
+    second = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
+    assert second.count("guide://tunnel") == 1
+    assert delivered == ["Classification: 1 via typesafe"]
+
+    await asyncio.sleep(0.35)  # call 2 lands, empty
+
+    third = await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
+    assert "guide://tunnel" not in third, "a delivered answer must never be delivered twice"
+    assert delivered == ["Classification: 1 via typesafe"], "and never announced twice"
+
+
+@pytest.mark.asyncio
+async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung vendor opens the breaker after three CALLS, and no turn pays one (§4).
+
+    The wiring's deadline and the service's used to be the same number started
+    microseconds apart, and the service's in-flight call is shielded — so when the
+    turn's copy won, the service recorded its failure AFTER the turn had already
+    been handed an empty block: four messages paid the full deadline and the breaker
+    opened on the fourth (QA round 1, Q1). The turn's number is now a WAIT and the
+    service's is the deadline, so the count is the vendor's own and the turn's cost
+    is the budget. Both halves are asserted here, on the WIRING path with the real
+    service: the vendor-leg call count after four messages, and that no message cost
+    the deadline.
+    """
+    from local_operator.classification.service import ClassificationService
+    from local_operator.classification.vendors import VENDOR_CLASSES
+    from local_operator.credentials import CredentialManager
+    from tests.unit.classification.support import LegBehaviour, leg_class
+
+    behaviour = LegBehaviour(name="openrouter", delay_s=5.0)
+    monkeypatch.setattr(
+        "local_operator.classification.vendors.VENDOR_CLASSES",
+        {**VENDOR_CLASSES, "openrouter": leg_class(behaviour)},
+        raising=True,
+    )
+    service = ClassificationService(
+        manager=CredentialManager(tmp_path),
+        settings={"classification": {"auto": True, "vendor": "openrouter", "timeoutMs": 150}},
+    )
+    hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=service)
+    hooks.classification_wait_s = 0.02
+
+    waits: list[float] = []
+    for index in range(4):
+        started = time.monotonic()
+        await session_factory._select_knowledge_block(
+            hooks, f"message {index}", task_id=f"t{index}"
+        )
+        waits.append(time.monotonic() - started)
+        # Past the service's OWN deadline, so its accounting has landed before the
+        # next message. The claim is that the deadline belongs to the CALL, not that
+        # a message may pay it.
+        await asyncio.sleep(0.2)
+
+    # Warm messages: the BUDGET, far under the 150 ms deadline they would have paid
+    # under the old wiring. The FIRST message of a session additionally pays the
+    # package's local cold path (the state serialization and lazy imports behind the
+    # first call), measured at ~95 ms on this host — a one-off the wait cannot bound
+    # because it runs before the first await, and named here rather than hidden: it is
+    # the package's cost, not the wait's.
+    assert max(waits[1:]) < 0.1, waits
+    assert waits[0] < 0.5, waits
+    assert len(behaviour.calls) == 3, "three consecutive failures open the breaker"
+    for task in hooks.classification_outstanding:
+        task.cancel()
+    await asyncio.sleep(0)

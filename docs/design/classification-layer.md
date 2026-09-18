@@ -278,7 +278,17 @@ Rules, each of which has to be provable:
    serializes only the user message.
 5. **The concurrent gather.** Wiring awaits this layer alongside the existing selection work, so
    the added wall-clock is the difference between the two, not their sum.
-6. **Server side.** `POST /v1/decisions` must ride the agent-server's existing Redis `AuthCache`
+6. **The turn waits a bounded time and a late answer is not lost.** The wiring waits
+   `values.classification.waitMs` (50 ms) and then stops waiting. The call keeps running in the
+   background, and its recommendation is appended to the NEXT user message's knowledge block —
+   which is the harness's existing late-host-state channel (the knowledge section is journaled as
+   a `[session-state]` update, so the cached prefix is never rewritten). `timeoutMs` stays the
+   CALL's deadline, enforced inside the service: the circuit breaker therefore counts the vendor's
+   own failures once per call, never the turn's patience. This is what keeps our added wall-clock
+   inside the budget while a real vendor answer is much slower than the budget: measured on a
+   27-candidate roster, an answer takes ~250 ms median against OpenRouter, and the budget excludes
+   that model time by its terms.
+7. **Server side.** `POST /v1/decisions` must ride the agent-server's existing Redis `AuthCache`
    (`internal/cache/auth_cache.go`, 5-minute TTL for API-key→identity and billing balances),
    which is why the route sits on `jwtOrAPIKeyBillingMiddleware`. It must not introduce uncached
    per-request work — in particular, price resolution for the decision model must be a cache hit
@@ -287,8 +297,10 @@ Rules, each of which has to be provable:
 Evidence obligations:
 
 - harness: a hermetic test asserting the local path (build state → cache lookup → credential memo
-  hit → serialize) is far under budget, plus a measured median and worst-case added wall-clock per
-  user message with the layer on versus off, on the real path;
+  hit → serialize) is far under budget, a hermetic test asserting the per-message wait is BOUNDED by
+  `waitMs` (a seam that hangs costs the turn the budget and nothing more, and its answer is delivered
+  by the following message), plus a measured median and worst-case added wall-clock per user message
+  with the layer on versus off, on the real path, reported separately for a cache hit and a cache miss;
 - server: a test proving a repeated call performs no second auth-repository lookup, a test proving
   price resolution performs no upstream fetch, and a timed warm-path measurement of the route's own
   handling (excluding upstream inference).
@@ -323,10 +335,15 @@ Sequence per user message:
 1. build the candidate list — the same discovered skills/guides the router sees, plus the
    configured MCP server names with their capability hints;
 2. `await asyncio.gather(...)` the existing selection and the classification, so the added
-   latency is the *difference*, not the sum;
+   latency is the *difference*, not the sum — and bound the WAIT for the classification by
+   `values.classification.waitMs` rather than by its deadline (see §5a rule 6: a call that misses
+   the wait keeps running, and its answer rides the next user message);
 3. render the recommendation block, dropping anything already selected by the router, and append
-   it to the knowledge/tail block;
-4. emit the notice once per user message when `values.classification.notice` is on.
+   it to the knowledge/tail block. A LATE answer is rendered the same way by the next admitted
+   user message, oldest first, inside the same per-message cap, and is delivered exactly once;
+4. emit the notice once per user message, at the moment an answer actually reaches the prompt —
+   never when a call times out (nothing was delivered then) and never a second time for an answer
+   an earlier turn already rendered.
 
 Rendered block (this is the whole token cost — target ≤ 6 lines):
 
@@ -357,7 +374,8 @@ entry in `_consumer_defaults()` in `tests/unit/test_settings_io.py`:
 | `auto` | bool | `false` | master switch; off means the prompt is unchanged |
 | `vendor` | choice | `auto` | `auto` \| `radient` \| `typesafe` \| `openrouter` (pins one leg) |
 | `model` | text | `""` | override the vendor's model id |
-| `timeoutMs` | int | `1500` | per-call deadline |
+| `timeoutMs` | int | `1500` | per-call deadline (the vendor's budget, and the breaker's clock) |
+| `waitMs` | int | `50` | how long a TURN waits for an answer; a slower one rides the next message (§5a rule 6) |
 | `maxStateChars` | int | `6000` | hard cap on the serialized state |
 | `maxCandidates` | int | `12` | candidates sent per kind |
 | `maxRecommendations` | int | `3` | recommendations injected per message |
@@ -439,3 +457,8 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
   tokens. The renderer already says "ignore the rest", so it is not required for safety.
 - The right default for `values.classification.auto`. Off is the conservative choice that matches
   `values.effort.auto`; a proving run may justify on.
+- §5's `context` half is UNBUILT on the caller side: the contract suggests "the newest compaction
+  summary line or the last assistant message's first line", and the wiring always passes
+  `context=None` (argued in `session_factory._RecommendationRequest`). Benign for an advisory
+  layer — the model sees the message, the roster and no transcript — but it is a deviation, and
+  the next slice should know the caller-side half is missing rather than assume it works.

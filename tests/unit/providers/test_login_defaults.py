@@ -279,6 +279,14 @@ def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
     """
     from local_operator.providers.login_defaults import plan_login_defaults
 
+    # The COMMON state — a working hosting already configured — must still say
+    # something: this is the state the note used to be unreachable in, and the login
+    # then read as having silently done nothing (review round 1, Q4).
+    configured = plan_login_defaults("typesafe", "deepseek", "deepseek-chat")
+    assert configured.hosting is None
+    assert configured.model_name is None
+    assert configured.receipt is not None and "your hosting is unchanged" in configured.receipt
+
     # Case 2: hosting empty (a fresh config, or `hosting: ""`).
     for empty in ("", None):
         plan = plan_login_defaults("typesafe", empty, None)
@@ -330,14 +338,29 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     from local_operator.paths import CONFIG_DIR_ENV
     from local_operator.providers import auth_cli
 
+    # The failure the note exists for happened in the COMMON state: a hosting already
+    # configured and perfectly usable, where the planner returned only "nothing to
+    # write" and the user saw `Stored API key for 'typesafe'.` and silence.
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "deepseek")
+    manager.set_config_value("model_name", "deepseek-chat")
+
     auth_cli._apply_login_defaults("typesafe")
     printed = capsys.readouterr().out
 
     assert "TypeSafe (Jev) serves decision-model calls, not chat completions" in printed
     assert "your hosting is unchanged" in printed
-    # ...and the config is untouched: no hosting, no model.
-    reloaded = ConfigManager(tmp_path)
+    # ...and the routing is untouched: the configured pair, unchanged.
+    assert manager.get_config_value("hosting") == "deepseek"
+    assert manager.get_config_value("model_name") == "deepseek-chat"
+
+    # The same on a config with no hosting at all, and still nothing written.
+    fresh = tmp_path / "fresh"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(fresh))
+    auth_cli._apply_login_defaults("typesafe")
+    assert "your hosting is unchanged" in capsys.readouterr().out
+    reloaded = ConfigManager(fresh)
     assert not reloaded.get_config_value("hosting")
     assert not reloaded.get_config_value("model_name")
 

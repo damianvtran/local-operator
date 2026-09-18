@@ -87,7 +87,7 @@ def plan_login_defaults(
        the error it produces recommends this command as the remedy, so
        "already set, leave it alone" would loop one level deeper.
 
-    …and ONE provider is exempt from cases 2 and 3: a DECISION-ONLY one
+    …and ONE provider is exempt from ALL THREE: a DECISION-ONLY one
     (``registry.is_decision_only`` — TypeSafe's Jev), whose wire rejects
     ``chat/completions`` on every host we reach it through. Logging in to it
     stores a credential the resource-classification layer uses and is not a
@@ -100,6 +100,13 @@ def plan_login_defaults(
     failover chain each refuse, and login is the fifth door to it. It is
     deliberately NOT repaired in case 3 either — a hosting that is already
     broken is not improved by replacing it with one that cannot serve a session.
+
+    The exemption is checked BEFORE case 1, and that ordering is load-bearing
+    rather than incidental: the receipt is the only place a user learns why this
+    login left their routing alone, and case 1 — a working hosting already
+    configured, the most common state there is — returns before any receipt a
+    later branch could produce. Behind it, the note was unreachable exactly when
+    it was most needed (review round 1, Q4).
 
     The credential is never in question here: storing it is the caller's step
     and it has already happened by the time this runs.
@@ -135,10 +142,6 @@ def plan_login_defaults(
       in ``tests/unit/tui/test_app_pilot.py`` asserts it end to end rather than
       stopping at the config file.
     """
-    if hosting and not is_unusable_hosting(hosting):
-        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
-
-    repairing = is_unusable_hosting(hosting)
     # The credential's storage id is the real hosting: an OAuth flavour stores
     # under the provider it authenticates, and that is what the app must point
     # at. This is also what gives the flavour a default model to inherit.
@@ -152,19 +155,20 @@ def plan_login_defaults(
     # path -- and a no-op plan is the honest answer when there is nothing
     # legitimate to write.
     definition = get_provider_definition(resolved)
-    if definition is None:
-        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
-    if definition.decision_only:
-        # Before BOTH adoption branches: a decision model is not a chat hosting,
-        # so there is no case in which this login should move the routing. The
-        # receipt is the one channel the dataclass has for "the login did
-        # something you should know about, and it was not a config write" — and
-        # both front ends print it (they must print it even when
-        # ``hosting is None``, which is the shape this branch returns).
+    if definition is not None and definition.decision_only:
+        # BEFORE the "hosting already set and usable" case, deliberately: this branch
+        # writes nothing in EVERY configuration, and its receipt is the only place a
+        # user learns why logging in to TypeSafe left their routing alone. Returning
+        # at the early exit below instead made the note unreachable in the MOST COMMON
+        # state of all — a working hosting already configured — which is exactly the
+        # silent-login failure this branch exists to remove (review round 1, Q4).
         #
-        # Naming the provider by its DISPLAY name, not the id: the receipt is
-        # read by the person who just pasted a key into TypeSafe's console and
-        # is matched by "TypeSafe (Jev)", not by `typesafe`.
+        # The receipt is the one channel the dataclass has for "the login did
+        # something you should know about, and it was not a config write", and both
+        # front ends print it even when ``hosting is None`` (the shape returned here).
+        # Naming the provider by its DISPLAY name, not the id: the receipt is read by
+        # the person who just pasted a key into TypeSafe's console and recognises
+        # "TypeSafe (Jev)", not `typesafe`.
         return LoginDefaults(
             hosting=None,
             model_name=None,
@@ -175,6 +179,13 @@ def plan_login_defaults(
             ),
             repairing=False,
         )
+
+    if hosting and not is_unusable_hosting(hosting):
+        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
+
+    repairing = is_unusable_hosting(hosting)
+    if definition is None:
+        return LoginDefaults(hosting=None, model_name=None, receipt=None, repairing=False)
     default_model = default_model_for(resolved) or ""
 
     if repairing:

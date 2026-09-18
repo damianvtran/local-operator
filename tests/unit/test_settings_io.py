@@ -207,14 +207,21 @@ def _consumer_defaults() -> dict[str, object]:
 def _classification_consumer_defaults() -> dict[str, object]:
     """``values.classification.*`` defaults, asked of the layer that reads them.
 
-    The consumer is the classification package — ``service.py``,
-    ``context.py``, ``recommend.py`` and ``cascade.py`` each own one of the §8
-    constants — so this imports THEM rather than restating the numbers beside the
-    registry rows. That is the same rule the rest of ``_consumer_defaults``
-    follows, and it is what catches a registry default that drifted from the
-    layer's own fallback (the painted-lie failure this test exists for).
+    For every key but one the consumer is the classification package —
+    ``service.py``, ``context.py``, ``recommend.py`` and ``cascade.py`` each own one
+    of the §8 constants — so this imports THEM rather than restating the numbers
+    beside the registry rows. That is the same rule the rest of
+    ``_consumer_defaults`` follows, and it is what catches a registry default that
+    drifted from the layer's own fallback (the painted-lie failure this test exists
+    for).
 
-    The wiring restates two of these values in ``session_factory``
+    ``waitMs`` is the exception, and the reason is structural rather than a
+    choice: it is the WIRING's number (how long a turn waits before it stops
+    waiting and lets the call ride a later message), which the package never
+    reads. Its consumer is ``session_factory.DEFAULT_CLASSIFICATION_WAIT_MS``, so
+    that is what is imported here.
+
+    The wiring restates two of the package's values in ``session_factory``
     (``DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS``,
     ``DEFAULT_CLASSIFICATION_TIMEOUT_MS``) for a turn-path copy that must not
     import the package; those two are pinned HERE to the same constants, so the
@@ -230,12 +237,14 @@ def _classification_consumer_defaults() -> dict[str, object]:
         DEFAULT_TIMEOUT_MS,
         DEFAULT_VENDOR,
     )
+    from local_operator.session_factory import DEFAULT_CLASSIFICATION_WAIT_MS
 
     return {
         "classification.auto": DEFAULT_AUTO,
         "classification.vendor": DEFAULT_VENDOR,
         "classification.model": DEFAULT_MODEL,
         "classification.timeoutMs": DEFAULT_TIMEOUT_MS,
+        "classification.waitMs": DEFAULT_CLASSIFICATION_WAIT_MS,
         "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
         "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
         "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
