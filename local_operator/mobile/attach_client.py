@@ -1439,6 +1439,20 @@ class AttachClient:
         """Renew this attach connection's desktop lease, not the phone counter."""
         return await self._request("desktop_watch", visible=visible, can_notify=can_notify)
 
+    async def viewer_watch(self, *, displaying: bool) -> str:
+        """Tell the owner whether this terminal is still SHOWING its session.
+
+        A multiplexing TUI keeps a switched-away session's connection open, so
+        the owner cannot infer "on screen" from "connected" and a parked gate
+        behind a retained attach never notified anybody. Sent on the switch
+        edge, not on a timer: this is state, not a lease.
+
+        Best-effort by contract. An owner too old to know the op answers with
+        an error frame, which is the correct outcome -- that build counted
+        every attach anyway, so nothing regresses when the call fails.
+        """
+        return await self._request("viewer_watch", displaying=displaying)
+
     async def abort(self) -> str:
         return await self._request("abort")
 
