@@ -82,6 +82,52 @@ def install(session: Any, state: FrontendSessionState) -> None:
     session._subagent_comms = SnapshotSubagentComms(state.jobs)
 
 
+def nested_state() -> FrontendSessionState:
+    """``scoped_state`` one level deeper: the leaf child has a child of its own.
+
+    Kept OUT of :func:`scoped_state` deliberately — that fixture is shared by
+    tests that open ``leaf`` and assert the dock leaves with it.
+    """
+    state = scoped_state()
+    return state.model_copy(
+        update={
+            "jobs": [
+                *state.jobs,
+                JobState(
+                    id="grandchild",
+                    type="task",
+                    session_id="grandchild-session",
+                    parent_job_id="leaf",
+                    label="Check the changelog",
+                    todos=plan("Grandchild plan"),
+                ),
+            ]
+        }
+    )
+
+
+class CountingComms(SnapshotSubagentComms):
+    """The follower facade, noting every job id it was asked to count.
+
+    The spy exists so the count on a row can be shown to come from a walk of
+    the GRAPH rather than from anything read off the job row: a mark derived
+    from the row itself would need no call here at all.
+    """
+
+    def __init__(self, jobs: Any) -> None:
+        super().__init__(jobs)
+        self.asked: list[str] = []
+
+    def children(self, job_id: str | None) -> list[Any]:
+        self.asked.append(str(job_id))
+        return super().children(job_id)
+
+
+def row_text(panel: SubagentPanel, job_id: str) -> str:
+    """The string one mounted row is painting right now."""
+    return str(panel._rows[job_id].content)
+
+
 @pytest.mark.parametrize("size", [(100, 30), (80, 24)])
 @pytest.mark.asyncio
 async def test_manager_children_and_plans_follow_navigation_and_live_updates(size) -> None:
@@ -140,6 +186,120 @@ async def test_manager_children_and_plans_follow_navigation_and_live_updates(siz
         assert "Root plan" in str(todos._body.content)
         assert app.screen.size == app.screen.virtual_size
         assert not app.screen.show_vertical_scrollbar
+
+
+@pytest.mark.asyncio
+async def test_the_dock_says_whose_children_it_lists_and_which_rows_go_deeper() -> None:
+    """Both halves of "where am I", on a roster that has a level under it.
+
+    The rows are the DIRECT children of the page you have open, so ``Subagents``
+    alone names a different list on every level, and a child with children
+    paints the same row as a leaf until you drill in and compare two lists.
+    """
+    state = nested_state()
+    session: Any = FakeSession()
+    install(session, state)
+    session._subagent_comms = comms = CountingComms(state.jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+
+        # Root scope, no page open: the bare header, and the mark on the one
+        # row that has a level under it.
+        assert panel.summary_text() == "Subagents   ctrl+g"
+        assert set(panel._rows) == {"manager", "sibling"}
+        assert "⊞1" in row_text(panel, "manager")
+        assert "⊞" not in row_text(panel, "sibling")
+
+        # The count came from a WALK of the comms graph, one call per ROSTER
+        # row, so nothing about a mark is read off the job row it is painted
+        # on — and only roster rows are walked.
+        assert panel._children_counts == {"manager": 1, "sibling": 0}
+        assert {"manager", "sibling"} <= set(comms.asked), comms.asked
+        assert "leaf" not in comms.asked, comms.asked
+
+        await _open(pilot, app, session.jobs.get("manager"))
+        await pilot.pause()
+        # Scoped: the rows are now the manager's children, and the header says
+        # so — this is the level the reader just arrived on.
+        assert panel.summary_text() == "Subagents of Coordinate review   ctrl+g"
+        assert set(panel._rows) == {"leaf"}
+        assert panel._children_counts == {"leaf": 1}
+        assert "⊞1" in row_text(panel, "leaf")
+        # The newly-scoped row's own level was walked for it, after the drill.
+        assert "leaf" in comms.asked, comms.asked
+
+        await pilot.press("escape")
+        await pilot.pause()
+        # Leaving the page takes the name of the scope with it: the header
+        # names the level the rows are on, never the level just left.
+        assert panel.summary_text() == "Subagents   ctrl+g"
+
+
+@pytest.mark.asyncio
+async def test_a_long_scope_label_cannot_push_the_header_past_its_row() -> None:
+    """The scope is model-authored text, so the header caps it (`SCOPE_CEILING`).
+
+    `#band` is content-sized, so an unbounded name in the header widens the
+    dock rather than truncating inside it. The bound is the ceiling plus the
+    header's own chrome and hint — read off the painted caption, not off the
+    constant, so a future header that adds a segment fails here.
+    """
+    long_label = "Audit every merged MR for the ingest path and the scheduler"
+    state = scoped_state()
+    state = state.model_copy(
+        update={
+            "jobs": [
+                job.model_copy(update={"label": long_label}) if job.id == "manager" else job
+                for job in state.jobs
+            ]
+        }
+    )
+    session: Any = FakeSession()
+    install(session, state)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        await _open(pilot, app, session.jobs.get("manager"))
+        await pilot.pause()
+        caption = panel.summary_text()
+        # 13 cells of `Subagents of ` + SCOPE_CEILING + 3 of HINT_GAP + `ctrl+g`.
+        assert len(caption) <= 46, caption
+        assert caption.startswith("Subagents of Audit every merged MR"), caption
+        assert caption.endswith("   ctrl+g"), caption
+        assert long_label not in caption, caption
+        # And the header still occupies its one row of the dock.
+        assert panel._header.size.height == 1
+
+
+@pytest.mark.asyncio
+async def test_a_host_with_no_comms_graph_docks_the_roster_without_marks() -> None:
+    """The marks are a decoration: a missing graph costs them and nothing else.
+
+    ``_refresh_band`` runs from the 1 Hz poll and from every ``Subagent*``
+    handler, so a host with no lineage to walk — a local session, an embedder —
+    must dock its ledger with no marks rather than raise or blank the dock.
+    """
+    state = scoped_state()
+    session: Any = FakeSession()
+    session.frontend_state = state
+    session.jobs = SnapshotJobs(state.jobs)
+    assert session._subagent_comms is None
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        assert panel._children_counts == {}
+        assert panel.display
+        assert all("⊞" not in row_text(panel, job_id) for job_id in panel._rows)
 
 
 @pytest.mark.parametrize("size", [(100, 30), (80, 24)])
