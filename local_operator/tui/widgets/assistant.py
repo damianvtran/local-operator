@@ -557,6 +557,32 @@ class AssistantBlock(TranscriptBlock):
         """Whether this block is mid-turn narration (see :meth:`mark_narration`)."""
         return self._narration
 
+    def mark_settled(self) -> None:
+        """Declare this block's message already SETTLED, before its first paint.
+
+        For a block built for a message that is DURABLE — one the engine has
+        already committed to the transcript — there is no streaming frame to
+        paint, and the builder has to say so BEFORE it gives the block its text.
+        Without this the first ``update_text`` authors the streaming geometry (the
+        whole lane, no rail) and ``finalize_text`` then re-folds the same message
+        two cells narrower: a discarded paint per row, at a width the block is
+        never seen at. ``session_presentation.project_settled_rows`` is the caller
+        — every row it mounts is a message the engine already committed.
+
+        The subagent page reaches the same place differently — by finalizing at
+        CONSTRUCTION for a row whose ``message_end`` already arrived
+        (``entry_block(..., settled=...)``) — because it is the one surface that
+        decides this per ROW rather than per pass.
+
+        This is NOT the commit. ``finalize_text`` still freezes the block and is
+        still the only caller of ``finalize``: a block marked and given text but
+        not committed keeps the splice's rows, which cannot produce the blank row
+        between two paragraphs. Set this only where the message is known to be
+        complete; a streaming block that sets it paints a rail over text still
+        arriving, which is the defect this gate exists to remove.
+        """
+        self._settled = True
+
     def _rail_cols(self) -> int:
         """:data:`RAIL_COLS` when the rail is on, 0 when it is off or unearned.
 

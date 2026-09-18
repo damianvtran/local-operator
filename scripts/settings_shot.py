@@ -118,6 +118,10 @@ rail capture's SURFACE documents after a caller sent a state name into THEME
                populated transcript cannot show what it does to this page — and
                the splash frame is what proves leaving puts the composition
                back rather than approximating it.
+
+The seeded prose is a fixture, not a subject: it is mounted without
+``finalize_text()``, so it is a STREAMING block and deliberately paints no rail
+(``AssistantBlock._rail_cols``) — a missing bar beside it is that, not a defect.
 """
 
 from __future__ import annotations

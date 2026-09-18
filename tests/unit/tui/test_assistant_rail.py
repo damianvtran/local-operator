@@ -1075,7 +1075,10 @@ async def test_the_mark_is_the_only_difference_between_progress_and_the_answer()
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("width", [16, 24, 40, 60, 120])
+@pytest.mark.parametrize(
+    "width",
+    [pytest.param(10, id="clamp"), 16, 24, 40, 60, 120],
+)
 @pytest.mark.asyncio
 async def test_a_streaming_message_paints_no_rail_and_folds_at_the_lane(
     width: int,
@@ -1092,9 +1095,17 @@ async def test_a_streaming_message_paints_no_rail_and_folds_at_the_lane(
     clipboard does not strip two cells of real content from a frame that never
     had them. Then the SAME block settles, and the pair is the whole claim.
 
-    The widths run from the ``MIN_BODY`` clamp region upward: below the floor
-    the arithmetic and the paint have to agree about a body narrower than the
-    floor, which is where a gate that special-cased either state would show.
+    The ``clamp`` case is the narrowest and is there on purpose. The block's
+    region is the terminal less its spine, so a 10-column terminal gives a
+    6-cell lane — under ``MIN_BODY``, which is where ``_body_width`` has to let
+    its floor GIVE WAY rather than fold prose wider than the block it is painted
+    in. Every other width in the list is above the floor and takes the ordinary
+    branch, and the repo's existing clamp sweep
+    (``test_rail_toggle.py::test_no_row_paints_outside_the_block_at_any_width``)
+    finalizes before it measures, so it only ever sees the SETTLED arithmetic:
+    this is the one test that meets the floor in the STREAMING state the settle
+    gate introduced, where the gutter is 0 and nothing else stands between the
+    lane and the fold (review R1).
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(width, 40)) as pilot:
@@ -1116,6 +1127,15 @@ async def test_a_streaming_message_paints_no_rail_and_folds_at_the_lane(
         # The lane itself is the fold: rail-OFF geometry, not railed geometry
         # with the glyph left off.
         assert block._built_width == lane, (block._built_width, lane)
+        if lane < MIN_BODY:
+            # THE FLOOR GAVE WAY, which is the clamp's own claim rather than
+            # containment by accident: a fold that took ``MIN_BODY`` here would
+            # be wider than the block and would paint over whatever sits beside
+            # it, so the width has to come out BELOW the floor and still be the
+            # lane.
+            assert block._built_width < MIN_BODY, (block._built_width, lane)
+        for row in streaming_rows:
+            assert len(row.rstrip()) <= lane, (row, lane)
 
         block.finalize_text()
         await pilot.pause()
@@ -1125,8 +1145,11 @@ async def test_a_streaming_message_paints_no_rail_and_folds_at_the_lane(
         assert block._painted_rail_cols == RAIL_COLS
         assert block.copy_gutter(0) == RAIL_COLS
         # The two cells came off the fold, and the box did not move: the box is
-        # the whole lane and the rail lives inside it.
+        # the whole lane and the rail lives inside it. In the clamp region that
+        # is the same giving-way body, two cells narrower again.
         assert block._built_width == max(lane - RAIL_COLS, 0), (block._built_width, lane)
+        if lane < MIN_BODY:
+            assert block._built_width < MIN_BODY, (block._built_width, lane)
         for row in settled_rows:
             assert len(row.rstrip()) <= block.region.width, (row, block.region.width)
 
