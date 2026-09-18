@@ -976,6 +976,416 @@ async def test_read_skill_url_without_resolver(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# scratchpad://: the session's own scratch area
+# ---------------------------------------------------------------------------
+
+
+def _scratchpad_context(
+    tmp_path: Path, *, approval: RecordingApproval | None = None
+) -> tuple[_RecordingContext, Path, dict[str, AgentTool]]:
+    """A working directory, a session store with a scratchpad root, and a wired context."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(exist_ok=True)
+    pad = tmp_path / "sessions" / "sess-pad" / "scratchpad"
+    recorder = approval or RecordingApproval(True)
+    context = _RecordingContext(
+        cwd=str(workspace),
+        session_id="scratchpad-test",
+        scratchpad_dir=str(pad),
+        request_approval=recorder,
+        recorder=recorder,
+    )
+    return context, pad, {tool.name: tool for tool in create_tools(context)}
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_roundtrip_write_list_read_range_edit(tmp_path) -> None:
+    """The whole protocol through the real tools, asserting the exact result
+    text: every operation has to print the RESOLVED ABSOLUTE PATH, which is the
+    only thing a shell (and the desktop Files panel) can act on."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    created = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://perf.md", "content": "alpha\nbeta\ngamma\n"},
+        None,
+        None,
+        context,
+    )
+    assert created.is_error is False
+    assert created.text == f"Created scratchpad://perf.md -> {pad / 'perf.md'} (17 chars)."
+    # ``details['path']`` and never ``details['url']``: the ``url`` key means
+    # "an internal URL the resolver served", which is what compaction's pruning
+    # exemption reads.
+    assert created.details is not None
+    assert created.details["path"] == str(pad / "perf.md")
+    assert "url" not in created.details
+
+    listed = await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context)
+    assert listed.is_error is False
+    assert listed.text == f"scratchpad:// -> {pad} (1 entries):\nperf.md"
+    assert listed.details is not None and listed.details["path"] == str(pad)
+
+    read = await tools["read"].execute("c", {"path": "scratchpad://perf.md"}, None, None, context)
+    assert read.is_error is False
+    assert read.text == f"scratchpad://perf.md -> {pad / 'perf.md'}\n1| alpha\n2| beta\n3| gamma"
+    assert read.details is not None and read.details["path"] == str(pad / "perf.md")
+
+    ranged = await tools["read"].execute(
+        "c", {"path": "scratchpad://perf.md", "range": "2-3"}, None, None, context
+    )
+    assert ranged.is_error is False
+    assert ranged.text == f"scratchpad://perf.md -> {pad / 'perf.md'}\n2| beta\n3| gamma"
+    assert ranged.details is not None and ranged.details["range"] == "2-3"
+
+    edited = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://perf.md", "old_text": "beta", "new_text": "BETA"},
+        None,
+        None,
+        context,
+    )
+    assert edited.is_error is False
+    assert edited.text == (
+        f"Edited scratchpad://perf.md -> {pad / 'perf.md'}: 1 hunk(s), 1 replacement(s) applied."
+    )
+    assert (pad / "perf.md").read_text(encoding="utf-8") == "alpha\nBETA\ngamma\n"
+
+    # A nested note: the write creates the parent directory, no special case.
+    nested = await tools["write"].execute(
+        "c", {"path": "scratchpad://run/deep.csv", "content": "a,b\n"}, None, None, context
+    )
+    assert nested.is_error is False
+    assert (
+        nested.text == f"Created scratchpad://run/deep.csv -> {pad / 'run' / 'deep.csv'} (4 chars)."
+    )
+    assert (pad / "run" / "deep.csv").read_text(encoding="utf-8") == "a,b\n"
+
+    sub = await tools["read"].execute("c", {"path": "scratchpad://run/"}, None, None, context)
+    assert sub.is_error is False
+    assert sub.text == f"scratchpad://run/ -> {pad / 'run'} (1 entries):\ndeep.csv"
+
+
+@pytest.mark.asyncio
+async def test_a_scratch_script_is_a_first_class_citizen_of_the_store(tmp_path) -> None:
+    """The store holds any TEXT file, not just prose: a one-off script the agent
+    writes belongs here as much as a note does. Nothing in the read path may
+    assume markdown — the file ladder classifies by content and extension, and a
+    shell script arrives as its own numbered body."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    script = "#!/bin/sh\nset -eu\necho hello\n"
+
+    created = await tools["write"].execute(
+        "c", {"path": "scratchpad://probe.sh", "content": script}, None, None, context
+    )
+    assert created.is_error is False
+    assert (
+        created.text
+        == f"Created scratchpad://probe.sh -> {pad / 'probe.sh'} ({len(script)} chars)."
+    )
+
+    read = await tools["read"].execute("c", {"path": "scratchpad://probe.sh"}, None, None, context)
+    assert read.is_error is False
+    # The header's absolute path is the thing the agent runs; the body is the
+    # file, numbered like any other text.
+    assert read.text == (
+        f"scratchpad://probe.sh -> {pad / 'probe.sh'}\n" "1| #!/bin/sh\n2| set -eu\n3| echo hello"
+    )
+
+    edited = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://probe.sh", "old_text": "echo hello", "new_text": "echo goodbye"},
+        None,
+        None,
+        context,
+    )
+    assert edited.is_error is False
+    assert (pad / "probe.sh").read_text(encoding="utf-8") == "#!/bin/sh\nset -eu\necho goodbye\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_listing_is_a_normal_shape_not_an_error(tmp_path) -> None:
+    """A session that has written nothing yet is the ordinary first state, so an
+    empty listing is a result that carries the next move."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    empty = await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context)
+    assert empty.is_error is False
+    assert empty.text == (
+        f"scratchpad:// -> {pad} (0 entries):\n"
+        '(nothing here yet; write one with write(path="scratchpad://name.md", content="…"))'
+    )
+    # Reading is not a mutation: listing an empty root must not create it.
+    assert not pad.exists()
+
+    dotted = await tools["read"].execute("c", {"path": "scratchpad://."}, None, None, context)
+    assert dotted.is_error is False
+    # Same listing, with the URL echoed as typed (the header names the address
+    # the caller used, followed by where it resolved).
+    assert dotted.text == empty.text.replace("scratchpad:// ->", "scratchpad://. ->")
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_listing_skips_dotfiles_it_would_refuse_to_read(tmp_path) -> None:
+    """Advertising a name the parser refuses is the own-goal the skill
+    protocol's docstring warns about, so the lister and the grammar agree."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "visible.md").write_text("x\n", encoding="utf-8")
+    (pad / ".hidden").write_text("x\n", encoding="utf-8")
+
+    listed = await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context)
+    assert "visible.md" in listed.text
+    assert ".hidden" not in listed.text
+
+    refused = await tools["read"].execute(
+        "c", {"path": "scratchpad://.hidden"}, None, None, context
+    )
+    assert refused.is_error is True
+    assert "dotfiles are not listed and cannot be read" in refused.text
+
+
+@pytest.mark.asyncio
+async def test_a_long_note_uses_the_file_ladder_not_the_internal_shaper(tmp_path) -> None:
+    """A note is a FILE, not a packaged document. It gets ``READ_LINE_CAP`` plus
+    ``_clamp_file_body`` and NO spill entry — the file itself is the store, so a
+    handle pointing back into it would be pure indirection. The guide/skill
+    shaper (``INTERNAL_READ_LIMIT`` + heading outline + spill) is for bodies that
+    are re-readable from a packaged catalog, and must not be reached here."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "big.md").write_text(
+        "".join(f"line {index}\n" for index in range(builtin.READ_LINE_CAP + 5)), encoding="utf-8"
+    )
+
+    result = await tools["read"].execute("c", {"path": "scratchpad://big.md"}, None, None, context)
+    assert result.is_error is False
+    assert "more lines in file" in result.text
+    assert result.details is not None
+    assert "spill" not in result.details
+    assert "url" not in result.details
+
+
+@pytest.mark.asyncio
+async def test_a_binary_note_is_refused_with_the_file_binary_error(tmp_path) -> None:
+    """The scratchpad is a text contract, so an undeclared binary in the folder is a
+    clean refusal naming the path, not a decode error or a mangled body."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "blob.md").write_bytes(b"\x00\x01\x02binary")
+
+    result = await tools["read"].execute("c", {"path": "scratchpad://blob.md"}, None, None, context)
+    assert result.is_error is True
+    assert "binary" in result.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_missing_file_names_the_write_call(tmp_path) -> None:
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    missing = await tools["read"].execute(
+        "c", {"path": "scratchpad://nope.md"}, None, None, context
+    )
+    assert missing.is_error is True
+    assert missing.text == (
+        "Scratchpad file does not exist: scratchpad://nope.md. Write it first with "
+        'write(path="scratchpad://nope.md", content="…").'
+    )
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuse_traversal_absolute_and_directory_targets(tmp_path) -> None:
+    """Each refusal is the model's own argument at fault, and none of them may
+    touch the disk: ``escape.md`` must not exist anywhere under tmp_path."""
+    from local_operator.scratchpad import SCRATCHPAD_NAMESPACE
+
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    escape = await tools["write"].execute(
+        "c", {"path": "scratchpad://../escape.md", "content": "x"}, None, None, context
+    )
+    assert escape.is_error is True
+    assert (
+        "Invalid scratchpad URL 'scratchpad://../escape.md': '..' segments are not allowed"
+        in escape.text
+    )
+
+    absolute = await tools["read"].execute(
+        "c", {"path": "scratchpad:///etc/passwd"}, None, None, context
+    )
+    assert absolute.is_error is True
+    assert "absolute paths are not allowed" in absolute.text
+
+    root_write = await tools["write"].execute(
+        "c", {"path": "scratchpad://", "content": "x"}, None, None, context
+    )
+    assert root_write.is_error is True
+    assert root_write.text == (
+        f"a {SCRATCHPAD_NAMESPACE} URL must name a file: scratchpad:// — e.g. scratchpad://name.md"
+    )
+
+    dir_write = await tools["write"].execute(
+        "c", {"path": "scratchpad://run/", "content": "x"}, None, None, context
+    )
+    assert dir_write.is_error is True
+    assert "e.g. scratchpad://run/name.md" in dir_write.text
+
+    assert not list(tmp_path.rglob("escape.md"))
+
+
+@pytest.mark.asyncio
+async def test_a_path_argument_carrying_a_stranger_scheme_creates_nothing(tmp_path) -> None:
+    """The silent-littering defect: without a refusal, a path argument carrying a
+    scheme this tool does not own falls through to the workspace resolver, which
+    reads it as a RELATIVE path — so ``notes://x.py`` (a model's habit, or a typo
+    for ``scratchpad://``) created a literal ``notes:`` directory inside the
+    user's working directory, with no approval, because a fresh path inside the
+    workspace looks ordinary. A scheme is a claim about a namespace, so an
+    unrecognised one is refused instead of reinterpreted.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    stranger = "notes://x.py"
+
+    write = await tools["write"].execute(
+        "c", {"path": stranger, "content": "print('hi')\n"}, None, None, context
+    )
+    assert write.is_error is True
+    assert "notes:// is not a scheme write can resolve" in write.text
+    assert "scratchpad://" in write.text
+
+    edit = await tools["edit"].execute(
+        "c", {"path": stranger, "old_text": "a", "new_text": "b"}, None, None, context
+    )
+    assert edit.is_error is True
+    assert "notes:// is not a scheme edit can resolve" in edit.text
+
+    # grep walks a directory, so the same argument would have walked
+    # ``<cwd>/notes:/x.py``.
+    grep = await tools["grep"].execute("c", {"pattern": "x", "path": stranger}, None, None, context)
+    assert grep.is_error is True
+    assert "notes:// is not a scheme grep can resolve" in grep.text
+
+    # The point of the test: nothing anywhere on disk, under any spelling.
+    assert not (tmp_path / "notes:").exists()
+    assert not (tmp_path / "ws" / "notes:").exists()
+    assert not list(tmp_path.rglob("notes*"))
+
+
+@pytest.mark.asyncio
+async def test_the_scheme_refusal_leaves_ordinary_odd_paths_alone(tmp_path) -> None:
+    """The guard keys on ``://``, not on a colon: a POSIX filename may contain a
+    colon (``a:b.txt``), and refusing those would break real paths."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    colon = await tools["write"].execute(
+        "c", {"path": "a:b.txt", "content": "x"}, None, None, context
+    )
+    assert colon.is_error is False
+    assert (tmp_path / "ws" / "a:b.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_read_and_write_never_prompt_but_an_outside_read_still_does(
+    tmp_path,
+) -> None:
+    """Constraint: a note lives outside the workspace by construction, so the
+    ``[outside workspace]`` escalation would be false here — while a genuine
+    escape from the workspace must still ask, and a denial must still refuse."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("hush\n", encoding="utf-8")
+
+    context, pad, tools = _scratchpad_context(tmp_path)
+    await tools["write"].execute(
+        "c", {"path": "scratchpad://perf.md", "content": "x\n"}, None, None, context
+    )
+    await tools["read"].execute("c", {"path": "scratchpad://perf.md"}, None, None, context)
+    await tools["edit"].execute(
+        "c", {"path": "scratchpad://perf.md", "old_text": "x", "new_text": "y"}, None, None, context
+    )
+    assert context.recorder.requests == []
+
+    denied, _, denied_tools = _scratchpad_context(tmp_path, approval=RecordingApproval(False))
+    blocked = await denied_tools["read"].execute(
+        "c", {"path": "../outside/secret.txt"}, None, None, denied
+    )
+    assert denied.recorder.requests[0][0] == "read"
+    assert denied.recorder.requests[0][1].startswith("[outside workspace] ")
+    assert blocked.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_without_a_scratchpad_root_is_unavailable_and_never_reaches_the_resolver(
+    tmp_path,
+) -> None:
+    """A host with no session (a bare loop, a ``--train`` agent directory) must
+    say so through all three tools, and must not fall through to the
+    internal-URL resolver — whose answer would be "the resolver does not handle
+    this URL", which misdirects the model toward retrying the URL."""
+    calls: list[str] = []
+
+    def resolver(url: str) -> str | None:
+        calls.append(url)
+        return None
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s", resolve_internal_url=resolver)
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    from local_operator.scratchpad import SCRATCHPAD_UNAVAILABLE
+
+    results = [
+        await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context),
+        await tools["write"].execute(
+            "c", {"path": "scratchpad://x.md", "content": "y"}, None, None, context
+        ),
+        await tools["edit"].execute(
+            "c",
+            {"path": "scratchpad://x.md", "old_text": "a", "new_text": "b"},
+            None,
+            None,
+            context,
+        ),
+    ]
+    for result in results:
+        assert result.is_error is True
+        assert result.text == SCRATCHPAD_UNAVAILABLE
+    assert calls == []
+    # Nothing was created for a host that has no session to create it under.
+    assert not list(tmp_path.rglob("scratchpad"))
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_never_calls_the_internal_resolver(tmp_path) -> None:
+    """A scratchpad read that only asserted success would pass with the branch
+    in the WRONG place if the resolver were also made scratchpad-aware, so the
+    assertion is a COUNT of resolver calls."""
+    calls: list[str] = []
+
+    def resolver(url: str) -> str | None:
+        calls.append(url)
+        return "resolved"
+
+    pad = tmp_path / "sessions" / "s" / "scratchpad"
+    context = ToolContext(
+        cwd=str(tmp_path),
+        session_id="s",
+        scratchpad_dir=str(pad),
+        resolve_internal_url=resolver,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    await tools["read"].execute("c", {"path": "scratchpad://"}, None, None, context)
+    await tools["write"].execute(
+        "c", {"path": "scratchpad://a.md", "content": "x"}, None, None, context
+    )
+    assert calls == []
+
+    still_resolved = await tools["read"].execute("c", {"path": "skill://demo"}, None, None, context)
+    assert calls == ["skill://demo"]
+    assert still_resolved.text == "resolved"
+
+
+# ---------------------------------------------------------------------------
 # path safety and approval tiers (RT-09/RT-10/RT-14/RT-29)
 # ---------------------------------------------------------------------------
 

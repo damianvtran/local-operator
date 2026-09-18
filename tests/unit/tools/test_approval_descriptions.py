@@ -519,3 +519,35 @@ def test_a_dotted_path_inside_the_workspace_is_not_called_outside_it() -> None:
     # A real escape still says what it is.
     escaped = _summary(build_write_tool(), {"path": "/etc/hosts"}, "/tmp/ws")
     assert escaped.startswith(OUTSIDE_MARKER)
+
+
+def test_a_url_argument_is_named_without_a_false_outside_workspace_escape(
+    tmp_path: Path,
+) -> None:
+    """A scratchpad URL points into the session's own folder, which is outside the
+    working directory by construction — so the workspace resolver, which is what
+    produces the hazard marker, must not be run on a URL at all. Left to it,
+    `scratchpad://runs/perf.md` resolves as the relative path
+    `<cwd>/scratchpad:/runs/perf.md` and the prompt reads `[outside workspace]
+    write: …/scratchpad:/runs/perf.md`: a false escalation on a target the parser
+    has already proved contained, about a path that does not exist, which the
+    user is then asked to weigh as an escape.
+
+    A stranger scheme (`notes://…`) gets the same treatment for a different
+    reason: the tool refuses it outright, so the prompt must not dress it up as a
+    path either.
+    """
+    for tool in (build_write_tool(), build_edit_tool()):
+        for url in (
+            "scratchpad://perf.md",
+            "scratchpad://runs/deep.csv",
+            "notes://perf.md",
+        ):
+            described = _summary(tool, {"path": url}, str(tmp_path))
+            assert described == f"{tool.name}: {url}", described
+            assert OUTSIDE_MARKER not in described
+            assert UNRESOLVABLE_MARKER not in described
+
+    # The marker this replaces is still doing its job for a real escape.
+    escaped = _summary(build_write_tool(), {"path": "/etc/hosts"}, str(tmp_path))
+    assert escaped.startswith(OUTSIDE_MARKER)

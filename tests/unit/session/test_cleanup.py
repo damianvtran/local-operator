@@ -31,7 +31,7 @@ from local_operator.session.cleanup import (
     remove_session_dir,
     run_cleanup,
 )
-from local_operator.session.retention import LIVE_MARKER_NAME
+from local_operator.session.retention import LIVE_MARKER_NAME, session_activity
 
 DAY = 86400.0
 NOW = time.time()
@@ -1211,3 +1211,49 @@ def test_a_stale_hidden_verdict_cannot_cost_a_session_its_recent_guard(tmp_path:
     fresh = run_cleanup(tmp_path, policy, now=NOW, dry_run=True, force=True)
     assert sorted(c.session for c in stale.chosen) == sorted(c.session for c in fresh.chosen)
     assert sorted(stale.protected) == sorted(fresh.protected)
+
+
+# ---------------------------------------------------------------------------
+# scratchpad:// inside a session directory: carried away by the same machinery
+# ---------------------------------------------------------------------------
+
+
+def test_removing_a_session_takes_its_scratchpad_whole(tmp_path: Path) -> None:
+    """The whole reason scratch lives UNDER the session directory: the removal
+    that already exists reclaims it, and no new deletion call was added."""
+    target = _session(tmp_path, "withscratch", transcript=True, age_days=30)
+    mark_store(tmp_path / "sessions")
+    (target / "scratchpad" / "runs").mkdir(parents=True)
+    (target / "scratchpad" / "perf.md").write_text("numbers\n", encoding="utf-8")
+    (target / "scratchpad" / "runs" / "deep.csv").write_text("a,b\n", encoding="utf-8")
+
+    assert remove_session_dir(target, config_dir=tmp_path, policy="p", reason="r", actor="test")
+    assert not target.exists()
+    assert not (target / "scratchpad").exists()
+
+
+def test_a_scratch_write_does_not_restamp_session_activity(tmp_path: Path) -> None:
+    """Scratch is not conversation. The activity clock reads the transcript and
+    the unread-mail spool only, so writing scratch files must leave it where it
+    was — otherwise an agent's bookkeeping would outrank a real conversation in
+    the recent-N guard."""
+    directory = _session(tmp_path, "worker", transcript=True, age_days=30)
+    stamp = session_activity(directory)
+    assert stamp is not None
+
+    (directory / "scratchpad").mkdir()
+    (directory / "scratchpad" / "perf.md").write_text("n" * 4000, encoding="utf-8")
+
+    assert session_activity(directory) == stamp
+
+
+def test_dir_bytes_counts_scratch(tmp_path: Path) -> None:
+    """``max_total_bytes`` must see the scratchpad, or a session could hide an
+    unbounded tree from the byte ceiling by keeping it below the threshold."""
+    directory = _session(tmp_path, "heavy", transcript=True, size=100, age_days=30)
+    before = cleanup._dir_bytes(directory)
+
+    (directory / "scratchpad").mkdir()
+    (directory / "scratchpad" / "bulk.md").write_text("z" * 500, encoding="utf-8")
+
+    assert cleanup._dir_bytes(directory) == before + 500
