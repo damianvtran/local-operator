@@ -3864,37 +3864,56 @@ def _print_current_generation() -> None:
         print(f"current install: {generation}")
 
 
-def _services_refusal() -> str | None:
+def _services_refusal(prefix: Path | None = None) -> str | None:
     """Why this process must not move the machine's services, or ``None``.
 
     THE SAME TWO QUESTIONS :func:`_repair_refusal` ASKS before it rewrites a
     plist, because moving a daemon onto a build is the same kind of act: it
     changes which install a long-lived process runs.
 
-    1. **Is this an installation at all?** An editable or unknown install is
-       refused outright (review round 2, R2-1). A worktree venv once rewrote the
+    1. **Is this an installation at all?** A kind that is not a uv tool — a
+       source checkout, a pip or pipx tree, anything unrecognised — is refused
+       outright (review round 2, R2-1). A worktree venv once rewrote the
        operator's four live plists to point at itself, and the same reasoning
        applies to signalling the services those plists start.
-    2. **Is it the SAME installation the services already run?** (review round 3,
-       R3-2.) Asking only the first let a pip-installed `lop update` on this
-       machine reload the fleet the uv-tool install owns. Harmless in destination
-       — everything converges on the shared pointer — but not in authority, and a
-       spurious reload cuts the app's relay for nothing. A uv-tool caller IS the
-       interpreter `lop` runs from, so its ``sys.prefix`` resolves to the very
-       install root the pointer names; anything else is somebody else's daemon.
+    2. **Is this process running this machine's install?** (review rounds 3 and 4,
+       R3-2 then R4-1.) Asking only the first let a pip-installed `lop update` on
+       a uv-tool machine reload the fleet that install owns: harmless in
+       destination, since everything converges on the shared pointer, but not in
+       authority, and a spurious reload cuts the app's relay for nothing.
+
+    **THE SECOND QUESTION IS NOT "IS THIS THE POINTER'S GENERATION"**, which is
+    where the first attempt at it went wrong and had to be fixed a round later.
+    ``perform_upgrade`` installs into a new generation and flips the pointer **in
+    this same process** — nothing re-execs, and this module says so itself where
+    it explains that ``sys.executable`` is "precisely the SUPERSEDED build"
+    (``_tui_reexec_hint``'s neighbourhood). So on the one path where this stage
+    matters most, the caller is *by construction* the generation the pointer has
+    just moved past, and comparing against the current pointer refused the very
+    caller that had performed the upgrade: `lop update` would move the tree,
+    refuse to move a single service, and report success. That is the reported bug
+    restored one generation later.
+
+    The question that survives both cases is membership: is this one of THIS
+    MACHINE's generations? A steady-state `lop` (invoked through `current`) is;
+    the superseded build a flip has just left behind is; a pip tree, a worktree
+    venv or anybody else's tool directory is not. That is also the honest
+    reading of what the daemons have in common — they were all started from this
+    install, and they all converge on its pointer.
+
+    ``prefix`` is a seam, not a parameter anyone passes in production: it exists
+    so the upgrade-path shape above can be tested by giving this function the
+    superseded prefix, which a test cannot otherwise fabricate.
     """
     kind = install_kind()
     if kind is not InstallKind.UV_TOOL:
         return f"this install's kind is {kind.value}"
-    generation = current_generation()
-    if generation is None:
-        return "the install pointer names no build"
-    mine = Path(sys.prefix).resolve()
-    owner = _generation_install_root(generation).resolve()
-    if mine != owner:
+    mine = (prefix or Path(sys.prefix)).resolve()
+    generations = (stable_root() / "generations").resolve()
+    if mine == generations or not mine.is_relative_to(generations):
         return (
-            f"this process runs from {mine}, which is not the install the pointer "
-            f"names ({owner})"
+            f"this process runs from {mine}, which is not one of this machine's "
+            f"install generations ({generations})"
         )
     return None
 
@@ -3928,9 +3947,11 @@ def _services_stage(*, wait_s: float | None = None) -> None:
     #
     # The plist half was never reachable this way: `_repair_refusal` already refuses
     # an editable caller inside the refresh child, so the blast radius here is the
-    # SERVES — the part that had no guard at all (review round 3, R3-4: an earlier
-    # version of this comment listed the mobile daemon, the browser bridge and the
-    # tunnel too, and overclaimed).
+    # SERVES (review round 3, R3-4: an earlier version of this comment listed the
+    # mobile daemon, the browser bridge and the tunnel too, and overclaimed). The
+    # mobile daemon IS reachable from an editable caller, but only through
+    # `--no-services` (review round 4, R4-4), which is by design the pre-change path
+    # and is therefore left exactly as it was.
     #
     # `services.reload_serve_daemons` refuses on the same missing stamp, so this is
     # the sentence rather than the fence — but the sentence is what an operator

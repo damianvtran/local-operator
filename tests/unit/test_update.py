@@ -10,6 +10,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -45,15 +46,21 @@ def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The ownership check has its own tests below; every OTHER test here is about
     the shape of `lop update`'s output or its failure paths, and without this each
-    of them would have to fabricate an install tree whose root happens to equal
-    `sys.prefix` — which is a pytest process's venv, not a generation, so they
-    would all be asserting against a refusal instead of against the thing they
-    were written for.
+    of them would have to fabricate an install tree under a `generations` root and
+    a `sys.prefix` inside it — which is a pytest process's venv, so they would all
+    be asserting against a refusal instead of against the thing they were written
+    for.
 
-    A test that wants the real guard puts `_REAL_SERVICES_REFUSAL` back, which
-    wins because a test's own `monkeypatch` runs after this fixture.
+    WHAT THIS HIDES, stated so it is not discovered by surprise (review round 4,
+    R4-3): while it is in force NO test in this module can see the guard through
+    `update_command`. That is why the test that must see it — the upgrade-path one
+    below, which is the shape that broke in R4-1 — restores the real refusal and
+    drives `update_command` itself rather than calling `_services_stage`.
+
+    The restore is `_REAL_SERVICES_REFUSAL`, not a re-implementation: a test's own
+    `monkeypatch` runs after this fixture, so it wins.
     """
-    monkeypatch.setattr(update_mod, "_services_refusal", lambda: None)
+    monkeypatch.setattr(update_mod, "_services_refusal", lambda *a, **k: None)
 
 
 def _pypi_transport(
@@ -665,17 +672,17 @@ def test_update_no_services_still_repairs_the_supervised_daemons(
     assert ran == ["daemons"]
 
 
-def test_the_services_stage_refuses_an_install_that_is_not_the_one_the_pointer_names(
+def test_the_services_stage_refuses_an_install_that_is_not_this_machines(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """R3-2: the guard must ask OWNERSHIP, not just install kind.
+    """R3-2: the guard must ask ownership, not just install kind.
 
     Asking only "is this an installation at all" let a pip-installed `lop update`
-    reload the fleet the uv-tool install owns. Harmless in destination — everything
-    converges on the shared pointer — but not in authority, and a spurious reload
-    cuts the app's relay for nothing. This mirrors `_repair_refusal`'s second
-    question.
+    on a uv-tool machine reload the fleet that install owns. Harmless in
+    destination — everything converges on the shared pointer — but not in
+    authority, and a spurious reload cuts the app's relay for nothing.
     """
+    import sys as sys_mod
     from pathlib import Path
 
     from local_operator import services, update
@@ -684,14 +691,57 @@ def test_the_services_stage_refuses_an_install_that_is_not_the_one_the_pointer_n
     called: list[str] = []
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
     monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
-    monkeypatch.setattr(update, "current_generation", lambda: Path("/generations/g1"))
-    monkeypatch.setattr(
-        update, "_generation_install_root", lambda generation: Path("/someone/elses/install")
-    )
+    monkeypatch.setattr(update, "stable_root", lambda: Path("/nowhere/lop"))
+    monkeypatch.setattr(sys_mod, "prefix", "/usr/local/lib/python3.12/site-packages")
     monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
     update._services_stage()
     assert called == []
-    assert "is not the install the pointer names" in capsys.readouterr().err
+    assert "is not one of this machine's install generations" in capsys.readouterr().err
+
+
+def test_update_command_moves_the_services_on_the_upgrade_path(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1's regression: the caller that just flipped the pointer is SUPERSEDED.
+
+    ``perform_upgrade`` installs into a new generation and flips the pointer **in
+    this same process** — nothing re-execs — so the guard's first attempt, which
+    compared ``sys.prefix`` with the generation the pointer names, refused the one
+    caller that had actually performed the upgrade. `lop update` then moved the
+    tree, moved no service, and reported success: the reported bug, restored one
+    generation later.
+
+    This drives `update_command` itself rather than `_services_stage`, because the
+    module's autouse fixture hides the guard from `update_command` (R4-3) — the
+    path that broke has to be the path under test.
+    """
+    import sys as sys_mod
+    from types import SimpleNamespace
+
+    from local_operator import update
+    from local_operator.update import InstallKind
+
+    generations = tmp_path / "lop" / "generations"
+    superseded = generations / "20260101T000000Z-0.1.0" / "tools" / "local-operator"
+    superseded.mkdir(parents=True)
+    # The pointer has already moved on, and this process is still the old build.
+    (generations / "20260102T000000Z-0.2.0").mkdir(parents=True)
+
+    ran: list[str] = []
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "stable_root", lambda: tmp_path / "lop")
+    monkeypatch.setattr(sys_mod, "prefix", str(superseded))
+    monkeypatch.setattr(
+        update,
+        "check_latest",
+        lambda force=False: SimpleNamespace(installed="0.2.0", latest="0.2.0", behind=False),
+    )
+    monkeypatch.setattr(
+        "local_operator.services.restart_services", lambda **k: ran.append("ran") or []
+    )
+    assert update.update_command() == 0
+    assert ran == ["ran"], "the stage refused the caller that performed the upgrade"
 
 
 @pytest.mark.parametrize("kind", [InstallKind.EDITABLE, InstallKind.UNKNOWN])
@@ -717,27 +767,39 @@ def test_the_services_stage_refuses_a_checkout(
     assert "does not own this machine's services" in capsys.readouterr().err
 
 
-def test_a_uv_tool_caller_that_is_the_pointer_install_may_proceed(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_generation_of_this_install_may_proceed(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The guard must not refuse the caller it exists for.
+    """The guard must not refuse the callers it exists for — either of them.
+
+    Both shapes are real, and the second is the one R4-1 was about:
+
+    * steady state — `lop` invoked through `current`;
+    * the superseded build — the process that has just performed the upgrade.
 
     Checked against the REAL install on this machine before this was written: the
-    `current` generation's `lop` has `sys.prefix == _generation_install_root(current)`,
-    so this is the shape a legitimate caller actually has.
+    `current` generation's `lop` has `sys.prefix` inside `stable_root()/generations`.
     """
-    import sys
+    import sys as sys_mod
     from pathlib import Path
 
     from local_operator import update
     from local_operator.update import InstallKind
 
+    generations = tmp_path / "lop" / "generations"
+    steady = generations / "20260102T000000Z-0.2.0" / "tools" / "local-operator"
+    superseded = generations / "20260101T000000Z-0.1.0" / "tools" / "local-operator"
+    steady.mkdir(parents=True)
+    superseded.mkdir(parents=True)
+
     monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
     monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
-    monkeypatch.setattr(update, "current_generation", lambda: Path("/generations/g1"))
-    monkeypatch.setattr(
-        update, "_generation_install_root", lambda generation: Path(sys.prefix).resolve()
-    )
+    monkeypatch.setattr(update, "stable_root", lambda: tmp_path / "lop")
+    monkeypatch.setattr(sys_mod, "prefix", str(steady))
+    assert update._services_refusal() is None
+    # The `generations` root itself is not an install, only what lives under it.
+    assert update._services_refusal(prefix=Path(generations)) is not None
+    monkeypatch.setattr(sys_mod, "prefix", str(superseded))
     assert update._services_refusal() is None
 
 

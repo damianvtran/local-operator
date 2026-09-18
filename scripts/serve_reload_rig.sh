@@ -57,7 +57,7 @@ export LOP_BUILD_PREFIX="$ISO/next"
 cleanup() {
   # EXIT covers the normal paths; INT and TERM cover a runner that is stopped
   # while this is mid-flight, which is how two daemons from an earlier revision
-  # escaped with only `trap ... EXIT` (review round 2, MINOR-3).
+  # escaped with only `trap ... EXIT` (review round 2, R2-4).
   #
   # ``${VAR:-}`` AND NOT ``$VAR``: under `set -u` an unbound HOLDER or DIALLER
   # aborted this function BEFORE the `rm -rf`, so a failure in the first ten lines
@@ -164,7 +164,7 @@ echo "replacement image ran:     $(ps eww -p "$SERVE_PID" 2>/dev/null | tr ' ' '
 echo "dialler across the change: $(cat "$ISO/dial.txt") (refused MUST be 0)"
 echo "held connection reused:    $(cat "$ISO/held.txt") (no = cut, the documented cost)"
 
-# The rig PRINTS refused=/other=; it also has to ASSERT them (review round 2, NIT-4),
+# The rig PRINTS refused=/other=; it also has to ASSERT them (review round 2, R2-8),
 # or a run that refused every dial would still print PASS. `other` is allowed: those
 # are connections accepted and then cut by the exec itself, which is the documented
 # cost — a REFUSED connection is the port having no listener, which is the whole

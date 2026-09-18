@@ -54,17 +54,24 @@ logger = logging.getLogger("local_operator.services")
 #: How long one daemon has to come back on the new build before it is reported.
 #:
 #: Sized against the phases it covers, MEASURED rather than assumed (review
-#: round 2, MINOR-2: the first version was 30 s while the daemon's own budgets
+#: round 2, R2-2: the first version was 30 s while the daemon's own budgets
 #: summed to 40 s, so the caller could give up while the daemon was still
 #: working and report a failure for a reload that then succeeded):
 #:
-#:   drain   up to ``reload.DRAIN_BUDGET_S``  = 10 s
+#:   drain   up to ``reload.DRAIN_BUDGET_S``  = 10 s   (asked TWICE — see below)
 #:   smoke   up to ``reload.SMOKE_TIMEOUT_S`` = 10 s
 #:   start   interpreter + record publish     = ~1.5-2 s on the reporting host
 #:
-#: 45 s is a margin over the worst honest sum rather than a restatement of it,
-#: and it is the CALLER's patience, not a phase's deadline: an expiry is a
-#: warning on a successful update, never a kill.
+#: THE DRAIN IS PAID TWICE (review round 4, R4-2: this and the reload's own
+#: comment both described one drain, which invites a future smoke bump that
+#: silently overruns the caller — a reload is drained, smoke-checked, and drained
+#: AGAIN, because the smoke is off the loop and a spawn can arrive during it).
+#: Worst honest sum ≈ 32 s against 45 s. A change to either budget has to re-do
+#: that arithmetic rather than assume this number still covers it.
+#:
+#: 45 s is a margin over that sum rather than a restatement of it, and it is the
+#: CALLER's patience, not a phase's deadline: an expiry is a warning on a
+#: successful update, never a kill.
 RELOAD_WAIT_S = 45.0
 
 #: The poll period while waiting for a daemon's replacement to publish.
@@ -104,7 +111,7 @@ def _answers_as_record(record: Any) -> str | None:
     # not: `f"http://{[record.host]}:…"` renders the list `['::1']`, so every
     # probe of a v6 daemon asked a URL that cannot parse and the daemon was
     # reported as "did not identify itself" while answering perfectly. Found by
-    # the test the review asked for (round 2, NIT-2), which is the whole reason it
+    # the test the review asked for (round 2, R2-6), which is the whole reason it
     # was asked for.
     authority = f"[{record.host}]" if ":" in record.host else record.host
     url = f"http://{authority}:{record.port}/health"
@@ -241,16 +248,24 @@ def reload_serve_daemons(
         # reachable the moment the services stage started running on ``lop
         # update``'s "nothing to install" path, and a source checkout is exactly
         # such a caller — its ``disk_build()`` is None, so a developer running
-        # ``lop update`` in their worktree would have bounced the operator's
-        # mobile daemon, browser bridge, tunnel and serves. Demonstrated end to
-        # end in review with a fabricated-root daemon: stale → signalled →
-        # really reloaded.
+        # ``lop update`` in their worktree would have signalled this machine's serve
+        # daemon. Demonstrated end to end in review with a fabricated-root daemon:
+        # stale → signalled → really reloaded. (Review round 4, R4-4: the first two
+        # versions of this sentence listed the mobile daemon, the browser bridge and
+        # the tunnel as well, and both overclaimed — see below.)
         #
         # THE BLAST RADIUS IS THE SERVES, not the whole fleet (review round 3,
         # R3-4: an earlier version of this comment listed the mobile daemon, the
         # browser bridge and the tunnel, and overclaimed — `_repair_refusal`
-        # already refuses an editable caller inside the plist refresh child, so
-        # the only part with no guard at all was this one).
+        # already refuses an editable caller inside the plist refresh child).
+        #
+        # AND NOT THE MOBILE DAEMON EITHER, except on one path (review round 4,
+        # R4-4): a checkout's `lop update --no-services` does still reach the mobile
+        # bounce, which has no guard of this kind and never did. That is
+        # pre-existing behaviour rather than anything this change added —
+        # `--no-services` is deliberately the pre-change path — so it is named here
+        # and left alone rather than quietly changed under a flag whose whole job is
+        # to reproduce the old behaviour.
         #
         # The invariant this restores: "stale" is a comparison, and a comparison
         # against an absent right-hand side is not a verdict. Fail-closed, and
