@@ -250,8 +250,9 @@ reach until that first message is sent:
   recipient says how many were left out — `→ name (pid N): delivered to the
   mailbox (will be read on the next turn); 3 matches skipped (not engaged yet)`
   — so a partly-delivered broadcast is never reported as a clean success; when
-  nothing else matched, the refusal names the sessions it passed over instead
-  of the `no session matches` form;
+  nothing else matched, the refusal says what it reached — the pid when a
+  single session matched, otherwise the needle and the count — instead of the
+  `no session matches` form;
 - `/stop <target>` (and `lop stop <target>`) still resolves it — the kill
   switch names a session in order to stop it, so a composer window someone
   needs to end stays reachable.

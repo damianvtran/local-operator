@@ -510,6 +510,24 @@ def live_scan_found_nothing(error: str) -> bool:
     return "no live session matches" in error
 
 
+def session_id_unknown(error: str) -> bool:
+    """True only for the live resolver's "no session has that id" refusal.
+
+    The exact-``session`` half of the cold lookup runs on this predicate and
+    NOTHING looser, for the same reason :func:`live_scan_found_nothing` gates
+    the substring half. An id that MATCHED a live record is answered by the live
+    resolver — the unengaged refusal, or :func:`_not_dialable` for a wedged one
+    — and that answer has to stand: re-asking the store for the same id turns a
+    refusal about a session the call did reach into a cold delivery, which
+    spools a note behind a process that still owns the conversation (the
+    BLOCKER-1/MAJOR-1 class) and hands a live composer's sender the cold
+    sentence (QA round 3, Q8). Only this form means the live scan does not know
+    the id at all, so the store is a NEW question rather than a second try at a
+    refused one.
+    """
+    return "no session found with session id" in error
+
+
 def resolve_stored_target(
     needle: str,
     *,
@@ -727,8 +745,13 @@ async def deliver_peer_message(
     # ``wake`` would OPEN A TURN in a session whose owner is not there. Both are
     # refused before any file is touched.
     if not session_has_durable_history(session_id):
-        # ``cold=True``: no live record means no window to send into, so the
-        # remedy is stated for a session that has to be opened (D5).
+        # ``cold=True``: the caller reached this raise with no DIALABLE record
+        # for the id — either nothing published one, or the live resolver
+        # refused it (an exact ``--session`` naming a wedged-and-unengaged
+        # record answers as not dialable, and the send path no longer re-asks
+        # the store for that id — see ``session_id_unknown``). Either way there
+        # is no window to send into, so the remedy is stated for a session that
+        # has to be opened and used (D5).
         raise RuntimeError(unengaged_refusal(unengaged_label(session_id=session_id), cold=True))
 
     if not wake and mode == "mailbox":

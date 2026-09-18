@@ -8022,6 +8022,7 @@ async def execute_send(
         live_scan_found_nothing,
         peer_sender_identity_async,
         resolve_peer_target,
+        session_id_unknown,
         skipped_clause,
         validate_peer_body,
     )
@@ -8058,11 +8059,17 @@ async def execute_send(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     cold_session_id = ""
-    if record is None:
-        # An exact ``session`` may still name a stored session that is simply
-        # not running. A quiet note to one of those is spooled rather than
-        # refused (that is what ``wake=false`` asks for); anything wanting
-        # attention engages a runtime. See ``peer_send.deliver_peer_message``.
+    if record is None and session_id_unknown(error):
+        # No DIALABLE live record and the live scan did not know this id at all:
+        # an exact ``session`` may name a stored session that is simply not
+        # running. A quiet note to one of those is spooled rather than refused
+        # (that is what ``wake=false`` asks for); anything wanting attention
+        # engages a runtime. See ``peer_send.deliver_peer_message``.
+        #
+        # The predicate keeps a refusal about a LIVE session standing (QA
+        # round 3, Q8): a wedged or unengaged match is the live resolver's
+        # answer, and re-asking the store for the same id would deliver behind
+        # a process that still owns the session.
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")

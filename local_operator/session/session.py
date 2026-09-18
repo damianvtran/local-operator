@@ -5627,10 +5627,16 @@ class Session:
             return
         for line in lines:
             try:
-                # The row's own ``wake``, never a guess: a row spooled by a
-                # runtime that was leaving a replaced build carries what its
-                # sender asked for, and ``send --wake`` asked for a turn. Rows
-                # written before the field existed read as notes, unchanged.
+                # The row's own ``wake`` is forwarded, never guessed: a row
+                # spooled by a runtime that was leaving a replaced build
+                # carries what its sender asked for, and ``send --wake`` asked
+                # for a turn. Rows written before the field existed read as
+                # notes, unchanged. What this drain DOES with that request is
+                # the consumer's business, not the field's: the BOOT drain runs
+                # before the socket listens, on an idle session, so the wake is
+                # honoured with a turn of its own, while the first-turn drain
+                # reaches the receiver mid-turn and the row rides that turn's
+                # context instead (see the paragraph at its call site).
                 await self.receive_peer_message(
                     line.text,
                     mode="mailbox",
@@ -8142,8 +8148,10 @@ class Session:
             # spool by an older sender that had no live record for it, or by one
             # on an older build — never passes through; without this drain those
             # rows would sit unread until some future process cold-opens the
-            # session. Delivered in the quiet mailbox shape so the drain itself
-            # can never drive a turn.
+            # session. The row's own ``wake``/mode are FORWARDED rather than
+            # rewritten, and the no-extra-turn property comes from WHERE this
+            # runs — inside a turn that is already streaming — not from a quiet
+            # override: see the caller's paragraph below.
             #
             # HERE, AFTER this turn's own messages are durable, and that
             # position is the guarantee rather than a convenience: a peer row

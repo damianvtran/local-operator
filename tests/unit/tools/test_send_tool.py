@@ -725,3 +725,47 @@ async def test_the_tool_receipt_reports_the_matches_a_name_send_skipped(monkeypa
         assert "2 matches skipped (not engaged yet)" in result.text, result.text
     finally:
         registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_an_exact_session_naming_a_live_composer_is_refused_live_not_cold(
+    monkeypatch, tmp_path
+) -> None:
+    """Q8 on the tool path: the twin of the CLI pin.
+
+    The cold lookup is gated on the live resolver's not-found form, so a live
+    composer addressed by exact session gets the LIVE refusal and nothing is
+    spooled. The store holds the same id with real history — a regressed gate
+    would spool a note behind the live process and tell the model it was merely
+    held.
+    """
+    from local_operator.mobile import peer_send
+
+    sid = "composer0002"
+    session_dir = _plant_stored_session(monkeypatch, tmp_path, sid, "credential work")
+    record = registry.SessionRecord(
+        pid=os.getppid(),
+        kind="daemon",
+        session_id=sid,
+        conversation_name="",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=False,
+    )
+    monkeypatch.setattr(peer_send.registry, "scan", lambda root=None: [(record, "live")])
+
+    result = await execute_send(
+        "t16",
+        {"session": sid, "message": "note to a live composer", "wake": False},
+        None,
+        None,
+        _context(),
+    )
+
+    assert result.is_error is True
+    assert f"session '{sid}' has not been engaged yet" in result.text, result.text
+    assert "its owner has to send a first message" in result.text, result.text
+    assert "once someone opens it" not in result.text, result.text
+    assert not (session_dir / "inbox.jsonl").exists()
