@@ -49,6 +49,18 @@ def isolate_capture() -> None:
     os.environ.pop("NO_COLOR", None)
     os.environ["TERM"] = "xterm-256color"
     os.environ["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
+    # THE DESKTOP SWITCHES TOO, because most captures boot the REAL
+    # ``OperatorApp`` (68 shot scripts come through here) and the app is a
+    # notification surface: a capture that ends a turn can raise a genuine
+    # macOS banner, titled with a fixture string, on a machine running dozens
+    # of other sessions. ``probe_isolation`` always set these; this sandbox
+    # did not, which is exactly the drift the shared mapping removes — the
+    # names are imported rather than repeated so the next switch added there
+    # lands here too, and ``tests/unit/test_notification_isolation.py`` fails
+    # if either sandbox stops carrying them.
+    from scripts.rig_safety import disable_notifications
+
+    disable_notifications()
 
 
 @dataclass(frozen=True)

@@ -46,6 +46,10 @@ from typing import Any
 
 import websockets
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.rig_safety import NO_NOTIFY_ENV  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 EXTENSION_ID = "b" * 32
 ORIGIN = f"chrome-extension://{EXTENSION_ID}"
@@ -71,6 +75,10 @@ def isolated_env(home: Path) -> dict[str, str]:
         for key, value in os.environ.items()
         if not key.startswith("CMUX_") and not key.startswith("LOP_")
     }
+    # The child is a real `lop` process, and the gate is re-asserted after the
+    # strip rather than assumed: `LOCAL_OPERATOR_NO_NOTIFICATIONS` is not in
+    # either prefix family.
+    env.update(NO_NOTIFY_ENV)
     config = home / ".local-operator"
     env["HOME"] = str(home)
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config)

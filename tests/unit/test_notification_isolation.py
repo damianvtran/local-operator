@@ -1,0 +1,502 @@
+"""A session that exists to be TESTED must never reach the operator's desktop.
+
+WHY THIS FILE EXISTS. The operator kept getting macOS notification banners whose
+body was ``Hello from the mock provider`` — the deterministic reply from the
+test hosting (``providers/clients.py``), and therefore the composed snippet
+(``notifications/compose.py`` takes a notification's body from the session's own
+last assistant line) of every mock session on the machine. The raisers were the
+sessions' OWN runtimes (``session/runtime/serving.py::_announce_completion``,
+rung 4: nothing watching, no desktop presence, no TUI) plus the two
+machine-wide backend surfaces a desktop app reads. Seventeen recorded banner
+attempts across scratch stores in two days, all of them mock sessions, all of
+them from drive-by rigs.
+
+Two properties are pinned here, and they are different questions:
+
+* **A process that adopts the test hosting is a test process**, so it does not
+  notify — on any wire, including the in-band toast. That is a process-wide
+  switch (``tui.notify.suppress_notifications_for_process``) rather than a
+  per-session flag, because the environment is the only form of it a SPAWNED
+  child also respects.
+* **A stored session that ran on the test hosting is not announced by anyone**,
+  even from a process that never touched the mock itself: a scratch store
+  outlives the rig that filled it, and the operator's own backend polls it.
+
+The last two tests are the drift guards: one sweeps every child-environment
+builder under ``tests/e2e/`` and ``scripts/`` for the gate, and one asserts the
+test tree and the script tree declare the same switch names.
+
+NOT COVERED HERE, deliberately: ad-hoc rigs written outside this repository.
+They cannot be reached by any test, which is why the load-bearing part of the
+fix is the product gate rather than the harness ones.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import local_operator.session.attention as attention_module
+import local_operator.session.runtime.serving as serving_module
+from local_operator.model.configure import configure_model
+from local_operator.notifications import compose
+from local_operator.providers.clients import client_for_spec
+from local_operator.providers.registry import is_mock_provider
+from local_operator.session.model_selection import session_uses_test_hosting
+from local_operator.tui.notify import (
+    Notifier,
+    notifications_enabled,
+    suppress_notifications_for_process,
+)
+
+#: The kill switch itself, and the spellings a module may use to carry it.
+#: ``NO_NOTIFY_ENV`` is ``tests/e2e/harness.py``'s mapping, ``probe_isolation``
+#: and ``rig_safety`` are the two script-side helpers that set it. A module that
+#: mentions any one of them has made the gate its own business rather than
+#: inheriting it by accident.
+GATE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+_GATE_SPELLINGS = (GATE, "NO_NOTIFY_ENV", "probe_isolation", "rig_safety")
+
+#: Strings that mark a module as one that spawns LOCAL-OPERATOR children rather
+#: than a git or a flake8. A syntactic sweep that ignored this would demand the
+#: switch in every module that ever hands a child an environment, which is most
+#: of the suite and none of the hazard.
+_ENTRY_POINTS = (
+    "local_operator.cli",
+    "local_operator.session.runtime.process",
+    "local_operator.wakes.supervisor",
+    "local-operator",
+)
+
+_SPAWNER_NAME = re.compile(r"(popen|run|call|spawn|exec|check_output|sh|system)", re.I)
+
+#: The two stages the sweep covers. ``tests/e2e/`` is where bespoke, filtered
+#: child environments are built — the ambient one cannot be relied on because
+#: the builders deliberately strip families from it — and ``scripts/`` is where
+#: the rigs live. The rest of ``tests/unit`` spawns short-lived helpers
+#: (``python -c`` probes, ``lop secret``, a fake ssh) whose environment is
+#: derived from ``os.environ``, which ``tests/conftest.py`` arms at import time;
+#: the package side is pinned independently by
+#: ``tests/unit/test_ambient_env_isolation.py``.
+_GATED_STAGES = (
+    Path(__file__).resolve().parents[1] / "e2e",
+    Path(__file__).resolve().parents[2] / "scripts",
+)
+
+#: A mock session's stored model selection: the row
+#: ``Session._persist_selected_model`` writes, and the only durable record of
+#: which hosting a conversation actually ran on.
+_SELECTION_ROW = {
+    "id": "selection-1",
+    "ts": 1.0,
+    "type": "custom",
+    "payload": {
+        "custom_type": "selected_model",
+        "details": {"version": 2, "selector": "test/test-model", "effort": None, "boot": None},
+    },
+}
+
+
+def _transcript_with_selection(directory: Path, selector: str | None) -> Path:
+    """A session directory whose journal carries (or omits) a selection row."""
+    directory.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    if selector is not None:
+        row = json.loads(json.dumps(_SELECTION_ROW))
+        row["payload"]["details"]["selector"] = selector
+        rows.append(row)
+    with (directory / "transcript.jsonl").open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    return directory
+
+
+# ---------------------------------------------------------------------------
+# The process gate
+# ---------------------------------------------------------------------------
+
+
+def test_the_helper_turns_the_process_switch_on_and_stays_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(GATE, raising=False)
+    assert notifications_enabled() is True
+
+    suppress_notifications_for_process("mock hosting (test/test-model)")
+    assert notifications_enabled() is False
+    assert os.environ[GATE] == "1"
+
+    # Sticky and one-way: a second caller must not clear it, and it keeps the
+    # first reason rather than relabelling itself.
+    suppress_notifications_for_process("something else")
+    assert os.environ[GATE] == "1"
+
+
+def test_the_gate_reads_the_mapping_it_is_given() -> None:
+    """An injected environment is honoured, which is what keeps every existing
+    tests of the notifier (which inject one) deterministic."""
+    assert notifications_enabled({GATE: "1"}) is False
+    assert notifications_enabled({}) is True
+
+
+def test_building_a_mock_client_suppresses_the_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supply edge: EVERY mock stream is built here, including the
+    mid-session switch that turns a real conversation into a mock one."""
+    from local_operator.harness.types import ModelSpec
+
+    monkeypatch.delenv(GATE, raising=False)
+    client_for_spec(ModelSpec(provider="test", model_id="test-model", context_window=1000))
+    assert notifications_enabled() is False
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "google"])
+def test_a_real_hosting_leaves_the_gate_alone(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    """Failing OPEN here would silence every real session on the machine."""
+    from local_operator.harness.types import ModelSpec
+
+    monkeypatch.delenv(GATE, raising=False)
+    client_for_spec(ModelSpec(provider=provider, model_id="gpt-x", context_window=1000))
+    assert notifications_enabled() is True
+
+
+def test_adopting_a_mock_spec_suppresses_the_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec adoption is EARLIER than any stream, and it is what lets a TUI that
+    boots on the mock never construct a notifier at all."""
+    monkeypatch.delenv(GATE, raising=False)
+    configuration = configure_model("test", "test-model")
+    assert configuration.spec.provider == "test"
+    assert notifications_enabled() is False
+
+
+def test_adopting_a_real_spec_leaves_the_gate_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(GATE, raising=False)
+    configure_model("openai", "gpt-x")
+    assert notifications_enabled() is True
+
+
+def test_is_mock_provider_answers_by_wire_not_by_name() -> None:
+    assert is_mock_provider("test") is True
+    # The legacy `--hosting` alias resolves to the same provider.
+    assert is_mock_provider("noop") is True
+    assert is_mock_provider("openai") is False
+    assert is_mock_provider("not-a-provider") is False
+
+
+class _Sink:
+    """Collects what the app would have written to the terminal."""
+
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+
+    def __call__(self, data: str) -> None:
+        self.writes.append(data)
+
+
+def test_a_notifier_built_before_the_gate_goes_silent_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session switched onto the mock mid-run must stop toasting IN BAND too.
+
+    The notifier takes ``enabled`` at construction, which is the whole bug:
+    built while the session was real, it would keep writing OSC escapes (a real
+    interruption, not chrome) for the rest of the run. So the gate is re-read
+    per call — from the environment the notifier was built with, which is
+    ``os.environ`` in production and an injected mapping in tests, the same
+    source every other decision in the class reads.
+    """
+    monkeypatch.delenv(GATE, raising=False)
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    environment = {"TERM": "xterm-256color"}
+    sink = _Sink()
+    notifier = Notifier(sink, env=environment)
+    notifier.set_focused(False)
+    assert notifier.notify_turn_complete(running_children=0) is True
+    assert sink.writes
+
+    # The switch flips mid-run, exactly as it does when a session switches to
+    # the mock hosting.
+    sink.writes.clear()
+    environment[GATE] = "1"
+    notifier.set_focused(False)
+    assert notifier.enabled is False
+    assert notifier.notify_turn_complete(running_children=0) is False
+    assert sink.writes == []
+
+    # ...and the production shape, where the class reads the process's own
+    # environment: the process-wide helper silences an already-built notifier.
+    monkeypatch.delenv(GATE, raising=False)
+    live = Notifier(sink)
+    assert live.enabled is True
+    suppress_notifications_for_process("mock hosting (test/test-model)")
+    assert live.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_a_suppressed_runtime_takes_no_delivery_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silenced process must not write-then-unwrite a claim every turn.
+
+    The claim is a watermark asserting somebody was told; nobody was. Checked by
+    spying on the store rather than by inspecting a database, so the assertion is
+    about the CALL rather than about the state a wrong implementation might
+    leave behind.
+    """
+    from tests.unit.session.runtime.test_serving import make_handle
+
+    monkeypatch.delenv(GATE, raising=False)
+    claimed: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        attention_module.AttentionStore,
+        "claim_delivery",
+        lambda self, identity, token, backend: bool(claimed.append((identity, token, backend))),
+    )
+    handle, _session = make_handle()
+    suppress_notifications_for_process("mock hosting (test/test-model)")
+
+    assert handle._announce_completion() == serving_module._ANNOUNCE_SETTLED
+    assert claimed == []
+
+
+@pytest.mark.asyncio
+async def test_a_suppressed_runtime_still_records_a_parked_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DURABLE half of a parked gate survives the silence.
+
+    ``pending`` is what keeps a parked runtime findable in ``lop sessions`` — it
+    is not a notification, and a test process still owes the honest record. Only
+    the out-of-band banner is skipped.
+    """
+    from tests.unit.session.runtime.test_serving import make_handle
+
+    announced: list[Any] = []
+    monkeypatch.delenv(GATE, raising=False)
+    monkeypatch.setattr(
+        "local_operator.tui.notify.detached_notify",
+        lambda *args, **kwargs: bool(announced.append(args)),
+    )
+    handle, _session = make_handle()
+
+    class _Registrant:
+        record = type("R", (), {"session_id": "notify000001"})()
+
+        def __init__(self) -> None:
+            self.pending: list[str] = []
+
+        def watching_surfaces(self) -> frozenset[str]:
+            return frozenset()
+
+        def set_record_pending(self, kind: str | None) -> None:
+            self.pending.append(str(kind))
+
+    registrant = _Registrant()
+    handle._registrant = registrant
+
+    # Real hosting: the banner is raised, which is the control for this test.
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+    assert announced, "the control arm raised nothing"
+
+    suppress_notifications_for_process("mock hosting (test/test-model)")
+    announced.clear()
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+    assert announced == []
+    assert registrant.pending == ["approval", "approval"]
+
+
+# ---------------------------------------------------------------------------
+# The stored-session gate: a store outlives the process that filled it
+# ---------------------------------------------------------------------------
+
+
+def test_a_journalled_mock_selection_marks_the_session_as_test_hosted(tmp_path: Path) -> None:
+    directory = _transcript_with_selection(tmp_path / "sessions" / "mock0001", "test/test-model")
+    assert session_uses_test_hosting(directory) is True
+
+
+def test_a_real_selection_is_not_test_hosted(tmp_path: Path) -> None:
+    directory = _transcript_with_selection(tmp_path / "sessions" / "real0001", "openai/gpt-x")
+    assert session_uses_test_hosting(directory) is False
+
+
+def test_an_unreadable_or_selection_free_journal_fails_toward_notifying(tmp_path: Path) -> None:
+    """Silencing a REAL session's banner is worse than bannering a test one."""
+    assert session_uses_test_hosting(tmp_path / "missing") is False
+    directory = tmp_path / "sessions" / "empty01"
+    directory.mkdir(parents=True)
+    assert session_uses_test_hosting(directory) is False
+    (directory / "transcript.jsonl").write_text("{not json\n", encoding="utf-8")
+    assert session_uses_test_hosting(directory) is False
+
+
+def test_the_composed_body_of_a_mock_session_is_the_banner_that_was_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The symptom itself, pinned: this is why the mock had to be gated.
+
+    A completion's body is a snippet of the session's OWN last assistant line,
+    and a mock session's last line is always the mock's canned reply — so the
+    banner a leaked mock session raises is not a mystery string, it is exactly
+    this. Asserted through the real composer against a real transcript row, and
+    it fails the day either half changes, which is the day the recognisable body
+    of a leaked banner becomes something else.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    directory = tmp_path / "sessions" / "mock0002"
+    directory.mkdir(parents=True)
+    rows = [
+        {
+            "id": "assistant-1",
+            "ts": 2.0,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "assistant",
+                "content": [{"text": "Hello from the mock provider!"}],
+            },
+        }
+    ]
+    with (directory / "transcript.jsonl").open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+    composition = compose("complete", session_dir=directory, session_name="")
+    assert composition.body == "Hello from the mock provider!"
+    assert composition.body_is_snippet is True
+
+
+# ---------------------------------------------------------------------------
+# Drift guards
+# ---------------------------------------------------------------------------
+
+
+def _modules_that_gate_their_children(stages: tuple[Path, ...] | None = None) -> list[Path]:
+    """The sweep's population: modules that hand a child a built environment."""
+    population: list[Path] = []
+    for stage in _GATED_STAGES if stages is None else stages:
+        for path in sorted(stage.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            spawns = False
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", "") or getattr(node.func, "id", "")
+                if not name or not _SPAWNER_NAME.search(name):
+                    continue
+                if any(keyword.arg == "env" for keyword in node.keywords):
+                    spawns = True
+                    break
+            if not spawns:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if any(entry in node.value for entry in _ENTRY_POINTS):
+                        population.append(path)
+                        break
+    return population
+
+
+def test_every_child_environment_builder_gates_notifications() -> None:
+    """A bespoke child environment must carry the gate ITSELF.
+
+    NOT "the ambient one will do": these builders hand a child a mapping they
+    built, deliberately stripped of the families that let a runtime address the
+    operator's live panes, and the children are real ``lop`` processes that can
+    park a gate and announce it. The switch names no pane or store, so a strip
+    never removes it — but inheriting it by accident is not the property this
+    wants, because the next builder may build from scratch.
+    """
+    population = _modules_that_gate_their_children()
+    assert population, "the sweep found no builders; the predicate has rotted"
+    offenders = [
+        path.relative_to(Path(__file__).resolve().parents[2])
+        for path in population
+        if not any(spelling in path.read_text(encoding="utf-8") for spelling in _GATE_SPELLINGS)
+    ]
+    assert not offenders, (
+        "these modules spawn a local-operator child with a built environment and "
+        "never set the notification gate, so a mock session they drive can put "
+        "its own reply on the operator's lock screen:\n"
+        + "\n".join(f"  {path}" for path in offenders)
+    )
+
+
+def test_the_walker_sees_a_builder_that_forgets_the_gate(tmp_path: Path) -> None:
+    """Prove the guard can still fail: a builder with no gate is an offender."""
+    offending = tmp_path / "test_forgot.py"
+    offending.write_text(
+        "import os\n"
+        "import sys\n"
+        "import subprocess\n"
+        "def _child_env(config):\n"
+        "    return {**os.environ, 'LOCAL_OPERATOR_CONFIG_DIR': str(config)}\n"
+        "def go(config):\n"
+        "    return subprocess.run(\n"
+        "        [sys.executable, '-m', 'local_operator.cli', 'exec', 'hi'],\n"
+        "        env=_child_env(config),\n"
+        "    )\n",
+        encoding="utf-8",
+    )
+    assert _modules_that_gate_their_children(stages=(tmp_path,)) == [offending]
+
+
+def test_the_test_tree_and_the_script_tree_declare_the_same_gates() -> None:
+    """One rule, declared once per tree, checked — the trees cannot import each
+    other, so without this they would drift the first time a switch is added."""
+    import scripts.rig_safety as rig_safety
+    from tests.e2e.harness import NO_NOTIFY_ENV
+
+    assert dict(NO_NOTIFY_ENV) == dict(rig_safety.NO_NOTIFY_ENV)
+
+
+@pytest.mark.parametrize("module", ["scripts/probe_isolation.py"])
+def test_probe_isolation_carries_every_gate(module: str) -> None:
+    """The import-time sandbox carries every desktop switch.
+
+    Textual rather than behavioural because the module's whole point is that it
+    acts on IMPORT (and refuses if anything under ``local_operator`` is already
+    loaded), so a test cannot re-import it in-process. Accepts the shared helper
+    as well as the literal names — referencing the mapping IS carrying it.
+    """
+    import scripts.rig_safety as rig_safety
+
+    source = (Path(__file__).resolve().parents[2] / module).read_text(encoding="utf-8")
+    if "rig_safety" in source:
+        return
+    missing = [name for name in rig_safety.NO_NOTIFY_ENV if name not in source]
+    assert not missing, f"{module} does not carry {missing}"
+
+
+def test_the_capture_sandbox_turns_every_gate_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``isolate_capture`` is the sandbox 68 shot scripts actually call.
+
+    ``probe_isolation`` always set these switches; this one did not, so every
+    capture that booted the real app was a notification surface — which is how a
+    screenshot run ends up putting fixture text in Notification Centre. Driven
+    for real: the function is called and the environment is read back.
+    """
+    import scripts.rig_safety as rig_safety
+    from scripts import visual_capture
+
+    for name in rig_safety.NO_NOTIFY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(visual_capture, "_SANDBOX", None)
+
+    visual_capture.isolate_capture()
+
+    for name in rig_safety.NO_NOTIFY_ENV:
+        assert os.environ[name] == "1", name
+    # HOME comes with it, which is the rest of the sandbox.
+    assert "lop-visual-" in os.environ["HOME"]

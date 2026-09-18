@@ -77,6 +77,8 @@ from typing import Any, cast
 # venv"). Without this a benchmark run in a worktree silently measures main.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from scripts.rig_safety import NO_NOTIFY_ENV, disable_notifications  # noqa: E402
+
 #: The scenario names this benchmark reports. Kept in one place so the CLI
 #: choices and the summary table cannot drift apart.
 SCENARIOS = ("tui", "desktop-cold", "desktop-warm")
@@ -273,6 +275,9 @@ async def _run_tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
     env["TMPDIR"] = str(config_dir.parent)
     env["LOP_TTFT_CHILD"] = "1"
     env["LOP_TTFT_CWD"] = str(cwd)
+    # The child boots the real TUI (``--child-tui``), so it is a notification
+    # surface: gated explicitly, not inherited.
+    env.update(NO_NOTIFY_ENV)
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         str(Path(__file__).resolve()),
@@ -449,6 +454,10 @@ async def _one(scenario: str, index: int) -> dict[str, float]:
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     os.environ["TMPDIR"] = str(root)
     os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = secrets.token_hex(32)
+    # The desktop scenarios drive a real ``lop serve`` whose machine-wide feed
+    # raises banners, and the children inherit THIS environment — so the gate is
+    # set here, once per run, rather than only in the child mappings below.
+    disable_notifications()
     if _TIKTOKEN_CACHE_DIR is not None:
         os.environ["TIKTOKEN_CACHE_DIR"] = str(_TIKTOKEN_CACHE_DIR)
     try:

@@ -345,3 +345,49 @@ def refused_decision_only_selection(directory: Path) -> str | None:
                 provider = selector.split("/", 1)[0]
                 return provider if provider and is_decision_only(provider) else None
     return None
+
+
+def session_uses_test_hosting(directory: Path) -> bool:
+    """Whether this session's journal says it is CURRENTLY on the TEST hosting.
+
+    WHY A SECOND READER, given the process-wide kill switch in
+    ``tui.notify.suppress_notifications_for_process``: the switch silences the
+    process that RAN the mock, and a store outlives that process. A QA rig's
+    scratch store keeps its mock conversations, and every other reader of that
+    store — the machine-wide desktop feed, a bridge attached by the desktop
+    app, an operator's TUI looking at a per-rig config dir — would still
+    compose a banner whose body is a snippet of the session's last assistant
+    line, which for a mock session is always "Hello from the mock provider!".
+    That sentence on a lock screen is the reported symptom, and the mock exists
+    only for tests, so a stored session that is on it must not be announced.
+
+    THE NEWEST SELECTION WINS, which is the same rule every other reader of
+    this journal follows (:func:`read_model_selection`): a conversation that
+    switched onto the mock is a test surface from that point, and one that
+    switched off it is a real session again — for the store's benefit, since
+    the process that ran the mock has already silenced itself.
+
+    CHEAP, by construction: only the newest ``version == 2`` row is read, via
+    the same bounded backward scan :func:`_settled_selection` uses (16.9 ms on
+    the operator's 262 MB journal, and the callers only ask about sessions they
+    are about to banner anyway — the composer reads the same transcript's tail
+    on the very next line).
+
+    TOLERANT, AND FAILS TOWARD NOTIFYING. ``False`` for a missing, unreadable
+    or selection-free journal, and for an unusable row. Two reasons that is the
+    right direction: an unreadable transcript is not evidence of a test
+    session, and silencing a REAL session's completion is a worse failure than
+    bannering a test one — the operator's complaint is about noise, and a
+    "fix" that also mutes real work would be its own bug report. A mock
+    session written by any build in this release carries a v2 row (see
+    :func:`Session._persist_selected_model`), so the version gate loses nothing
+    in practice; a version-less legacy row is deliberately not enough to
+    silence a session.
+    """
+    try:
+        from local_operator.providers.registry import is_mock_provider
+
+        settled = _settled_selection(directory)
+    except Exception:  # noqa: BLE001 — a banner decision never fails on a store read
+        return False
+    return settled is not None and is_mock_provider(settled.provider)

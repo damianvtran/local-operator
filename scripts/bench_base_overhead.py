@@ -46,6 +46,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.rig_safety import NO_NOTIFY_ENV  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 
 # The repo root first, as `bench_task_cost.py` does: this script imports the
@@ -222,6 +226,9 @@ def _child_env(config_dir: Path) -> dict[str, str]:
     that warmup discard and run #1 becomes cold while the rest are warm, which
     skews min and median in opposite directions."""
     env = dict(os.environ)
+    # This child imports ``local_operator`` and builds a real session (see the
+    # probe code above), so it is a notification surface in its own process.
+    env.update(NO_NOTIFY_ENV)
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     env["LO_BENCH_CONFIG_DIR"] = str(config_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")

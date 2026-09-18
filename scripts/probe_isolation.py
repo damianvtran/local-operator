@@ -25,9 +25,12 @@ mechanical:
   a headless test did exactly that, and the shell rule ("unset these first")
   is the kind of instruction the next runner forgets. Scrubbed here it cannot
   leak, and scrubbing on import also lands before any application code reads it.
-* ``NO_COLOR`` unset, ``TERM=xterm-256color``, shimmer/notifications/title
-  off — the same sandbox ``visual_capture.isolate_capture`` builds, so the
-  two cannot drift.
+* ``NO_COLOR`` unset, ``TERM=xterm-256color``, shimmer/title off, and the
+  desktop switches (notifications, desktop launch) taken from
+  :mod:`scripts.rig_safety` — which ``visual_capture.isolate_capture`` now
+  also takes them from, so the two cannot drift. They DID drift before:
+  this module set the notification switch and the capture sandbox did not,
+  and 68 shot scripts boot the real app through the latter.
 * If ``local_operator`` (or any submodule) is ALREADY in ``sys.modules``
   the import raises: isolation after the fact protects nothing.
 
@@ -62,6 +65,13 @@ os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(SANDBOX / "config")
 os.environ.pop("NO_COLOR", None)
 os.environ["TERM"] = "xterm-256color"
 os.environ["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
-os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
+# The desktop switches, from the shared mapping rather than spelled again here:
+# a sandbox that boots the real app must not be able to notify, and the same
+# names have to land in `visual_capture.isolate_capture` (which 68 shot scripts
+# call) or the two sandboxes drift — the claim this module's docstring already
+# makes. `tests/unit/test_notification_isolation.py` holds both halves.
+from scripts.rig_safety import disable_notifications  # noqa: E402
+
+disable_notifications()
 os.environ["LOCAL_OPERATOR_NO_TERMINAL_TITLE"] = "1"
 (SANDBOX / "config").mkdir(parents=True, exist_ok=True)

@@ -2652,6 +2652,25 @@ def configure_model(
         if base_url:
             spec = spec.model_copy(update={"base_url": base_url})
 
+    # Adopting a spec is the FIRST moment a process knows it is a test surface,
+    # and it is earlier than any stream (the wire client is built per request,
+    # on the first turn). Gating here is what lets an app that BOOTS on the test
+    # hosting never construct a notifier at all: the TUI builds one from
+    # `notifications_enabled()` at startup, so suppressing later would leave a
+    # notifier alive that had already captured `enabled=True`. It also covers
+    # the paths that never build a client at all — a server process adopting a
+    # mock spec for a client-driven session, whose machine-wide desktop feed
+    # would otherwise banner it from a DIFFERENT process's store.
+    #
+    # Keyed through `is_mock_provider` rather than on the `test` id so this and
+    # `client_for_spec` cannot drift. Both calls are idempotent, so a boot that
+    # passes through here and then builds a mock client logs one reason.
+    from local_operator.providers.registry import is_mock_provider
+
+    if is_mock_provider(spec.provider):
+        from local_operator.tui.notify import suppress_notifications_for_process
+
+        suppress_notifications_for_process(f"mock hosting ({spec.provider}/{spec.model_id})")
     return ModelConfiguration(
         hosting=hosting,
         name=model_name,
