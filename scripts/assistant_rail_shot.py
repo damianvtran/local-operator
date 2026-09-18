@@ -3,7 +3,7 @@
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/assistant_rail_shot.py OUT.svg [COLSxROWS] [THEME]
+        scripts/assistant_rail_shot.py OUT.svg [COLSxROWS] [THEME] [SURFACE]
 
 The seeded tree is chosen so one frame answers every question the treatment can
 be wrong about, because a frame of an assistant message ALONE cannot show any of
@@ -47,7 +47,12 @@ off would see without this capture leaving state behind in their config. The
 rail-OFF frame is not decoration: "off restores the pre-rail build" is a claim
 about a rendered frame, and the pair is what lets a reviewer check it.
 
-``SURFACE`` (default ``transcript``) selects WHICH surface is captured.
+``SURFACE`` is the FOURTH POSITIONAL argument (default ``transcript``) and
+selects WHICH surface is captured. It is an argument and NOT an environment
+variable, so it has to be passed after ``THEME``: a caller who writes
+``assistant_rail_shot.py out.svg 100x30 stream`` sends it into the theme and dies
+with ``KeyError: unknown theme: 'stream'`` (design round 2, D3).
+
 ``subagent`` renders the delegated-job page instead, and it is not optional
 coverage: the rail appears there, and every prose block on that page is a model
 response — so it is the page where a mark that distinguishes progress from the
@@ -168,7 +173,7 @@ async def _stream(
     that ends in tool calls — the same sequence ``test_narration_toggle`` drives.
 
     ``before_end`` and ``after_end`` are AWAITED either side of the finalize
-    event, which is what gives ``SURFACE=stream`` both frames of the retraction
+    event, which is what gives the ``stream`` SURFACE both frames of the retraction
     from one seeded turn (see the ``stream`` surface in the module docstring).
     Awaitable rather than plain callables so a hook can take its own pause
     before exporting: a frame is only evidence if the paint it shows has
@@ -200,7 +205,7 @@ async def _seed(
     """The reported turn: prompt, progress sentence, its tool card, the answer.
 
     ``progress_frames`` is handed to the PROGRESS message's stream as
-    ``(before_end, after_end)`` — see ``SURFACE=stream``.
+    ``(before_end, after_end)`` — see the ``stream`` surface above.
     """
     app._append_block(UserBlock("how does the ingest path handle a failing source?"))
     await pilot.pause()
