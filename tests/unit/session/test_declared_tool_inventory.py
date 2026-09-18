@@ -356,6 +356,64 @@ async def test_a_later_declaration_may_still_tighten(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_narrowing_call_cannot_turn_the_declarations_approval_back_on(tmp_path):
+    """The approval half is one-way in the same direction the reach is.
+
+    Declaring a set with a human at the gate is that human's decision to keep
+    deciding; the *allowed* subset call must not be able to lift it to
+    auto-approval, or the loosening direction of the invariant is open to
+    exactly the caller the widening refusal above is written against. Driven
+    through the GATE rather than read off the flag, because that is what the
+    loop calls and what decides whether the tool runs.
+
+    Before the fix this sequence left the declared gate answering ``True`` for
+    ``echo`` without consulting the base gate at all — the reach stayed bounded
+    and the approval did not — so the base-gate denial asserted below is the
+    discriminator, not the declaration's bookkeeping.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(tool_call_turns("echo"))
+    session = make_session(
+        tmp_path, stream, tools=[echo_tool(executed)], request_approval=_always_deny
+    )
+    session.set_tool_inventory(["echo", "bash"])
+
+    session.set_tool_inventory(["echo"], unattended=True)
+
+    gate = session._tool_approval_gate()
+    assert gate is not None
+    assert await ask_approval(gate, "echo", "d") is False
+    await session.prompt("go")
+    assert executed == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_later_call_may_still_turn_the_declarations_approval_off(tmp_path):
+    """The other half of the one-way flag, and the trade-off it accepts.
+
+    ``unattended=False`` on a later call is a TIGHTENING and stays honoured even
+    though the first declaration was auto-approved: a host that narrows and
+    wants the human asked again gets that. It fails closed — where nobody can
+    answer, the base gate refuses the remaining calls — which is the direction
+    to fail in, and the alternative (freezing the first value) would silently
+    ignore the request.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(tool_call_turns("echo"))
+    session = make_session(
+        tmp_path, stream, tools=[echo_tool(executed)], request_approval=_always_deny
+    )
+    session.set_tool_inventory(["echo", "bash"], unattended=True)
+
+    session.set_tool_inventory(["echo"], unattended=False)
+
+    await session.prompt("go")
+    assert executed == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_an_undeclared_session_is_untouched(tmp_path):
     """The negative case the change must not disturb: no declaration, no
     narrowing, and the ordinary gate still decides."""

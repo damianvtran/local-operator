@@ -313,6 +313,22 @@ def test_tools_declares_the_inventory_and_approves_it_when_unattended():
     assert session.tool_inventory == ("read",)
 
 
+def test_a_run_started_with_stdin_closed_still_reads_its_declaration(monkeypatch):
+    """fd 0 CLOSED is a shape a launcher can produce.
+
+    Python leaves ``sys.stdin`` as ``None`` for it rather than raising, and the
+    tty probe above assumed a stream: the whole run died at startup with
+    ``'NoneType' object has no attribute 'isatty'`` before it reached a provider
+    request. A stdin that cannot be asked is the same answer a pipe gives, so
+    the declaration stands as the approval exactly as it does for
+    ``--background``'s ``DEVNULL``.
+    """
+    monkeypatch.setattr(sys, "stdin", None)
+    session = RecordingSession(reachable=("read", "bash"))
+    apply_startup(session, ExecArgs(tools="read"), team=None)
+    assert session.declared == [(("read",), True)]
+
+
 def test_a_foreground_tty_run_does_not_treat_the_declaration_as_consent(monkeypatch):
     """Naming a tool is not consent on a terminal.
 
