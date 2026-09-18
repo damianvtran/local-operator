@@ -185,6 +185,30 @@ async def _wait_for_band_figure(
         ) from error
 
 
+def _pause_attention_poll(app: OperatorApp) -> None:
+    """Stop the app's 1 Hz completion-attention poll for the rest of the test.
+
+    The band's figure has TWO publishers, and this test's claim is about one of
+    them. `_rebuild_spend` publishes the reconstruction; the app's
+    `_poll_completion_attention` republishes the same number from the LIVE ledger
+    once a second (`refresh_attention` -> `refresh_frontend_state` ->
+    `mutate(cumulative_parent_cost=...)` in `session.py`). Review round 1 (R1-1)
+    traced the consequence: deleting the rebuild's own publish still moved the
+    band one poll later, so a mutation aimed at the rebuild read GREEN and the
+    test could not own the claim its name makes. With the poll stopped, a figure
+    that arrives is evidence the REBUILD published it.
+
+    Stopped by TIMER OBJECT, never by patching the method: the interval holds the
+    bound method it was handed when `set_interval` created it, so a patch applied
+    afterwards cannot reach it — the dead-instrument shape AGENTS.md's "A dead
+    instrument returns a reading, not an error" is about.
+    """
+    for timer in list(app._timers):
+        callback = getattr(timer, "_callback", None)
+        if getattr(callback, "__func__", None) is OperatorApp._poll_completion_attention:
+            timer.pause()
+
+
 @pytest.mark.asyncio
 async def test_a_resumed_session_opens_on_the_provider_s_own_context_reading(
     tmp_path: Path,
@@ -1088,6 +1112,9 @@ async def test_a_pre_ledger_resume_moves_from_its_floor_to_the_accumulated_figur
             assert gated.wait(10), "the rebuild never reached its pricer"
             assert app._status is not None
             before = app._status._cost
+            # The REBUILD must be the only publisher this test can see move the
+            # band's figure; see `_pause_attention_poll`.
+            _pause_attention_poll(app)
             release.set()
             # Wait on the FIGURE, not on the rebuild's flag: see
             # `_wait_for_band_figure`, which names what the flag's order costs.
