@@ -236,7 +236,7 @@ def test_exec_hands_over_the_fd_the_new_interpreter_and_a_safe_path(
     plan = _watch(_app(fd=13)).plan()
     serve_reload._exec(plan)
     # The fd is made inheritable for the exec and put BACK afterwards, because a
-    # stubbed exec leaves this process serving (review round 1, NIT-2).
+    # stubbed exec leaves this process serving (review round 1's `set_inheritable` nit).
     assert seen["inherit"] == [(13, True), (13, False)]
     assert seen["path"] == str(plan.interpreter)
     assert seen["argv"] == [

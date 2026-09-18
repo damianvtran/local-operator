@@ -290,7 +290,7 @@ class ReloadWatch:
         """
         plan = self.plan()
         await self.drain()
-        # OFF THE EVENT LOOP (review round 2, MINOR-3). The check spawns a process
+        # OFF THE EVENT LOOP (review round 2, R2-3). The check spawns a process
         # and waits for it, measured at 0.20-0.35 s cold; run inline it would stop
         # this daemon answering HTTP for that whole time, which is the opposite of
         # what a reload is for. `to_thread` rather than a second loop: the body is
@@ -487,7 +487,7 @@ def _exec(plan: ReloadPlan) -> None:
         os.execve(str(plan.interpreter), argv, dict(os.environ))
     finally:
         # Reached only when the exec FAILED — a successful one never returns.
-        # Both restorations run even if the first raises (review round 2, NIT-3):
+        # Both restorations run even if the first raises (review round 2, R2-7):
         # a daemon left deaf is worse off than one left with a writable
         # descriptor, because the first can never be asked to reload again.
         # The descriptor goes back exactly as the reload found it, because this
