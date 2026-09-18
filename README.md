@@ -62,6 +62,7 @@ pooled, load-balanced, and used with the prompt cache in mind.
 - [🌐 Drive Your Own Browser (Browser Extension)](#-drive-your-own-browser-browser-extension)
 - [📦 Installation Options](#-installation-options)
 - [🔧 Configuration & Credentials](#-configuration--credentials)
+  - [Credentials and secrets](#credentials-and-secrets)
 - [🌟 Radient: automatic model selection and agent sharing](#-radient-automatic-model-selection-and-agent-sharing)
 - [🔒 Safety Model](#-safety-model)
 - [📝 Examples](#-examples)
@@ -880,11 +881,21 @@ Project-level `AGENTS.md` / `CLAUDE.md` files are discovered separately by
 walking up from your working directory, and can be disabled with
 `LOCAL_OPERATOR_CONTEXT_FILES=0`.
 
-Credentials are stored in `~/.local-operator/credentials.env` and never
-echoed:
+### Credentials and secrets
+
+Four different things get called "credentials" here, and they behave
+differently. **Provider API keys** live in
+`~/.local-operator/credentials.env` in plaintext and are read by `lop` itself —
+you set them once through a masked prompt and they never need to appear in a
+session. **Session credentials** are what a pasted or `/credential`-captured
+secret becomes: memory-only for that session, injected into every `bash`
+child's environment so a command can use them, and never readable by the model.
+**Ordinary variables** — the named values a session carries for the agent — are
+not secret at all, only denylist-filtered. The **encrypted long-term store** is
+the one that outlives the session, and is what this section is about.
 
 ```bash
-lop credential update TAVILY_API_KEY
+lop credential update TAVILY_API_KEY     # provider key, masked prompt
 lop credential delete TAVILY_API_KEY
 ```
 
@@ -897,6 +908,73 @@ captured and how long it is — a higher bar than a file mode, though not a vaul
 since anything running as you that can run `lop` can read it. The
 [QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
 including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
+
+**What the `lop secret` store is, and is not.** Secrets are encrypted with
+AES-256-GCM under blind-indexed names, so the "scan the disk for credential
+files" malware a bad link actually drops finds no readable `.env`, no
+greppable `API_KEY=`, and not even the names. In the default mode the master
+key is a file beside the store; `lop secret harden` replaces that with a
+passphrase held in a running broker's memory, read behind a macOS
+authorization prompt. What it is **not** is a vault: `lop` is on your `PATH`,
+so anything running as you that is willing to run `lop` can read every secret
+exactly as the agent does, and a value an agent retrieves is in that session's
+memory for the turn. It is a large and worthwhile increase in the cost of
+stealing these credentials, not a guarantee — `lop secret status` prints the
+same caveat on the machine, and
+[docs/design/secret-store.md](./docs/design/secret-store.md) sets out the
+residual risk in full.
+
+`lop secret` is the primary surface:
+
+```bash
+lop secret set GITHUB_TOKEN --description "CI token"   # value from stdin, never argv
+lop secret list                                        # names and descriptions, never values
+lop secret get GITHUB_TOKEN                            # value to stdout, no trailing newline
+lop secret rm GITHUB_TOKEN
+```
+
+Interpolate a stored secret directly into the command that needs it:
+
+```bash
+curl -H "Authorization: Bearer $(lop secret get GITHUB_TOKEN)" https://api.github.com/user
+```
+
+The value crosses a pipe into `curl`'s argv inside the child process; the model
+sees only the command text it wrote, and the value never enters the transcript.
+Never `echo` a secret, assign-then-print it, write it to a file you do not
+immediately delete, or paste it into a commit or a message — each one puts it
+somewhere it outlives the command.
+
+**From the agent's side**, the `secret` tool takes
+`op: store|retrieve|list|describe|update|delete`. `retrieve` deliberately
+returns a receipt naming the secret and how to reach it, never the value: in
+`bash` that is `$(lop secret get NAME)`, and in the `eval` kernel it is
+`secrets["NAME"]`, which hands the real string to the worker process rather
+than to the transcript. Agent-facing guidance lives in
+[`local_operator/guides/credentials/GUIDE.md`](./local_operator/guides/credentials/GUIDE.md).
+
+**Paste a key into the composer** and it collapses into a credential chip. The
+secret is routed to the session store, the line carries only the marker, and
+you keep typing to say what the secret is for — which is what the agent reads:
+
+<p align="center">
+  <img src="./static/tui-credential-chip.png" alt="A manager session's composer showing the line Here's my OpenRouter key, use it to test the integration followed by a collapsed [Credential #1, 15 chars] chip, above the subagent dock and the shared todo list" width="720">
+</p>
+
+<p align="center"><i>A pasted key collapses into a chip: the value goes to the store, the transcript keeps only the marker and your description of it.</i></p>
+
+**Typing a secret is masked too.** `/credential` followed by a space opens a
+capture: the characters are held out of the draft and painted as dots, **Enter**
+mints the same chip, and **Esc** brings the text back unchanged. Bare
+`/credential` lists what this session holds, and
+`/credential --persist <KEY>` promotes an existing session credential into the
+long-term store.
+
+<p align="center">
+  <img src="./static/tui-credential-masked-typing.png" alt="The composer while a secret is being typed after /credential: the characters render as dots, with the hint line masked as you type — Enter turns it into a chip, Esc cancels underneath" width="720">
+</p>
+
+<p align="center"><i>A hand-typed secret is masked as it is entered — Enter chips it, Esc cancels.</i></p>
 
 ## 🌟 Radient: automatic model selection and agent sharing
 
@@ -937,7 +1015,10 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   input and warned about on first connect. See [docs/mcp.md](./docs/mcp.md)
   for the trust model.
 - **Credential hygiene.** Keys live in a local credential store, are entered
-  through hidden prompts, and are kept out of transcripts.
+  through hidden prompts, and are kept out of transcripts; a secret pasted into
+  the composer becomes a chip rather than text, and the encrypted long-term
+  store keeps the rest behind a higher bar than a file mode. See
+  [Credentials and secrets](#credentials-and-secrets).
 - **A shell's environment is a policy, not an accident.** A command the model
   runs sees your environment by default (`shell_environment.mode: inherit`); a
   server-owned run sets `allowlist`, so the provider key that session launched
