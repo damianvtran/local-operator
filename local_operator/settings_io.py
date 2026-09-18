@@ -419,6 +419,22 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Concurrency cap, who picks a child's model, and the model each tier runs on.",
     ),
+    # NEW_SESSIONS, and the scope is a statement about the CONSUMER: the
+    # classification service is built per session (``ClassificationService`` is
+    # constructed by ``session_factory._attach_classification`` and caches the
+    # vendor it resolved, its circuit breaker and its LRU for that session's
+    # life), and it is handed a SNAPSHOT of this section rather than the live
+    # mapping the stream fn holds. An edit therefore lands on the next session,
+    # which is what this tag tells the user — claiming LIVE here would be a
+    # painted lie of the kind the ``effort.*`` note in
+    # ``Session._apply_config_change`` records.
+    Section(
+        "classification",
+        "Resource recommendations",
+        Scope.NEW_SESSIONS,
+        "Advisory skills, guides and MCP servers a decision model suggests "
+        "per message. Off keeps the prompt unchanged.",
+    ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
     # launch-time (autosave and the cleanup policy), and these keys take
@@ -1954,6 +1970,128 @@ SETTINGS: tuple[Setting, ...] = (
         # incident ran through.
         help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
+    ),
+    # -- resource classification --------------------------------------------
+    #
+    # docs/design/classification-layer.md §8. Ordered master-switch first, then
+    # what it controls, matching the `session.cleanup.*` block above: the page
+    # reads as "a switch, then its knobs", every sub-row leads with the gate
+    # (`↳` label, "Needs recommendations on." help), and the numbers here are the
+    # §8 defaults the classification package's own readers fall back to —
+    # `_consumer_defaults()` in tests/unit/test_settings_io.py binds the two so
+    # neither can drift.
+    #
+    # Scope is NEW_SESSIONS on the SECTION above; the reason is recorded there
+    # rather than repeated per row.
+    Setting(
+        key="classification.auto",
+        path=("classification", "auto"),
+        section="classification",
+        label="Resource recommendations",
+        kind=Kind.BOOL,
+        default=False,
+        # Same precedent as `values.effort.auto` (`model/effort_classifier.py`):
+        # default OFF, because an upgrade must never silently change behaviour or
+        # spend. The help says what ON does rather than what the feature is: the
+        # row's label already names the feature.
+        help="Off: the prompt is unchanged. On: advisory resources may be added.",
+        choices=_bool_choices(
+            "a decision model may add advisory resources",
+            "the prompt stays exactly as it is",
+        ),
+    ),
+    Setting(
+        key="classification.vendor",
+        path=("classification", "vendor"),
+        section="classification",
+        label="↳ vendor",
+        kind=Kind.ENUM,
+        default="auto",
+        # `auto` is a real member here rather than the unset spelling
+        # `model_effort` uses: the cascade's own default IS "first leg with a
+        # usable credential", and storing that as an empty string would leave
+        # the page unable to show which of the two the operator chose.
+        help="Needs recommendations on. Pin one leg; auto prefers Radient.",
+        choices=(
+            Choice("auto", "auto", "first leg with a usable credential"),
+            Choice("radient", "radient", "Radient's decision route"),
+            Choice("typesafe", "typesafe", "TypeSafe's Jev endpoint"),
+            Choice("openrouter", "openrouter", "OpenRouter's alpha decisions route"),
+        ),
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.model",
+        path=("classification", "model"),
+        section="classification",
+        label="↳ model",
+        kind=Kind.TEXT,
+        default="",
+        help="Needs recommendations on. Vendor model id; empty uses its default.",
+        empty_unsets=True,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.timeoutMs",
+        path=("classification", "timeoutMs"),
+        section="classification",
+        label="↳ deadline (ms)",
+        kind=Kind.INT,
+        default=1500,
+        # 0 is "use the default", not "no deadline": the reader refuses a
+        # non-positive value rather than treating it as unlimited, so a hand-edit
+        # cannot leave a turn parked on a vendor. The help says so.
+        help="Needs recommendations on. Per-call deadline; 0 uses 1500 ms.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.maxStateChars",
+        path=("classification", "maxStateChars"),
+        section="classification",
+        label="↳ max state chars",
+        kind=Kind.INT,
+        default=6000,
+        help="Needs recommendations on. State cap; 0 uses 6000 chars.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.maxCandidates",
+        path=("classification", "maxCandidates"),
+        section="classification",
+        label="↳ max candidates",
+        kind=Kind.INT,
+        default=12,
+        help="Needs recommendations on. Candidates per kind; 0 uses 12.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.maxRecommendations",
+        path=("classification", "maxRecommendations"),
+        section="classification",
+        label="↳ max recommendations",
+        kind=Kind.INT,
+        default=3,
+        help="Needs recommendations on. Per-message resources; 0 uses 3.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.notice",
+        path=("classification", "notice"),
+        section="classification",
+        label="↳ notice",
+        kind=Kind.BOOL,
+        default=True,
+        # ON by default, unlike the master switch: the notice is the only place
+        # the spend and the vendor are visible, and a user who turned the layer on
+        # asked for that. It appears once per message and only when the model
+        # actually recommended something.
+        help="Needs recommendations on. Names vendor, resources, cost.",
+        choices=_bool_choices("show the one-line notice", "stay silent"),
+        gated_by="classification.auto",
     ),
     # -- fork ---------------------------------------------------------------
     #

@@ -200,7 +200,47 @@ def _consumer_defaults() -> dict[str, object]:
     for provider, (_name, endpoint, _url) in LOCAL_PRESETS.items():
         consumers[f"providers.{provider}.base_url"] = endpoint
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
+    consumers.update(_classification_consumer_defaults())
     return consumers
+
+
+def _classification_consumer_defaults() -> dict[str, object]:
+    """``values.classification.*`` defaults, asked of the layer that reads them.
+
+    The consumer is the classification package — ``service.py``,
+    ``context.py``, ``recommend.py`` and ``cascade.py`` each own one of the §8
+    constants — so this imports THEM rather than restating the numbers beside the
+    registry rows. That is the same rule the rest of ``_consumer_defaults``
+    follows, and it is what catches a registry default that drifted from the
+    layer's own fallback (the painted-lie failure this test exists for).
+
+    The wiring restates two of these values in ``session_factory``
+    (``DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS``,
+    ``DEFAULT_CLASSIFICATION_TIMEOUT_MS``) for a turn-path copy that must not
+    import the package; those two are pinned HERE to the same constants, so the
+    third and fourth spellings cannot drift either.
+    """
+    from local_operator.classification import (
+        DEFAULT_AUTO,
+        DEFAULT_MAX_CANDIDATES,
+        DEFAULT_MAX_RECOMMENDATIONS,
+        DEFAULT_MAX_STATE_CHARS,
+        DEFAULT_MODEL,
+        DEFAULT_NOTICE,
+        DEFAULT_TIMEOUT_MS,
+        DEFAULT_VENDOR,
+    )
+
+    return {
+        "classification.auto": DEFAULT_AUTO,
+        "classification.vendor": DEFAULT_VENDOR,
+        "classification.model": DEFAULT_MODEL,
+        "classification.timeoutMs": DEFAULT_TIMEOUT_MS,
+        "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
+        "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
+        "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
+        "classification.notice": DEFAULT_NOTICE,
+    }
 
 
 #: Settings with no independent consumer constant to compare against, and WHY
@@ -233,6 +273,28 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
 }
+
+
+def test_the_harness_copy_of_the_classification_limits_matches_the_package() -> None:
+    """The wiring's two restated numbers are pinned to the package's §8 defaults.
+
+    ``session_factory`` carries ``DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS``
+    and ``DEFAULT_CLASSIFICATION_TIMEOUT_MS`` because the turn path must not
+    import the classification package (the off path is byte-identical down to
+    its import graph, and the unit tests inject a double that never sees the real
+    types). Those two copies are the only place a §8 default is spelled twice, so
+    they are the only place this file can miss a drift: the registry rows above
+    are compared against the package by ``test_every_default_matches_its_consumer``,
+    and this asserts the harness's copies against the same constants.
+    """
+    from local_operator import session_factory
+    from local_operator.classification import (
+        DEFAULT_MAX_RECOMMENDATIONS,
+        DEFAULT_TIMEOUT_MS,
+    )
+
+    assert session_factory.DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS == DEFAULT_MAX_RECOMMENDATIONS
+    assert session_factory.DEFAULT_CLASSIFICATION_TIMEOUT_MS == DEFAULT_TIMEOUT_MS
 
 
 def test_the_drift_allow_list_is_not_stale() -> None:
