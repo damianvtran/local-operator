@@ -7941,11 +7941,8 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
             "right away; `wake=False` is the quiet "
             "mailbox drop (read on the peer's next turn), and `now=True` steers "
             "mid-turn (opens a turn if the peer is idle). The result says how the "
-            "peer received it. A session that has not run a real turn yet sits "
-            "in the composer window of a fresh `/new` and is NOT a recipient: "
-            "sends to it are refused with the reason (its owner has to send a "
-            "first message) and a broadcast skips it, so a peer message never "
-            "becomes the opening row of a conversation nobody started."
+            "peer received it. A session with no message sent in it yet (a fresh "
+            "`/new`) is not a recipient: sends to it are refused."
         ),
         parameters=SendParams.model_json_schema(),
         # write tier: a delivery can start an autonomous turn in ANOTHER session
