@@ -278,9 +278,11 @@ jobs:
               # skipped, never reused.
               #
               # The tag comes from `ls-remote`, NOT `git describe`, and that is
-              # load-bearing rather than a preference. `actions/checkout@v4`
+              # load-bearing rather than a preference. `actions/checkout@v7`
               # passes `--no-tags` unless `fetch-tags: true` (its default is
-              # false), so this shallow checkout carries ZERO tags and
+              # false — v7.0.1 still declares `fetch-tags: false` and
+              # `fetch-depth: 1`, so the v4-to-v7 bump above changed none of
+              # what follows), so this shallow checkout carries ZERO tags and
               # `git describe` exits 128 on every real run — a first draft of
               # this check used it and was dead code that passed a backward
               # bump green. `fetch-tags: true` does not fix it either: at
