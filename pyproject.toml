@@ -308,7 +308,16 @@ reportPrivateImportUsage = false
 # either mechanism — which is what keeps this from masking a packaging break.
 extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
-# the three defaults must be restated here alongside any addition of our own.
+# the four defaults must be restated here alongside any addition of our own.
+# THE COUNT IS VERSION-COUPLED. It became FOUR at 1.1.414, which added
+# `**/__editable__.*` — the finder shim and `.pth` an editable install drops
+# into site-packages — to the three this list carried before it. That is why
+# the pin and this list move together, and why
+# `tests/unit/test_ci_hygiene.py::test_configured_pyright_excludes_are_a_superset_of_the_running_defaults`
+# probes the RUNNING analyzer's defaults rather than restating them here: a
+# missed restatement type-checks that shim on every local run while staying
+# invisible in CI, which has no `.venv` and installs into the runner's own
+# interpreter.
 # Dropping `**/.*` is not cosmetic: every worktree (and the main checkout)
 # carries a `.venv` symlink into the shared uv environment, so pyright walks it
 # and enumerates the whole site-packages tree — 29466 source files instead of
@@ -336,7 +345,7 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # code, and CI cannot catch the omission — it never builds a wheel before
 # type-checking — so the cost lands entirely on local runs of the gate command,
 # where `rm -rf build/` is folklore the next person re-derives from scratch.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.
