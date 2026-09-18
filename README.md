@@ -820,9 +820,12 @@ command, treat the strict mode as a mitigation rather than a guarantee.
 The `bash` child keeps the harness's own additions in either mode: the
 non-interactive defaults (pagers off, `CI=1`, `LOCAL_OPERATOR_AGENT_SHELL=1`,
 `TERM=dumb`) and any credential the session store injected for the agent to
-*use*. The `eval` worker keeps neither — it gets its own protocol channel
-instead, so a cell sees no `CI` and no session credential in either mode, and
-any subprocess that cell spawns follows the same policy. In either mode
+*use*. The `eval` worker is never handed
+those: it gets its own protocol channel instead, so `lop` gives a cell no `CI`
+and no session credential in either mode. It does still see whatever the harness
+was *launched* with when the mode is `inherit` (a `CI=1` the launching
+environment exported included) — the difference is the injection, which is a
+`bash`-only addition. Any subprocess the cell spawns follows the same policy. In either mode
 `shell_environment.exclude` removes names outright — including those injections,
 so it is the way to deny a variable rather than merely not grant it. It governs
 these two children only: MCP servers (already limited to the SDK's safe set plus

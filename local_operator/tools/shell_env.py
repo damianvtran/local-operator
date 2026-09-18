@@ -81,10 +81,14 @@ as this process and the parent's environment stays readable from it:
   same-uid read the model's child already has.
 
 So the E2 exposure is NARROWED by this module, not closed: one command recovers
-the credential from the process that spawned the shell. The root fix is not to
-hold the provider key in the process environment at all (read it from the
-credential store or a 0600 file at call time), or to run the child under a
-different uid — neither of which belongs in a shell-environment policy. The
+the credential from the process that spawned the shell. The root fix is for the
+key to never be in the process's LAUNCH environment at all (read it from the
+credential store or a 0600 file at call time and do not export it), or to run the
+child under a different uid — neither of which belongs in a shell-environment
+policy. Note that first half precisely: deleting the variable from ``os.environ``
+at runtime closes NOTHING, because ``ps`` and ``/proc/PID/environ`` report the
+environment a process was STARTED with, so a fix that unsets it in place would
+leave the same read path open. The
 value this module does deliver, and the reason to keep it, is that the child's
 own environment becomes a decision this repo makes rather than an accident of
 how the harness was launched: deterministic, name-based, and reviewable.
@@ -102,10 +106,18 @@ and the next command in the same session gets the credential back.
 write during a run takes effect at the next launch, and can never weaken the run
 in flight.
 
-The honest boundary of that, stated rather than implied: a deployment that wants
-the strict mode must not let the run rewrite its own config *before* the first
-tool call of that run. This module guarantees "the policy this process resolved
-under", not "a policy nobody could change".
+The honest boundaries of that, stated rather than implied:
+
+* A deployment that wants the strict mode must not let a run rewrite its own
+  config *before* the first tool call of that run. This module guarantees "the
+  policy this process resolved under", not "a policy nobody could change".
+* "Once per process" is the whole window, and a long-lived host process — a
+  server or mobile daemon serving several runs, or any process that outlives one
+  run — keeps what it resolved FIRST for its own lifetime: a config written after
+  that process started applies at that process's next start, not to the runs it
+  is already serving. The interactive path says so on the settings page (the
+  section is tagged "new launch"); an automated deployment has to read it here,
+  because a successful resolution logs nothing.
 
 The credential-NAME machinery is insurance, not a filter
 -------------------------------------------------------
@@ -304,7 +316,13 @@ def load_policy() -> ShellEnvironmentPolicy:
 
     * No config file at all — there is no policy to honour, so the permissive
       default applies, which is the behaviour every session had before this
-      module existed (DEBUG).
+      module existed (DEBUG). Note the interaction with the branch below: if
+      some OTHER reader reached a half-written config first, ``ConfigManager``
+      quarantines it (``config.yml.bad.<ts>``, logged at WARNING by the config
+      layer) and a process starting after that sees no file — so the strict
+      branch covers the process whose own read failed, and a deployment that
+      wants the guarantee validates its config before the run rather than
+      relying on which reader got there first.
     * A config file that exists and cannot be read or parsed — a deployment that
       believes it is hardened must not silently lose the protection because a
       file is being rewritten under it, so the STRICT policy applies and a
@@ -515,8 +533,6 @@ def child_environment(
         env = dict(source)
     if injections:
         env.update({str(name): str(value) for name, value in injections.items()})
-    for name in policy.exclude:
-        env.pop(name, None)
     # A NAME LIST THAT MATCHED NOTHING IS A SILENT NO-OP, and a typo in one is the
     # same silent-downgrade class as an unrecognised mode. The two lists are
     # reported at different levels because their failure directions differ:
@@ -525,9 +541,14 @@ def child_environment(
     # that matches nothing means a GRANT did not apply, which is usually benign
     # (a name that only exists in the deployment's own environment), so it is
     # debug. Neither line ever prints a value.
-    unmatched_exclude = sorted(
-        name for name in policy.exclude if name not in env and name not in source
-    )
+    #
+    # MATCHED IS MEASURED BEFORE THE DENIAL RUNS, and it includes the injections.
+    # ``exclude`` is documented as the way to deny what the harness itself hands
+    # over (``CI``, the session credential), so asking the question AFTER the pop
+    # would report the loudest configured denial — one that WORKED — as one that
+    # matched nothing.
+    matched = set(env)
+    unmatched_exclude = sorted(name for name in policy.exclude if name not in matched)
     if unmatched_exclude:
         logger.warning(
             "shell_environment.exclude names %s, which the environment being filtered "
@@ -542,4 +563,6 @@ def child_environment(
             "does not define; nothing was granted for them",
             ", ".join(unmatched_inherit),
         )
+    for name in policy.exclude:
+        env.pop(name, None)
     return env
