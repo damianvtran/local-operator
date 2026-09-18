@@ -57,14 +57,23 @@ from local_operator.session.creation import (
     ensure_session_created_at,
     session_created_at,
 )
+
+# The engagement reader — and the transcript filename it looks for — live in
+# ``session/runtime/engagement.py``, a stdlib-only module, so the peer-send core
+# can ask "has this COLD session been engaged?" without paying for this module's
+# dependency weight (that module's docstring has the whole reason). Re-exported
+# rather than redefined: exactly one definition of each, and every existing
+# importer of ``session.transcript`` keeps resolving.
+from local_operator.session.runtime.engagement import (  # noqa: F401
+    TRANSCRIPT_FILENAME,
+    durable_conversation_path,
+)
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
 
 logger = logging.getLogger(__name__)
-
-TRANSCRIPT_FILENAME = "transcript.jsonl"
 
 ENTRY_MESSAGE = "message"
 ENTRY_COMPACTION = "compaction"
@@ -136,48 +145,6 @@ def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
         )
         for entry in entries
     )
-
-
-def durable_conversation_path(path: Any) -> bool:
-    """Whether the transcript file at ``path`` holds a REAL conversation turn.
-
-    The seed signal for the record's ``started`` bit: ``RuntimeServer.__init__``
-    (a resumed boot must publish ``started=True`` before any turn runs in the
-    NEW process) and ``TuiSessionHandle.rebind`` (a ``/resume`` mid-flight
-    re-seeds the bit for the swapped identity). A message row alone is NOT the
-    discriminator: a round-1 quiet-dial of a peer note persists a
-    ``peer_message`` CustomMessage as a message row (kind ``custom``) through
-    ``append_messages``, without a turn ever running, so a session whose only
-    durable rows are quiet-dial notes would seed ``started=True`` — and a
-    peer's ``--wake`` or a broadcast would then drive an assistant turn into a
-    session the owner never typed in (QA Q4). Only a plain ``Message`` row
-    (kind ``message`` — a real user/assistant/tool turn) counts. Read from the
-    FILE rather than the in-memory index — the index is built by replay and is
-    not guaranteed populated at the moment either call site asks — and
-    defensively: no readable file answers False, the conservative "unstarted"
-    direction a first real turn immediately corrects.
-    """
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for row in handle:
-                try:
-                    entry = json.loads(row)
-                except ValueError:
-                    continue  # a torn line says nothing about history
-                if not isinstance(entry, dict) or entry.get("type") != ENTRY_MESSAGE:
-                    continue
-                payload = entry.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                # ``kind`` arrived with producer admission; a legacy row
-                # predating it IS a plain Message — the custom writer always
-                # tagged its rows.
-                if payload.get("kind", CUSTOM_KIND_MESSAGE) != CUSTOM_KIND_MESSAGE:
-                    continue
-                return True
-    except OSError:
-        return False
-    return False
 
 
 #: Rewrite the file only once this many bytes are provably reclaimable. A

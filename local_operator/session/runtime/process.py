@@ -1591,6 +1591,28 @@ async def _drain_inbox_into(handle: object) -> int:
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if directory is None:
         return 0
+    # AN UNENGAGED SESSION KEEPS ITS SPOOL. Rows can reach this inbox from a
+    # sender on an older build (one whose record read is absent-as-``True``) or
+    # from before any record existed, and draining them HERE would put a peer
+    # row at the head of a conversation its owner has not started — the boot
+    # drain runs before the socket listens, which is also before the owner's
+    # first turn. Leaving the file alone is what makes the delivery happen
+    # instead at that first turn (``Session._drain_spooled_peer_inbox``, once
+    # the owner IS engaged), so nothing is lost and nothing opens the history.
+    # The engaged case — including the handover, where a draining runtime spools
+    # for a successor — drains exactly as it always did.
+    from local_operator.session.runtime.engagement import (
+        TRANSCRIPT_FILENAME,
+        durable_conversation_path,
+    )
+
+    if not durable_conversation_path(directory / TRANSCRIPT_FILENAME):
+        logger.info(
+            "inbox drain skipped for %s: no durable history yet, so the person "
+            "has not engaged this session; rows stay for the first turn",
+            directory,
+        )
+        return 0
     try:
         lines = await asyncio.to_thread(drain_inbox, directory)
     except Exception:  # noqa: BLE001 — a bad spool must not block the runtime

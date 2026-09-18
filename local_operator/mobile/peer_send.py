@@ -29,6 +29,9 @@ from typing import Any, NamedTuple
 from local_operator.info.model import format_duration
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.engagement import (
+    session_has_durable_history as _session_has_durable_history,
+)
 
 #: How much of a stored session store the send-side fallback scans while
 #: hunting for a substring match. Discovery over the WHOLE store would pay one
@@ -48,6 +51,69 @@ STORED_DISCOVERY_LIMIT = 200
 PEER_MESSAGE_MAX_BYTES = 256 * 1024
 
 
+def unengaged_refusal(label: str) -> str:
+    """The ONE sentence that refuses a peer message to a never-engaged session.
+
+    A session that has not run a real turn yet (``SessionRecord.started`` is
+    False — the ``/new`` window where the record is published but the owner is
+    still composing their first prompt) is not a recipient: a peer row landing
+    there becomes the OPENING row of a conversation its owner never started,
+    which is the operator-reported symptom this gate exists for.
+
+    Three layers can each stop a delivery — resolution
+    (:func:`resolve_peer_target`), delivery (:func:`deliver_peer_message`) and
+    the receive-side gate (``session.runtime.server._dispatch``, the one that
+    also holds against a sender on an older build) — and they use the SAME
+    sentence, because a sender refused at one layer and retried into another
+    must not have to learn a second rule. Only ``label`` varies, and it is
+    written in the caller's own grammar (``pid 12345``, ``session 'abc'``,
+    ``session 12345``) so the target the refusal names is the one addressed.
+
+    The reason is stated as the FIX, not as a prohibition: the owner sends a
+    first message and the session becomes eligible at that moment (the first
+    turn publishes the flipped bit the resolver and the receive side both
+    read). ``/stop`` never reads this — the kill switch passes
+    ``require_started=False``, since a composer window is exactly a session a
+    person may need to stop.
+    """
+    return (
+        f"{label} has not been engaged yet (no user message has been sent in it), "
+        "so it cannot receive peer messages — its owner has to send a first message"
+    )
+
+
+def session_has_durable_history(session_id: str, *, root: "Path | None" = None) -> bool:
+    """Whether a session's OWN transcript already holds a real turn.
+
+    The cold half of the unengaged gate: a target with no live record still has
+    a durable history to ask about, and that history is what distinguishes a
+    session someone has used from a composer window that was never typed in.
+    The discriminator (only a plain ``Message`` row counts, so a quiet-dialled
+    peer note is not history) is
+    :func:`local_operator.session.runtime.engagement.durable_conversation_path`,
+    read through that stdlib-only module — NOT through ``session.transcript``,
+    which would drag pydantic in and break this module's pinned import contract.
+
+    ``root`` defaults to :func:`config_dir` and exists for the tests, which
+    drive the store out of a tmp dir. NEVER raises: an absent, unreadable or
+    malformed directory answers False — the conservative unengaged direction,
+    which the owner's first real turn immediately corrects.
+    """
+    return _session_has_durable_history(session_id, root=config_dir() if root is None else root)
+
+
+def delivery_label(record: "Any | None", session_id: str) -> str:
+    """How a delivery refusal names its target: ``pid 12345`` when we have the
+    live record (the form the sender typed), else the session id.
+
+    Shared with the receive-side gate's label shape so one refusal reads the
+    same wherever it is raised.
+    """
+    if record is not None:
+        return f"pid {record.pid}"
+    return f"session {session_id!r}"
+
+
 def resolve_peer_target(
     *,
     target: str | None = None,
@@ -56,6 +122,7 @@ def resolve_peer_target(
     pid_hint: str = "an exact pid",
     session_hint: str = "a session id",
     include_wedged: bool = False,
+    require_started: bool = True,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
@@ -77,7 +144,32 @@ def resolve_peer_target(
     for a runtime that will not answer. A send never wants that; a message to
     such a runtime is a message that may sit unread.
 
-    Note what that refusal is and is not. It is a rule about which target to
+    A record that has not run a real turn yet (``started`` False — the ``/new``
+    composer window) is not a recipient, and ``require_started`` (default True)
+    is where every send path enforces that: an EXACT ``pid``/``session``/all-digit
+    address is refused with :func:`unengaged_refusal` naming it, and a SUBSTRING
+    match skips it. Both halves matter and they fail differently: a broadcast
+    that reached an unengaged session would drive an interrupt into a
+    conversation nobody started, while an exact send that resolved to one would
+    let a caller who named it explicitly land the first row of that history.
+    The refusal for a substring match deliberately does NOT use the
+    ``no live session matches`` phrasing: that form is what opens the stored
+    fallback (``live_scan_found_nothing``), and a refusal about a session the
+    live scan DID reach must never fall through to a stored namesake — the same
+    wrong-recipient rule as the target+selector conflict below.
+
+    ``require_started=False`` resolves an unengaged record exactly as a started
+    one, and exists for the KILL SWITCH alone (``/stop``, ``lop stop`` in
+    ``tui/app.py`` and ``cli.py``): a composer window is a session a person may
+    need to stop, and a stop names its target rather than messaging it.
+    Delivery is not reachable through it — ``deliver_peer_message`` refuses an
+    unengaged target whatever the resolver allowed.
+
+    A session that stops being unengaged needs no re-scan: the first real turn
+    flips the record's ``started`` bit (``RuntimeServer.set_record_started``,
+    published by the owner process), and this reads the record.
+
+    Note what the wedged refusal is and is not. It is a rule about which target to
     DIAL, not a claim that the owner is broken: the beat is authored by the
     runtime's own event loop, so a busy session can read ``wedged`` too
     (``registry.classify``). The cost of being wrong that way is bounded and
@@ -131,6 +223,8 @@ def resolve_peer_target(
             if rec.pid == pid:
                 if state not in eligible:
                     return None, [], _not_dialable(f"target pid {pid}", rec, state)
+                if require_started and not getattr(rec, "started", True):
+                    return None, [], unengaged_refusal(f"pid {pid}")
                 return rec, [], ""
         return None, [], f"no session found with pid {pid}"
 
@@ -139,6 +233,8 @@ def resolve_peer_target(
             if rec.session_id == session:
                 if state not in eligible:
                     return None, [], _not_dialable(f"target session {session}", rec, state)
+                if require_started and not getattr(rec, "started", True):
+                    return None, [], unengaged_refusal(f"session {session!r}")
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
 
@@ -163,33 +259,50 @@ def resolve_peer_target(
                 pid_hint=pid_hint,
                 session_hint=session_hint,
                 include_wedged=include_wedged,
+                require_started=require_started,
             )
 
     needle = needle_source.lower()
     matches: list[Any] = []
+    # Live matches held back ONLY because the session has not been engaged yet.
+    # Kept rather than dropped so the refusal below can name what it reached and
+    # keep the stored fallback closed (see the docstring).
+    unengaged: list[Any] = []
     for rec, _state in live:
-        # A session that has never run a turn (``/new``, owner still composing
-        # the first prompt) is excluded from a BROADCAST/substring match: an
-        # interrupt there would drive a turn into a session whose owner has not
-        # started it. An EXACT ``--pid``/``--session`` send still resolves to it
-        # (the sender deliberately named that session); delivery then degrades
-        # to a quiet mailbox dial that drives no turn — see
-        # ``deliver_peer_message``. The default True keeps a record that simply
-        # lacks the attribute (a test double, a hand-built record) eligible; a
-        # pre-field binary's record round-trips through ``from_json``, which
-        # reads the ABSENT key as True (old peer behaviour preserved) — see the
-        # mixed-version note there.
-        if not getattr(rec, "started", True):
-            continue
+        # A session that has never run a turn is excluded from a
+        # BROADCAST/substring match: an interrupt there would drive a turn into
+        # a session whose owner has not started it, and a quiet note there would
+        # become the opening row of that history. The default True keeps a
+        # record that simply lacks the attribute (a test double, a hand-built
+        # record) eligible; a pre-field binary's record round-trips through
+        # ``from_json``, which reads the ABSENT key as True (old peer behaviour
+        # preserved) — see the mixed-version note there. That is exactly why the
+        # receive-side gate exists: an older SENDER resolves such a record and
+        # dials it, and only the receiver can refuse.
         haystacks = [
             rec.conversation_name or "",
             rec.session_id or "",
             os.path.basename(rec.cwd or ""),
         ]
-        if any(needle in field.lower() for field in haystacks):
-            matches.append(rec)
+        if not any(needle in field.lower() for field in haystacks):
+            continue
+        if require_started and not getattr(rec, "started", True):
+            unengaged.append(rec)
+            continue
+        matches.append(rec)
 
     if not matches:
+        if unengaged:
+            # A refusal ABOUT a live session the scan did reach. Deliberately
+            # NOT the no-match form: ``live_scan_found_nothing`` reads that
+            # phrasing as "try the stored store", and a stored namesake would
+            # then be spooled to — a recipient this call never named
+            # (BLOCKER-1). The count is stated when there is more than one.
+            if len(unengaged) == 1:
+                label = f"the only live match for {needle_source!r} (pid {unengaged[0].pid})"
+            else:
+                label = f"every live match for {needle_source!r} ({len(unengaged)} of them)"
+            return None, [], unengaged_refusal(label)
         # Distinguish "matched but not live" from "no match at all" so the caller
         # knows whether to wait or to fix the name.
         wedged = [
@@ -339,6 +452,12 @@ def resolve_stored_target(
     differs by name is a rename-timing edge, not a case worth a second
     registry scan on every stored send to catch.
 
+    A row whose session has NO durable history is skipped rather than returned:
+    such a session was never engaged, so it is not a recipient either — the
+    stored half of the same rule the live resolver applies with
+    ``require_started``. The read is one :func:`session_has_durable_history`
+    pass per MATCHING row only, and the no-match answer is unchanged.
+
     Returns ``(session_id, candidates, error)`` shaped like
     :func:`resolve_peer_target`'s triple for symmetry, with one deliberate
     difference: ``error`` is ALWAYS empty. A plain no-match is not this
@@ -367,6 +486,13 @@ def resolve_stored_target(
         candidate = StoredCandidate(session_id=row.id, conversation_name=row.name)
         haystacks = [candidate.conversation_name, candidate.session_id]
         if any(needle_folded in field.lower() for field in haystacks):
+            # Hold back the never-engaged row instead of resolving onto it: a
+            # broadcast must not be able to reach a conversation nobody started
+            # even through the stored fallback. The read happens ONLY here, on
+            # a row that already matched, so the scan stays one bounded name
+            # read per row for everything that does not match.
+            if not session_has_durable_history(row.id, root=directory):
+                continue
             matches.append(candidate)
     if not matches:
         return None, [], ""
@@ -399,14 +525,14 @@ async def _spool_quiet_note(
 ) -> str:
     """Spool one message for a session with NO live runtime. Returns receipt.
 
-    The single spool writer for ``deliver_peer_message``'s cold branch (and
-    historically its unstarted branch): one ``O_APPEND`` row under the
-    session's directory, consumed by the runtime child's boot drain
-    (``process._drain_inbox_into``) the next time that session actually opens
-    a runtime. A spool is ONLY for a session nobody has open — the drain runs
-    once at child boot, so a session that is already live would never read
-    it, which is why a live-but-unstarted target is dialled quietly instead
-    (see ``deliver_peer_message``).
+    The single spool writer for ``deliver_peer_message``'s cold branch: one
+    ``O_APPEND`` row under the session's directory, consumed by the runtime
+    child's boot drain (``process._drain_inbox_into``) the next time that
+    session opens a runtime — or, for a session that has not been engaged yet,
+    by the first real turn (``Session._drain_spooled_peer_inbox``). Only a
+    session with durable history ever reaches this writer: a cold target with
+    NO history is refused by the caller, so nothing here can become the opening
+    row of a conversation nobody started.
     """
     from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -438,17 +564,19 @@ async def deliver_peer_message(
 ) -> str:
     """Hand one message to a peer session, running or not. Returns the receipt.
 
-    Four cases, and the split between them is the whole point:
+    Three cases, and the split between them is the whole point:
 
+    - **A session that has not run a real turn yet** (``started`` False — the
+      ``/new`` composer window) — REFUSED, with
+      :func:`unengaged_refusal`, whether it is live or cold. Nothing is dialled
+      and nothing is spooled: a peer row written there would be the OPENING row
+      of a conversation its owner never started, which is the reported symptom
+      this gate exists for. The refusal is raised at THIS layer as well as in
+      resolution because a caller can bypass resolution (a hand-built record, a
+      future entry point), and because the cold half cannot be decided by
+      resolution at all — a target with no live record has no ``started`` bit to
+      read, only its durable history (see :func:`session_has_durable_history`).
     - **A live, started record** — dial it, exactly as before.
-    - **A live, UNSTARTED record** (``/new``, owner still composing) — dial it
-      in the quiet mailbox shape (``mailbox`` + no wake) so the receive side
-      paints the peer card and persists the row WITHOUT driving a turn. A
-      spool would be wrong here: a live record means the session is already
-      open, and the only inbox consumer is the runtime child's boot drain, so
-      a spooled note would sit unread for that session's whole life while the
-      receipt claimed otherwise. Degrading wake/steer to the quiet dial is
-      the deliverable form of "never drive a turn into an unstarted session".
     - **No runtime, quiet note** (``wake=False`` and mailbox mode) — SPOOL it.
       Starting a runtime here would contradict what the sender asked for:
       ``wake=False`` means "read this on your next turn", not "start one now",
@@ -465,24 +593,26 @@ async def deliver_peer_message(
 
     if record is not None:
         if not getattr(record, "started", True):
-            # Belt-and-braces with the resolver's broadcast exclusion: an
-            # exact-address send (or any caller that bypassed resolution) must
-            # NEVER drive a turn into a session whose owner is still composing
-            # their first prompt — so whatever mode/wake the sender asked for,
-            # the dial uses the record-only shape (``mailbox`` + no wake). The
-            # receive side's record-only branch persists the row and paints the
-            # peer card but spawns no turn, which makes the message visible to
-            # the already-open session NOW; a spool cannot (its only consumer
-            # is the runtime child's boot drain, and this session is past
-            # that). The default True is a defence against a NON-standard
-            # record that simply lacks the attribute (a test double, a
-            # hand-built record); a record a PRE-FIELD binary wrote round-trips
-            # through ``from_json``, which reads the absent key as ``True`` —
-            # old peer behaviour preserved — so an old working session is
-            # dialled normally, never degraded.
-            await _dial_or_explain(record, text=text, mode="mailbox", wake=False, sender=sender)
-            return "delivered to the mailbox (session not started yet; no turn driven)"
+            # The default True is a defence against a NON-standard record that
+            # simply lacks the attribute (a test double, a hand-built record); a
+            # record a PRE-FIELD binary wrote round-trips through ``from_json``,
+            # which reads the absent key as ``True`` — so an old working session
+            # is dialled normally. That mixed-version direction is why the
+            # RECEIVE side also gates: an older SENDER resolves such a record
+            # and dials it, and only the receiver can refuse (see
+            # ``session.runtime.server``'s ``peer_message`` op).
+            raise RuntimeError(unengaged_refusal(delivery_label(record, session_id)))
         return await _dial_or_explain(record, text=text, mode=mode, wake=wake, sender=sender)
+
+    # Cold target: the ONLY signal of engagement is the session's own durable
+    # history — a live record would have carried ``started``. Without it this is
+    # a conversation nobody has started, so neither branch below is a delivery
+    # to make: a spool would land the peer row at the head of that history once
+    # the owner starts typing, and ``engage_runtime`` is worse still — a
+    # ``wake`` would OPEN A TURN in a session whose owner is not there. Both are
+    # refused before any file is touched.
+    if not session_has_durable_history(session_id):
+        raise RuntimeError(unengaged_refusal(delivery_label(None, session_id)))
 
     if not wake and mode == "mailbox":
         return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)

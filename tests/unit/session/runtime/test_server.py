@@ -534,10 +534,16 @@ async def test_recall_steer_dispatches_by_command_id() -> None:
 
 @pytest.mark.asyncio
 async def test_peer_message_dispatches_with_parsed_args() -> None:
-    """A `lop send` peer_message reaches the handle with mode/wake/sender parsed."""
+    """A `lop send` peer_message reaches the handle with mode/wake/sender parsed
+
+    — for a session that HAS been engaged. ``set_record_started`` is called
+    first because the receive side now refuses an unengaged session outright
+    (see the refusal test below); this test is about the frame's arguments.
+    """
     handle = FakeHandle()
     runtime = RuntimeServer(handle, kind="tui")
     runtime.start()
+    runtime.set_record_started(True)
     writer = None
     try:
         record = await _wait_record()
@@ -666,13 +672,62 @@ async def test_an_owner_without_the_effort_capability_keeps_its_plain_switch() -
         runtime.close()
 
 
+@pytest.mark.asyncio
+async def test_peer_message_to_an_unengaged_session_is_refused() -> None:
+    """THE NEW RULE, receive side: a runtime whose record says ``started=False``
+    (a fresh ``/new`` in the composer) refuses a ``peer_message`` op.
+
+    This is the only layer that holds against a sender on an OLDER build: such
+    a sender reads a pre-field record's missing ``started`` key as True, resolves
+    it and dials — so the row can be refused here or not at all, and a row
+    written here would become the OPENING row of a conversation its owner never
+    started. The refusal rides the ordinary error frame, which both send
+    surfaces render as ``could not deliver: ...``.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        assert record.started is False
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "peer_message", "req": 13, "text": "hi", "mode": "mailbox"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        err = await _until(reader, "error", 13)
+        assert "has not been engaged yet" in err["message"]
+        assert "no user message has been sent in it" in err["message"]
+        assert "no live session" not in err["message"]
+        assert handle.calls == [], "nothing may reach the handle for an unengaged session"
+
+        # And the SAME frame is delivered the moment the session runs a turn,
+        # with no re-dial logic anywhere: the bit is the whole state.
+        runtime.set_record_started(True)
+        writer.write(
+            json.dumps({"op": "peer_message", "req": 14, "text": "hi", "mode": "mailbox"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 14)
+        assert "mailbox" in ack["detail"]
+        assert handle.calls[-1][0] == "receive_peer_message"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 class NoPeerHandle(FakeHandle):
     """An owner runtime that predates peer messaging: no receive_peer_message.
 
     The dispatch probes the capability with getattr, so a handle that simply
     lacks the method must surface the clear "cannot receive" error rather than
     an AttributeError — exactly the optional-capability contract recall_steer
-    documents."""
+    documents.
+    """
 
     receive_peer_message = None  # type: ignore[assignment]
 
@@ -682,6 +737,9 @@ async def test_peer_message_on_handle_without_capability_errors_cleanly() -> Non
     handle = NoPeerHandle()
     runtime = RuntimeServer(handle, kind="tui")
     runtime.start()
+    # The capability probe is reached only by an ENGAGED session now, so the
+    # engagment gate is satisfied first; the point here is the missing method.
+    runtime.set_record_started(True)
     writer = None
     try:
         record = await _wait_record()
