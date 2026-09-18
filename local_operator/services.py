@@ -475,21 +475,54 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
     return refreshes
 
 
+#: The width `status` keeps every line inside. The house budget, and the one the
+#: check in this module's tests asserts — a soft-wrapping terminal breaks mid-word, so
+#: 137 columns rendered as ``curre`` / ``nt`` (design review D6).
+_LINE_BUDGET = 80
+
+
+def _restart_can_move_anything() -> bool:
+    """Will ``lop services restart`` actually move a daemon on this machine?
+
+    BOTH questions the repair guard asks, because they gate different states and this
+    output promised on only one of them twice — once for the note (design review D7)
+    and once for the fleet advice line (round 11 R11-3). ``_repair_refusal`` refuses a
+    caller that is not an install at all AND one that is a different install from the
+    one the plists already run; keying on the stamp alone covered only the first.
+
+    An unanswerable guard is NOT permission, so an exception reads as "no".
+    """
+    from local_operator import update
+
+    if _current_stamp() is None:
+        return False
+    try:
+        return update._repair_refusal() is None
+    except Exception:  # noqa: BLE001 - an unreadable guard must not licence a promise
+        logger.debug("repair refusal unreadable", exc_info=True)
+        return False
+
+
 def status_lines() -> list[str]:
     """One line per non-runtime service, with the build it is serving.
 
-    The reader this exists for is an operator who has just been told "the server
-    is on an older build than the install" by a desktop app and wants to see
-    WHICH process said so. Nothing here acts, so it is safe to run at any time.
+    The reader this exists for is an operator who has just been told "the server is on
+    an older build than the install" by a desktop app and wants to see WHICH process
+    said so. Nothing here acts, so it is safe to run at any time.
 
     BOTH SIDES OF EVERY COMPARISON ARE NAMED, which the first version did not do
-    (design review D1). It printed the daemon's own version and nothing else, so on
-    a SAME-VERSION REBUILD — this host's ordinary drift, and the whole reason
+    (design review D1): it printed the daemon's own version and nothing else, so on a
+    SAME-VERSION REBUILD — this host's ordinary drift, and the whole reason
     ``BuildStamp`` compares a ref — the output read ``STALE (0.59.2)`` beside an
-    install that was also 0.59.2 with no ref anywhere to explain it, and in the
-    post-upgrade case the new build's version and ref appeared nowhere at all. A
-    verdict whose two operands are not both visible is not a report; it reads as a
-    fault in the tool that printed it.
+    install that was also 0.59.2 with no ref anywhere to explain it, and after an
+    upgrade the new build appeared nowhere at all. A verdict whose two operands are
+    not both visible is not a report; it reads as a fault in the tool that printed it.
+
+    NOTHING HERE PROMISES A MOVE THE TOOL CANNOT MAKE. Every sentence that names
+    ``lop services restart`` is gated on that command being able to act — the action
+    line and the supervised note both (D7, D11, R11-2, R11-3) — because on a checkout
+    the guard refuses and on a fleet where every stale daemon is non-reloadable the
+    verb skips the very daemons the line is about.
     """
     stamp = _current_stamp()
     lines: list[str] = [
@@ -504,29 +537,44 @@ def status_lines() -> list[str]:
         lines.append("serve daemons: none running")
     for record in daemons:
         lines.extend(_daemon_status_lines(record, stamp))
-    if stamp is not None and any(not _serves_current_build(record, stamp) for record in daemons):
-        # Only when there IS a build to move onto. Advising the command on a machine
-        # whose pointer names nothing is advice the tool cannot carry out (design
-        # review D1 — and D7 for the same clause on the note below).
-        lines.append("run `lop services restart` to move the stale ones onto the current build")
+    lines.extend(_fleet_action_lines(daemons, stamp))
     supervised = _supervised_daemon_plists()
     for path in supervised:
         lines.append(f"supervised daemon: {path.stem}")
     if supervised:
-        # Their build is NOT knowable here and saying nothing invites the reader to
-        # assume it is current (design review D3): a plist names the stable shim, which
-        # resolves the pointer when the process starts, so the build a supervised
-        # daemon serves is whatever `current` named at its last start.
         lines.append("note: a supervised daemon resolves the install when it starts,")
         lines.append("      so its build is not in the plist.")
-        if stamp is not None:
-            # GATED, and this is the same mistake the action line above had (design
-            # review D7): `update._repair_refusal` refuses an editable caller, so on a
-            # checkout `lop services restart` moves NONE of these four, and a note
-            # promising otherwise sends the reader to a command that contradicts the
-            # line they just read.
+        if _restart_can_move_anything():
             lines.append("      `lop services restart` puts them on the current build")
     return lines
+
+
+def _fleet_action_lines(daemons: Sequence[Any], stamp: Any) -> list[str]:
+    """What the reader should DO about the fleet, or nothing at all.
+
+    The advice is only printed when ``restart`` would actually act — there is a build
+    to move onto AND the guard permits it AND at least one stale daemon is reloadable.
+    ``reloadable`` defaults to False and records written before the capability existed
+    do not carry it, so "every stale daemon is unmovable" is the COMMON case, not an
+    edge one: naming the verb there sends the reader to a command that skips the very
+    daemons the line is about (design review D11, round 11 R11-2).
+    """
+    if not daemons:
+        return []
+    stale = [r for r in daemons if not _serves_current_build(r, stamp)]
+    if not stale:
+        return []
+    movable = [r for r in stale if getattr(r, "reloadable", False)]
+    if not movable or not _restart_can_move_anything():
+        # Written to the budget like every other line here — the first version of this
+        # sentence was 86 columns, over the budget it was added to protect.
+        return ["the stale ones cannot be moved by `lop services restart`; restart them by hand"]
+    if len(movable) == len(stale):
+        return ["run `lop services restart` to move the stale ones onto the current build"]
+    return [
+        f"run `lop services restart` for the {len(movable)} it can move; "
+        f"{len(stale) - len(movable)} need restarting by hand"
+    ]
 
 
 def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
@@ -537,10 +585,16 @@ def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
     both operands, producing a line that soft-wraps mid-word in an 80-column terminal
     and pushes the action clause, the part that says what to DO, onto the continuation
     where adjacent daemons' clauses start mid-sentence. So a daemon that needs nothing
-    stays on ONE line, and one that needs something gets its identity on a line of its
-    own followed by INDENTED lines that open with the verdict — the widest anchor the
-    eye has. Exactly one `serve daemon` line per record, so `grep`/`awk` still see a
-    row per daemon.
+    stays on ONE line when it fits, and one that needs something gets its identity on a
+    line of its own followed by INDENTED lines that open with the verdict — the widest
+    anchor the eye has. Exactly one `serve daemon` line per record, so `grep`/`awk`
+    still see a row per daemon.
+
+    THE JOINED FORM IS WIDTH-CHECKED, not assumed (round 11 R11-1): a long authority —
+    a link-local or global IPv6 host — takes ``serve daemon pid N on [host]:port —
+    current (X@y)`` past the budget on its own, so the verdict moves to its own line
+    when the joined one will not fit. The check is on the rendered length, so no host
+    or label can slip past it.
 
     ``reloadable`` is not reader vocabulary: it is rendered as the action it decides,
     and omitted where it decides nothing (D1). The authority is bracketed for an IPv6
@@ -552,15 +606,18 @@ def _daemon_status_lines(record: Any, stamp: Any) -> list[str]:
     serving = _record_label(record)
     where = f"serve daemon pid {record.pid} on {authority}"
     if stamp is None:
-        # NOT a tautology, and not a 151-column wall of prose either (D6): with no
-        # readable stamp there is nothing to compare against, and `_label(None)` falls
-        # back to a phrase that read like an answer. This is also what a DEVELOPER
-        # sees, because `disk_build()` is None in a checkout.
-        return [where, f"  serving {serving}; cannot be compared: the pointer names no build"]
+        # The install line above has already said WHY nothing can be compared, so this
+        # does not repeat it (design review D13) — and it is not a tautology about the
+        # current build either, which is what the first version printed here because
+        # `_label(None)` falls back to a phrase.
+        return [where, f"  serving {serving}"]
     if _serves_current_build(record, stamp):
-        return [f"{where} — current ({serving})"]
+        joined = f"{where} — current ({serving})"
+        if len(joined) <= _LINE_BUDGET:
+            return [joined]
+        return [where, f"  current ({serving})"]
     action = (
-        "will move on `lop services restart`"
+        "`lop services restart` will move it"
         if getattr(record, "reloadable", False)
         else "cannot move itself; restart it by hand"
     )
