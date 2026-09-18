@@ -145,6 +145,56 @@ def test_the_identity_check_is_a_real_health_read(monkeypatch: pytest.MonkeyPatc
     assert services._answers_as_record(record) is None
 
 
+def test_a_missing_stamp_moves_nothing_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R2-1's fence: a comparison against an absent right-hand side is not a verdict.
+
+    With no readable stamp, `_serves_current_build` answers False for EVERY
+    daemon — so without this guard the whole fleet looks stale to a caller that
+    has no build to move anything onto. Review demonstrated it end to end with a
+    fabricated-root daemon, and the reachable caller is a source checkout, whose
+    `disk_build()` is None.
+    """
+    monkeypatch.setattr("local_operator.update.disk_build", lambda *_a, **_k: None)
+    kills: list[tuple[int, int]] = []
+    records = [_record(pid=1), _record(pid=2)]
+    out = services.reload_serve_daemons(
+        scan=lambda: records, kill=lambda pid, sig: kills.append((pid, sig))
+    )
+    assert kills == []
+    assert len(out) == 1
+    assert "NOTHING was signalled" in out[0].warnings[0]
+
+
+def test_the_probe_url_brackets_an_ipv6_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bracket join is load-bearing and was untested (review round 2, NIT-2).
+
+    `http://::1:1111/health` is not a URL: an IPv6 literal must be bracketed, and
+    a probe that cannot parse its own URL is a probe that answers "did not
+    identify itself" for a daemon that is answering perfectly.
+    """
+    import json as json_mod
+
+    seen: list[str] = []
+
+    class _Response:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return json_mod.dumps({"result": {"instance_id": "v6"}}).encode()
+
+    def _open(url: str, timeout: float = 0) -> Any:
+        seen.append(url)
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    assert services._answers_as_record(_record(host="::1", port=1111, instance_id="v6")) is None
+    assert seen == ["http://[::1]:1111/health"]
+
+
 def test_a_daemon_already_on_the_current_build_is_left_alone(pointer: dict[str, Any]) -> None:
     """Nothing to move, so nothing is interrupted — no signal, no stream cut."""
     record = _record(version=NEW.version, source_ref=NEW.source_ref)

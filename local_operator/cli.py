@@ -984,10 +984,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="no_services",
         action="store_true",
         help=(
-            "Do not bring the `lop serve` daemons onto the new build (review round 1, "
-            "NIT-1: 'stop there' was wrong, because the supervised daemons are still "
-            "repaired — that is the pre-change behaviour exactly). Use this only when "
-            "something else will start the serves, e.g. a script that owns their launch."
+            "Do not bring the `lop serve` daemons onto the new build; the supervised "
+            "daemons are still repaired. Use this only when something else will "
+            "start the serves, e.g. a script that owns their launch."
         ),
     )
 

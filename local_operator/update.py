@@ -3882,6 +3882,31 @@ def _services_stage(*, wait_s: float | None = None) -> None:
     """
     from local_operator.services import print_refreshes, restart_services
 
+    # IS THIS AN INSTALLATION AT ALL? (review round 2, R2-1.) The same question
+    # `_repair_refusal` asks before it will touch the plists, and it is asked here
+    # for the same incident-shaped reason: a source checkout has no business
+    # moving the operator's services. Before the services stage existed this was
+    # unreachable by construction — a checkout that was behind hit
+    # `editable_refusal` above, and one that was not behind returned early — so
+    # wiring the stage to the "nothing to install" path is what opened it. The
+    # consequence was measured in review: an editable caller classifies EVERY
+    # daemon as stale (its `disk_build()` is None, and a comparison against an
+    # absent right-hand side is not a verdict) and signals the machine's fleet.
+    #
+    # `services.reload_serve_daemons` refuses on the same missing stamp, so this
+    # is the sentence rather than the fence — but the sentence is what an operator
+    # reads, and "a worktree bounced your mobile daemon" needs to be impossible to
+    # reach rather than merely survivable.
+    kind = install_kind()
+    if kind in (InstallKind.EDITABLE, InstallKind.UNKNOWN):
+        print(
+            f"warning: this install's kind is {kind.value}, so it does not own this "
+            "machine's services and none were moved; run `lop services status` to see "
+            "them, and run the update from the install that owns them",
+            file=sys.stderr,
+        )
+        return
+
     try:
         refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded

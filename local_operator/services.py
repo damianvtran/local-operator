@@ -53,16 +53,19 @@ logger = logging.getLogger("local_operator.services")
 
 #: How long one daemon has to come back on the new build before it is reported.
 #:
-#: Sized against the three things this wait has to cover, MEASURED rather than
-#: assumed (review round 1, NIT-3: an earlier draft of this comment credited the
-#: boot half with "low hundreds of milliseconds", which the end-to-end rig
-#: contradicts) — the drain (milliseconds in the ordinary case, because the
-#: standing relays are deliberately not waited for), the pre-exec smoke check on
-#: a cold import, and the successor's interpreter start plus record publish. On
-#: the reporting host a full reload is ~1.5-2 s, so thirty seconds is an order of
-#: magnitude of headroom and short enough that an operator sees the answer in the
-#: same breath as the install.
-RELOAD_WAIT_S = 30.0
+#: Sized against the phases it covers, MEASURED rather than assumed (review
+#: round 2, MINOR-2: the first version was 30 s while the daemon's own budgets
+#: summed to 40 s, so the caller could give up while the daemon was still
+#: working and report a failure for a reload that then succeeded):
+#:
+#:   drain   up to ``reload.DRAIN_BUDGET_S``  = 10 s
+#:   smoke   up to ``reload.SMOKE_TIMEOUT_S`` = 10 s
+#:   start   interpreter + record publish     = ~1.5-2 s on the reporting host
+#:
+#: 45 s is a margin over the worst honest sum rather than a restatement of it,
+#: and it is the CALLER's patience, not a phase's deadline: an expiry is a
+#: warning on a successful update, never a kill.
+RELOAD_WAIT_S = 45.0
 
 #: The poll period while waiting for a daemon's replacement to publish.
 RELOAD_POLL_S = 0.2
@@ -97,7 +100,14 @@ def _answers_as_record(record: Any) -> str | None:
     import urllib.error
     import urllib.request
 
-    url = f"http://{[record.host] if ':' in record.host else record.host}:{record.port}/health"
+    # AN IPv6 LITERAL MUST BE BRACKETED, and the first version of this line was
+    # not: `f"http://{[record.host]}:…"` renders the list `['::1']`, so every
+    # probe of a v6 daemon asked a URL that cannot parse and the daemon was
+    # reported as "did not identify itself" while answering perfectly. Found by
+    # the test the review asked for (round 2, NIT-2), which is the whole reason it
+    # was asked for.
+    authority = f"[{record.host}]" if ":" in record.host else record.host
+    url = f"http://{authority}:{record.port}/health"
     try:
         with urllib.request.urlopen(url, timeout=HEALTH_TIMEOUT_S) as response:
             import json
@@ -215,11 +225,49 @@ def reload_serve_daemons(
     for the same reason: the install has already been replaced, and a failed
     nudge must not be reported as a failed update.
     """
+    # SCAN FIRST, so "nothing to say" stays silent. A machine with no serve
+    # daemons running is not a machine with a broken install, and a warning on
+    # every `lop update` on such a host would be noise that trains its reader to
+    # ignore the line that matters.
+    daemons = scan()
+    if not daemons:
+        return []
     stamp = _current_stamp()
+    if stamp is None:
+        # NO STAMP MEANS NO PREDICATE (review round 2, R2-1). ``_serves_current_build``
+        # answers False when the stamp is unreadable, so without this guard EVERY
+        # daemon looks stale and the whole fleet gets signalled by a caller that
+        # has no build to move anything onto. That is not hypothetical: it was
+        # reachable the moment the services stage started running on ``lop
+        # update``'s "nothing to install" path, and a source checkout is exactly
+        # such a caller — its ``disk_build()`` is None, so a developer running
+        # ``lop update`` in their worktree would have bounced the operator's
+        # mobile daemon, browser bridge, tunnel and serves. Demonstrated end to
+        # end in review with a fabricated-root daemon: stale → signalled →
+        # really reloaded.
+        #
+        # The invariant this restores: "stale" is a comparison, and a comparison
+        # against an absent right-hand side is not a verdict. Fail-closed, and
+        # said out loud — an operator whose pointer is unreadable AND who has
+        # daemons running has a real problem and should hear about it.
+        return [
+            ServiceRefresh(
+                "serve daemons",
+                warnings=(
+                    "warning: this install has no build the pointer can name, so no "
+                    "service can be moved onto it and NOTHING was signalled. Run "
+                    "`lop services status` to see what is running, and `lop update` "
+                    "from the install that owns them.",
+                ),
+            )
+        ]
     refreshes: list[ServiceRefresh] = []
     pending: list[Any] = []
 
-    for record in scan():
+    # The SCAN IS DONE ONCE and reused: scanning twice would let a daemon arrive
+    # or depart between the guard and the loop, which is exactly the kind of gap
+    # the guard exists to close.
+    for record in daemons:
         name = _serve_name(record)
         if _serves_current_build(record, stamp):
             refreshes.append(ServiceRefresh(name, lines=(f"{name} is already on {_label(stamp)}",)))
