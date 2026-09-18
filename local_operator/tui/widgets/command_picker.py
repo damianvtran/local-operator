@@ -2260,14 +2260,15 @@ class CommandPicker(Static):
             cursor=cursor_style,
         )
 
-    def _gutter(self, styles: _RowStyles, name: str = "") -> Text:
+    def _gutter(self, styles: _RowStyles, name: str) -> Text:
         """The selection mark for one row, plus the D5 "this key SENDS" variant.
 
         ``name`` is the row's own name so the send question can be asked of the
         row being painted rather than of a flag set elsewhere — see
-        :meth:`set_send_predicate`. It defaults to ``""`` so a caller with no
-        row identity (there is none today) gets the plain cursor rather than an
-        exception.
+        :meth:`set_send_predicate`. It is REQUIRED: every call site has a row
+        identity, and a default of ``""`` for a hypothetical caller without one
+        would have that caller's rows silently claim "this row cannot send"
+        rather than fail where the omission is.
 
         The mark stays in the cursor's own cell and the padding stays derived
         from the constant rather than written out: a hard-coded mark under a
