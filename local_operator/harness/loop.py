@@ -30,7 +30,7 @@ import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -56,6 +56,7 @@ from local_operator.harness.types import (
     AgentStartEvent,
     AgentTool,
     AgentToolUpdate,
+    ApprovalDescribeFn,
     Aside,
     ChatRequest,
     Content,
@@ -582,6 +583,35 @@ async def _get_before_timeout(queue: asyncio.Queue[_QueueItemT], timeout: float)
     if delivered:
         return getter.result()
     raise TimeoutError
+
+
+def _describe_call(
+    describe: ApprovalDescribeFn,
+    arguments: dict[str, Any],
+    cwd: str,
+    context: ToolContext | None,
+) -> str:
+    """Call a describer, handing it the turn's context only if it asks for one.
+
+    Opt-in by PARAMETER NAME, the way ``harness/approval.py`` resolves a gate's
+    ``job_id``: every describer that takes ``(args, cwd)`` — which is all of them
+    but the path one — is called exactly as before, while a describer that also
+    declares ``context`` receives it. Counting parameters would be wrong in both
+    directions (a ``*args`` describer would be handed an argument it cannot
+    name, and a keyword-only third parameter would be missed), and the reason a
+    describer needs the context at all is that some targets have no path to name
+    without the session's roots: ``scratchpad://perf.md`` resolves to a file
+    under the session directory, and an approval prompt that cannot name it is
+    asking a person to authorise a file it will not show them.
+    """
+    try:
+        parameters = inspect.signature(describe).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "context" not in parameters:
+        return describe(arguments, cwd)
+    wide = cast("Callable[..., str]", describe)
+    return wide(arguments, cwd, context=context)
 
 
 def _consume_claim(claimed: Counter[str], call_id: str) -> bool:
@@ -2791,7 +2821,7 @@ class AgentLoop:
             and tool_context is not None
             and tool_context.request_approval is not None
         ):
-            summary = self._approval_summary(tool, call, tool_context.cwd)
+            summary = self._approval_summary(tool, call, tool_context.cwd, tool_context)
             try:
                 approved = await ask_approval(
                     tool_context.request_approval,
@@ -3618,7 +3648,9 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _approval_summary(tool: AgentTool, call: ToolCall, cwd: str) -> str:
+    def _approval_summary(
+        tool: AgentTool, call: ToolCall, cwd: str, context: ToolContext | None = None
+    ) -> str:
         """The sentence the approval prompt shows for ``call``.
 
         The tool's own ``describe_approval`` when it has one, because only the
@@ -3631,7 +3663,7 @@ class AgentLoop:
         describe = tool.describe_approval
         if describe is not None:
             try:
-                described = describe(call.arguments, cwd)
+                described = _describe_call(describe, call.arguments, cwd, context)
             except Exception:
                 # A description is never worth failing a call over: fall through
                 # to the dump, which is always renderable.
