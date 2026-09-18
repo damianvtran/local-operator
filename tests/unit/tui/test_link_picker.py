@@ -27,6 +27,7 @@ from unittest.mock import patch
 import pytest
 from textual import events
 
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import (
     AssistantDelta,
@@ -38,6 +39,7 @@ from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from tests.unit.tui.conftest import painted_row
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: A message holding every shape the extractor must find: a markdown link, a
@@ -115,6 +117,30 @@ def _body_region(screen: LinkPickerScreen):
     body = screen._body
     assert body is not None
     return body.region
+
+
+def _card_cells(
+    app: OperatorApp, screen: LinkPickerScreen
+) -> list[tuple[int, str, str | None, str | None]]:
+    """(row, text, fg hex, bg hex) for every segment painted inside the card.
+
+    Sliced by the body's own region and read from the compositor strips, the
+    shape `conftest.composer_cells` documents: the card's own ``Text`` is what
+    the code intended, and these are the cells the terminal was SENT. That is
+    the difference the ink findings turn on — a `Style` on a span nobody reads
+    looks identical to a correct one — and the ROW is carried so a finding
+    about one row (the hover ground) can be told from one about the card.
+    """
+    region = _body_region(screen)
+    strips = list(app.screen._compositor.render_strips())
+    cells: list[tuple[int, str, str | None, str | None]] = []
+    for y in range(region.y, min(region.bottom, len(strips))):
+        for segment in strips[y]._segments:
+            style = segment.style
+            fg = style.color.get_truecolor().hex.lower() if style and style.color else None
+            bg = style.bgcolor.get_truecolor().hex.lower() if style and style.bgcolor else None
+            cells.append((y, segment.text, fg, bg))
+    return cells
 
 
 def _wheel(screen: LinkPickerScreen, down: bool):
@@ -287,6 +313,124 @@ async def test_a_click_opens_the_row_it_landed_on() -> None:
             await pilot.pause()
             await pilot.pause()
     assert opener.urls == ["https://bare.test/x"], opener.urls
+
+
+@pytest.mark.asyncio
+async def test_a_hovered_row_changes_the_frame_and_raises_the_hand() -> None:
+    """The mouse affordance, in both halves the design round asked for.
+
+    The card answers a CLICK by handing a URL to the browser, and a click needs
+    no pointer shape and no highlight to work — so the whole affordance is the
+    hover ground and the hand, which is `copy_picker`'s argument for treating
+    those two as the entire mouse story on a picker. On this card both were
+    absent: `styles.pointer` stayed ``default`` and the moved-pointer frame was
+    byte-identical to the resting one (design round 1, D3).
+
+    Asserted as a DIFFERENCE between two frames rather than as an attribute, so
+    a highlight that is painted and then overpainted — or painted in the same
+    colour as the rest of the row — still fails. The pointer is read from
+    ``screen._pointer_shape`` (the shape the terminal was told) rather than from
+    the inline style, which is `test_pointer_shapes`' rule.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_picker(
+            app, _targets("https://one.test/a", "https://two.test/b"), pilot
+        )
+        resting = _card_cells(app, screen)
+        assert screen._hovered is None
+        assert app.screen._pointer_shape == "default"
+
+        # Row 1: the body's origin, past the title and the rule.
+        region = _body_region(screen)
+        landed = await pilot.hover(screen._body, offset=(4, 3))
+        assert landed, "hover missed the card"
+        await pilot.pause()
+
+        assert screen._hovered == 1, "the highlight lands on the row under the pointer"
+        assert screen._selected == 0, "hovering must not move the selection"
+        assert app.screen._pointer_shape == "pointer", "a clickable row gets the hand"
+        hovered = _card_cells(app, screen)
+        assert hovered != resting, "the moved-pointer frame must DIFFER from the resting one"
+        # The difference is on that row's GROUND, and it is the ground the
+        # sibling cards use: `raised`, not the selection's `tint-select`.
+        raised = theme_mod.semantic_color("raised").lower()
+        changed = [cell for cell in hovered if cell not in resting]
+        assert changed, "the highlight must be visible in the painted cells"
+        assert {row for row, _, _, _ in changed} == {region.y + 3}, changed
+        assert all(bg == raised for _, _, _, bg in changed), changed
+        assert "two.test/b" in "".join(text for _, text, _, _ in changed), changed
+
+        # Leaving the card gives the hand and the highlight back: a shape that
+        # never resets is a cursor the user stops trusting.
+        await pilot.hover(app._transcript_view(), offset=(5, 0))
+        await pilot.pause()
+        assert screen._hovered is None
+        assert app.screen._pointer_shape == "default"
+        assert _card_cells(app, screen) == resting, "the resting frame comes back"
+
+
+@pytest.mark.asyncio
+async def test_the_cards_own_words_are_legible_on_its_own_ground() -> None:
+    """The footer's glosses, the counter's words and every row's sender are
+    `dim`, the step `session_picker` took on this same `$lo-overlay` ground.
+
+    `faint` on #302a20 measures 1.49:1 — written down twice in this repo as the
+    reason a sibling card moved off it — so at `faint` the two words telling a
+    user how to act and how to leave were among the faintest pixels on the card
+    (design round 1, D2). The ` · ` separators stay `faint`: meta separators are
+    what that token is for.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_picker(
+            app, _targets(*[f"https://a.test/{n}" for n in range(24)]), pilot
+        )
+        cells = _card_cells(app, screen)
+        dim = theme_mod.semantic_color("dim").lower()
+        faint = theme_mod.semantic_color("faint").lower()
+
+        # The words whose ink changed: the footer's three glosses, the
+        # counter's two, and every row's sender. The counter's NUMBERS were
+        # already `dim` and are not asserted here — only the words that moved.
+        words = {"move", "open", "cancel", "agent", "showing", "of"}
+        seen = set()
+        for _, text, fg, _ in cells:
+            if text.strip() in words:
+                seen.add(text.strip())
+                assert fg == dim, f"{text.strip()!r} is painted {fg}, not `dim` on the card"
+        # Guard the guard: the words must actually be on the painted frame, or
+        # the loop above passes by finding nothing.
+        assert seen == words, seen
+        separators = [fg for _, text, fg, _ in cells if text == " · "]
+        assert separators, "the footer's separators are painted"
+        assert set(separators) == {faint}, separators
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_terminal_gets_the_notice_that_fits() -> None:
+    """The too-small notice clips its own way out, so the narrow form is used.
+
+    The long form needs 35 content cells; at 30x8 the clipped rendering was
+    `terminal too small for` — the command named and ` · esc`, the only thing a
+    user can do from there, gone. `copy_picker` keeps `TOO_SMALL_NOTICE_SHORT`
+    for exactly this case and picks on the width the screen resolved (design
+    round 1, D1).
+    """
+    for size, expected in (
+        ((30, 8), "too small · esc"),
+        ((38, 8), "terminal too small for /links · esc"),
+    ):
+        app = _real_app()
+        async with app.run_test(size=size) as pilot:
+            screen = await _open_picker(app, _targets("https://a.test/x"), pilot)
+            assert not screen.is_drawable(), size
+            notice = screen.query_one("#link-picker-too-small")
+            assert notice.display is True
+            # Stripped: the notice is centred in the content box, and it is
+            # the CLIP at 30x8 that this test is about — a clipped frame sheds
+            # both ends of the string, not just the tail.
+            assert painted_row(app, notice).strip() == expected, size
 
 
 @pytest.mark.asyncio
