@@ -1046,16 +1046,20 @@ def test_partial_last_line_is_not_described_as_an_unbroken_copy(
     assert "only partly shown" in page.text, page.text[-400:]
 
 
-def test_string_marker_keeps_the_identity_when_nothing_survives() -> None:
-    # Review round 2, N1: on the marker-only branch the count must be the whole
-    # value, not `total - room`, which under-reported the loss by `room`.
-    value = "v" * 5_000
-    out = builtin._elide_string_middle(value, 20)
-    assert out.startswith("...")
-    elided = re.search(r"\[(\d+) of (\d+) chars elided\]", out)
-    assert elided, out
-    assert int(elided.group(2)) == 5_000
-    assert int(elided.group(1)) == 5_000, "nothing survived, so nothing was kept"
+def test_string_marker_count_is_the_chars_actually_dropped() -> None:
+    # The count identity, across the sizes where the marker is a large share of the
+    # budget. Review round 3's N1 correction: the marker-only branch (room == 0)
+    # always reported `total`, so the round-2 finding about it was wrong and is
+    # recorded as such in the code; this grid pins the property that IS load-bearing
+    # — dropped == total - kept — instead of the inert branch case.
+    for total, string_limit in [(5_000, 20), (1_000, 40), (200, 60), (100_000, 120), (12, 8)]:
+        value = "v" * total
+        out = builtin._elide_string_middle(value, string_limit)
+        elided = re.search(r"\.\.\.\[(\d+) of (\d+) chars elided\]\.\.\.", out)
+        assert elided, (total, string_limit, out)
+        kept_content = len(out) - len(elided.group(0))
+        assert int(elided.group(2)) == total, (total, string_limit)
+        assert int(elided.group(1)) == total - kept_content, (total, string_limit, out)
 
 
 def test_one_line_copy_search_route_says_what_it_returns(context: ToolContext) -> None:
@@ -1067,3 +1071,69 @@ def test_one_line_copy_search_route_says_what_it_returns(context: ToolContext) -
     assert "?q=<regex>" in body
     assert "read around them" not in body, "a one-line copy has no lines to read around"
     assert "the whole line comes back" in body
+
+
+def test_python_repr_output_is_not_treated_as_a_json_document(context: ToolContext) -> None:
+    # `json.JSONDecodeError` is the "not a JSON document" signal; a bare `{`/`[` is
+    # not. `eval` hands its printed body straight to spill_truncate, so `print(rows)`
+    # on a list or dict of records — Python's repr, single quotes — is the busiest
+    # payload this function sees, and treating a leading bracket as evidence of a
+    # document collapsed 10-12 KB of readable output to a 167-byte stub with a
+    # `not_parseable` reason that was false (review round 3, F1).
+    shapes = {
+        "list of dicts": repr(
+            [{"id": index, "name": f"record {index}", "note": "n" * 200} for index in range(80)]
+        ),
+        "list of strings": repr([f"row {index} " + "x" * 300 for index in range(100)]),
+        "dict": repr({index: "v" * 200 for index in range(120)}),
+        "bracketed log": "[INFO] starting\n"
+        + "".join(f"[INFO] step {index} done\n" for index in range(700)),
+    }
+    for name, text in shapes.items():
+        assert len(text) > 8_192, name
+        body, details = builtin.spill_truncate(text, "eval", context)
+        assert details is not None
+        assert '"not_parseable"' not in body, f"{name}: readable output is not a refused document"
+        # The line path kept readable content from both ends, as it did before the
+        # F1 fix went in.
+        assert len(body) > 4_000, (name, len(body))
+        assert body.lstrip().startswith(text.lstrip()[:20]), (name, body[:80])
+        head, _ = builtin._clip_head_tail(text, 4_000 - len(builtin.BASH_TRUNCATION_MARKER))
+        assert head[:64] in body, name
+
+    # …and a genuine document still takes the structured branch.
+    payload = json.dumps({"assessment_id": "ra_1", "rows": [{"n": "n" * 40} for _ in range(200)]})
+    body, _ = builtin.spill_truncate(payload, "eval", context)
+    parsed_document, _ = json.JSONDecoder().raw_decode(body.lstrip("\ufeff"))
+    assert parsed_document["assessment_id"] == "ra_1"
+
+
+def test_numeric_scalar_variants_still_get_the_envelope(context: ToolContext) -> None:
+    # Review round 3, F2: the old shape test compared the whole head against a
+    # numeric charset, so one trailing space or newline defeated it and the payload
+    # was spliced into the number. The exception TYPE does not care about
+    # whitespace — both variants raise the plain ValueError — so both are closed.
+    for suffix in ("", "\n", " "):
+        text = "1" * 9_000 + suffix
+        body, details = builtin.spill_truncate(text, "eval", context)
+        assert details is not None
+        assert builtin.BASH_TRUNCATION_MARKER not in body, repr(suffix)
+        parsed = _parseable_head(body)  # the footer follows the document
+        assert parsed[builtin.ELISION_MARKER_KEY]["reason"] == "not_parseable", repr(suffix)
+
+
+def test_document_trailer_is_kept_not_dropped(context: ToolContext) -> None:
+    # Review round 3, F3: the text after a parsed document is outside it, so it can
+    # be kept losslessly rather than "elided out" — dropping it silently was the
+    # failure mode, because the only signal was an aggregate char count a reader
+    # attributes to the elided JSON fields.
+    document = json.dumps({"assessment_id": "ra_1", "notes": "n" * 9_000})
+    body, details = builtin.spill_truncate(
+        document + "\nTRAILER-TEXT-THAT-MATTERS", "eval", context
+    )
+    assert details is not None
+    assert "TRAILER-TEXT-THAT-MATTERS" in body
+    # …and the document before it is still a clean parseable prefix.
+    parsed, end = json.JSONDecoder().raw_decode(body.lstrip("\ufeff"))
+    assert end < len(body)
+    assert parsed["assessment_id"] == "ra_1"

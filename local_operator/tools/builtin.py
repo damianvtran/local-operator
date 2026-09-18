@@ -587,19 +587,20 @@ def _elide_json(text: str, limit: int) -> str | None:
     overwrite an upstream ``_truncated``, destroying the signal that the proxy,
     not the harness, elided it. A distinct key cannot collide with either.
 
-    ``None`` means "no complete JSON document at the head of this text" — NOT
-    "not JSON". The difference is the point: the parser this asks is CPython's,
-    which is stricter than JSON. It refuses a number past its int-conversion
-    guard (4,301 digits, CVE-2020-10735), a document nested past the recursion
-    limit, and any document followed by non-whitespace, and all three are JSON a
-    model's own parser accepts. So the question is asked with ``raw_decode``
-    (a complete document at the head, trailing region ignored), and a payload
-    that is JSON-SHAPED but that the parser refused gets the envelope from
-    :func:`_refused_json_envelope` rather than ``None`` — because ``None`` is the
+    ``None`` means the interpreter's parser raised ``JSONDecodeError`` — this text
+    is not a JSON document — or the text is a bare scalar with other text after it,
+    which is a log line that happens to begin with a number. It does NOT mean
+    "not JSON", and that distinction is the whole rule: CPython is stricter than
+    JSON, refusing a number past its int-conversion guard (4,301 digits,
+    CVE-2020-10735) and a document nested past the recursion limit, and both are
+    JSON a model's own parser accepts. Those get the envelope from
+    :func:`_refused_json_envelope` rather than ``None``, because ``None`` is the
     one value that routes into the head+tail path, which splices a marker into
-    bytes the model was about to parse. Nothing is ever spliced into a
-    document-shaped payload; prose and logs still take the line path, where a
-    spliced marker is readable and correct.
+    bytes the model was about to parse. So the question is asked with
+    ``raw_decode`` AND the exception TYPE decides — syntax means text, a refusal
+    means a document — never the payload's first character, because `{` and `[`
+    begin `print(rows)` output and bracketed logs as readily as they begin a
+    document.
     """
     # A UTF-8 BOM survives the transport of some tool results, and `json.loads`
     # rejects one in `str` input. Without this a BOM'd payload was classified
@@ -607,23 +608,32 @@ def _elide_json(text: str, limit: int) -> str | None:
     # into its first line — reproduced on a 20,010-char BOM'd document as
     # "Expecting value: line 1 column 1" (review round 1, F1a).
     head = text.lstrip("\ufeff \t\r\n")
-    document_shaped = _json_document_shaped(head)
     try:
         parsed, consumed = json.JSONDecoder().raw_decode(head)
+    except json.JSONDecodeError:
+        # The interpreter says this is NOT a JSON document: prose, a log line,
+        # Python's repr of a list or dict (single quotes), a bracketed log, a
+        # truncated fragment. The line path is right for all of those — a spliced
+        # marker in readable text still reads — and deciding by EXCEPTION TYPE
+        # rather than by the first character is what keeps that true: `[` and `{`
+        # start `print(rows)` and `[INFO]` output as readily as they start a
+        # document. A leading-brace test collapsed 10-12 KB of readable eval output
+        # to a 167-byte stub and labelled it `not_parseable`, which was false
+        # (review round 3, F1). Do not reintroduce a shape proxy here.
+        return None
     except (ValueError, RecursionError):
-        if not document_shaped:
-            # Not a document shape: prose, a log line, a truncated fragment. The
-            # line path is the right answer for those, and a spliced marker in a
-            # log line is readable.
-            return None
-        # JSON-shaped and refused: never hand these bytes to the splice path.
+        # NOT a JSONDecodeError, so this text IS a document the interpreter's
+        # parser refused: a number past the int-conversion guard (plain
+        # ValueError, CVE-2020-10735), or nesting past the recursion limit. A
+        # model's own parser accepts those, so they get the envelope rather than a
+        # marker spliced into bytes the model was about to parse.
         return _refused_json_envelope(head, limit, len(text))
-    if not document_shaped and head[consumed:].strip():
-        # A SCALAR followed by more text: that is a log line that happens to start
-        # with a number ("2026-09-17T01:23 …"), not a document with a trailer, and
-        # eliding it structurally would throw the line away. A container keeps its
-        # trailer elided-out (the shape review round 2 F1 named): the document is
-        # what a caller parses, and the trailer is outside it.
+    if not isinstance(parsed, (dict, list)) and head[consumed:].strip():
+        # A bare SCALAR followed by text is a log line that happens to start with a
+        # number ("2026-09-17T01:23 …"), not a document with a trailer; eliding it
+        # structurally would keep 4 characters and throw the line away. A container
+        # keeps its trailer, appended after the document (see below): the document
+        # is what a caller parses and the trailer is outside it, so both fit.
         return None
     parsed = _scrub_surrogates(parsed)
     for rung in JSON_ELISION_RUNGS:
@@ -631,25 +641,31 @@ def _elide_json(text: str, limit: int) -> str | None:
             _elide_json_value(parsed, rung, 0), separators=(",", ":"), ensure_ascii=False
         )
         if len(candidate) <= limit:
-            return candidate
+            return _with_trailer(candidate, head[consumed:], limit)
     return _elision_envelope(parsed, limit, len(text))
 
 
-# A JSON document is an object or an array; a bare numeric scalar is also JSON the
-# parser can refuse (CPython's 4,301-digit int-conversion guard, CVE-2020-10735)
-# and cannot be prose, because prose has letters or spaces. Deliberately NOT "any
-# character that can start a JSON value": `n`, `t`, `f` and a leading digit also
-# start ordinary log lines ("no adverse media found", "2026-09-17T01:23 …"), and
-# sending those to the envelope would trade a readable log for a shape note.
-_NUMERIC_CHARS = frozenset("0123456789+-.eE")
+def _with_trailer(document: str, trailer: str, limit: int) -> str:
+    """The elided document with the text that followed it kept, not dropped.
 
-
-def _json_document_shaped(head: str) -> bool:
-    """Whether a payload the parser REFUSED is still a JSON document. Only used on
-    the failure path: a payload this says yes to is never spliced into."""
-    if head.startswith(("{", "[")):
-        return True
-    return bool(head) and len(head.split()) == 1 and set(head) <= _NUMERIC_CHARS
+    A payload can be a JSON document followed by a status line, and the trailer is
+    OUTSIDE the document a caller parses, so keeping it costs nothing and losing it
+    silently is the failure mode this module keeps paying for: the served result
+    showed only an aggregate character count, which a reader attributes to the
+    elided JSON fields the `_elided` marker enumerates (review round 3, F3). The
+    trailer is bounded by what is left of the budget, and when it does not fit the
+    note says how long it was so the handle is the obvious next call.
+    """
+    if not trailer.strip():
+        return document
+    room = limit - len(document)
+    if room <= 0:
+        return document
+    if len(trailer) <= room:
+        return document + trailer
+    note = f"\n...[{len(trailer) - room} of {len(trailer)} trailer chars elided]...\n"
+    keep = max(0, room - len(note))
+    return document + trailer[:keep] + note if keep else document
 
 
 def _refused_json_envelope(head: str, limit: int, original_chars: int) -> str:
