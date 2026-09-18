@@ -22,7 +22,10 @@ state plus a set of *typed questions* and get typed answers back — a `choice` 
 with a probability distribution, a `noul` yes/no probability, or a `score` over ordered levels.
 It cannot generate prose, and it cannot invent an option. Measured on 31 labelled PEP-tier cases:
 31/31 correct with the rubric carried in the option descriptions, 17/31 without it, p50 0.20 s,
-~$0.00005 per call.
+~$0.00005 per call **on that evaluation arm** — a mid-2026 Jev measurement at that model's own
+pricing, not the cost of the routes that ship now. The live figure is
+`~$0.00006–$0.00018 per call` by roster (§12 records the input-token arithmetic, and
+`guide://classification` states the shipped range).
 
 This layer does not replace those heuristics. It runs **beside** them, once per user message,
 and adds a short, advisory list of resources the agent may want to read. Every existing
