@@ -54,7 +54,7 @@ from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
-from local_operator.env import get_env_config
+from local_operator.env import get_env_config, resolve_radient_api_base_url
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
@@ -5710,6 +5710,20 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
     return 0
 
 
+def _radient_hub_base_url(config_manager: ConfigManager) -> str:
+    """The ONE place the CLI resolves the Radient Agent Hub API root.
+
+    ``config.yml``'s ``radient_base_url`` wins when set;
+    :func:`~local_operator.env.resolve_radient_api_base_url` supplies the
+    ``RADIENT_API_BASE_URL``/canonical default otherwise, version segment
+    included. Sharing this helper is the point: ``agents delete``, ``agents
+    push`` and ``agents pull`` each carried their own literal, two of the three
+    naming a route or a host that does not exist, so one configuration resolved
+    three different destinations and two of them could never work.
+    """
+    return resolve_radient_api_base_url(config_manager.get_config_value("radient_base_url", None))
+
+
 def agents_delete_command(
     args: argparse.Namespace, agent_registry: "AgentRegistry", config_dir: Path
 ) -> int:
@@ -5737,7 +5751,7 @@ def agents_delete_command(
 
         credential_manager = CredentialManager(config_dir)
         config_manager = ConfigManager(config_dir)
-        base_url = config_manager.get_config_value("radient_base_url", "https://api.radienthq.com")
+        base_url = _radient_hub_base_url(config_manager)
         api_key = resolve_radient_credential_sync(credential_manager, base_url)
         if not api_key:
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
@@ -7429,9 +7443,7 @@ def main() -> int:
 
                 credential_manager = CredentialManager(base_dir)
                 config_manager = ConfigManager(base_dir)
-                base_url = config_manager.get_config_value(
-                    "radient_base_url", "https://api.radienthq.com"
-                )
+                base_url = _radient_hub_base_url(config_manager)
                 api_key = resolve_radient_credential_sync(credential_manager, base_url)
                 if not api_key:
                     print(
@@ -7486,9 +7498,7 @@ def main() -> int:
                 agent_id = args.id
                 # Get Radient base URL from config or use default
                 config_manager = ConfigManager(base_dir)
-                base_url = config_manager.get_config_value(
-                    "radient_base_url", "https://api.radientlabs.ai"
-                )
+                base_url = _radient_hub_base_url(config_manager)
                 radient_client = RadientClient(api_key=None, base_url=base_url)
                 try:
                     imported_agent, renamed_from = agent_registry.download_agent_from_radient(
