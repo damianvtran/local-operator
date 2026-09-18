@@ -178,6 +178,40 @@ def at_token(text: str, cursor: int | None = None) -> SlashContext | None:
     return SlashContext(line_start + at, query, line_start + end)
 
 
+def at_token_spans(line: str) -> list[tuple[int, int, str]]:
+    """EVERY ``@`` token on ``line``, as ``(start, end, query)``.
+
+    The whole-line counterpart of :func:`at_token`, and it exists because the
+    two questions are genuinely different and both are asked: the picker needs
+    "the token the CARET is in" (one answer), while the composer's reference
+    ink needs "every token this line names" (all of them), so a draft holding
+    three references can be painted without the caret deciding which two go
+    dark. Both read the same boundary rule and the same :func:`_token_end`, so
+    the spans cannot disagree with each other or with the resolver.
+
+    A bare ``@`` is not returned. An empty query is not a reference —
+    ``references._reference_tokens`` keeps a token only when it has one, and
+    ``@`` alone is how the operator asks "what is here", not a path.
+
+    Pure and host-free, like everything in this module: reads its argument and
+    the two rules above, consults no filesystem and no widget. Whether a span
+    is worth painting is the caller's question, not the grammar's.
+    """
+    spans: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(line):
+        if line[index] != "@" or not is_boundary(line, index):
+            index += 1
+            continue
+        end, query = _token_end(line, index)
+        if query:
+            spans.append((index, end, query))
+        # ``max`` so a token that ends where it starts (a lone `@`) still
+        # advances; ``end`` is always >= index + 1 in practice.
+        index += max(end - index, 1)
+    return spans
+
+
 def split_token(query: str) -> tuple[str, str]:
     """Split a token's ``query`` into ``(dir_part, name_query)`` at the LAST ``/``.
 

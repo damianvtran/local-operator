@@ -15,7 +15,11 @@ from typing import Any, Callable
 from unittest import mock
 
 from local_operator import references
-from local_operator.references import SCAN_CANDIDATE_LIMIT, scan_directory
+from local_operator.references import (
+    SCAN_CANDIDATE_LIMIT,
+    scan_directory,
+    scan_directory_report,
+)
 
 
 def _counting(names: tuple[str, ...] = ("stat", "lstat", "scandir")) -> Any:
@@ -237,3 +241,32 @@ def test_a_dotenv_entry_is_flagged_by_name_not_only_by_directory(tmp_path):
     # Dotfiles are excluded from the picker entirely, so `.env` itself is not a
     # row here — the resolver's gate is what covers a hand-typed `@.env`.
     assert ".env" not in alerts
+
+
+def test_the_scan_reports_what_its_own_cap_kept_out(tmp_path):
+    """D6: the count is of the DIRECTORY, and the cap was hiding 50 of its entries.
+
+    `scan_directory` dropped the fact that it had refused entries, so the
+    picker's overflow row described the capped set as if it were the whole
+    directory: a 2500-entry directory read ``… 1992 more`` and never mentioned
+    the 500 it had not looked at. The number is exact rather than an estimate and
+    costs no extra syscall — the cap is applied after the cheap pass has already
+    enumerated every listable entry, so it was a number this function had in hand
+    and threw away.
+    """
+    for index in range(SCAN_CANDIDATE_LIMIT + 50):
+        (tmp_path / f"entry_{index:05d}.txt").write_text("x", encoding="utf-8")
+
+    rows, unlisted = scan_directory_report("", str(tmp_path))
+
+    assert len(rows) == SCAN_CANDIDATE_LIMIT, "premise: the cap is still the cap"
+    assert unlisted == 50, "the entries the cap refused are not accounted for"
+
+    # Nothing under the cap over-reports, and the plain call is unchanged: its
+    # forty existing callers must not have had to learn about a second return.
+    # One more file, sorting LAST, so the kept 2000 are the same 2000 and the
+    # refusal count moves from 50 to 51 — which is the point of counting here
+    # rather than inside the picker, where the extra entry never arrives.
+    (tmp_path / "zzz_extra.txt").write_text("x", encoding="utf-8")
+    assert scan_directory("", str(tmp_path)) == rows
+    assert scan_directory_report("", str(tmp_path)) == (rows, 51)

@@ -800,6 +800,59 @@ Editor .text-area--credential-armed {
     text-style: bold;
 }
 
+/* ── `@path` reference ink ───────────────────────────────────────────────
+ *
+ * A resolvable `@path` token in the composer. It shipped with NO rule at all,
+ * so it rendered in the prose colour on the prose ground. Measured on one frame
+ * of `/help explain @README.md to me`: `/help` painted `signal` (6.81:1 on this
+ * ground) and ` explain @README.md to me` came back as ONE run of the prose ink
+ * (`fg`, 13.76:1 against the ground), leaving the token at **1.00:1 against the
+ * prose around it**. No chip, no tint, no weight change, in a composer that
+ * already had a vocabulary for "structured token that is not prose" (design
+ * round 1, D2).
+ *
+ * `signal` is that vocabulary, and the sheet already argues its use for this
+ * object one block up: the attachment chip took `signal` as "the ramp's
+ * file/reference hue". Now that the token carries it, the two numbers this rule
+ * is judged on are:
+ *
+ *   token vs the prose beside it (`fg`)      1.00:1 -> **2.02:1**
+ *   token vs the composer ground (`surface`) 13.76:1 -> **6.81:1**
+ *
+ * The first is DISCRIMINATION — the number D2 was filed on, and the one that
+ * was total: the token and the words either side of it were the same ink. The
+ * second is legibility, and it moves the other way because `signal` is a HUE
+ * shift rather than a lightness one: the path now sits at 6.81:1 on the ground
+ * where prose sits at 13.76:1, which is still clear of AA for body text (4.5:1)
+ * and is exactly what `/help` reads beside it in that frame. Losing contrast on
+ * the ground to gain it against the prose is the trade the finding asks for —
+ * the alternative was a token nobody could tell from a sentence.
+ *
+ * BOLD, matching `slash-command` exactly, and that is the second half of the
+ * discrimination above rather than decoration. The slash rules state the family
+ * this token belongs to — "structure that will NOT be sent as message text",
+ * where a `@path` is replaced by the file's content at submit — and `/help` is
+ * the member of that family the round put next to it. The attachment chip that
+ * also uses `signal` is NOT the precedent here: a chip is not text the operator
+ * typed, while a `@path` is, so the text language is the right one and the
+ * ground is not.
+ *
+ * FOREGROUND ONLY, like its two neighbours, so the rule composes with the
+ * cursor's inverse and the selection ground instead of fighting them — the
+ * property `_paint_reference_ink` relies on.
+ *
+ * PAINTED ONLY FOR TOKENS THAT RESOLVE, and that is a ruling rather than a
+ * refinement: the resolver sends a token whose path does not exist as PROSE
+ * (`@me — no such path; sent as written`, the Q-2 rule), so lighting `@me` up
+ * as a reference would assert something false about the one token that rule
+ * exists to keep as prose. See `Editor._reference_runs`. The visible
+ * consequence is that a half-typed path has no ink until it names something —
+ * the ink arrives with the file, which is when the claim becomes true. */
+Editor .text-area--at-reference {
+    color: $lo-signal;
+    text-style: bold;
+}
+
 /* ── startup toast ───────────────────────────────────────────────────────
  *
  * Top-right transient overlay. The host HUGS its card (`width: auto`) and both
