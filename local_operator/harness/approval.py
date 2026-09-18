@@ -120,4 +120,38 @@ async def ask_approval(
     return bool(await narrow(tool_name, description))
 
 
-__all__ = ["ApprovalGate", "ask_approval"]
+def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
+    """Whether a write may LOOSEN a live approval gate (``ask`` -> ``auto``).
+
+    The gate's own boundary, and the whole of it: a loosening is an operator
+    action only when it is a write this process made through the operator's own
+    settings facade (``settings_io`` -> ``config_watch.notify_local``, which
+    delivers ``source="local"``) *in the process that holds the gate*.
+    Everything else is unattributed from here and may only tighten:
+
+    * a model tool's own file write (the party being gated is not the authority
+      that may lower its own gate -- the reason this predicate exists);
+    * an editor, a second pane, or any other process's edit;
+    * the settings API or ``lop config edit`` in ANOTHER process, which is a
+      genuine operator action but happened where this gate is not, so this
+      process cannot tell it apart from the first case;
+    * the embedded TUI's ``/settings`` page while an attached runtime owns the
+      gate (``gate_is_here=False``): the file write is attributed in the app's
+      own process, but the engine consults the runtime's flag.
+
+    ``source`` is ``ConfigChange.source`` and ``gate_is_here`` is whether the
+    caller is the process whose flag the engine reads -- ``True`` for the
+    runtime/daemon host, ``not self._gate_is_owned_elsewhere()`` for the TUI.
+    Spelled ``source == "local"`` rather than "not disk" so widening what
+    counts as ``local`` in ``config_watch`` widens who may loosen the gate;
+    that is the direction the literal deliberately makes visible at the
+    call site rather than absorbing here.
+
+    Tightening is NOT this predicate's business: ``auto`` -> ``ask`` and every
+    other hardening path stay live and unconditional. Nor is ``--yolo``, which
+    is an explicit pin on the run rather than a transition of the gate.
+    """
+    return source == "local" and gate_is_here
+
+
+__all__ = ["ApprovalGate", "ask_approval", "loosening_is_authorised"]
