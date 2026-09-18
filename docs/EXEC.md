@@ -65,15 +65,8 @@ TOP-LEVEL conversation: an ordinary session directory with no `origin.json`, so
 desktop sidebar and the phone's history all offer it as their own work.
 
 ```
-exec failed: a `lop` invocation from inside an agent session cannot open one —
-the session it would start is a top-level conversation the operator never
-opened, listed in their session list and desktop sidebar as if they had, and
-running outside the job manager that lets this session see, steer, cancel and
-account for delegated work.
-Launch delegated work with the `task` tool instead. A session without it — a
-role that does not delegate runs one level deep and loses `task`/`wait`/`wake` —
-asks the session that delegated to it, with `hub`, to launch the child; the
-brief travels in the message. Work that must happen later belongs in `wake`.
+exec failed: a `lop` invocation from inside an agent session cannot open one — the session it would start is a top-level conversation the operator never opened, listed in their session list and desktop sidebar as if they had, and running outside the job manager that lets this session see, steer, cancel and account for delegated work.
+Delegated work is launched with the `task` tool. A session that does not hold `task` may not create subagents at all: do the work yourself, and say so with `hub` if the slice genuinely cannot be done alone — `hub` reaches the session that delegated to you and the brief travels in the message. Work that must happen later is not a child session's to arm — `wake` is pruned from every child — so a child routes it back to the session that delegated to it, while a session that holds `wake` arms it there itself.
 ```
 
 The incident this answers (2026-09-18): a subagent owed a review round on a PR,
@@ -81,6 +74,14 @@ held no `task` tool to run it with, and reached for `lop exec --profile reviewer
 --background`. Two sessions — `lo-1281-review` and `lo-1281-qa`, 7 ms apart —
 appeared in the operator's sidebar as chats they had opened. `lop exec --status`
 starts nothing and is unaffected.
+
+The other half of that incident is the role's allowance, and it is the half the
+guard does not fix: whether a subagent may delegate at all is its ROLE's answer
+(`delegate: yes`), and a subagent that holds `task` is expected to use it, at any
+depth. A role that does not delegate — a `coder`, a `reviewer`, a `scout` — never
+holds it, and is expected to do the work itself rather than route around the
+rule. So a team brief that owes a review round to a slice gives that slice a role
+that may delegate, or keeps the round with the session that delegates.
 
 **The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
 waives the refusal for one invocation, on BOTH entry points. It exists because
