@@ -69,6 +69,38 @@ if TYPE_CHECKING:
 
 from local_operator.helpers import setup_cross_platform_environment
 
+#: The `lop services restart --wait` default, in seconds.
+#:
+#: DUPLICATED ON PURPOSE, WITH A TEST AS THE GUARD. The number it must agree with is
+#: ``services.RELOAD_WAIT_S``, and ``cli.py`` may not import that module: this file's
+#: startup path is asserted stdlib-light, and ``services`` reaches ``asyncio`` (the
+#: test is ``tests/unit/test_import_graph.py::test_cli_import_does_not_load_asyncio``).
+#: Naming the wrong default in ``--help`` while the tool used another was design review
+#: D2 — a flag that misreports its own behaviour is worse than one that has no default
+#: text — so the literal lives here and
+#: ``tests/unit/test_services.py::test_the_documented_wait_default_is_the_one_used``
+#: fails if the two ever drift apart.
+DEFAULT_SERVICES_WAIT_S = 45.0
+
+
+def _positive_seconds(text: str) -> float:
+    """argparse ``type`` for a wait budget that must be greater than zero.
+
+    REFUSED AT PARSE TIME, NOT AFTER THE WORK STARTS (design review D2). The first
+    version accepted anything: ``--wait -1`` ran the whole restart and then reported
+    "within -1s", and ``--wait 0.5`` reported "within 0s" because the message
+    formatted to whole seconds. A budget the tool cannot honour is a usage error, and
+    argparse says so before a single daemon is touched.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return value
+
+
 CLI_DESCRIPTION = """
     Local Operator - An environment for agentic AI models to perform tasks on the local device.
 
@@ -1008,7 +1040,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     services_subparsers = services_parser.add_subparsers(dest="services_command")
     services_subparsers.add_parser(
         "status",
-        help="Report each non-runtime service and the build it is serving",
+        help=(
+            "Report each non-runtime service, the build it is serving, and the build "
+            "the install is on"
+        ),
         parents=[parent_parser],
     )
     services_restart = services_subparsers.add_parser(
@@ -1018,13 +1053,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     services_restart.add_argument(
         "--wait",
-        type=float,
+        type=_positive_seconds,
         default=None,
         metavar="SECONDS",
         help=(
             "How long to wait for an asked daemon to come back on the new build "
-            "(default: 30). A daemon that does not make it is reported and left "
-            "serving the build it loaded."
+            f"(default: {DEFAULT_SERVICES_WAIT_S:g}s; must be positive). A daemon that does "
+            "not make it is reported, left serving the build it loaded, and retried by "
+            "the next `lop services restart`."
         ),
     )
 

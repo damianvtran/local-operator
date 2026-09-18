@@ -331,11 +331,22 @@ def test_live_serve_daemons_drops_everything_that_is_not_live(
 def test_status_lines_name_the_drift_and_the_capability(
     pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reader is an operator who was just told "older build than the install"."""
+    """The reader is an operator who was just told "older build than the install".
+
+    BOTH OPERANDS ON EVERY LINE (design review D1). The version alone made the
+    ordinary case — a same-version rebuild — read as ``STALE (0.59.2)`` beside an
+    install that was also 0.59.2, with no ref anywhere to explain the verdict.
+    """
+    # The pointer names a build WITH a ref, so the ref half of every comparison is
+    # visible in the assertions below.
+    pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
     monkeypatch.setattr(
         services,
         "live_serve_daemons",
-        lambda: [_record(), _record(pid=9, version=NEW.version, reloadable=False)],
+        lambda: [
+            _record(source_ref="9f2c1ab"),
+            _record(pid=9, version="0.59.0", source_ref="4d3ce1d", reloadable=False),
+        ],
     )
     monkeypatch.setattr(
         services,
@@ -343,9 +354,63 @@ def test_status_lines_name_the_drift_and_the_capability(
         lambda: [Path("/tmp/com.local-operator.mobile.plist")],
     )
     lines = services.status_lines()
-    assert "serve daemon pid 4242 on 127.0.0.1:1111 — STALE (0.56.14, reloadable)" in lines
-    assert "serve daemon pid 9 on 127.0.0.1:1111 — current (0.59.0, not reloadable)" in lines
+    assert "install: 0.59.0@4d3ce1d" in lines, "the build the reader is comparing against"
+    # Stale: what it serves, what current is, and what to DO about it — not the word
+    # "reloadable", which is not reader vocabulary.
+    assert (
+        "serve daemon pid 4242 on 127.0.0.1:1111 — STALE: serving 0.56.14@9f2c1ab, "
+        "current is 0.59.0@4d3ce1d; will move on `lop services restart`" in lines
+    )
+    assert "serve daemon pid 9 on 127.0.0.1:1111 — current (0.59.0@4d3ce1d)" in lines
     assert "supervised daemon: com.local-operator.mobile" in lines
+    # D3: their build is not in the plist, and the reader is told so rather than left
+    # to assume it is current.
+    assert any("resolves the install when it starts" in line for line in lines)
+    assert any("run `lop services restart`" in line for line in lines)
+
+
+def test_status_lines_name_the_true_reason_a_daemon_cannot_move(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon that cannot be asked is told apart from one that can (D1)."""
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(reloadable=False)])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    line = next(line for line in services.status_lines() if line.startswith("serve daemon"))
+    assert "cannot move itself; restart it by hand" in line
+
+
+def test_status_lines_bracket_an_ipv6_authority(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``::1:56569`` is ambiguous, and past the point the eye finds the boundary (D4)."""
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record(host="::1")])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    line = next(line for line in services.status_lines() if line.startswith("serve daemon"))
+    assert "on [::1]:1111" in line
+
+
+def test_status_lines_says_it_cannot_compare_when_the_stamp_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D1's fix must not turn an unanswerable comparison into a tautology.
+
+    ``_label(None)`` falls back to a phrase, so the first version printed "current is
+    the current build" — a sentence that reads like an answer on the one line whose job
+    is to name both operands. It also advised `lop services restart` when there is no
+    build to move anything onto, which is advice the tool cannot carry out.
+
+    This is not a corner case: it is what a DEVELOPER sees, because a checkout's own
+    install on disk is its working tree and ``disk_build()`` is None there by design.
+    """
+    monkeypatch.setattr("local_operator.update.disk_build", lambda *a, **k: None)
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [_record()])
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    lines = services.status_lines()
+    assert lines[0] == "install: no build the pointer can name, so nothing can be compared"
+    assert "cannot be compared" in lines[1]
+    joined = " ".join(lines)
+    assert "current is the current build" not in joined
+    assert "run `lop services restart`" not in joined
 
 
 def test_status_lines_says_so_when_there_are_no_daemons(
@@ -353,4 +418,37 @@ def test_status_lines_says_so_when_there_are_no_daemons(
 ) -> None:
     monkeypatch.setattr(services, "live_serve_daemons", lambda: [])
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
-    assert services.status_lines() == ["serve daemons: none running"]
+    assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
+
+
+def test_the_documented_wait_default_is_the_one_used(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--help`` must not name a default the tool does not use (design review D2).
+
+    The literal is duplicated because ``cli.py`` may not import this module (its
+    startup path is asserted stdlib-light and this one reaches asyncio), so this test
+    IS the guard that keeps the two from drifting.
+    """
+    from local_operator import cli
+
+    assert cli.DEFAULT_SERVICES_WAIT_S == services.RELOAD_WAIT_S
+
+
+def test_a_non_positive_wait_is_a_usage_error() -> None:
+    """``--wait -1`` ran and reported "within -1s"; ``--wait 0.5`` said "within 0s" (D2).
+
+    Refused by the PARSER, before anything is touched, so this asserts on
+    ``build_cli_parser`` rather than on ``main`` (which brands the process and
+    configures logging as side effects).
+    """
+    from local_operator import cli
+
+    parser = cli.build_cli_parser()
+    for value in ("-1", "0", "-0.5"):
+        with pytest.raises(SystemExit) as caught:
+            parser.parse_args(["services", "restart", "--wait", value])
+        assert caught.value.code == 2, value
+    # A positive one is accepted, and the documented default is the one used.
+    assert parser.parse_args(["services", "restart", "--wait", "0.5"]).wait == 0.5
+    assert parser.parse_args(["services", "restart"]).wait is None

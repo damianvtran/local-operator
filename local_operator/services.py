@@ -430,8 +430,8 @@ def _await_relocations(
                     name,
                     warnings=(
                         f"warning: {name} did not come back on the current build within "
-                        f"{wait_s:.0f}s; it is still serving the build it loaded and the "
-                        "next `lop services restart` will try again",
+                        f"{_seconds_label(wait_s)}; it is still serving the build it loaded "
+                        "and the next `lop services restart` will try again",
                     ),
                 )
             )
@@ -481,23 +481,105 @@ def status_lines() -> list[str]:
     The reader this exists for is an operator who has just been told "the server
     is on an older build than the install" by a desktop app and wants to see
     WHICH process said so. Nothing here acts, so it is safe to run at any time.
+
+    BOTH SIDES OF EVERY COMPARISON ARE NAMED, which the first version did not do
+    (design review D1). It printed the daemon's own version and nothing else, so on
+    a SAME-VERSION REBUILD — this host's ordinary drift, and the whole reason
+    ``BuildStamp`` compares a ref — the output read ``STALE (0.59.2)`` beside an
+    install that was also 0.59.2 with no ref anywhere to explain it, and in the
+    post-upgrade case the new build's version and ref appeared nowhere at all. A
+    verdict whose two operands are not both visible is not a report; it reads as a
+    fault in the tool that printed it.
     """
     stamp = _current_stamp()
-    lines: list[str] = []
+    lines: list[str] = [
+        (
+            f"install: {_label(stamp)}"
+            if stamp is not None
+            else "install: no build the pointer can name, so nothing can be compared"
+        )
+    ]
     daemons = live_serve_daemons()
     if not daemons:
         lines.append("serve daemons: none running")
     for record in daemons:
-        current = _serves_current_build(record, stamp)
-        verdict = "current" if current else "STALE"
-        caps = "reloadable" if getattr(record, "reloadable", False) else "not reloadable"
-        lines.append(
-            f"serve daemon pid {record.pid} on {record.host}:{record.port} — "
-            f"{verdict} ({record.version or 'unknown build'}, {caps})"
-        )
-    for path in _supervised_daemon_plists():
+        lines.append(_daemon_status_line(record, stamp))
+    if stamp is not None and any(not _serves_current_build(record, stamp) for record in daemons):
+        # Only when there IS a build to move onto. Advising the command on a machine
+        # whose pointer names nothing would be advice the tool cannot carry out, which
+        # is the same mistake as the tautology below in a different sentence (design
+        # review D1).
+        lines.append("run `lop services restart` to move the stale ones onto the current build")
+    supervised = _supervised_daemon_plists()
+    for path in supervised:
         lines.append(f"supervised daemon: {path.stem}")
+    if supervised:
+        # Their build is NOT knowable here and saying nothing invites the reader to
+        # assume it is current (design review D3): a plist names the stable shim,
+        # which resolves the pointer when the process starts, so the build a
+        # supervised daemon serves is whatever `current` named at its last start.
+        lines.append(
+            "note: a supervised daemon resolves the install when it starts, so its build "
+            "is not in the plist; `lop services restart` puts them on the current build"
+        )
     return lines
+
+
+def _daemon_status_line(record: Any, stamp: Any) -> str:
+    """One daemon's line: where it is, what it serves, and what that means.
+
+    ``reloadable`` is not reader vocabulary (design review D1). It is an internal
+    capability name that decides whether ``restart`` can move this daemon, so it is
+    rendered as the thing the reader can DO about it — and dropped entirely on a
+    daemon that is already current, where it decides nothing.
+
+    The authority is bracketed for an IPv6 host (design review D4): ``::1:56569``
+    is ambiguous and, at 88 columns, ran past the point where the eye finds the
+    boundary between host and port.
+    """
+    authority = (
+        f"[{record.host}]:{record.port}" if ":" in record.host else f"{record.host}:{record.port}"
+    )
+    serving = _record_label(record)
+    where = f"serve daemon pid {record.pid} on {authority}"
+    if stamp is None:
+        # NOT a tautology. With no readable stamp there is nothing to compare against,
+        # and the first version printed "current is the current build" here because
+        # `_label(None)` falls back to a phrase — a sentence that says nothing while
+        # reading like an answer, on the one line whose whole job is to name both
+        # operands (design review D1).
+        return (
+            f"{where} — serving {serving}; this cannot be compared, because the "
+            "install's build is unknown (the pointer names no build)"
+        )
+    if _serves_current_build(record, stamp):
+        return f"{where} — current ({serving})"
+    action = (
+        "will move on `lop services restart`"
+        if getattr(record, "reloadable", False)
+        else "cannot move itself; restart it by hand"
+    )
+    return f"{where} — STALE: serving {serving}, current is {_label(stamp)}; {action}"
+
+
+def _record_label(record: Any) -> str:
+    """``version@ref7`` for a record, matching ``BuildStamp.label()``'s shape.
+
+    The ref is the part that distinguishes a same-version rebuild from a current
+    daemon, so dropping it made the common case unreadable (design review D1).
+    """
+    version = record.version or "unknown build"
+    ref = str(getattr(record, "source_ref", "") or "")[:7]
+    return f"{version}@{ref}" if ref else version
+
+
+def _seconds_label(value: float) -> str:
+    """``45s``, ``0.5s`` — never ``0s`` for a budget that is not zero (D2).
+
+    The wait is echoed back in a warning, and ``{value:.0f}`` printed ``within
+    0s`` for a half-second budget the caller had genuinely asked for.
+    """
+    return f"{value:g}s"
 
 
 def _supervised_daemon_plists() -> list[Any]:
