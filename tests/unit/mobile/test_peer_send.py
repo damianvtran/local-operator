@@ -8,13 +8,16 @@ caught once for both callers.
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.mobile import peer_send, registry
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 
 class _Record:
@@ -215,7 +218,8 @@ def test_only_live_records_are_eligible(fake_scan) -> None:
 def test_a_broadcast_substring_skips_an_unstarted_session(fake_scan) -> None:
     """A ``/new`` session sitting in the composer (``started=False``) is
     invisible to a substring/broadcast match: an interrupt there would drive a
-    turn into a session whose owner has not started it."""
+    turn into a session whose owner has not started it, and a quiet note there
+    would become the opening row of that history."""
     fresh = _Record(10, conversation_name="release", started=False)
     working = _Record(20, conversation_name="release cutter", started=True)
     fake_scan([(fresh, "live"), (working, "live")])
@@ -225,30 +229,75 @@ def test_a_broadcast_substring_skips_an_unstarted_session(fake_scan) -> None:
     assert error == ""
 
 
-def test_a_broadcast_matching_only_unstarted_sessions_finds_nothing(fake_scan) -> None:
+def test_a_broadcast_matching_only_unstarted_sessions_is_refused(fake_scan) -> None:
+    """THE NEW RULE: a substring/broadcast match that reached only a session
+    nobody has typed in is REFUSED, and the refusal must not read as "nothing".
+
+    The refused record is live and the scan DID reach it, so the error must not
+    contain ``no live session matches``: that phrasing is what opens the stored
+    fallback (``live_scan_found_nothing``), and a stored namesake would then be
+    spooled to — a recipient this call never named (BLOCKER-1).
+    """
     fresh = _Record(10, conversation_name="release", started=False)
     fake_scan([(fresh, "live")])
     record, _c, error = peer_send.resolve_peer_target(target="release")
     assert record is None
-    assert "no live session matches" in error
+    assert "has not been engaged yet" in error, error
+    assert "pid 10" in error, error
+    assert peer_send.live_scan_found_nothing(error) is False, error
+    assert "no live session matches" not in error, error
 
 
-def test_an_exact_pid_send_still_resolves_an_unstarted_session(fake_scan) -> None:
-    """The sender deliberately NAMED this session by pid, so it resolves — the
-    delivery layer spools rather than drives a turn (see deliver_peer_message)."""
+def test_an_exact_pid_send_refuses_an_unstarted_session(fake_scan) -> None:
+    """THE NEW RULE: naming a session by pid does not make it a recipient.
+
+    This used to resolve (the delivery layer degraded to a quiet dial). A peer
+    row written into a composer window becomes the OPENING row of a
+    conversation its owner never started, which is the reported symptom, so the
+    refusal happens before delivery can consider it. The session becomes
+    eligible when it runs its first turn — see ``require_started=False`` for the
+    kill switch, the one caller that must still resolve it.
+    """
     fresh = _Record(10, conversation_name="release", started=False)
     fake_scan([(fresh, "live")])
     record, _c, error = peer_send.resolve_peer_target(pid=10)
-    assert record is fresh
-    assert error == ""
+    assert record is None
+    assert "pid 10 has not been engaged yet" in error, error
 
 
-def test_an_exact_session_send_still_resolves_an_unstarted_session(fake_scan) -> None:
+def test_an_exact_session_send_refuses_an_unstarted_session(fake_scan) -> None:
+    """THE NEW RULE: same for an exact session id (and for an all-digit target
+    tried as a pid, which routes through the same branch)."""
     fresh = _Record(10, session_id="fresh-id", started=False)
     fake_scan([(fresh, "live")])
     record, _c, error = peer_send.resolve_peer_target(session="fresh-id")
-    assert record is fresh
-    assert error == ""
+    assert record is None
+    assert "session 'fresh-id' has not been engaged yet" in error, error
+
+    # The bare all-digit spelling reaches the pid branch, so it is refused too.
+    digits = _Record(20123, session_id="digit-id", started=False)
+    fake_scan([(digits, "live")])
+    record, _c, error = peer_send.resolve_peer_target(target="20123")
+    assert record is None
+    assert "pid 20123 has not been engaged yet" in error, error
+
+
+def test_the_kill_switch_still_resolves_an_unstarted_session(fake_scan) -> None:
+    """``require_started=False`` is the KILL-SWITCH carve-out: ``/stop <target>``
+    and ``lop stop <target>`` must resolve a composer window in every address
+    form, because a session someone needs to stop is not a delivery."""
+    fresh = _Record(10, session_id="fresh-id", conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    addresses: list[dict[str, Any]] = [
+        {"pid": 10},
+        {"session": "fresh-id"},
+        {"target": "release"},
+    ]
+    for kwargs in addresses:
+        record, candidates, error = peer_send.resolve_peer_target(require_started=False, **kwargs)
+        assert record is fresh, f"kwargs={kwargs} error={error}"
+        assert candidates == []
+        assert error == ""
 
 
 def test_no_target_is_a_clean_error(fake_scan) -> None:
@@ -276,30 +325,244 @@ class _StoredRow:
         self.mtime = mtime
 
 
-def _stored(monkeypatch, rows):
+def _write_transcript(root: Path, session_id: str, *, engaged: bool = True) -> Path:
+    """Materialise one session's directory, with or without real history.
+
+    Both new gates read the DISK rather than the fakes: ``resolve_stored_target``
+    skips a stored row whose session has no durable history, and
+    ``deliver_peer_message`` refuses a cold target on the same signal. So a
+    stored row that is meant to resolve needs a transcript holding a real turn,
+    and a row that is meant to be skipped needs a bare directory. Written as the
+    raw JSONL shape the gate parses (``type: message`` + ``kind: message``)
+    because going through ``Transcript`` would make the fixture's writer rather
+    than the gate's reader the thing under test.
+    """
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    if engaged:
+        (directory / TRANSCRIPT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "id": "h1",
+                    "ts": 1,
+                    "type": "message",
+                    "payload": {
+                        "kind": "message",
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hello"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return directory
+
+
+def _stored(monkeypatch, rows, *, root: Path, unengaged: "set[str] | None" = None):
+    """Install the faked store scan AND the on-disk history it now depends on.
+
+    ``unengaged`` names the rows that must stay bare — no transcript — which is
+    the state the new skip exists for.
+    """
     monkeypatch.setattr(
         "local_operator.resume.recent_session_rows",
         lambda directory, limit=None: rows,
     )
+    monkeypatch.setattr(peer_send, "config_dir", lambda: root)
+    for row in rows:
+        _write_transcript(root, row.id, engaged=row.id not in (unengaged or set()))
 
 
-def test_stored_match_by_name_resolves_when_no_live_record(monkeypatch, fake_scan) -> None:
+def test_stored_match_by_name_resolves_when_no_live_record(
+    monkeypatch, tmp_path, fake_scan
+) -> None:
     fake_scan([])
-    _stored(monkeypatch, [_StoredRow("abc123def456", "Improve /credential skill")])
+    _stored(
+        monkeypatch,
+        [_StoredRow("abc123def456", "Improve /credential skill")],
+        root=tmp_path,
+    )
     session_id, candidates, error = peer_send.resolve_stored_target("credential")
     assert error == ""
     assert candidates == []
     assert session_id == "abc123def456"
 
 
-def test_stored_match_is_case_insensitive(monkeypatch, fake_scan) -> None:
+def test_stored_match_is_case_insensitive(monkeypatch, tmp_path, fake_scan) -> None:
     fake_scan([])
-    _stored(monkeypatch, [_StoredRow("abc123def456", "Release Cutter")])
+    _stored(monkeypatch, [_StoredRow("abc123def456", "Release Cutter")], root=tmp_path)
     session_id, _c, _e = peer_send.resolve_stored_target("release cutter")
     assert session_id == "abc123def456"
 
 
-def test_live_ids_exclude_a_running_session_s_own_stored_row(monkeypatch, fake_scan) -> None:
+def test_a_stored_row_with_no_durable_history_is_skipped(monkeypatch, tmp_path, fake_scan) -> None:
+    """THE NEW RULE, stored half: a session that never ran a turn is not a
+    recipient, so the fallback must not resolve onto one — a broadcast would
+    otherwise spool a peer row into a conversation nobody started, and an exact
+    cold send would be refused only one layer later.
+
+    Both directions are pinned: the unengaged row is skipped while an engaged
+    namesake still resolves, and a match on an unengaged row ALONE comes back as
+    a REFUSAL naming it rather than as an empty no-match — the row DOES answer
+    to the name, so "no session matches" would be a false statement about a
+    session the user can see on the picker (review round 1, F-4).
+    """
+    fake_scan([])
+    _stored(
+        monkeypatch,
+        [_StoredRow("dead0001", "new session"), _StoredRow("used0002", "new session")],
+        root=tmp_path,
+        unengaged={"dead0001"},
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target("new session")
+    assert (session_id, candidates, error) == ("used0002", [], "")
+
+    _stored(
+        monkeypatch,
+        [_StoredRow("dead0001", "brand new")],
+        root=tmp_path,
+        unengaged={"dead0001"},
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target("brand new")
+    assert session_id is None
+    assert candidates == []
+    assert "the only stored match for 'brand new' (session 'dead0001')" in error, error
+    assert "has not been engaged yet" in error, error
+
+    # TWO withheld rows name the count instead of a single id, and neither form
+    # may read as the no-match the callers compose for a store that answered
+    # nothing.
+    _stored(
+        monkeypatch,
+        [_StoredRow("dead0001", "brand new"), _StoredRow("dead0002", "brand new")],
+        root=tmp_path,
+        unengaged={"dead0001", "dead0002"},
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target("brand new")
+    assert (session_id, candidates) == (None, [])
+    assert "2 stored matches for 'brand new' have not been engaged yet" in error, error
+    # D3: the count is stated ONCE and the tail agrees with it — the form this
+    # replaced (``every stored match for 'x' (2 of them) … so it cannot``) said
+    # the count twice and then spoke about one session.
+    assert "every stored match" not in error and "(2 of them)" not in error, error
+    assert "no user message has been sent in any of them" in error, error
+    assert "so they cannot receive peer messages" in error, error
+    # D5: a stored row has no window anyone can type into, so the remedy is the
+    # conversation being opened, not an owner sending into one that is already
+    # there.
+    assert "they become recipients once someone opens them" in error, error
+
+    # A TRUE no-match is still the silent empty answer the callers compose their
+    # own "searched live and stored sessions" sentence over.
+    _stored(monkeypatch, [_StoredRow("other0001", "something else")], root=tmp_path)
+    assert peer_send.resolve_stored_target("brand new") == (None, [], "")
+
+
+def test_a_partly_delivered_broadcast_reports_the_matches_it_skipped(fake_scan) -> None:
+    """D1 (design round 1): a name/substring send that REACHES a recipient may
+    still have passed over matches held back for being unengaged. The sender
+    typed one command believing it reached its needle, so the receipt has to
+    say how many were left out — silence here is what made the GUIDE's "skips
+    such a session and says so" a claim the product did not keep.
+
+    ``skipped`` is the out-parameter the two surfaces read; the wording they
+    append comes from ``skipped_clause`` so both say it the same way.
+    """
+    fake_scan(
+        [
+            (_Record(10, conversation_name="release build", started=False), "live"),
+            (_Record(11, conversation_name="release notes", started=False), "live"),
+            (_Record(20, conversation_name="release cutter", started=True), "live"),
+        ]
+    )
+    skipped: list[Any] = []
+    record, candidates, error = peer_send.resolve_peer_target(target="release", skipped=skipped)
+    assert record is not None and record.pid == 20
+    assert (candidates, error) == ([], "")
+    assert [rec.pid for rec in skipped] == [10, 11]
+    assert peer_send.skipped_clause(skipped) == "; 2 matches skipped (not engaged yet)"
+
+
+def test_the_skipped_clause_is_silent_when_nothing_was_skipped() -> None:
+    """The clause is the empty string for an empty list — that is what lets
+    both receipts append it unconditionally — and it agrees with itself at one.
+    """
+    assert peer_send.skipped_clause([]) == ""
+    assert peer_send.skipped_clause([_Record(10)]) == "; 1 match skipped (not engaged yet)"
+
+
+def test_no_receipt_means_nothing_is_reported_as_skipped(fake_scan) -> None:
+    """Only a DELIVERY prints a receipt, so only a delivery is handed the
+    skipped matches: a refusal and an ambiguity resolve nothing, and a caller
+    that appended a clause there would qualify a line that is already the
+    error."""
+    fake_scan([(_Record(10, conversation_name="release", started=False), "live")])
+    skipped: list[Any] = []
+    record, _c, error = peer_send.resolve_peer_target(target="release", skipped=skipped)
+    assert record is None and "has not been engaged yet" in error
+    assert skipped == []
+
+    fake_scan(
+        [
+            (_Record(20, conversation_name="release a"), "live"),
+            (_Record(21, conversation_name="release b"), "live"),
+        ]
+    )
+    skipped = []
+    record, candidates, _error = peer_send.resolve_peer_target(target="release", skipped=skipped)
+    assert record is None and [c.pid for c in candidates] == [20, 21]
+    assert skipped == []
+
+
+def test_the_kill_switch_never_skips_a_match(fake_scan) -> None:
+    """``require_started=False`` withholds nothing — the whole carve-out is
+    that a composer window RESOLVES for ``/stop`` — so the kill switch's own
+    callers keep working unchanged and never grow a receipt clause."""
+    fresh = _Record(10, session_id="fresh-id", conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    skipped: list[Any] = []
+    record, _c, error = peer_send.resolve_peer_target(
+        target="release", require_started=False, skipped=skipped
+    )
+    assert record is fresh and error == ""
+    assert skipped == []
+
+
+def test_a_batched_refusal_agrees_with_its_own_count(fake_scan) -> None:
+    """D3: a refusal about SEVERAL sessions has to read as a plural. The form
+    this replaced said the count twice (``every … (3 of them)``) and then spoke
+    about a single owner (``so it cannot … its owner``), which a reader can take
+    as one owner's remedy for a batch."""
+    fake_scan(
+        [
+            (_Record(10, conversation_name="release a", started=False), "live"),
+            (_Record(11, conversation_name="release b", started=False), "live"),
+            (_Record(12, conversation_name="release c", started=False), "live"),
+        ]
+    )
+    record, _c, error = peer_send.resolve_peer_target(target="release")
+    assert record is None
+    assert error.startswith("3 live matches for 'release' have not been engaged yet"), error
+    assert "no user message has been sent in any of them" in error, error
+    assert "so they cannot receive peer messages" in error, error
+    assert "their owners have to send a first message" in error, error
+    assert "every live match" not in error and "(3 of them)" not in error, error
+
+
+def test_a_single_match_refusal_still_reads_as_one_session(fake_scan) -> None:
+    """The other half of D3: the singular forms are right and must stay — a
+    pid-addressed refusal names the pid and talks about one owner."""
+    fake_scan([(_Record(10, conversation_name="release", started=False), "live")])
+    _r, _c, error = peer_send.resolve_peer_target(target="release")
+    assert error.startswith("the only live match for 'release' (pid 10) has not been engaged yet")
+    assert "no user message has been sent in it" in error, error
+    assert "its owner has to send a first message" in error, error
+
+
+def test_live_ids_exclude_a_running_session_s_own_stored_row(
+    monkeypatch, tmp_path, fake_scan
+) -> None:
     """The exclusion is by ID, not by name, and exists for the id collision.
 
     The fallback is entered only after the live scan matched nothing (see
@@ -314,7 +577,11 @@ def test_live_ids_exclude_a_running_session_s_own_stored_row(monkeypatch, fake_s
     """
     live = _Record(10, session_id="shared-id", conversation_name="live name")
     fake_scan([(live, "live")])
-    _stored(monkeypatch, [_StoredRow("shared-id", "old name"), _StoredRow("other-id", "old name")])
+    _stored(
+        monkeypatch,
+        [_StoredRow("shared-id", "old name"), _StoredRow("other-id", "old name")],
+        root=tmp_path,
+    )
     session_id, candidates, error = peer_send.resolve_stored_target(
         "old name", live_ids={"shared-id"}
     )
@@ -324,11 +591,14 @@ def test_live_ids_exclude_a_running_session_s_own_stored_row(monkeypatch, fake_s
     assert session_id == "other-id"
 
 
-def test_ambiguous_stored_matches_are_refused_with_candidates(monkeypatch, fake_scan) -> None:
+def test_ambiguous_stored_matches_are_refused_with_candidates(
+    monkeypatch, tmp_path, fake_scan
+) -> None:
     fake_scan([])
     _stored(
         monkeypatch,
         [_StoredRow("id1", "multi one"), _StoredRow("id2", "multi two")],
+        root=tmp_path,
     )
     session_id, candidates, error = peer_send.resolve_stored_target("multi")
     assert session_id is None
@@ -341,9 +611,9 @@ def test_ambiguous_stored_matches_are_refused_with_candidates(monkeypatch, fake_
     ]
 
 
-def test_no_stored_match_is_a_clean_no_match(monkeypatch, fake_scan) -> None:
+def test_no_stored_match_is_a_clean_no_match(monkeypatch, tmp_path, fake_scan) -> None:
     fake_scan([])
-    _stored(monkeypatch, [_StoredRow("id1", "something else")])
+    _stored(monkeypatch, [_StoredRow("id1", "something else")], root=tmp_path)
     session_id, candidates, error = peer_send.resolve_stored_target("nothing-here")
     assert (session_id, candidates, error) == (None, [], "")
 
@@ -365,13 +635,14 @@ def test_stored_resolution_flows_into_spool_delivery(monkeypatch, tmp_path) -> N
     ``resolve_stored_target`` decides WHO; ``deliver_peer_message`` still owns
     HOW. This pins that a resolved stored id spools to the inbox on a quiet
     mailbox (wake=False) exactly as an exact-id cold send does — the fallback
-    does not rebuild delivery.
+    does not rebuild delivery. The session has real history, which is what
+    makes it a recipient at all now (a never-engaged stored row is skipped by
+    the resolver AND refused by the cold gate).
     """
     import asyncio
 
     sid = "deadbeef0123"
-    directory = tmp_path / "sessions" / sid
-    directory.mkdir(parents=True)
+    directory = _write_transcript(tmp_path, sid)
     monkeypatch.setattr(peer_send, "config_dir", lambda: tmp_path)
 
     receipt = asyncio.run(
@@ -681,13 +952,14 @@ def test_a_non_dict_sender_cannot_escape_the_handler(monkeypatch) -> None:
 
 # --- ``started`` gating on the DELIVERY path ---------------------------------
 #
-# ``resolve_peer_target`` excludes an unstarted session from a broadcast, but
-# an exact-address send still resolves to it. The quiet-mailbox dial below is
-# the belt-and-braces that makes "no turn is ever driven into an unstarted
-# session" hold even for a caller that bypassed resolution — a DIAL, not a
-# spool, because a live record means an open session whose only inbox
-# consumer is the runtime child's boot drain (Q1: a spooled note was never
-# read while that session stayed open).
+# THE RULE: a session that has not run a real turn yet is NOT a peer-message
+# recipient. Resolution refuses it in every address form and skips it in a
+# broadcast; delivery refuses it AGAIN here, because a caller can bypass
+# resolution and because a COLD target has no ``started`` bit to read — only its
+# durable history. Nothing may be dialled, spooled or persisted for such a
+# session: the peer row would become the OPENING row of a conversation its owner
+# never started. This replaced a quiet dial that persisted exactly that row
+# ("delivered to the mailbox (session not started yet; no turn driven)").
 
 
 def _unstarted_record(session_id: str = "fresh-id") -> registry.SessionRecord:
@@ -705,47 +977,164 @@ def _unstarted_record(session_id: str = "fresh-id") -> registry.SessionRecord:
 
 
 @pytest.mark.asyncio
-async def test_an_unstarted_live_session_is_dialled_quietly_never_spooled(
+async def test_an_unstarted_live_session_is_refused_with_no_dial_and_no_spool(
     monkeypatch, tmp_path
 ) -> None:
-    """An exact send to a LIVE unstarted session DIALS in the record-only
-    shape (mailbox + no wake) whatever the sender asked for, so the peer card
-    is painted and the row persisted for the already-open session without
-    driving a turn — and nothing is spooled, because no live session would
-    ever drain it."""
+    """THE NEW RULE, live half: whatever mode/wake the sender asked for, an
+    unstarted record raises the refusal — no dial, no spool, nothing persisted.
+
+    Every shape is exercised because the old behaviour degraded all four to a
+    quiet dial that wrote the row; the point is that NONE of them writes now.
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     record = _unstarted_record()
-    dials: list[tuple[str, bool]] = []
+    dialled: list[str] = []
 
-    async def _dial(
-        rec: Any, *, text: str, mode: str, wake: bool, sender: Any
-    ) -> str:  # noqa: ANN401
-        assert rec is record
-        dials.append((mode, wake))
-        return "delivered to the mailbox (will be read on the next turn)"
+    async def _dial(*_a: Any, **_k: Any) -> str:
+        dialled.append("dialled")
+        raise AssertionError("an unengaged session must never be dialled")
 
     monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
 
     for mode, wake in (("mailbox", False), ("mailbox", True), ("steer", False), ("steer", True)):
-        detail = await peer_send.deliver_peer_message(
-            record,
-            session_id=record.session_id,
-            text=f"note-{mode}-{wake}",
-            mode=mode,
-            wake=wake,
-            sender={"pid": 1},
-        )
-        assert (
-            detail == "delivered to the mailbox (session not started yet; no turn driven)"
-        ), f"mode={mode} wake={wake}"
+        with pytest.raises(RuntimeError) as excinfo:
+            await peer_send.deliver_peer_message(
+                record,
+                session_id=record.session_id,
+                text=f"note-{mode}-{wake}",
+                mode=mode,
+                wake=wake,
+                sender={"pid": 1},
+            )
+        assert "pid 4242 has not been engaged yet" in str(excinfo.value), str(excinfo.value)
+        assert "no user message has been sent in it" in str(excinfo.value)
+        # A LIVE record is not the cold shape: the remedy stays the owner
+        # sending a first message into the window that is already open (D5).
+        assert "its owner has to send a first message" in str(excinfo.value)
 
-    # Every requested mode/wake combination degraded to the quiet dial: a
-    # turn-driving shape (wake=True or a steer) must never reach the socket.
-    assert dials == [("mailbox", False)] * 4
-    # And nothing was spooled: a live unstarted session would only drain an
-    # inbox row at a future cold open, which is exactly the invisibility the
-    # dial exists to avoid. The delivery touched the socket, not the file.
-    assert not (tmp_path / "sessions" / record.session_id).exists()
+    assert dialled == []
+    # Nothing was written anywhere — no spool row, no session directory at all.
+    assert not (tmp_path / "sessions").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_target_without_durable_history_is_refused(monkeypatch, tmp_path) -> None:
+    """THE NEW RULE, cold half: no live record and no transcript means nobody
+    ever started this conversation, so neither cold branch may run — no spool
+    (it would become the head of that history) and no ``engage_runtime`` (a
+    ``--wake`` would OPEN A TURN in a session whose owner is not there).
+
+    The directory EXISTS, which is the state ``resolve_cold_session`` still
+    hands over: a ``/new`` that was abandoned before any message leaves one.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _write_transcript(tmp_path, "cold-fresh", engaged=False)
+    engaged: list[str] = []
+
+    async def _engage(*_a: Any, **_k: Any) -> Any:
+        engaged.append("engaged")
+        raise AssertionError("a wake must not open a turn in a session nobody started")
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch.engage_runtime", _engage, raising=True
+    )
+
+    for mode, wake in (("mailbox", False), ("mailbox", True), ("steer", False)):
+        with pytest.raises(RuntimeError) as excinfo:
+            await peer_send.deliver_peer_message(
+                None,
+                session_id="cold-fresh",
+                text="note",
+                mode=mode,
+                wake=wake,
+                sender={"pid": 1},
+            )
+        assert "session 'cold-fresh' has not been engaged yet" in str(excinfo.value)
+        # D5: no runtime means no window to send into, so the remedy names
+        # opening the conversation rather than typing into it.
+        assert "it becomes a recipient once someone opens it and sends a first message" in str(
+            excinfo.value
+        ), str(excinfo.value)
+
+    assert engaged == []
+    assert not (tmp_path / "sessions" / "cold-fresh" / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_target_with_history_still_spools_and_engages(monkeypatch, tmp_path) -> None:
+    """The unchanged half: a cold target that HAS durable history keeps both
+    behaviours exactly as they were — the quiet note spools for the next open,
+    and a wake engages a runtime."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _write_transcript(tmp_path, "used-session")
+
+    detail = await peer_send.deliver_peer_message(
+        None,
+        session_id="used-session",
+        text="quiet",
+        mode="mailbox",
+        wake=False,
+        sender={"pid": 1},
+    )
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    assert detail == SPOOL_RECEIPT_NOTE
+    assert (tmp_path / "sessions" / "used-session" / "inbox.jsonl").exists()
+
+    engaged: list[tuple[str, str]] = []
+
+    class _Outcome:
+        detail = "delivered and woke the session"
+
+    async def _engage(session_id: str, cwd: str, errand: Any, *, config_dir: Any) -> Any:
+        engaged.append((session_id, errand.text))
+        return _Outcome()
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch.engage_runtime", _engage, raising=True
+    )
+    woken = await peer_send.deliver_peer_message(
+        None,
+        session_id="used-session",
+        text="act",
+        mode="mailbox",
+        wake=True,
+        sender={"pid": 1},
+    )
+    assert woken == "delivered and woke the session"
+    assert engaged == [("used-session", "act")]
+
+
+def test_the_durable_history_signal_is_a_real_turn_not_a_peer_note(tmp_path) -> None:
+    """``session_has_durable_history`` is the cold gate's ONLY signal, and it
+    must answer the same question the record's ``started`` bit is seeded from:
+    a transcript whose rows are quiet-dialled peer notes (kind ``custom``) is
+    NOT history. An absent directory answers False too — the conservative
+    unengaged direction, which the owner's first real turn corrects."""
+    assert peer_send.session_has_durable_history("never-existed", root=tmp_path) is False
+
+    directory = _write_transcript(tmp_path, "only-notes", engaged=False)
+    (directory / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "p1",
+                "ts": 1,
+                "type": "message",
+                "payload": {
+                    "kind": "custom",
+                    "custom_type": "peer_message",
+                    "attribution": "user",
+                    "details": {"text": "<peer-session-message>hi</peer-session-message>"},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert peer_send.session_has_durable_history("only-notes", root=tmp_path) is False
+
+    _write_transcript(tmp_path, "ran-a-turn")
+    assert peer_send.session_has_durable_history("ran-a-turn", root=tmp_path) is True
 
 
 @pytest.mark.asyncio
@@ -821,3 +1210,32 @@ def test_a_record_without_the_started_key_reads_as_started() -> None:
         }
     )
     assert explicit.started is False
+
+
+def test_the_cold_gate_accepts_only_forms_where_nothing_owns_the_session() -> None:
+    """The exact-``session`` cold gate answers one question — may the store be
+    asked again? (review round 4, MINOR-1 and NIT-4).
+
+    Two forms qualify, because in both no process is behind the conversation:
+    an id the scan never knew, and a record whose pid is gone. The other three
+    are answers ABOUT a session, and re-asking the store would deliver around
+    the answer the caller just received: a wedged pid still owns the session, an
+    unengaged one is deliberately not a recipient, and a refused target+selector
+    pair never named one session at all.
+    """
+    accepted = [
+        "no session found with session id 'abc'",
+        "target session abc is stale (its pid no longer exists), so nothing can read it",
+    ]
+    refused = [
+        "session 'abc' has not been engaged yet (no user message has been sent in it), "
+        "so it cannot receive peer messages — its owner has to send a first message",
+        "pid 42 has not reported for 4m, so a plain send will not dial it; it may report "
+        "again on its own",
+        "pass either a target substring or an exact pid/session, not both",
+        "no live session matches 'abc'",
+    ]
+    for error in accepted:
+        assert peer_send.session_id_unowned(error) is True, error
+    for error in refused:
+        assert peer_send.session_id_unowned(error) is False, error

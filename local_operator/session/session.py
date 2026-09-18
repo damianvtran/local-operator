@@ -2218,8 +2218,11 @@ class Session:
         #: handle (``ServingSessionHandle._publish_session_started``) and probed
         #: so a reduced host without it is a no-op.
         self._publish_session_started: Callable[[], None] | None = None
-        #: Guards the once-per-lifetime peer-inbox drain at the top of
-        #: ``_run_turn_pipeline`` — see ``_drain_spooled_peer_inbox``.
+        #: Guards the once-per-lifetime peer-inbox drain inside
+        #: ``_run_turn_pipeline``. That drain is deliberately NOT at the top of
+        #: the pipeline: it runs once this turn's own messages are durable, so a
+        #: leftover spool can never become the opening row of the history (see
+        #: ``_drain_spooled_peer_inbox``).
         self._peer_inbox_drained = False
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
@@ -5589,15 +5592,18 @@ class Session:
     async def _drain_spooled_peer_inbox(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
-        Called at the top of ``_run_turn_pipeline`` (see the call site for
-        why the first real turn is the right moment). The session usually
-        never has spool: the runtime child's boot drain consumed it before
-        the socket even listened, and live deliveries dial instead of
-        spooling. This drain exists for the rows that bypass both — a sender
-        on an older binary, or a race that left the record unreadable — so
-        the flag is what keeps it off the steady-state turn path: after the
-        first attempt it is never tried again, and the cold-open drain
-        remains the owner of anything written later.
+        Called by ``_run_turn_pipeline`` AFTER the turn's own messages are
+        durable and before the model is asked anything (see the call site for
+        why that position — not merely the moment — is the guarantee). The
+        session usually never has a spool: the runtime child's boot drain
+        consumed it before the socket even listened, and live deliveries dial
+        instead of spooling. This drain exists for the rows that bypass both —
+        a sender on an older binary, or a race that left the record
+        unreadable, or a session that has not been engaged yet (whose spool
+        ``process._drain_inbox_into`` deliberately preserves) — so the flag is
+        what keeps it off the steady-state turn path: after the first attempt
+        it is never tried again, and the cold-open drain remains the owner of
+        anything written later.
 
         Best-effort per row, mirroring ``process._drain_inbox_into``: one
         malformed or rejected row must not stop the rest, and none of it may
@@ -5621,10 +5627,16 @@ class Session:
             return
         for line in lines:
             try:
-                # The row's own ``wake``, never a guess: a row spooled by a
-                # runtime that was leaving a replaced build carries what its
-                # sender asked for, and ``send --wake`` asked for a turn. Rows
-                # written before the field existed read as notes, unchanged.
+                # The row's own ``wake`` is forwarded, never guessed: a row
+                # spooled by a runtime that was leaving a replaced build
+                # carries what its sender asked for, and ``send --wake`` asked
+                # for a turn. Rows written before the field existed read as
+                # notes, unchanged. What this drain DOES with that request is
+                # the consumer's business, not the field's: the BOOT drain runs
+                # before the socket listens, on an idle session, so the wake is
+                # honoured with a turn of its own, while the first-turn drain
+                # reaches the receiver mid-turn and the row rides that turn's
+                # context instead (see the paragraph at its call site).
                 await self.receive_peer_message(
                     line.text,
                     mode="mailbox",
@@ -7890,19 +7902,6 @@ class Session:
         opened the run, so the TUI's supersede guard still pairs them.
         """
         await self._refresh_context_metadata()
-        # Belt-and-braces for peer delivery: consume any inbox rows spooled
-        # for this session BEFORE the first real turn runs. The primary inbox
-        # consumer is the runtime child's boot drain (``process.amain``),
-        # which a session that opened some other way — or that was sent a
-        # spool by an older sender that had no live record for it — never
-        # passes through; without this drain those rows would sit unread
-        # until some future process cold-opens the session. Delivered in the
-        # quiet mailbox shape so the drain itself can never drive a turn.
-        # Runs BEFORE the started-flip below so the spooled notes are durable
-        # and visible even if this turn then fails; under the already-held
-        # ``_turn_lock`` their live-context append parks and rejoins at this
-        # very turn's first injection boundary (``_drain_steering``).
-        await self._drain_spooled_peer_inbox()
         # Flip the discovery record's ``started`` bit the first time a REAL
         # turn runs. This is the single choke point every spawn path funnels
         # through — the user's ``prompt()``, wake deliveries
@@ -7922,9 +7921,12 @@ class Session:
         # reason the flip above is here — this is the single choke point every
         # spawn path funnels through — and guarded the same way, because a
         # record that could fail a turn would be a worse defect than the
-        # unattributable death it exists to fix. Called AFTER the inbox drain
-        # above on purpose: a drain that aborts before the turn starts should
-        # not leave a row claiming a turn that never ran.
+        # unattributable death it exists to fix. The row opens the turn at
+        # ADMISSION, above both the pre-abort drop and the peer-inbox drain that
+        # run further down this pipeline; the drain in particular is no longer
+        # above this line — it runs AFTER this turn's own messages are durable
+        # (see ``_drain_spooled_peer_inbox``) — so nothing here is ordered
+        # against it any more.
         note_open = getattr(self, "note_turn_open", None)
         if callable(note_open):
             try:
@@ -8138,6 +8140,56 @@ class Session:
                     and message.text != _CONTINUATION_PROMPT
                 ):
                     await self._emit(MessageStartEvent(message=message))
+
+            # Belt-and-braces for peer delivery: consume any inbox rows spooled
+            # for this session, ONCE, at the first real turn. The primary inbox
+            # consumer is the runtime child's boot drain (``process.amain``),
+            # which a session that opened some other way — or that was sent a
+            # spool by an older sender that had no live record for it, or by one
+            # on an older build — never passes through; without this drain those
+            # rows would sit unread until some future process cold-opens the
+            # session. The row's own ``wake``/mode are FORWARDED rather than
+            # rewritten, and the no-extra-turn property comes from WHERE this
+            # runs — inside a turn that is already streaming — not from a quiet
+            # override: see the caller's paragraph below.
+            #
+            # HERE, AFTER this turn's own messages are durable, and that
+            # position is the guarantee rather than a convenience: a peer row
+            # lands in the transcript at the moment it is delivered, so draining
+            # before the append loop wrote the note ABOVE the owner's opening
+            # prompt — the peer message became the first row of a conversation
+            # its owner had just started, which is the reported symptom in the
+            # one corner the unengaged gate cannot cover (a spool written by a
+            # build that predates the gate).
+            #
+            # What the move does NOT cost, measured rather than assumed: the
+            # rows' visibility to the model is identical in both positions. The
+            # live append parks (the turn lock is held), and the loop drains
+            # steering only from its SECOND inner iteration onward
+            # (``harness/loop.py``: ``if not first_inner``), so a spooled row was
+            # never in this turn's FIRST request either way — it lands in live
+            # context at the continuation/yield boundary and is carried by the
+            # next model call. Do not re-describe this as "visible in the same
+            # turn's first request": that was never true.
+            #
+            # And nothing is consumed before the turn can deliver it — the
+            # once-per-lifetime flag is set inside the drain, so a turn dropped
+            # as pre-aborted, or a turn that fails before its own rows are
+            # written, leaves the spool whole for the next real turn instead of
+            # discarding rows it never showed anyone.
+            #
+            # A spooled row's own ``wake`` is NOT authoritative here, and that
+            # is a property of this position rather than an oversight: the drain
+            # runs inside a turn that is already streaming (``_is_streaming`` is
+            # True above), so ``receive_peer_message`` takes its busy branch and
+            # the row rides THIS turn's context as a quiet note instead of
+            # spawning a second turn. That is the benign direction — nothing is
+            # lost, the row is durable and in live context, and it is exactly
+            # what a live dial into a busy session does — but do not read the
+            # row's field as "a turn will be driven for this": a sender's
+            # ``--wake`` asks for attention, and it gets the attention of the
+            # turn already running.
+            await self._drain_spooled_peer_inbox()
 
             # Inventory changes deferred from a `web_*.enabled` edit land HERE,
             # before the tool context and the loop config are built for this

@@ -1192,17 +1192,55 @@ class RuntimeServer:
         # broadcasts and degrading peer wakes to quiet notes until the owner
         # typed once). Seeded from the session's own durable transcript — the
         # same signal ``TuiSessionHandle.rebind`` uses — so a true ``/new``
-        # (no message rows) still boots as the composer window. Probed off
-        # ``handle._session`` because only the owned-handle shape carries its
-        # Session there; a handle without one (the TUI's, a reduced test
-        # host) keeps the conservative False a first real turn immediately
-        # corrects. Direct field writes, not ``set_record_started``: nothing
-        # is published yet, and this is a derivation at birth, not the
+        # (no message rows) still boots as the composer window.
+        #
+        # ``_session`` IS AN ATTRIBUTE ON SOME HANDLES AND A METHOD ON OTHERS,
+        # and the difference is load-bearing rather than cosmetic. The owned
+        # shapes (``ServingSessionHandle``, the exec handle) assign the Session
+        # once, so ``getattr`` returns it; ``TuiSessionHandle._session`` is a
+        # METHOD — the phone has to follow a ``/new``/``/resume`` swap, so the
+        # TUI reads it per call. Probing only the attribute therefore bound a
+        # function, read ``transcript_path`` off it, got ``None`` and reported
+        # ``False`` for EVERY TUI window, including the very case this seed
+        # exists for: a TUI booted on an existing conversation
+        # (``lop --resume <sid>``, whose first session is adopted before any
+        # ``rebind``) published ``started=false`` over hundreds of transcript
+        # rows, and the peer gate then refused a send to it with a sentence
+        # that was false about it (review round 1, F-1). Calling it is
+        # GUARDED because a TUI whose session has not been bound yet raises
+        # ``RuntimeError("session is still starting")``, and a runtime whose
+        # handle cannot answer yet keeps the conservative False that its first
+        # real turn corrects — the same direction as a reduced test host with
+        # no session at all. Direct field writes, not ``set_record_started``:
+        # nothing is published yet, and this is a derivation at birth, not the
         # per-turn signal.
         owned_session = getattr(handle, "_session", None)
-        if owned_session is not None and has_durable_history(owned_session):
-            self._started = True
-            self._record.started = True
+        if callable(owned_session):
+            try:
+                owned_session = owned_session()
+            except Exception:  # noqa: BLE001 — a boot that cannot answer yet is not an error
+                owned_session = None
+        try:
+            # The DERIVATION is inside the guard too, not just the call. The
+            # reader ends at ``durable_conversation_path``, which catches only
+            # ``OSError``: a handle answering with something that is not a path
+            # would raise ``TypeError`` straight out of this constructor. A
+            # runtime that cannot boot is a far worse failure than one record
+            # starting conservatively false until the owner's first turn.
+            if owned_session is not None and has_durable_history(owned_session):
+                self._started = True
+                self._record.started = True
+        except Exception:  # noqa: BLE001 — a host that cannot answer keeps the conservative False
+            # WARNING, not debug (review round 3, N2): where this fires on a
+            # RESUMED session the record publishes ``started=false`` over a
+            # conversation that has run turns, which is the false-refusal shape
+            # of the F-1 defect — a peer send to it is answered with "no user
+            # message has been sent in it". Benign on a reduced host, and a
+            # signal worth seeing when it is not.
+            logger.warning(
+                "could not read the resumed session's history at boot; " "publishing started=false",
+                exc_info=True,
+            )
         self._publisher: RecordPublisher | None = None
         #: The config dir this runtime was STARTED in, captured by ``start`` /
         #: ``start_in_process`` and handed to the publisher. The record path is
@@ -3502,6 +3540,40 @@ class RuntimeServer:
                 raise ValueError("owner adopt_aside operation must be awaitable")
             return await result
         if op == "peer_message":
+            # THE RECEIVE-SIDE HALF OF THE UNENGAGED GATE, and the only one that
+            # holds against a sender this build does not control. Resolution
+            # refuses such a target and ``deliver_peer_message`` refuses it
+            # again, but a sender on an OLDER build reads a pre-field record's
+            # missing ``started`` key as True (``SessionRecord.from_json``) and
+            # dials anyway — and a peer row written through this op becomes the
+            # OPENING row of a conversation whose owner has not typed yet, which
+            # is the symptom this gate exists for. Refusing HERE makes the
+            # guarantee independent of the sender's build: the dispatch turns
+            # the ValueError into an ``error`` frame, ``peer_client`` raises it
+            # as a RuntimeError, and both send surfaces render
+            # ``could not deliver: ...``.
+            #
+            # ``self._started`` IS the published bit (``set_record_started``
+            # flips both together), so what this refuses is exactly what
+            # ``lop sessions`` reports as an unengaged composer window. The
+            # import is in-function and INSIDE the refusal branch: this module
+            # keeps its import weight off the happy path, and peer_send is only
+            # needed to name the refusal. The label follows the ADDRESS — a
+            # dial arrives at this runtime's PID, so the pid is what the sender
+            # typed (or what ``lop sessions`` showed it), not the session id it
+            # never named; both come from ``unengaged_label`` so all four
+            # refusal sites share one grammar.
+            if not self._started:
+                from local_operator.mobile.peer_send import (
+                    unengaged_label,
+                    unengaged_refusal,
+                )
+
+                raise ValueError(
+                    unengaged_refusal(
+                        unengaged_label(pid=self._record.pid, session_id=self._record.session_id)
+                    )
+                )
             # Cross-session `lop send` delivery. Optional capability — an owner
             # host that predates peer messaging (or a non-interactive exec host
             # that never wired it) answers with a clear error, which the sender

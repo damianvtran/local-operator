@@ -29,6 +29,9 @@ async def test_send_returns_ack_detail_and_passes_args() -> None:
     handle = FakeHandle()
     registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
+    # Engaged first: the receive side refuses an unengaged session outright, and
+    # THIS test is about the sender's frame reading, not the gate.
+    registrant.set_record_started(True)
     try:
         record = await _wait_record()
         detail = await send_peer_message(
@@ -70,6 +73,7 @@ async def test_send_survives_an_oversized_welcome_projection() -> None:
     ]
     registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
+    registrant.set_record_started(True)  # engaged: this test is about frame size
     try:
         record = await _wait_record()
         detail = await send_peer_message(
@@ -92,9 +96,15 @@ async def test_send_survives_an_oversized_welcome_projection() -> None:
 async def test_send_raises_on_error_frame() -> None:
     # A handle without the capability makes the registrant answer with an error
     # frame; the sender must raise RuntimeError, not hang or swallow it.
+    #
+    # ``set_record_started`` matters for the fixture, not the assertion: an
+    # unengaged runtime refuses the op with the SAME "cannot receive peer
+    # messages" wording, so without it this test would pass on the engagement
+    # gate while claiming to cover the missing capability.
     handle = NoPeerHandle()
     registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
+    registrant.set_record_started(True)
     try:
         record = await _wait_record()
         with pytest.raises(RuntimeError, match="cannot receive peer messages"):

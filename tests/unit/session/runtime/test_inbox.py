@@ -24,6 +24,7 @@ from local_operator.session.runtime.inbox import (
     inbox_path,
     peek_inbox,
 )
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 
 def _line(text: str) -> InboxLine:
@@ -168,14 +169,24 @@ def test_the_drain_is_wired_before_the_socket_starts_listening() -> None:
     )
 
 
-def test_a_message_spooled_to_an_unstarted_session_drains_on_start(tmp_path: Path) -> None:
-    """The receive half of the cold-session spool: a message that
-    ``deliver_peer_message`` wrote to the inbox (a session with NO live
-    record) is consumed by the ordinary drain the next time the session
-    opens. A live-but-unstarted target is no longer spooled at all — it is
-    quietly dialled — but rows written by an older sender, or before a
-    record existed, still land here, and this pins that the boot drain is
-    what serves them."""
+def test_a_spool_for_an_unengaged_session_is_preserved_for_the_first_turn(
+    tmp_path: Path,
+) -> None:
+    """THE NEW RULE, boot-drain half: an unengaged session does NOT consume its
+    spool.
+
+    The spool can hold rows written by a sender on an OLDER build (one whose
+    record read is absent-as-``True``) or from before any record existed, and
+    the boot drain runs before the socket listens — so draining here would put
+    a peer row at the HEAD of a conversation its owner has never typed in,
+    which is the reported symptom. The rows stay for
+    ``Session._drain_spooled_peer_inbox``, which runs inside the first real
+    turn, once the session IS engaged: nothing is lost, and nothing opens the
+    history.
+
+    "No durable history" is the whole test: a session directory with a spool
+    and no transcript file at all (the fresh ``/new`` this gate exists for).
+    """
     import asyncio
 
     from local_operator.session.runtime.process import _drain_inbox_into
@@ -200,11 +211,57 @@ def test_a_message_spooled_to_an_unstarted_session_drains_on_start(tmp_path: Pat
             return "ok"
 
     handle = _Handle()
+    assert asyncio.run(_drain_inbox_into(handle)) == 0
+    assert handle.received == []
+    # NOT consumed: the rows are still there for the first real turn.
+    assert [line.text for line in peek_inbox(session_dir)] == ["held until you start"]
+
+
+def test_a_spool_for_an_engaged_session_drains_on_start(tmp_path: Path) -> None:
+    """The unchanged half: a session with durable history drains at boot exactly
+    as it always did — including the handover case, where a draining runtime
+    spooled a message for the successor that is about to start here."""
+    import asyncio
+
+    from local_operator.session.runtime.process import _drain_inbox_into
+
+    session_dir = tmp_path / "sessions" / "usedsess"
+    session_dir.mkdir(parents=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert append_inbox(session_dir, _line("hello again"))
+
+    class _Transcript:
+        directory = session_dir
+
+    class _Session:
+        transcript = _Transcript()
+
+    class _Handle:
+        def __init__(self) -> None:
+            self._session = _Session()
+            self.received: list[tuple[str, str, bool]] = []
+
+        async def receive_peer_message(self, text, *, mode, wake, sender=None):
+            self.received.append((text, mode, wake))
+            return "ok"
+
+    handle = _Handle()
     delivered = asyncio.run(_drain_inbox_into(handle))
 
     assert delivered == 1
     # Drained as a quiet mailbox note (never a wake), matching the cold path.
-    assert handle.received == [("held until you start", "mailbox", False)]
+    assert handle.received == [("hello again", "mailbox", False)]
     # And the spool is consumed, not peeked.
     assert drain_inbox(session_dir) == []
 
@@ -282,6 +339,21 @@ def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
     append_inbox(
         transcript.directory,
         InboxLine(text="a quiet note", sender={"name": "peer"}),
+    )
+    # The session has run a turn, so it is a recipient at boot: the drain is
+    # what serves it. Written to disk because that is where the gate reads the
+    # engagement signal from.
+    (transcript.directory / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
     )
     handle = _Handle(_Session())
     handle._session = type("S", (), {"transcript": transcript})()
