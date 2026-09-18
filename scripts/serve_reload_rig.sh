@@ -55,11 +55,14 @@ export LOP_INSTALL_ROOT="$ISO/next"
 export LOP_BUILD_PREFIX="$ISO/next"
 
 cleanup() {
+  # EXIT covers the normal paths; INT and TERM cover a runner that is stopped
+# while this is mid-flight, which is how two daemons from an earlier revision
+  # escaped with only `trap ... EXIT` (review round 2, MINOR-3).
   kill -9 "$SERVE_PID" 2>/dev/null || true
   kill -9 "$HOLDER" "$DIALLER" 2>/dev/null || true
   rm -rf "$ISO"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 "$PY" -m local_operator.cli serve --host 127.0.0.1 --port 0 > "$ISO/serve.log" 2>&1 &
 SERVE_PID=$!
@@ -149,8 +152,19 @@ echo "pid unchanged:             $([ "$ALIVE" = yes ] && echo yes || echo NO) (p
 echo "alive after R1-1 window:   $ALIVE"
 echo "instance changed:          $([ -n "$NEW_INSTANCE" ] && [ "$NEW_INSTANCE" != "$INSTANCE" ] && echo yes || echo NO)"
 echo "replacement image ran:     $(ps eww -p "$SERVE_PID" 2>/dev/null | tr ' ' '\n' | grep -c '^LOP_RIG_REPLACED_IMAGE=1$') (1 = the target root's interpreter)"
-echo "dialler across the change: $(cat "$ISO/dial.txt")"
+echo "dialler across the change: $(cat "$ISO/dial.txt") (refused MUST be 0)"
 echo "held connection reused:    $(cat "$ISO/held.txt") (no = cut, the documented cost)"
+
+# The rig PRINTS refused=/other=; it also has to ASSERT them (review round 2, NIT-4),
+# or a run that refused every dial would still print PASS. `other` is allowed: those
+# are connections accepted and then cut by the exec itself, which is the documented
+# cost — a REFUSED connection is the port having no listener, which is the whole
+# property under test.
+REFUSED=$(sed -n 's/.*refused=\([0-9]*\).*/\1/p' "$ISO/dial.txt")
+if [ -z "$REFUSED" ] || [ "$REFUSED" != "0" ]; then
+  echo "FAIL: the dialler was refused $REFUSED time(s) — the port had a gap"
+  exit 1
+fi
 
 if [ "$ALIVE" != yes ] || [ -z "$NEW_INSTANCE" ] || [ "$NEW_INSTANCE" = "$INSTANCE" ]; then
   echo "FAIL"; exit 1

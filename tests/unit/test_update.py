@@ -646,6 +646,26 @@ def test_update_no_services_still_repairs_the_supervised_daemons(
     assert ran == ["daemons"]
 
 
+def test_the_services_stage_refuses_a_checkout(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """R2-1's sentence: a worktree does not own this machine's services.
+
+    Before the services stage existed this was unreachable by construction (a
+    checkout that was behind hit `editable_refusal`; one that was not behind
+    returned early). Wiring the stage to the "nothing to install" path is what
+    opened it, and the consequence was measured in review — an editable caller
+    classifies every daemon as stale and signals the fleet.
+    """
+    from local_operator import services, update
+    from local_operator.update import InstallKind
+
+    called: list[str] = []
+    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.EDITABLE)
+    monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
+    update._services_stage()
+    assert called == []
+    assert "does not own this machine's services" in capsys.readouterr().err
+
+
 def test_main_dispatches_services_status(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     """``lop services status`` prints what it finds and changes nothing."""
     from local_operator.cli import main

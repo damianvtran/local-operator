@@ -129,11 +129,15 @@ DRAIN_POLL_S = 0.1
 
 #: How long the target build's CLI is given to prove it can start.
 #:
-#: Generous on purpose: it is paid once, immediately before an irrecoverable
-#: step, and a cold import of a CLI with a large dependency closure on a loaded
-#: machine is seconds rather than milliseconds. An expiry is treated as "the
-#: check could not run" and the reload proceeds — see :func:`_smoke`.
-SMOKE_TIMEOUT_S = 30.0
+#: Generous on purpose — a cold import of a CLI with a large dependency closure on
+#: a loaded machine is seconds rather than milliseconds — but it has to FIT INSIDE
+#: the caller's patience, because this runs before the exec and a caller that gave
+#: up first would report a failure for a reload that then succeeded (review round
+#: 2, MINOR-2: the first version was 30 s, which with the 10 s drain overran
+#: ``services.RELOAD_WAIT_S``). Thirty was never a measurement; ten is still an
+#: order of magnitude over the measured cold import, and an expiry is treated as
+#: "the check could not run" — see :func:`_smoke`.
+SMOKE_TIMEOUT_S = 10.0
 
 
 class ReloadRefusal(Exception):
@@ -286,7 +290,12 @@ class ReloadWatch:
         """
         plan = self.plan()
         await self.drain()
-        _smoke(plan.interpreter)
+        # OFF THE EVENT LOOP (review round 2, MINOR-3). The check spawns a process
+        # and waits for it, measured at 0.20-0.35 s cold; run inline it would stop
+        # this daemon answering HTTP for that whole time, which is the opposite of
+        # what a reload is for. `to_thread` rather than a second loop: the body is
+        # a single bounded subprocess call, so there is nothing to serialise.
+        await asyncio.to_thread(_smoke, plan.interpreter)
         logger.info(
             "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
             os.getpid(),
@@ -466,13 +475,17 @@ def _exec(plan: ReloadPlan) -> None:
         os.execve(str(plan.interpreter), argv, dict(os.environ))
     finally:
         # Reached only when the exec FAILED — a successful one never returns.
-        # The descriptor and the disposition go back exactly as the reload found
-        # them, because this process is still serving: an fd left inheritable
-        # would be handed to every child it later spawns, including the runtime
-        # spawns that are its whole purpose, and a signal left ignored would make
-        # this daemon permanently deaf to the next request.
-        os.set_inheritable(fd, False)
-        signal.signal(RELOAD_SIGNAL, previous)
+        # Both restorations run even if the first raises (review round 2, NIT-3):
+        # a daemon left deaf is worse off than one left with a writable
+        # descriptor, because the first can never be asked to reload again.
+        # The descriptor goes back exactly as the reload found it, because this
+        # process is still serving: an fd left inheritable would be handed to
+        # every child it later spawns, including the runtime spawns that are its
+        # whole purpose.
+        try:
+            signal.signal(RELOAD_SIGNAL, previous)
+        finally:
+            os.set_inheritable(fd, False)
 
 
 def _smoke(interpreter: Path) -> None:
