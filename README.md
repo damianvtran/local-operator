@@ -788,6 +788,69 @@ interpreter the `bash` tool spawns: unset, it runs the first `bash` on `PATH`
 syntax work as the tool's name promises. Every option is browsable in
 `/settings`.
 
+### What the agent's shell may see
+
+`bash` and the `eval` kernel are real child processes, and both take their
+environment from the session's `shell_environment` policy:
+
+| `mode` | What a command the model runs can see |
+| --- | --- |
+| `inherit` (default) | a copy of the environment `lop` was started with, so `gh`, `aws`, `npm`, your proxy settings and your locale all keep working |
+| `allowlist` | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`, whatever `shell_environment.inherit` names, and nothing else |
+
+**What the strict mode does and does not close.** It closes the *inherited
+copy*: the provider key `lop` was started with is no longer handed to the child,
+and the child's own environment becomes a decision this program makes rather
+than an accident of how it was launched. It does **not** make the key
+unreadable. A command the model writes runs as the same user as `lop`, so it can
+read the parent process's environment in one line — `ps eww -p $PPID` on macOS,
+`cat /proc/$PPID/environ` on Linux. Read `allowlist` as "the commands my agent
+runs no longer carry the credential", not as "the credential cannot be recovered
+from a command". Closing that second half means not holding the provider key in
+the process environment at all (or running the child as another user), which is
+a separate change.
+
+**The mode is resolved once per session.** `config.yml` lives in a directory the
+agent's own shell can write, as the same user, so a policy re-read per command
+is one the model could turn off between two commands. An edit here applies at
+the next launch, and the settings page marks the section accordingly. The
+consequence to know: if a run can rewrite its own config *before* its first
+command, treat the strict mode as a mitigation rather than a guarantee.
+
+The `bash` child keeps the harness's own additions in either mode: the
+non-interactive defaults (pagers off, `CI=1`, `LOCAL_OPERATOR_AGENT_SHELL=1`,
+`TERM=dumb`) and any credential the session store injected for the agent to
+*use*. The `eval` worker is never handed
+those: it gets its own protocol channel instead, so `lop` gives a cell no `CI`
+and no session credential in either mode. It does still see whatever the harness
+was *launched* with when the mode is `inherit` (a `CI=1` the launching
+environment exported included) — the difference is the injection, which is a
+`bash`-only addition. Any subprocess the cell spawns follows the same policy. In either mode
+`shell_environment.exclude` removes names outright — including those injections,
+so it is the way to deny a variable rather than merely not grant it. It governs
+these two children only: MCP servers (already limited to the SDK's safe set plus
+their own configured `env`) and `lop`'s own processes are unaffected. A name in
+`inherit` or `exclude` that matches nothing is a no-op and is reported — a
+denial at `WARNING`, a grant at debug — so a typo cannot pass for a control.
+
+```yaml
+values:
+  shell_environment:
+    mode: allowlist                 # strict; the default is `inherit`
+    inherit: [LANG, LOCAL_OPERATOR_CONFIG_DIR]   # names the strict mode keeps
+    exclude: [GH_TOKEN]             # never passed on, in either mode
+```
+
+Set it per deployment, not globally: the interactive session you are sitting at
+wants `inherit`, a server-owned run wants `allowlist`. Why the strict mode
+exists: `lop` reads its provider API key **from its own environment**, so an
+inherited copy is a spend credential in the hands of any command the model
+writes — and a run whose whole job is fetching attacker-influenceable pages is
+exactly the run that must not have one. `mode` unset (or blank) is `inherit`;
+an unrecognised value (`strict`, `allow-list`) resolves to `allowlist` and warns
+by name, so a typo cannot silently disarm a hardened run. Every name here is a
+variable NAME, never a value.
+
 ### Standing instructions
 
 Your machine-wide preferences — output style, commit conventions, safety
@@ -875,6 +938,11 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
   for the trust model.
 - **Credential hygiene.** Keys live in a local credential store, are entered
   through hidden prompts, and are kept out of transcripts.
+- **A shell's environment is a policy, not an accident.** A command the model
+  runs sees your environment by default (`shell_environment.mode: inherit`); a
+  server-owned run sets `allowlist`, so the provider key that session launched
+  with is not readable from that shell. See
+  [What the agent's shell may see](#what-the-agents-shell-may-see).
 - **Endpoint protection.** A full install registers per-user services, which
   behaviour-based EDR can read as persistence. See
   [docs/ENDPOINT_PROTECTION.md](./docs/ENDPOINT_PROTECTION.md) for the inventory

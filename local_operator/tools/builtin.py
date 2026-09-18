@@ -125,7 +125,7 @@ from local_operator.scratchpad import (
     ScratchpadPathError,
     parse_scratchpad_url,
 )
-from local_operator.tools import group_reaper
+from local_operator.tools import group_reaper, shell_env
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -2230,8 +2230,6 @@ async def execute_bash(
             f"aborted ({signal.reason or 'aborted'}): {params.command}",
         )
 
-    env = os.environ.copy()
-    env.update(NON_INTERACTIVE_ENV)
     # Session credentials ride the child environment so the agent can USE a
     # secret it can never READ. Injected here rather than advertised as a
     # bash ``env`` argument: a model-authored env map would have to carry
@@ -2240,9 +2238,19 @@ async def execute_bash(
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
+    injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     if isinstance(extra, dict):
-        extra = {str(name): str(value) for name, value in extra.items()}
-        env.update(extra)
+        injections.update({str(name): str(value) for name, value in extra.items()})
+
+    # The child environment is built from the session's `shell_environment`
+    # policy, not copied wholesale: `inherit` (the default) is the copy this
+    # used to be, `allowlist` is the strict mode a server-owned run turns on so
+    # a model-authored command cannot read the provider key out of its own
+    # environment. Both the non-interactive contract and the credential store
+    # above are worth keeping in EITHER mode, so they ride the policy as
+    # intentional injections rather than around it — see
+    # local_operator.tools.shell_env, the one place this decision is made.
+    env = shell_env.child_environment(injections=injections)
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
