@@ -7826,7 +7826,13 @@ def main() -> int:
             # route", and the exec path prints the same bytes with no colour at
             # all — one sentence must not render two ways depending on which
             # entry point hit it.
-            print(paint("Error: ", ERROR) + refusal, file=sys.stderr)
+            #
+            # `stream=sys.stderr` because that is where this text goes (design
+            # round 2, D4): `paint`'s gate reads the stream it is told about, and
+            # with the default it read stdout — so `lop 2> log` with stdout on a
+            # terminal wrote escapes into a file, the one shape the gate exists
+            # to keep plain.
+            print(paint("Error: ", ERROR, stream=sys.stderr) + refusal, file=sys.stderr)
             return 1
 
         config_manager = ConfigManager(base_dir)
