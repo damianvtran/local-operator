@@ -598,8 +598,6 @@ class _HttpDecisionVendor:
         self._memo_settled_at = now
         self._key_expires_at = now + self._credential_ttl_s
         return self._key
-        self._key_expires_at = now + self._credential_ttl_s
-        return self._key
 
     def invalidate_credential(self) -> None:
         """Drop the memo so the next :meth:`credential` re-reads the store.

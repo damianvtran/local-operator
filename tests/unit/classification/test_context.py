@@ -51,6 +51,31 @@ _REALISTIC_DESCRIPTION = (
 _MCP_DESCRIPTION = "CRM contacts, companies, deals, marketing, and sales."
 
 
+def _catalogue_roster() -> tuple[Candidate, ...]:
+    """THE roster the §5 accounting is measured on: 537 rows, and the doc quotes it.
+
+    Shared by both budget tests so the two cannot drift apart against one paragraph,
+    which is exactly what review round 3 found (the cap-40 test was still building
+    the old 530-row roster while the doc quoted a 537-row measurement).
+    """
+    return (
+        tuple(_realistic_roster(500))
+        + tuple(
+            candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
+            for index in range(30)
+        )
+        + tuple(
+            candidate(f"server-{index}", kind="mcp", description=_MCP_DESCRIPTION)
+            for index in range(7)
+        )
+    )
+
+
+#: The message both budget tests classify. Repeated because a real turn can be, and
+#: it is the whole ``request`` field the state carries.
+_CATALOGUE_MESSAGE = "why can't this tenant run legal searches? " * 8
+
+
 def option_chars_of(plan: Any) -> int:
     """The character cost of the questions' OPTION text.
 
@@ -513,25 +538,15 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
     (operator's figure, 2026-09-18; §5 of the design doc said 64k, which nothing
     had measured).
 
-    The numbers, MEASURED on this roster (537 rows: 500 skills, 30 guides, 7 servers,
-    each skill/guide carrying a realistic ~85-character description) rather than quoted
-    from §5: **6 943 chars ≈ 1 735 tokens ≈ 5.3%** of the 32 768-token window at the
-    shipped defaults. The assertion is tight against that figure, because review round
-    1 found the previous version's toy descriptions let a 5x drift through a `<= 3000`
-    bound, and round 2 found the doc and the test measuring different rosters.
+    The numbers are MEASURED here and QUOTED in §5 of the design doc, and the
+    assertion is EQUALITY against the measured total rather than a loose ceiling: two
+    review rounds were spent on the gap between this test and that paragraph (toy
+    descriptions that let a 5x drift through a `<= 3000` bound, then a doc quoting
+    figures this test did not measure). If the harness's question copy or the roster
+    changes, this fails and both numbers move together.
     """
-    rows = (
-        tuple(_realistic_roster(500))
-        + tuple(
-            candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
-            for index in range(30)
-        )
-        + tuple(
-            candidate(f"server-{index}", kind="mcp", description=_MCP_DESCRIPTION)
-            for index in range(7)
-        )
-    )
-    message = "why can't this tenant run legal searches? " * 8
+    rows = _catalogue_roster()
+    message = _CATALOGUE_MESSAGE
 
     state = build_state(user_message=message, context=None, candidates=rows)
     state_chars = serialized_size(state)
@@ -545,31 +560,30 @@ def test_the_request_stays_a_small_fraction_of_the_models_input_window() -> None
     estimated_tokens = (state_chars + option_chars + instruction_chars) // 4
 
     print(
-        f"500 skills + 30 guides: state={state_chars} chars, "
-        f"options={option_chars} chars, instructions={instruction_chars} chars, "
-        f"~{estimated_tokens} tokens of a 32 768-token window"
+        f"537-row catalogue: state={state_chars} chars, options={option_chars} chars, "
+        f"instructions={instruction_chars} chars, ~{estimated_tokens} tokens "
+        f"of a 32 768-token window"
     )
-    assert estimated_tokens <= 2_500
+    # These three are the numbers §5 prints, and they must move together with it.
+    assert (state_chars, option_chars, instruction_chars) == (3279, 3170, 449)
+    assert estimated_tokens == (state_chars + option_chars + instruction_chars) // 4
 
 
 def test_a_raised_candidate_cap_scales_linearly_and_stays_inside_the_window() -> None:
     """The knob's safe range, measured: the window is not what binds at 40 a kind."""
-    rows = tuple(_realistic_roster(500)) + tuple(
-        candidate(f"guide-{index}", kind="guide", description=_REALISTIC_DESCRIPTION)
-        for index in range(30)
-    )
-    message = "deploy core to qa"
+    rows = _catalogue_roster()
+    message = _CATALOGUE_MESSAGE
 
     state = build_state(user_message=message, context=None, candidates=rows, candidate_limit=40)
     plan = build_questions(rows, limit=40)
     option_chars = option_chars_of(plan)
     estimated_tokens = (serialized_size(state) + option_chars) // 4
 
-    # Measured on the same 537-row roster at head: 13 953 chars ≈ 3 488 tokens ≈ 10.6%
-    # of the window. The cap is the lever, and even at 40 per kind the window is not
-    # what binds.
+    # The same 537-row catalogue at 40 a kind: the cap is the lever, and even here the
+    # window is not what binds. The figures are §5's, asserted by equality for the
+    # reason the default-cap test's docstring gives.
     print(f"maxCandidates=40: state+options ~{estimated_tokens} tokens")
-    assert estimated_tokens <= 5_000
+    assert (serialized_size(state), option_chars) == (5336, 8102)
 
 
 def test_a_zero_cap_keeps_nothing_like_select_candidates() -> None:
