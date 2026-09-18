@@ -169,11 +169,14 @@ def refusal_message() -> str:
     ``task`` (what the user's instruction asks for and what most sessions that
     reach here will hold), ``hub`` back to the delegating session (the route for
     a role that does not delegate — the case this guard was written for), and
-    ``wake`` for anything that must happen later. The text deliberately does not
-    mention :data:`ALLOW_NESTED_SESSION_ENV`: teaching the bypass to the reader
-    it exists to stop would be the whole change talking itself out of a job, and
-    the human-facing documentation is where a person (or a QA run that needs the
-    real CLI) looks for it.
+    ``wake`` for anything that must happen later, named as the DELEGATING
+    session's to arm rather than the reader's: ``harness.subagent`` prunes
+    ``wake`` from every child, so a reader who reached for it would find the
+    tool missing on top of the refusal it already got. The text deliberately
+    does not mention :data:`ALLOW_NESTED_SESSION_ENV`: teaching the bypass to the
+    reader it exists to stop would be the whole change talking itself out of a
+    job, and the human-facing documentation is where a person (or a QA run that
+    needs the real CLI) looks for it.
     """
     return (
         "a `lop` invocation from inside an agent session cannot open one — the "
@@ -185,7 +188,9 @@ def refusal_message() -> str:
         "not hold `task` may not create subagents at all: do the work yourself, "
         "and say so with `hub` if the slice genuinely cannot be done alone — "
         "`hub` reaches the session that delegated to you and the brief travels "
-        "in the message. Work that must happen later belongs in `wake`."
+        "in the message. Work that must happen later is not yours to arm "
+        "either — `wake` is pruned from every child session, this one included "
+        "— so it belongs to the session that delegated to you."
     )
 
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
@@ -107,19 +109,28 @@ def nested_state() -> FrontendSessionState:
 
 
 class CountingComms(SnapshotSubagentComms):
-    """The follower facade, noting every job id it was asked to count.
+    """The follower facade, noting every graph walk it was asked for.
 
     The spy exists so the count on a row can be shown to come from a walk of
     the GRAPH rather than from anything read off the job row: a mark derived
-    from the row itself would need no call here at all.
+    from the row itself would need no call here at all. It counts WALKS, not
+    per-row lookups, because the mark is read from ONE grouping pass over
+    ``nodes()`` (review round 1, F2): the old per-row ``children(job_id)``
+    rebuilds the whole node list on every call, so a mark cost O(rows x nodes)
+    and this counter is what makes that shape observable.
     """
 
     def __init__(self, jobs: Any) -> None:
         super().__init__(jobs)
-        self.asked: list[str] = []
+        self.walks = 0
+        self.children_asked: list[str] = []
+
+    def nodes(self) -> list[Any]:
+        self.walks += 1
+        return super().nodes()
 
     def children(self, job_id: str | None) -> list[Any]:
-        self.asked.append(str(job_id))
+        self.children_asked.append(str(job_id))
         return super().children(job_id)
 
 
@@ -214,12 +225,14 @@ async def test_the_dock_says_whose_children_it_lists_and_which_rows_go_deeper() 
         assert "⊞1" in row_text(panel, "manager")
         assert "⊞" not in row_text(panel, "sibling")
 
-        # The count came from a WALK of the comms graph, one call per ROSTER
-        # row, so nothing about a mark is read off the job row it is painted
-        # on — and only roster rows are walked.
+        # The count came from a WALK of the comms graph — nothing about a mark
+        # is read off the job row it is painted on — and `children` is asked
+        # once by the resolver for the SCOPE it is listing, never once per row:
+        # nothing here asks about `manager` or `sibling`, which is exactly what
+        # a per-row count of their marks would have done (review round 1, F2).
         assert panel._children_counts == {"manager": 1, "sibling": 0}
-        assert {"manager", "sibling"} <= set(comms.asked), comms.asked
-        assert "leaf" not in comms.asked, comms.asked
+        assert set(comms.children_asked) == {"None"}, comms.children_asked
+        assert comms.walks, "the graph must be the source of the mark"
 
         await _open(pilot, app, session.jobs.get("manager"))
         await pilot.pause()
@@ -229,8 +242,10 @@ async def test_the_dock_says_whose_children_it_lists_and_which_rows_go_deeper() 
         assert set(panel._rows) == {"leaf"}
         assert panel._children_counts == {"leaf": 1}
         assert "⊞1" in row_text(panel, "leaf")
-        # The newly-scoped row's own level was walked for it, after the drill.
-        assert "leaf" in comms.asked, comms.asked
+        # The newly-scoped page's own level was reached through the resolver,
+        # and the mark on ITS row (leaf) never asked for leaf's children.
+        assert comms.children_asked[-1] == "manager", comms.children_asked
+        assert "leaf" not in comms.children_asked, comms.children_asked
 
         await pilot.press("escape")
         await pilot.pause()
@@ -558,3 +573,194 @@ async def test_opening_a_leaf_settles_the_dock_in_the_same_handler(leaf_has_plan
             assert _dock_state(app) == settled
         app._refresh_band()
         assert _dock_state(app) == settled
+
+
+class WindowedJobs(SnapshotJobs):
+    """``SnapshotJobs`` as the LIVE manager always is: with a retention window.
+
+    The facade carries no ``retention_ms``, and ``_within_roster_window`` fails
+    OPEN without one — identity, every row kept — so a fixture built on the
+    bare facade cannot see a settled child age out at all. That is why the
+    round-1 finding had to be reproduced with a probe that set the attribute by
+    hand, and why the mark's agreement with the page had no test (review round
+    1, F1): the disagreement only exists where a window does.
+    """
+
+    def __init__(self, values: Any, retention_ms: float) -> None:
+        super().__init__(values)
+        self.retention_ms = retention_ms
+
+
+@pytest.mark.asyncio
+async def test_a_mark_never_promises_a_level_that_would_open_empty() -> None:
+    """The mark counts what the ROSTER would render, not what the graph holds.
+
+    A child that settled longer ago than the manager's window is still in the
+    comms graph, and the count used to read it straight out of the graph — so
+    the dock painted ``Coordinate review ⊞1`` over a page that opened with no
+    rows at all, and nothing on either surface said the level had aged out
+    (review round 1, F1). Both halves are asserted, because the defect was
+    their DISAGREEMENT: the row's promise and the page it opens.
+    """
+    state = scoped_state()
+    settled = time.time() - 3600.0
+    state = state.model_copy(
+        update={
+            "jobs": [
+                (
+                    job.model_copy(update={"status": "completed", "settled_at": settled})
+                    if job.id == "leaf"
+                    else job
+                )
+                for job in state.jobs
+            ]
+        }
+    )
+    session: Any = FakeSession()
+    install(session, state)
+    # The production default, so the fixture is the window a real dock runs.
+    session.jobs = WindowedJobs(state.jobs, 5 * 60_000)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        assert panel._children_counts == {"manager": 0, "sibling": 0}
+        assert "⊞" not in row_text(panel, "manager"), row_text(panel, "manager")
+
+        # The page that mark used to promise, resolved through the roster the
+        # reader actually gets: one level down, and empty.
+        scoped, _ = app._subagent_roster()
+        assert [job.id for job in scoped] == ["manager", "sibling"], scoped
+        await _open(pilot, app, session.jobs.get("manager"))
+        await pilot.pause()
+        page, _ = app._subagent_roster()
+        assert page == [], page
+        assert not panel._rows
+
+
+@pytest.mark.asyncio
+async def test_a_mark_costs_one_walk_of_the_graph_however_many_rows_list_it() -> None:
+    """F2's shape: the mark was O(rows x nodes), one ``children()`` per row.
+
+    ``SubagentComms.children`` rebuilds every node per call, so the per-row form
+    cost 275 ms for ONE refresh at 500 rows — and it ran from the 1 Hz poll and
+    from every ``Subagent*`` handler. The unit is the walks the facade sees, and
+    the assertion is that the count does not move with the size of the roster it
+    is answering for.
+    """
+    state = scoped_state()
+    wide = [
+        JobState(id=f"wide-{n}", type="task", parent_job_id="manager", label=f"wide {n}")
+        for n in range(40)
+    ]
+    state = state.model_copy(update={"jobs": [*state.jobs, *wide]})
+    session: Any = FakeSession()
+    install(session, state)
+    session._subagent_comms = comms = CountingComms(state.jobs)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        one_row = [session.jobs.get("manager")]
+        many_rows = session.jobs.list()
+
+        comms.walks = 0
+        assert app._subagent_child_counts(one_row) == {"manager": 41}
+        one = comms.walks
+        comms.walks = 0
+        counts = app._subagent_child_counts(many_rows)
+        many = comms.walks
+
+        assert counts["manager"] == 41, counts
+        assert one == many, (one, many)
+        assert one < 5, one  # a per-row walk would be 43 here
+
+
+@pytest.mark.parametrize("size", [(75, 30), (60, 30)])
+@pytest.mark.asyncio
+async def test_the_mark_survives_the_widths_where_it_used_to_disappear(
+    size: tuple[int, int],
+) -> None:
+    """D2's cliff, at the two widths the finding measured it at.
+
+    ``Coordinate review`` is 17 cells. With the mark appended BEFORE the
+    truncation the row kept it only from 64 columns up, so at 75x30 and 60x30 a
+    parent and a childless sibling painted the same row — the one thing the mark
+    exists to prevent. The name yields those cells now, and a row still never
+    overruns its width.
+    """
+    state = nested_state()
+    session: Any = FakeSession()
+    install(session, state)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=size) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        assert set(panel._rows) == {"manager", "sibling"}
+        assert "⊞1" in row_text(panel, "manager"), row_text(panel, "manager")
+        assert "⊞" not in row_text(panel, "sibling"), row_text(panel, "sibling")
+        assert app.screen.size == app.screen.virtual_size
+
+
+@pytest.mark.parametrize("width", [40, 36])
+@pytest.mark.asyncio
+async def test_the_header_keeps_the_hint_inside_the_terminal_at_forty_columns(width: int) -> None:
+    """D1: the constant ceiling alone painted the caption past the panel edge.
+
+    At 40x30 the header was 43 cells in a 45-cell region, so `ctrl+g` sat in
+    columns 38-43 — off screen — and the dock stopped following the terminal
+    (panel width 45 at 40, 44 and 36 columns, against 38 at the same size with
+    no scope). The scope is bounded by the LIVE row width now, and the hint's
+    cells are charged before the scope's, so the way back out survives at any
+    width where a caption exists at all.
+    """
+    state = scoped_state()
+    session: Any = FakeSession()
+    install(session, state)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(width, 30)) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        await _open(pilot, app, session.jobs.get("manager"))
+        await pilot.pause()
+        caption = panel.summary_text()
+        assert caption.endswith("ctrl+g"), caption
+        assert cell_len(caption) <= panel._row_width(), (caption, panel._row_width())
+        assert panel.size.width <= width, (panel.size.width, width)
+        assert app.screen.size == app.screen.virtual_size
+
+
+@pytest.mark.asyncio
+async def test_the_compact_caption_names_the_level_it_counts() -> None:
+    """D1: the summary had no scope segment at all, at the one size it is alone.
+
+    At 40x20 the caption is the panel's ONLY representation, and it read a bare
+    ``Subagents · 1 running ⣯ · ctrl+g`` while the counts under it were the open
+    page's children — the unqualified word the scope exists to qualify. Counts
+    yield to the level name now (``_SUMMARY_SHED_ORDER``), so the name survives
+    the width that sheds them.
+    """
+    state = nested_state()
+    session: Any = FakeSession()
+    install(session, state)
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(40, 20)) as pilot:
+        panel = app.query_one(SubagentPanel)
+        await pilot.pause()
+        app._refresh_band()
+        await pilot.pause()
+        await _open(pilot, app, session.jobs.get("manager"))
+        await pilot.pause()
+        assert panel._header_compact, "the assertion is about the compact caption"
+        caption = panel.summary_text()
+        assert caption.startswith("Subagents of Coordinate"), caption
+        assert "running" not in caption, caption  # a count yields to the name
+        assert caption.endswith("ctrl+g"), caption
+        assert cell_len(caption) <= panel._row_width(), (caption, panel._row_width())

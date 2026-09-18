@@ -13,8 +13,10 @@ Run before and after the change to get the pair: the BEFORE frame (no scope, no
 mark) is what a reader saw when a mid-level page and the root looked identical.
 
     .venv/bin/python scripts/nested_roster_shot.py /tmp/nested 120x40
-    rsvg-convert /tmp/nested/nested-root.svg -o /tmp/nested-root.png
-    rsvg-convert /tmp/nested/nested-scoped.svg -o /tmp/nested-scoped.png
+    .venv/bin/python scripts/nested_roster_shot.py /tmp/nested 60x30   # the narrow dock: the mark's floor
+    rsvg-convert /tmp/nested/nested-root-120x40.svg -o /tmp/nested-root.png
+    rsvg-convert /tmp/nested/nested-scoped-120x40.svg -o /tmp/nested-scoped.png
+    rsvg-convert /tmp/nested/nested-root-60x30.svg -o /tmp/nested-narrow.png
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ async def capture(output: Path, size: tuple[int, int]) -> None:
         # Frame 1 — the ROOT roster: the mid-level child is a row here, and its
         # own children are what `⊞N` marks. Before the change this row and a
         # leaf are byte-identical.
-        save_capture(app, str(output / "nested-root.svg"))
+        save_capture(app, str(output / f"nested-root-{size[0]}x{size[1]}.svg"))
         print(f"root header: {panel._header.content!r}")
         for job_id in ("manager", "leaf"):
             try:
@@ -69,7 +71,7 @@ async def capture(output: Path, size: tuple[int, int]) -> None:
         app._open_subagent_view("leaf")
         for _ in range(6):
             await pilot.pause()
-        save_capture(app, str(output / "nested-scoped.svg"))
+        save_capture(app, str(output / f"nested-scoped-{size[0]}x{size[1]}.svg"))
         print(f"scoped header: {panel._header.content!r}")
         for job_id in ("leaf", "grandchild"):
             try:

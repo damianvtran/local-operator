@@ -69,5 +69,19 @@ only difference in each pair is the change under review.
 
 Measured on the "after" frames: the label cell grows by exactly 2 cells
 (`⊞1`), the panel's rung and column maths are untouched, and the scope label is
-bounded by `SCOPE_CEILING` (24 cells) so the content-sized `#band` cannot be
-widened past its rows by a long model-authored label.
+bounded by the live panel width and by `SCOPE_CEILING` (24 cells) so the
+content-sized `#band` cannot be widened past its rows by a long model-authored
+label.
+
+## The narrow dock (review round 1's D1/D2)
+
+Two of the round-1 findings were about widths this folder did not photograph, so
+the pair below is taken at the sizes they were measured at:
+
+| frame | what it shows |
+| --- | --- |
+| `after-root-roster-60x30.png` | 60x30: `• Coordinate rev… ⊞1` — the label truncates with its ellipsis and the MARK SURVIVES. Before the round's fix the mark was appended inside the label and then truncated positionally, so a 21-cell label kept its mark only from 76 columns and a parent row was indistinguishable from a leaf below that. |
+| `after-scoped-roster-60x30.png`, `after-scoped-roster-40x30.png` | A page open at 60 and at 40 columns: `Subagents of Inspect documentation…` and `Subagents of Inspect docum…`, each with `ctrl+g` still ON SCREEN and the dock inside the terminal. Before the fix the scope was bounded by a constant sized against an assumed 58-cell dock, so at 40 columns the header string was 43 cells in a 45-cell region, `ctrl+g` fell off the right edge and the dock stopped following the terminal. |
+
+Both were re-taken from the remediated tree with the same script and the same
+fixtures, so the pairs differ by the change under review and nothing else.

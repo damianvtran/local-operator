@@ -433,13 +433,16 @@ def test_a_row_says_when_the_child_it_names_has_a_level_under_it() -> None:
     assert "⊞" not in _plain(parent, 120)
 
 
-def test_the_mark_is_the_labels_own_budget_rather_than_a_column_of_its_own() -> None:
-    """It rides the label's truncation, so no unmarked row pays for it.
+def test_the_mark_is_reserved_before_the_name_so_it_cannot_be_cut_away() -> None:
+    """It rides the label's own budget, and it is charged BEFORE the name is.
 
     Two rows, one with a level under it: the numbers still start in one column
-    (the shared label width measures the MARKED label), and where the label is
-    squeezed it is the count that goes and not the name — the count is
-    re-derivable by opening the page, the name is not.
+    (the shared label width measures the MARKED label), and no marked row is
+    wider than its budget. Where the label is squeezed it is the NAME that
+    yields — a name cut short reads as a name, the `…` says so, while a mark
+    cut off is a row stating a different FACT ("nothing below me") that can be
+    falsified only by opening the page the mark was there to announce (design
+    round 1, D2).
     """
     usage = Usage(input_tokens=48_000, output_tokens=9_000, context_tokens=48_200)
     rows = _column(
@@ -454,9 +457,25 @@ def test_the_mark_is_the_labels_own_budget_rather_than_a_column_of_its_own() -> 
     assert "⊞" not in rows[1], rows
     assert rows[0].index("$") == rows[1].index("$"), rows
     narrow = _plain(Job("j1", "review-301-r2", progress="auditing merged MRs"), 30, children=3)
-    assert "review-301" in narrow  # the head of the name survives
-    assert "⊞" not in narrow  # the count at the tail is what yields
+    assert "⊞3" in narrow, narrow  # the mark stays
+    assert "review-301-r2" not in narrow, narrow  # it is the NAME that yielded
     assert cell_len(narrow) <= 30
+
+
+def test_the_mark_survives_every_width_that_still_paints_a_label() -> None:
+    """D2's cliff, as a sweep: a 21-cell label kept its mark only from 76 up.
+
+    Below that the mark and its digit came off the tail with the name, so the
+    same roster showed a level or hid it depending on the terminal width — and
+    with two equal-length labels a parent and a leaf were the same row. The
+    rung ladder always keeps a label (``LABEL_FLOOR`` is the last thing to
+    yield), so there is no width at which the mark may be absent.
+    """
+    label = "Inspect documentation"  # 21 cells, this branch's own capture label
+    for width in range(24, 141):
+        row = _plain(Job("j1", label, progress="auditing merged MRs"), width, children=1)
+        assert "⊞1" in row, (width, row)
+        assert cell_len(row) <= width, (width, row)
 
 
 def test_a_row_never_overruns_the_width_it_was_given() -> None:

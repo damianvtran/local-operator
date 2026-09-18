@@ -29,6 +29,7 @@ from local_operator.agent_shell import (
     in_agent_shell,
     nested_session_allowed,
     nested_session_refusal,
+    refusal_message,
     stamp_escaped_session,
 )
 from local_operator.cli import main as cli_main
@@ -68,8 +69,10 @@ def test_the_marker_refuses_and_names_what_to_do_instead(in_agent: None) -> None
     The three routes are the ones that exist: `task` for a session that holds
     it, `hub` for the non-delegating child this guard was written for (the one
     that cannot launch anything itself), and `wake` for work that belongs
-    later. The escape hatch is the one thing the text must NOT name — see the
-    next test.
+    later — named as the DELEGATING session's to arm, because `wake` is pruned
+    from every child session and the reader this text reaches is a child
+    (review round 1, F3). The escape hatch is the one thing the text must NOT
+    name — see the next test.
     """
     message = nested_session_refusal()
     assert message is not None
@@ -77,6 +80,31 @@ def test_the_marker_refuses_and_names_what_to_do_instead(in_agent: None) -> None
     assert "`task`" in message
     assert "`hub`" in message
     assert "`wake`" in message
+    # The last sentence may not route the reader to a tool it does not hold.
+    # `wake` is pruned from EVERY child regardless of role, so "put it in
+    # `wake`" sent it looking for a tool that is not in its set — the same
+    # class of dead end the refusal exists to end (review round 1, F3).
+    assert "belongs in `wake`" not in message
+    assert "`wake` is pruned from every child session" in message
+    assert message.endswith("so it belongs to the session that delegated to you.")
+
+
+def test_the_exec_doc_quotes_the_refusal_byte_for_byte() -> None:
+    """``docs/EXEC.md``'s quoted copy is the message, not a paraphrase of it.
+
+    The quote is what a human — and the next agent — reads to recognise the
+    refusal in a terminal, and a reworded quote cannot be grepped for: the
+    copy this replaces had already drifted from the function ("Launch
+    delegated work with" against "Delegated work is launched with") and kept
+    routing the reader to `wake` after the message stopped doing so. Pinned
+    rather than spot-checked, so the next reword cannot leave one behind.
+    """
+    doc = Path(__file__).resolve().parents[2] / "docs" / "EXEC.md"
+    text = doc.read_text()
+    marker = "```\nexec failed: "
+    start = text.index(marker)
+    end = text.index("```", start + len(marker))
+    assert text[start + 4 : end] == f"exec failed: {refusal_message()}\n"
 
 
 def test_the_refusal_does_not_teach_the_bypass(in_agent: None) -> None:
