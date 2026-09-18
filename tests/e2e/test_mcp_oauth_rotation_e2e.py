@@ -559,9 +559,10 @@ async def test_a_drain_that_runs_out_of_time_reports_the_loss_it_could_not_stop(
     ZERO exchange-outcome lines in the log, because the settle callback returned
     silently for a cancelled exchange and the failed write sat at DEBUG. Both new
     lines are asserted here — the bound being hit, and the per-exchange line that
-    says whether the request had been dispatched (the question the incident could
-    not answer, and the one a decision between "stop exiting mid-POST" and "arm
-    later" turns on).
+    says whether httpx was handed the request (the question the incident could
+    not answer, and the one any decision about the send path turns on — see
+    ``RefreshSendState`` for why the line names the hand-off rather than the
+    wire).
     """
     auth_mod = pytest.importorskip("local_operator.mcp.auth")
 
@@ -612,9 +613,9 @@ async def test_a_drain_that_runs_out_of_time_reports_the_loss_it_could_not_stop(
                 await asyncio.gather(*pending, return_exceptions=True)
                 assert any(
                     "CANCELLED before any answer" in record.getMessage()
-                    and "had already been dispatched" in record.getMessage()
+                    and "had already entered the sending pipeline" in record.getMessage()
                     for record in caplog.records
-                ), "a lost exchange must name its dispatch state: that is the whole point of d2"
+                ), "a lost exchange must name what is known about its request: that is d2"
     finally:
         store.close()
 

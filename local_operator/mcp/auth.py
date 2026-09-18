@@ -178,15 +178,40 @@ RefreshOutcome = Literal[
 class RefreshSendState:
     """What one exchange knows about ITS OWN request's progress.
 
-    ``dispatched`` flips in the httpx request EVENT HOOK that arms the
-    write-ahead send marker, i.e. at the last instant before the transport
-    writes — so it answers exactly one question: did this exchange's request
-    reach the wire? That is the question a lost exchange turns on (a token that
-    reached the wire may have been spent, one that did not cannot have been),
-    and until this existed the log could not answer it, because the two states
-    were indistinguishable after the fact: the marker was armed BEFORE the
-    client existed, so an armed marker was as consistent with "cancelled during
-    DNS" as with "cancelled mid-POST" (design audit Q1).
+    ``send_started`` flips in the httpx request EVENT HOOK that arms the
+    write-ahead send marker. That hook runs in ``_send_handling_redirects``
+    BEFORE ``_send_single_request`` reaches the transport (httpx 0.28.1:
+    ``_client.py:1691`` against ``:1717``/``:1728``), so the flag means exactly
+    one thing: httpx was HANDED this request and began sending it.
+
+    It is NOT evidence that a byte reached the wire. Everything httpx does
+    between that hook and the socket — the pool queue, DNS, TCP, TLS — happens
+    after the flag flips, so a cancellation in any of them leaves it ``True``
+    and the marker armed, identically to the arm this replaced (reviewer round
+    1, R1-2, measured on this tree). The first revision of this change claimed
+    otherwise; the claim is withdrawn rather than the behaviour being faked,
+    because httpx exposes no observable "the bytes are on the wire" seam short
+    of socket-level surgery.
+
+    The two readings are deliberately asymmetric, and that asymmetry is the
+    whole value:
+
+    * ``False`` is CONCLUSIVE, and it is the direction the refusal policy needs:
+      no request was ever handed to the client, so this exchange cannot have
+      spent the token and cannot have lost a rotation in flight. Nothing gets
+      quarantined for a request that was never built.
+    * ``True`` is CONSERVATIVE, never optimistic: it covers both "on the wire"
+      and "cancelled in the connect phase", which is the distinction the
+      14-hour incident could not make from its logs (design audit Q1). An arm a
+      tick too early costs a browser sign-in; one a tick too late risks
+      re-presenting a spent token, the reuse-detection POST that revokes the
+      family.
+
+    What the move to the hook bought is therefore narrow and is stated as such
+    here: the marker is never armed LATER than the request hook (safety-neutral),
+    and the log says what is observable instead of overstating it. It does NOT
+    remove the connect-phase cancellation class, and no test or comment in this
+    module may claim that it does.
 
     Deliberately NOT persisted: it describes a live task, and the row already
     carries the durable half (the marker itself). One instance per exchange,
@@ -196,7 +221,7 @@ class RefreshSendState:
     the state after the connect that started it has gone.
     """
 
-    dispatched: bool = False
+    send_started: bool = False
 
 
 #: Refresh this far BEFORE the stored access token's deadline. A connect that
@@ -1125,20 +1150,31 @@ class McpTokenStorage:
         row that already held the token it presented, so absence here always
         means a REMOVAL that raced us, never a first grant.
 
+        The return value is NOT acted on by its only caller,
+        (:func:`_perform_refresh_exchange` discards it and reports
+        ``"refreshed"`` either way — see the comment at that call), so what a
+        dropped write buys the operator is the INFO line above and nothing more.
+        That is still a real gain: the row keeps the presented (spent) token with
+        the write-ahead marker armed, so the next refresh refuses on it exactly as
+        the refusal policy always did, instead of a drop being indistinguishable
+        from a success. Turning the drop into its own ``RefreshOutcome`` would
+        change what every caller of the exchange switches on — the refusal and
+        marker path — which is deliberately out of this change's scope (reviewer
+        round 1, R1-3). Consumers of the return value today: this module's tests.
+
         Caller: :func:`_perform_refresh_exchange`, which holds the refresh lock
         across this call, so the only writers it races are the ones that
         deliberately do not take the lock (a completed interactive login, the
         SDK's client-info writes, a `/mcp logout`).
 
         Returns ``True`` when the response was written, and ``False`` when the
-        write was DROPPED — the case the previous contract could not express,
-        because ``_write`` swallowed the failure while this method returned
-        ``True`` unconditionally. A dropped rotation is the one loss in this
-        subsystem that is both silent and expensive: the provider has already
-        spent the presented token, so the row that keeps it is a spent token
-        that the NEXT refresh will re-present (the reuse-detecting POST). It is
-        therefore logged at INFO like the other two refusals above, and the
-        caller is told.
+        write was DROPPED — a case the previous contract could not express at
+        all, because ``_write`` swallowed the failure while this method returned
+        ``True`` unconditionally. That return is what d3 fixes; the paragraph
+        above is the honest account of WHO reads it, and the answer is that the
+        caller does not branch on it, so a drop reaches the operator through
+        this method's own INFO line rather than through the caller's control
+        flow.
         """
         creds = self._read()
         if self._row_was_removed():
@@ -3358,9 +3394,9 @@ async def _refresh_oauth_token_locked(
     # the three ways this ends: completed in time, cancelled mid-flight, or
     # landed after the bound.
     # One state object per exchange, handed down so BOTH halves can use it: the
-    # event hook inside ``_perform_refresh_exchange`` flips ``dispatched`` when
-    # the request is about to be written, and the settle line attached below
-    # reads it after the connect that started the exchange is long gone. It is
+    # event hook inside ``_perform_refresh_exchange`` flips ``send_started`` when
+    # httpx is handed the request, and the settle line attached below reads it
+    # after the connect that started the exchange is long gone. It is
     # created here rather than inside the exchange because the detaching side
     # needs it too, and only a value passed to both can describe the same
     # request.
@@ -3437,9 +3473,11 @@ def _detach_refresh_exchange(
     INFO, not debug, for the same reason the write paths say so: an exchange
     nobody awaited is exactly the state whose rotation support has to be able to
     read out of a log after the fact. ``send_state`` is what makes that log line
-    answer the question support actually has — did this exchange's request reach
-    the wire? — and is optional only so the module's own tests can drive an
-    exchange directly.
+    say what is OBSERVABLE — whether httpx was handed the request at all — and
+    is optional only so the module's own tests can drive an exchange directly.
+    The line never claims the request reached the wire: nothing short of
+    socket-level instrumentation can establish that, and an overstated support
+    line is worse than a narrow one (see :class:`RefreshSendState`).
     """
 
     _DETACHED_REFRESH_EXCHANGES.add(exchange)
@@ -3454,17 +3492,21 @@ def _detach_refresh_exchange(
             # 36 user-visible connect failures contained ZERO exchange-outcome
             # lines: the armings that matter were invisible by construction, so
             # the loss could not be counted, attributed or even noticed. One
-            # line per lost exchange, naming whether its request had been
-            # dispatched — a request that reached the wire may have spent the
-            # stored token, one that did not cannot have, and only this flag can
-            # tell the two apart after the fact.
+            # line per lost exchange, naming the only thing that CAN be named
+            # after the fact — whether httpx was handed the request — and the
+            # consequence that follows from it: an armed marker stays armed, and
+            # a rotation the issuer performed for a request that did go out is
+            # unread. Whether that request reached the wire is deliberately NOT
+            # claimed: the hook fires before the transport, so this state covers
+            # the connect phase too (see :class:`RefreshSendState`).
             logger.info(
                 "detached MCP token refresh for %s was CANCELLED before any answer "
-                "arrived; the request had %s been dispatched, so any rotation the "
-                "authorization server performed is lost and any armed send marker "
-                "stays armed [writer: detached refresh exchange]",
+                "arrived; its request had %s entered the sending pipeline (which is "
+                "not evidence it reached the wire), so any armed send marker stays "
+                "armed and a rotation the authorization server performed for that "
+                "request is unread and lost [writer: detached refresh exchange]",
                 server_url,
-                "already" if (send_state is not None and send_state.dispatched) else "never",
+                "already" if (send_state is not None and send_state.send_started) else "never",
             )
             return
         with contextlib.suppress(BaseException):
@@ -3481,14 +3523,62 @@ def _detach_refresh_exchange(
             if outcome != "refreshed":
                 logger.info(
                     "detached MCP token refresh for %s ended %r without persisting"
-                    " (the request had %s been dispatched)"
+                    " (its request had %s entered the sending pipeline)"
                     " [writer: detached refresh exchange]",
                     server_url,
                     outcome,
-                    "already" if (send_state is not None and send_state.dispatched) else "never",
+                    "already" if (send_state is not None and send_state.send_started) else "never",
                 )
 
     exchange.add_done_callback(_settle)
+
+
+def _waitable_detached_exchanges(
+    loop: asyncio.AbstractEventLoop,
+) -> list["asyncio.Task[RefreshOutcome]"]:
+    """The detached exchanges THIS loop can actually wait for.
+
+    Two kinds of registry entry are not waitable, and waiting on them is worse
+    than ignoring them:
+
+    * one whose task belongs to a CLOSED loop. It was abandoned by a loop that
+      went down without cancelling its pending tasks, so it can never run again:
+      waiting for it pays the FULL bound and then logs a loss no exchange is
+      carrying, on every later teardown in this process (reviewer round 1,
+      R1-4, reproduced). Discarded here, which is the only place such an entry
+      can be recognised — its own done callback has not run and never will.
+    * one whose task belongs to a DIFFERENT, still-open loop (the hand-driven
+      loops in ``session/runtime``). It is not this loop's to drain and
+      ``asyncio.wait`` cannot wait on a future from another loop, so it stays in
+      the registry for whoever owns it.
+
+    A DONE task is discarded here too. Normally the exchange's own done callback
+    does that the tick after it resolves; when the loop closes first the callback
+    never runs, and this is the same act arriving late. It is bookkeeping, not a
+    loss: the exchange resolved, so whatever it was going to persist it has.
+
+    The real overrun is deliberately NOT filtered out anywhere: a task that is
+    live, not done and ours stays in the returned list, however long it takes.
+    """
+    waitable: list["asyncio.Task[RefreshOutcome]"] = []
+    for task in list(_DETACHED_REFRESH_EXCHANGES):
+        if task.done():
+            _DETACHED_REFRESH_EXCHANGES.discard(task)
+            continue
+        owner = task.get_loop()
+        if owner.is_closed():
+            _DETACHED_REFRESH_EXCHANGES.discard(task)
+            logger.info(
+                "dropped a detached MCP token refresh exchange abandoned by a closed "
+                "event loop; it can never complete, so it is not waitable and any "
+                "rotation it was carrying will not be persisted "
+                "[writer: refresh teardown drain]",
+            )
+            continue
+        if owner is not loop:
+            continue
+        waitable.append(task)
+    return waitable
 
 
 async def drain_refresh_exchanges(timeout_s: float | None = None) -> bool:
@@ -3519,6 +3609,20 @@ async def drain_refresh_exchanges(timeout_s: float | None = None) -> bool:
     delivered by the teardown itself can still be unwinding: a connect that has
     not yet reached its ``CancelledError`` arm has not registered its exchange
     yet, and a single snapshot taken before that would silently drain nothing.
+
+    THE FIRST SNAPSHOT IS THEREFORE NEVER TAKEN BEFORE THIS COROUTINE HAS
+    YIELDED. The re-read above only rescues the NON-EMPTY case, and the empty
+    one is exactly the shape the caller creates: ``disconnect_all`` cancels the
+    reconnects and reaches this function with no ``await`` between the cancels
+    and the call whenever ``self._connections`` is empty, so a cancellation it
+    has just delivered has not even been scheduled yet. Measured on this tree
+    (reviewer R1-1 and QA Q5, independently): a cancel issued in the same
+    synchronous stretch, then this call, returned ``True`` — read by every
+    caller as "nothing in flight" — while a detached exchange registered one
+    tick later, and closing the store on that verdict left the row holding the
+    spent token with its marker armed, which is the incident this drain exists
+    to remove. So the empty verdict is conclusive only after a yield, which the
+    first pass below always gives it.
     """
     loop = asyncio.get_running_loop()
     if timeout_s is None:
@@ -3527,21 +3631,29 @@ async def drain_refresh_exchanges(timeout_s: float | None = None) -> bool:
         # ``REFRESH_DRAIN_TIMEOUT_S`` unpatched code that looks patched.
         timeout_s = REFRESH_DRAIN_TIMEOUT_S
     deadline = loop.time() + timeout_s
+    #: Whether this coroutine has given the loop a turn since it was called. The
+    #: empty verdict is only conclusive once it has — see the docstring.
+    yielded = False
     while True:
-        pending = [task for task in list(_DETACHED_REFRESH_EXCHANGES) if not task.done()]
+        pending = _waitable_detached_exchanges(loop)
         if not pending:
-            return True
+            if yielded:
+                return True
+            await asyncio.sleep(0)
+            yielded = True
+            continue
         remaining = deadline - loop.time()
         if remaining <= 0:
             logger.warning(
                 "%d detached MCP token refresh exchange(s) outlived the %.1fs teardown "
-                "drain; any rotation they were carrying is lost when this process "
-                "exits [writer: refresh teardown drain]",
+                "drain; any rotation they were carrying is lost if this process exits "
+                "before it lands [writer: refresh teardown drain]",
                 len(pending),
                 timeout_s,
             )
             return False
         await asyncio.wait(pending, timeout=remaining)
+        yielded = True
 
 
 async def _perform_refresh_exchange(
@@ -3569,30 +3681,37 @@ async def _perform_refresh_exchange(
     reuse-detection POST that revokes the family.
 
     The request is also WRITE-AHEAD MARKED
-    (:meth:`McpTokenStorage.mark_send_unconfirmed`) at the instant it is
-    DISPATCHED — from an httpx request event hook, which runs after the endpoint
-    URL is resolved and immediately before the transport writes the bytes, and
-    therefore still strictly before any answer can exist — because the token is
-    spent by the REQUEST and a process that dies mid-flight takes all in-memory
-    knowledge with it. A failure BEFORE the request was written clears the marker
-    again (the token was never presented, so that is an ordinary transient
-    retry); anything later leaves it armed, and the refresh path then refuses to
-    present that token until an interactive grant replaces it (see
-    :data:`GRANT_UNCONFIRMED_SEND_KEY`).
+    (:meth:`McpTokenStorage.mark_send_unconfirmed`) from an httpx REQUEST EVENT
+    HOOK, i.e. at the point httpx is HANDED the request and starts sending it —
+    still strictly before any answer can exist, because the hook runs before the
+    transport — because the token is spent by the REQUEST and a process that dies
+    mid-flight takes all in-memory knowledge with it. A failure BEFORE the
+    request was written clears the marker again (the token was never presented,
+    so that is an ordinary transient retry); anything later leaves it armed, and
+    the refresh path then refuses to present that token until an interactive
+    grant replaces it (see :data:`GRANT_UNCONFIRMED_SEND_KEY`).
 
-    That hook is the WHOLE point of the ordering, and it replaces an arm that sat
-    before ``httpx.AsyncClient`` was even constructed. The earlier placement
-    covered strictly more than the danger it guards against: a cancellation or a
-    kill anywhere in client construction, DNS, TLS or the pool wait left a marker
-    armed for a request that had never left the machine, and a live marker costs
-    the user a browser sign-in (the refusal above, then ``/mcp reauth``, which
-    deletes the credential). Spending an hour of hard refusal on a POST that was
-    never made is a false positive with the maximum possible price, and arming at
-    dispatch removes the class without weakening the guarantee: the hook runs
-    before the transport, so no response can exist before the marker does.
+    What that move IS and is NOT, stated at length because the first revision of
+    this change claimed more than it delivers (reviewer round 1, R1-2, measured
+    on httpx 0.28.1): the arm used to sit before ``httpx.AsyncClient`` was even
+    constructed and now sits at the hook. That is SAFETY-NEUTRAL — the marker is
+    never armed LATER than it was before, so no request can go out unmarked — and
+    it keeps the arm off the window before any request exists at all (a kill
+    between the pre-flight reads and the client is no longer a quarantined
+    grant). It does NOT narrow the CONNECT phase, and this docstring used to say
+    it did: httpx runs request hooks in ``_send_handling_redirects``
+    (``_client.py:1691``) and enters the transport — pool, DNS, TCP, TLS —
+    afterwards in ``_send_single_request`` (``:1717``/``:1728``), so a
+    cancellation during any of that still finds the marker armed, exactly as
+    before. Nothing here removes that class: httpx offers no observable "the
+    bytes are on the wire" seam short of socket-level surgery, and a hook that
+    pretended otherwise would have to guess. The honest summary is that this
+    change reports better and arms no earlier than it must — not that it spares
+    the connect phase.
 
-    ``send_state`` is the caller's record of that dispatch, used by the settle
-    line on a detached exchange; a direct caller may leave it out.
+    ``send_state`` is the caller's record of that hand-off, used by the settle
+    line on a detached exchange; a direct caller may leave it out. See
+    :class:`RefreshSendState` for what it does and does not establish.
 
     ``lock=None`` means the CALLER owns exclusivity (the direct-call path used
     by the unit tests and by nothing else); a caller that hands over a handle it
@@ -3698,15 +3817,16 @@ async def _perform_refresh_exchange(
             headers["Authorization"] = f"Basic {encoded}"
 
         # WRITE-AHEAD by REQUEST EVENT HOOK, not here: the marker must exist
-        # before the request can be on the wire and must NOT exist before the
-        # request is even dispatchable, and only the transport's own seam can
-        # tell those apart (see this function's docstring). httpx runs
-        # ``request`` hooks in ``_send_single_request`` immediately before
-        # handing the request to the transport, so this fires exactly once per
-        # attempt, after DNS/TLS/pool work that a cancellation may never get
-        # past. The hook also records the fact for the log, which is the only
-        # thing that can distinguish "lost a live POST" from "cancelled before
-        # the wire" after the fact.
+        # before the request can be on the wire, and must NOT exist before the
+        # request is even handed over — the window between the pre-flight reads
+        # and the client is where a kill used to quarantine a grant for an hour
+        # over a request that was never built. See this function's docstring for
+        # what the hook does NOT do: it fires BEFORE the transport, so a
+        # cancellation in the pool wait, DNS, TCP or TLS still finds the marker
+        # armed and the connect-phase class is unchanged (reviewer round 1,
+        # R1-2). What the hook adds is the record for the log — the only thing
+        # that can distinguish "httpx was handed the request" from "no request
+        # was ever built" after the fact — and it fires exactly once per attempt.
         #
         # Bound to a local because the guard above is what proves the token is
         # there, and a closure does not inherit that narrowing.
@@ -3714,7 +3834,7 @@ async def _perform_refresh_exchange(
 
         async def _arm_send_marker(request: httpx.Request) -> None:
             storage.mark_send_unconfirmed(presented_refresh_token)
-            send_state.dispatched = True
+            send_state.send_started = True
 
         try:
             # ``read`` is the LATE GRACE, not the budget: a response that lands
@@ -3853,6 +3973,16 @@ async def _perform_refresh_exchange(
         # The refresh path's OWN write, never ``set_tokens``: it is conditioned
         # on the grant this exchange was computed from and it never clears the
         # dead-grant marker (see :meth:`McpTokenStorage.store_refresh_result`).
+        #
+        # Its ``False`` is deliberately NOT branched on here. The exchange still
+        # reports ``"refreshed"`` because the rotation was really obtained —
+        # what did not land is our write of it — and giving the drop its own
+        # outcome would change what every caller of this function switches on,
+        # i.e. the refusal and marker path, which this change does not touch.
+        # Instead the store's own INFO line carries the drop, and the row's
+        # state stays honest on its own: it holds the presented (spent) token
+        # with the write-ahead marker armed, so the next refresh refuses exactly
+        # as it always did (reviewer round 1, R1-3).
         storage.store_refresh_result(new_tokens, presented_refresh_token=tokens.refresh_token)
         return "refreshed"
     finally:
@@ -4158,7 +4288,7 @@ def _make_refresh_coordinating_provider(
         #: INSTANCE below rather than as a class attribute like its siblings
         #: above: a plain function in a class body is a descriptor, so reading it
         #: back through ``self`` would bind it as a method and call it with
-        #: ``self`` — a TypeError inside the auth flow, which httpx2 reports as a
+        #: ``self`` — a TypeError inside the auth flow, which httpx reports as a
         #: connection failure rather than as the bug it is.
         _refresh_coord_leaving: "Callable[[], bool] | None"
 
