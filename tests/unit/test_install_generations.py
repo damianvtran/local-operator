@@ -1236,6 +1236,148 @@ class TestPruning:
         assert middle not in plan.removed, "the margin must protect a FINISHED build"
         assert in_flight.is_dir()
 
+    def test_a_generation_named_only_by_a_boot_record_is_kept(self, home: Path) -> None:
+        """I1a: the ~1.2 s before the first heartbeat is a boot record's window.
+
+        A runtime publishes its boot record BEFORE it listens and before its first
+        ``SessionRecord`` heartbeat — the design measured that gap at ~1.2 s — so
+        during it the tree the runtime is importing from is named by nothing the
+        live-record reader can see. A prune in that window deleted the tree under a
+        runtime that was mid-start, and this is the record that closes it.
+
+        The record is built directly rather than through
+        ``journal.write_boot_record``, which stamps ``sys.prefix`` of the process
+        call: the property under test is which INSTALL_ROOT a boot record vouches
+        for, and a test that could only name its own interpreter's tree could not
+        ask whether a generation is protected by one.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.journal import BootRecord
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME
+
+        generations = [_install(f"0.52.{index}") for index in range(5)]
+        booted = generations[0]
+        record = BootRecord(
+            pid=os.getpid(),
+            session_id="booting",
+            install_root=str(booted / "tools" / "local-operator"),
+        )
+        registry.publish(record, home / ".local-operator", HOST_RUN_DIRNAME)
+
+        plan = update_mod.prune_generations(
+            keep=0, referenced=update_mod.referenced_install_roots()
+        )
+
+        assert booted.is_dir(), "a tree named by a boot record must be kept"
+        assert booted not in plan.removed
+        assert generations[1] in plan.removed, "the others are still pruned"
+
+    def test_a_generation_named_only_by_a_reaped_record_is_kept(self, home: Path) -> None:
+        """I1a: a reaped record still describes a runtime that may exist.
+
+        ``registry.scan`` MOVES a proven-dead record to ``reaped/`` instead of
+        deleting it, because it is the evidence a death is classified from — and the
+        generation it names may be exactly the tree the same session's successor
+        imports from. Reading only the live directory made this the namespace where a
+        record could vouch for nothing, and the scan that reaps is the same scan the
+        reader runs, so the hole opened on the first prune.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import SessionRecord
+
+        generations = [_install(f"0.52.{index}") for index in range(5)]
+        reaped = generations[0]
+        record = SessionRecord(
+            pid=2**22 + 91,  # never a live pid: the scan must prove this one dead
+            kind="daemon",
+            session_id="reapedonly",
+            conversation_name="n",
+            cwd="/",
+            model_label="m",
+            control_port=0,
+            control_key="k",
+            install_root=str(reaped / "tools" / "local-operator"),
+        )
+        root = home / ".local-operator"
+        registry.publish(record, root)
+        # The reap is the reader's own first step (``registry.scan``), which is why
+        # the hole opened on the first prune rather than on some rare interleaving.
+        registry.scan(root)
+        live = root / "run" / "mobile" / f"{record.pid}.json"
+        sidecar = root / "run" / "mobile" / registry.REAPED_DIRNAME / f"{record.pid}.json"
+        assert not live.exists() and sidecar.exists(), "precondition: the record was reaped"
+
+        plan = update_mod.prune_generations(
+            keep=0, referenced=update_mod.referenced_install_roots()
+        )
+
+        assert reaped.is_dir(), "a tree named by a reaped record must be kept"
+        assert reaped not in plan.removed
+        assert generations[1] in plan.removed, "the others are still pruned"
+
+    def test_a_prune_attests_before_it_removes_a_runtime_tree(self, home: Path) -> None:
+        """I3: the deletion names its actor, in the victim's own conversation dir.
+
+        This is the harness act that is hardest to see afterwards: a prune removes a
+        whole venv while runtimes import from it, they die torn, and nothing they
+        write survives — AGENTS.md's "installing over a live fleet" and the
+        2026-09-15 19:41 sweep both end this way.
+
+        The shape the marker can still meet is the WINDOW, and that is what this
+        test builds: the caller's ``referenced`` snapshot is taken, and a runtime
+        publishes its boot record after it — which is exactly the ~1.2 s of a
+        runtime's life the snapshot cannot see, and the only way a record's tree
+        still reaches a removal now that both readers read the same namespaces. The
+        marker must be on disk BEFORE ``_remove_tree`` runs, must carry the mechanism
+        and the front end's own name, and must say ``deliberate: false`` so no reader
+        can call it a user stop.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.journal import BootRecord
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME, session_dir
+
+        generations = [_install(f"0.52.{index}") for index in range(4)]
+        doomed = generations[0]
+        root = home / ".local-operator"
+        # The conversation directory a live runtime has (its transcript lives there):
+        # the marker goes INTO it, and ``registry.write_stop_marker`` deliberately
+        # does not create one.
+        session_dir(root, "doomed1").mkdir(parents=True)
+        # The caller's snapshot, taken before this runtime existed.
+        referenced = update_mod.referenced_install_roots()
+        registry.publish(
+            BootRecord(
+                pid=4242,
+                session_id="doomed1",
+                install_root=str(doomed / "tools" / "local-operator"),
+            ),
+            root,
+            HOST_RUN_DIRNAME,
+        )
+
+        plan = update_mod.prune_generations(
+            keep=0, referenced=referenced, actor=update_mod.ACTOR_PRUNE
+        )
+
+        assert doomed in plan.removed, plan.decisions
+        assert not doomed.exists()
+        marker = registry.read_stop_marker(session_dir(root, "doomed1"))
+        assert marker is not None, "the pruned tree's runtime must be attested for"
+        assert marker["deliberate"] is False
+        assert marker["mechanism"] == update_mod.MECHANISM_GENERATION_PRUNE
+        assert marker["actor"] == update_mod.ACTOR_PRUNE
+        assert marker["session_id"] == "doomed1"
+        assert marker["pid"] == 4242
+        # The staging PROCESS is named too: the actor field says what kind of act it
+        # was, and the killer says which process performed it.
+        assert marker["killer"]["pid"] == os.getpid()
+        assert marker["killer"]["argv0"]
+        # Markers are per RUNTIME, not per removal: the other generations went the
+        # same way and nothing had a conversation to attest into.
+        assert [entry for entry in (root / "sessions").iterdir() if entry.is_dir()] == [
+            session_dir(root, "doomed1")
+        ]
+
     def test_prune_reports_what_it_kept_and_why(self, home: Path) -> None:
         """D3: the one command whose whole job is a retention decision must explain it."""
         _install("0.52.0")

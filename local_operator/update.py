@@ -2387,13 +2387,33 @@ def _sweep_staging_links(moment: float) -> list[Path]:
 def referenced_install_roots() -> tuple[Path, ...]:
     """The install roots named by live and persisted records.
 
-    TWO NAMESPACES, because two kinds of long-lived process read a generation:
-    a session runtime (``run/mobile``) and the ``lop serve`` daemon
-    (``run/serve``, whose record has carried a ``prefix`` field all along for
-    the update path). Both are read through their own registry so pruning and
-    the processes that publish records cannot drift apart, and both imports are
-    FUNCTION-LOCAL because they reach the session and server layers: this module
-    is on ``lop --version``'s path and must not drag either in.
+    FOUR NAMESPACES, because four kinds of record can name a tree a runtime is
+    importing from, and a prune that reads only some of them deletes the tree
+    under the runtimes only the others describe:
+
+    * a session runtime (``run/mobile``), and
+    * the ``lop serve`` daemon (``run/serve``, whose record has carried a
+      ``prefix`` field all along for the update path) — the two the readers and
+      the processes that publish them have to agree on, each read through its own
+      registry so they cannot drift apart; and
+    * the ``run/mobile/reaped`` SIDECAR — a record ``registry.scan`` has proven
+      dead and MOVED there rather than deleted, because it is the evidence a
+      death is classified from. It still describes a runtime that may exist: the
+      scan proves the pid it names is gone, and a prune runs beside a fleet in
+      which the same session may already have been re-engaged under a new pid
+      from the SAME tree. Reading only the live directory made this the one
+      namespace where a record could vouch for nothing.
+    * the ``run/host`` BOOT records — a record published about 1.2 s before the
+      first heartbeat, which is exactly the window this left unprotected (see
+      ``journal.write_boot_record``): a runtime that has just started has a boot
+      record and no heartbeat yet, so between those two moments the tree it is
+      importing from was named by nothing here at all. That window is where a
+      prune is most likely to find a "superseded, unreferenced" tree whose owner
+      is in fact mid-start.
+
+    Every one of those imports is FUNCTION-LOCAL because they reach the session and
+    server layers: this module is on ``lop --version``'s path and must not drag
+    either in.
 
     AND TWO CONFIG ROOTS. ``registry.scan()`` reads ``config_dir()``, which is the
     AMBIENT one — an isolated run, a second profile, a QA pass each have their
@@ -2404,19 +2424,53 @@ def referenced_install_roots() -> tuple[Path, ...]:
     machine publishes under, and reading it is what makes rule 2 mean what its
     docstring says. The failure direction is unchanged: MORE trees kept.
 
-    A failure in either namespace, under either root, reads as "no records from
+    A failure in any namespace, under either root, reads as "no records from
     there", which only ever keeps MORE trees — the direction that costs disk
     rather than a running session.
     """
     roots: list[Path] = []
     seen: set[str] = set()
     for config_root in _config_roots():
-        for value in _session_roots_under(config_root) + _serve_roots_under(config_root):
+        for _record, value in _records_under(config_root):
             key = str(value)
             if key and key not in seen:
                 seen.add(key)
                 roots.append(Path(key))
     return tuple(roots)
+
+
+def _records_under(config_root: Path) -> list[tuple[Any, str]]:
+    """``(record, install_root)`` for every record published under one config root.
+
+    ONE GATHERING, because two readers need the same four namespaces and each
+    wants a different part of the answer: ``referenced_install_roots`` wants the
+    roots (what a prune must keep), and ``note_doomed_runtimes`` wants the records
+    together with their config root (where a marker must land, and whose run key it
+    must carry). A second traversal per reader would be free to disagree with this
+    one about which namespaces count, and the disagreement would show up as a
+    deleted tree rather than as a failing test.
+    """
+    found: list[tuple[Any, str]] = []
+    found.extend(_session_records_under(config_root))
+    found.extend(_serve_records_under(config_root))
+    found.extend(_reaped_records_under(config_root))
+    found.extend(_boot_records_under(config_root))
+    return found
+
+
+def _roots_from(records: Iterable[Any], field: str) -> list[tuple[Any, str]]:
+    """``(record, value)`` for every record whose root field is set.
+
+    A record with no root field says nothing about a tree — it is dropped rather
+    than coerced to a bare ``""``, which ``Path("")`` would silently read as the
+    current directory and so protect or doom an unrelated tree.
+    """
+    found: list[tuple[Any, str]] = []
+    for record in records:
+        value = str(getattr(record, field, "") or "")
+        if value:
+            found.append((record, value))
+    return found
 
 
 def _config_roots() -> tuple[Path, ...]:
@@ -2430,35 +2484,260 @@ def _config_roots() -> tuple[Path, ...]:
     return (ambient, default)
 
 
-def _session_roots_under(config_root: Path) -> list[Path]:
-    """``install_root`` from every session record under one config root."""
-    found: list[Path] = []
+def _session_records_under(config_root: Path) -> list[tuple[Any, str]]:
+    """``(record, install_root)`` from every live session record under one root."""
     try:
         from local_operator.session.runtime import registry
         from local_operator.session.runtime.types import SessionRecord
 
-        for record, _state in registry.scan(config_root, parse=SessionRecord.from_json):
-            value = str(getattr(record, "install_root", "") or "")
-            if value:
-                found.append(Path(value))
+        return _roots_from(
+            [
+                record
+                for record, _state in registry.scan(config_root, parse=SessionRecord.from_json)
+            ],
+            "install_root",
+        )
     except Exception:  # noqa: BLE001 — no readable records means no objection to keep
         logger.debug("session records unreadable under %s", config_root, exc_info=True)
-    return found
+        return []
 
 
-def _serve_roots_under(config_root: Path) -> list[Path]:
-    """``prefix`` from every ``lop serve`` record under one config root."""
-    found: list[Path] = []
+def _serve_records_under(config_root: Path) -> list[tuple[Any, str]]:
+    """``(record, prefix)`` from every ``lop serve`` record under one root."""
     try:
         from local_operator.server import registry as serve_registry
 
-        for serve_record, _state in serve_registry.scan(config_root):
-            value = str(getattr(serve_record, "prefix", "") or "")
-            if value:
-                found.append(Path(value))
+        return _roots_from(
+            [record for record, _state in serve_registry.scan(config_root)], "prefix"
+        )
     except Exception:  # noqa: BLE001 — same direction as above
         logger.debug("serve records unreadable under %s", config_root, exc_info=True)
+        return []
+
+
+def _reaped_records_under(config_root: Path) -> list[tuple[Any, str]]:
+    """``(record, root)`` from every reaped sidecar record under one config root.
+
+    BOTH session namespaces, because ``registry.scan`` reaps whichever directory
+    it is asked about and a serve daemon's record moves into its own sidecar. The
+    records are parsed with the SAME types the live reader uses — a sidecar is a
+    record that moved, not a different kind of file — so the two readers cannot
+    come to disagree about what a root field means.
+    """
+    found: list[tuple[Any, str]] = []
+    try:
+        from local_operator.server.registry import ServeRecord
+        from local_operator.session.runtime.types import (
+            RUN_DIRNAME,
+            SERVE_RUN_DIRNAME,
+            SessionRecord,
+        )
+
+        for dirname, parse in (
+            (RUN_DIRNAME, SessionRecord.from_json),
+            (SERVE_RUN_DIRNAME, ServeRecord.from_json),
+        ):
+            field = "install_root" if dirname == RUN_DIRNAME else "prefix"
+            found.extend(_roots_from(_sidecar_records(config_root, dirname, parse), field))
+    except Exception:  # noqa: BLE001 — same direction as above
+        logger.debug("reaped records unreadable under %s", config_root, exc_info=True)
     return found
+
+
+def _sidecar_records(config_root: Path, dirname: str, parse: Any) -> list[Any]:
+    """Every parseable record in one namespace's ``reaped/`` sidecar.
+
+    GLOBBED rather than asked for through ``registry.reaped_dir``, which CREATES
+    the directory (and its 0700 mode) on first use: a read must not leave a
+    directory behind on a machine whose only problem is that something died. This
+    is the same rule and the same reason ``attention._run_record_evidence``
+    states for this sidecar, and the one thing a malformed entry costs is itself:
+    a torn sidecar must not be why a prune stops protecting the other twenty-nine.
+    """
+    records: list[Any] = []
+    try:
+        from local_operator.session.runtime.registry import REAPED_DIRNAME
+
+        directory = config_root / dirname / REAPED_DIRNAME
+        paths = sorted(directory.glob("*.json"))
+    except OSError:
+        return records
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        record = parse(data)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def _boot_records_under(config_root: Path) -> list[tuple[Any, str]]:
+    """``(record, install_root)`` from every ``run/host`` boot record under one root.
+
+    THE WINDOW THIS CLOSES. A runtime publishes its boot record before its first
+    heartbeat — the design measured that gap at ~1.2 s — and the boot record is the
+    only artifact that names the tree such a runtime is importing from during it.
+    A prune in that window saw a superseded-looking tree with no record holding it
+    and deleted the tree a runtime was mid-start on. The boot namespace is read
+    here for the same reason ``journal.prune_boot_records`` reads it: it is the only
+    place a starting runtime is visible at all.
+    """
+    try:
+        from local_operator.session.runtime.journal import BootRecord
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME
+
+        directory = config_root / HOST_RUN_DIRNAME
+        records: list[Any] = []
+        try:
+            paths = sorted(directory.glob("*.json"))
+        except OSError:
+            return []
+        for path in paths:
+            try:
+                record = BootRecord.from_json(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+            if record is not None:
+                records.append(record)
+        return _roots_from(records, "install_root")
+    except Exception:  # noqa: BLE001 — same direction as above
+        logger.debug("boot records unreadable under %s", config_root, exc_info=True)
+        return []
+
+
+#: The front end's own name for each act that can take an install tree away from
+#: under a running runtime, stamped as the ``actor`` field of the stop marker that
+#: act stages (see :func:`note_doomed_runtimes`).
+#:
+#: A CONSTANT RATHER THAN THIS PROCESS'S ``argv``, deliberately: the same act
+#: reaches here from a direct ``lop install prune``, from an upgrade's own prune,
+#: and — later — from whatever wraps them, and what a reader needs is the NAME OF
+#: THE ACT rather than the spelling of whichever layer happened to be on top.
+#: ``control._stop_marker_payload`` records this process's argv0 beside it, so the
+#: artifact still answers "which process" as well as "what did it do".
+ACTOR_PRUNE = "lop install prune"
+ACTOR_UPGRADE = "lop update"
+
+#: The mechanism tokens those markers carry.
+#:
+#: The operator-facing words live with the renderer
+#: (``incidents.INVOLUNTARY_MECHANISM_LABELS``); the tokens are spelled at the
+#: write site for the same reason ``control`` spells its rung tokens
+#: (``"socket"``/``"sigterm"``/``"sigkill"``) literally — one vocabulary, and a
+#: renderer that does not know a token degrades to naming the actor alone rather
+#: than leaking the writer's spelling onto an operator's screen.
+MECHANISM_GENERATION_PRUNE = "generation-prune"
+MECHANISM_IN_PLACE_INSTALL = "in-place-install"
+
+
+def _record_index() -> list[tuple[Any, Path]]:
+    """``(record, config root)`` for every record published under every config root.
+
+    The same traversal :func:`referenced_install_roots` makes, carrying the config
+    root alongside because a marker must be written into the CONVERSATION DIR that
+    lives under it — the run key alone says which session died, not where its
+    evidence goes.
+    """
+    index: list[tuple[Any, Path]] = []
+    for config_root in _config_roots():
+        for record, _value in _records_under(config_root):
+            index.append((record, config_root))
+    return index
+
+
+def note_doomed_runtimes(
+    tree: Path,
+    *,
+    mechanism: str,
+    actor: str = "",
+    records: Sequence[tuple[Any, Path]] | None = None,
+) -> list[Any]:
+    """Attest, for every runtime importing from ``tree``, that ``tree`` is going away.
+
+    EVERY HARNESS-CAUSED DEATH NAMES ITS ACTOR, and this is the call that makes the
+    deletions do it. Called by the process that is about to remove the tree,
+    immediately before it does, because from that moment the runtimes inside it
+    cannot record anything themselves: an install that ran over a busy fleet left
+    every session on the machine dead mid-turn with no exit record anywhere
+    (AGENTS.md, "Installing over a live fleet"), and the 2026-09-18 sweep of 25
+    runtimes in 13 s left no artifact naming any actor at all. A marker staged here
+    turns both into attributable deaths — ``runtime-killed`` with the mechanism and
+    actor on the reason — instead of a silent disappearance.
+
+    ONLY THE RUNTIMES THE TREE ACTUALLY FEEDS are attested, by install root rather
+    than by record kind: a session mid-turn, a session whose record has already been
+    reaped (its runtime may still hold the tree), one that has booted but not yet
+    heartbeated, and the ``serve`` daemon serving from it are all in
+    :func:`_records_under`. A record with no conversation to write into — the serve
+    daemon's — is skipped by ``control.note_involuntary_stop`` itself, which is why
+    the returned list is the records a marker was actually written for and not the
+    records that named the tree.
+
+    ``records`` lets a caller that has already made the traversal hand it over; the
+    prune does, so one removal pass costs one scan rather than one per candidate.
+
+    THE ONLY TREE THIS CAN STILL FIRE FOR is one the reader could not see, because a
+    tree any record names is now kept by :func:`prune_generations` itself. The window
+    that remains is real rather than theoretical: the caller takes its ``referenced``
+    snapshot before the removal pass, so a runtime that publishes its boot record in
+    between — the ~1.2 s a starting runtime spends with no heartbeat — is named by the
+    fresh index here and by nothing in that snapshot. This is the SECOND line of
+    defence for exactly the case the first one cannot see, and its output is what turns
+    a lost race from an unattributed wave into a named act.
+    """
+    target = _real(tree)
+    attested: list[Any] = []
+    index = _record_index() if records is None else records
+    for record, config_root in index:
+        value = str(getattr(record, "install_root", "") or getattr(record, "prefix", "") or "")
+        if not value:
+            continue
+        install_root = _real(Path(value))
+        if install_root != target and target not in install_root.parents:
+            continue
+        if _attests(record, config_root, mechanism=mechanism, actor=actor):
+            attested.append(record)
+            continue
+        # A RUNTIME THAT COULD NOT BE ATTESTED IS ITSELF WORTH A LINE. The marker
+        # goes into the victim's conversation directory and ``registry.write_stop_marker``
+        # deliberately does not create one (a stop must not leave a directory behind
+        # for a session that never existed) — so a record whose conversation was
+        # deleted, or a serve daemon that has no conversation at all, cannot be
+        # attested. That is a real gap in the artifact, and the acting process is the
+        # only party that can say so: silent here, it would read afterwards as "nobody
+        # was affected", which is the exact confusion this whole path exists to end.
+        logger.warning(
+            "removing %s could not attest pid %s: no conversation directory under %s",
+            tree,
+            getattr(record, "pid", "?"),
+            config_root,
+        )
+    return attested
+
+
+def _attests(record: Any, config_root: Path, *, mechanism: str, actor: str) -> bool:
+    """``note_involuntary_stop``, with its failures LOUD rather than fatal.
+
+    The marker write is best-effort by contract, but this caller must not be its
+    exception path either: a prune that raised here would abort with some
+    generations already deleted and the rest standing — a worse outcome than an
+    unattested deletion, and one no operator asked for. A record shape this writer
+    cannot read is logged as the gap it is (never swallowed silently) and the
+    deletion proceeds, because the alternative is a prune that cannot run at all.
+    """
+    from local_operator.session.runtime.control import note_involuntary_stop
+
+    try:
+        return note_involuntary_stop(record, config_root, mechanism=mechanism, actor=actor)
+    except Exception:  # noqa: BLE001 — the deletion outranks the paperwork
+        logger.warning(
+            "could not attest pid %s before removing its tree",
+            getattr(record, "pid", "?"),
+            exc_info=True,
+        )
+        return False
 
 
 def _real(path: Path) -> Path:
@@ -2716,6 +2995,7 @@ def prune_generations(
     keep: int = DEFAULT_KEEP_GENERATIONS,
     referenced: Iterable[str | Path] = (),
     now: float | None = None,
+    actor: str = "",
 ) -> PrunePlan:
     """Delete the generations nothing can still be importing from.
 
@@ -2725,6 +3005,15 @@ def prune_generations(
     two are the reason this is safe to run while the machine is busy: a runtime's
     own tree is never a candidate, and the count is only the margin for a session
     that has no record yet.
+
+    EVERY REMOVAL IS ATTESTED FIRST (:func:`note_doomed_runtimes`), because this is
+    the one place in the harness that deletes an install out from under runtimes
+    that are importing from it: a live record can only protect a tree the reader
+    COULD SEE, and the incidents where it did not — a boot record in its first
+    second, a record already reaped to the sidecar — are exactly the ones that left
+    no artifact naming an actor. ``actor`` is the front end's own name for the
+    request (see :data:`ACTOR_PRUNE`), recorded in the marker beside the acting
+    process's pid.
 
     Deletion is what makes the layout affordable rather than a leak — each
     generation is a whole venv — so it runs after every successful install as
@@ -2809,6 +3098,11 @@ def prune_generations(
 
     removed: list[Path] = []
     decisions: list[PruneDecision] = []
+    # GATHERED AT MOST ONCE, AND ONLY IF SOMETHING IS ACTUALLY REMOVED: a caller
+    # that already passed ``referenced`` has paid for one traversal, and a prune
+    # that keeps everything must not pay for a second one to attest nothing. The
+    # same traversal is reused for every doomed candidate below.
+    index: list[tuple[Any, Path]] | None = None
     for path in entries:
         resolved = _real(path)
         if current is not None and resolved == _real(current):
@@ -2830,6 +3124,23 @@ def prune_generations(
         elif resolved not in removable:
             decisions.append(PruneDecision(path, False, f"unreferenced, but within --keep {keep}"))
             continue
+        if index is None:
+            index = _record_index()
+        # ATTEST BEFORE THE TREE GOES. This is the one place in the harness that
+        # deletes an install out from under runtimes that are importing from it,
+        # and until this call existed the deletion was silent: the runtimes died
+        # torn and wrote no exit record of their own (AGENTS.md, "Installing over a
+        # live fleet"), so the artifact an investigation needs was the one nobody
+        # wrote. It goes HERE rather than at the top of the function because a
+        # candidate that is kept — by the pointer, by a record, by the age rule, by
+        # the margin — is not a doom, and a marker for a tree that survives would be
+        # a false attribution, which is worse than none.
+        note_doomed_runtimes(
+            path,
+            mechanism=MECHANISM_GENERATION_PRUNE,
+            actor=actor,
+            records=index,
+        )
         if _remove_tree(path):
             removed.append(path)
             decisions.append(PruneDecision(path, True, removal_reason))
@@ -2853,7 +3164,7 @@ def install_prune_command(*, keep: int = DEFAULT_KEEP_GENERATIONS) -> int:
     if not generations_dir().is_dir():
         print("no install generations on this machine — nothing to prune")
         return 0
-    plan = prune_generations(keep=keep, referenced=referenced_install_roots())
+    plan = prune_generations(keep=keep, referenced=referenced_install_roots(), actor=ACTOR_PRUNE)
     for line in prune_lines(plan):
         print(line)
     return 0
@@ -3496,7 +3807,7 @@ def perform_upgrade(
         # has already succeeded, and a caller that cannot read the record
         # directory must not be told otherwise.
         try:
-            plan = prune_generations(referenced=referenced_install_roots())
+            plan = prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
         except Exception:  # noqa: BLE001 — pruning never fails an upgrade
             logger.debug("generation prune failed", exc_info=True)
         else:
@@ -3516,8 +3827,28 @@ def perform_upgrade(
     if run is not None:
         # The injected runner sees the argv alone: it is a seam for tests and for
         # callers that observe the installer, not a way to spawn anything.
+        #
+        # IT IS ALSO WHY NOTHING IS ATTESTED ON THIS BRANCH: an injected runner
+        # does not rewrite any tree, so a marker written here would describe an act
+        # that did not happen — the one shape of evidence worse than no evidence.
         code = run(argv)
     else:
+        # THE IN-PLACE INSTALL IS THE ONE HAZARD THIS FUNCTION STILL COMMITS, and
+        # now it says so before it does it. pip and pipx have no generation layout
+        # to install into, so the site-packages tree under the running fleet is
+        # rewritten where it stands (see this function's docstring): the runtimes
+        # importing from it die mid-turn and cannot record anything themselves,
+        # which is why a measured install over a busy fleet took every session on
+        # the machine down with no exit record (AGENTS.md, "Installing over a live
+        # fleet", 2026-09-15 19:23). The attestation is staged immediately before
+        # the installer runs, for the same reason the control ladder stages its own
+        # marker before a signal: after the fact, the party that could say what
+        # happened is the party that was killed.
+        note_doomed_runtimes(
+            Path(prefix) if prefix is not None else Path(sys.prefix),
+            mechanism=MECHANISM_IN_PLACE_INSTALL,
+            actor=ACTOR_UPGRADE,
+        )
         code = _run_installer(argv, executable=image)
     if code != 0:
         raise UpdateError(f"installer exited {code}")
@@ -4177,7 +4508,9 @@ def _generation_upgrade(total: int, *, services: bool = True) -> int:
     leaving a daemon where it is.
     """
     _print_current_generation()
-    for line in prune_notice_lines(prune_generations(referenced=referenced_install_roots())):
+    for line in prune_notice_lines(
+        prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
+    ):
         print(line)
     if services:
         _services_stage()
