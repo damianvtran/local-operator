@@ -39,14 +39,16 @@ import re
 from rich.cells import cell_len
 from rich.console import Console, RenderableType
 from rich.markdown import Markdown
+from rich.style import Style
 from rich.text import Text
 from textual.content import Content
 from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.markdown_theme import brand_markdown_theme
+from local_operator.tui.settings import settings_get
 from local_operator.tui.widgets import _copy_markdown
-from local_operator.tui.widgets.transcript import TranscriptBlock
+from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
 
 #: Reference-link definition line: ``[label]: target`` (TUI-010 refusal).
 _REF_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s", re.MULTILINE)
@@ -59,6 +61,109 @@ _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 #: arrives with the first resize, which rebuilds (see
 #: :meth:`AssistantBlock.on_resize`).
 FALLBACK_WIDTH = 80
+
+#: The assistant rail: the same two cells ``UserBlock`` spends on its prompt
+#: rule, in a DIFFERENT ink and a NARROWER glyph. The transcript's complaint was
+#: that a user message has a line down its side and the model's answer has
+#: nothing, so the answer gets the same delineation.
+#:
+#: ``U+258E`` (quarter block), not the rule's ``U+258C`` (half block), and the
+#: difference is not decorative. Colour alone did not carry the distinction:
+#: ``label`` and ``signal`` are ISOLUMINANT in the shipped ramps — measured
+#: 1.08:1 contrast against each other on dark and 1.00:1 on light — so in
+#: greyscale, and under every CVD simulation (never above 1.24:1), a one-line
+#: user message and a one-line assistant reply were the same glyph in the same
+#: column at the same weight, which is the exact confusion this rail exists to
+#: remove. Weight is a SECOND, non-colour channel: it survives greyscale, it
+#: survives colour blindness, and it costs nothing in the long-block case that
+#: colour already handled.
+#:
+#: Changed here rather than on ``UserBlock``: the prompt rule is shipped and
+#: restyling it is not this slice's to do. The glyph is ALSO not the blockquote
+#: bar, and that is now THE MECHANISM rather than a secondary benefit: a quote
+#: row carries both marks and they are told apart by WIDTH — quarter block
+#: against half block, in different columns — which is what let the old
+#: reserve-the-cells-and-paint-nothing exception go (see :func:`rail_rows`).
+RAIL = "\u258e"
+#: The glyph RICH paints for a blockquote bar — not ours, and named here so the
+#: tests can assert that the rail and the bar are DIFFERENT glyphs in DIFFERENT
+#: columns, which is what makes a railed quote row read as nesting. It is also
+#: ``UserBlock.RULE``; that shared identity was the collision the rail used to
+#: step around, back when the rail was this same glyph.
+QUOTE_BAR = "\u258c"
+#: Exactly :data:`SPINE_INDENT`, imported rather than re-spelled as ``2``. The
+#: prompt rule and this rail must be the same width BY CONSTRUCTION — the field
+#: has one text origin, and two gutters that agree by coincidence drift the
+#: first time one of them is tuned (``UserBlock`` docstring, transcript.py).
+RAIL_COLS = SPINE_INDENT
+#: ``label``, and deliberately neither ``signal`` nor ``accent``.
+#:
+#: ``signal`` is the PROMPT's rule: painting the answer in it was rendered,
+#: compared and rejected, because it makes a user block and an assistant block
+#: look alike and so removes the only distinction this rail exists to draw.
+#: ``accent`` is a closed five-site budget this is not entitled to spend.
+#: Measured as a graphical object against ``bg`` across all 54 registered
+#: themes: no theme below the 3:1 non-text floor, worst ``tokyo-night-day`` at
+#: 4.32:1 — and ``label`` is never equal to ``signal`` or ``accent`` in any of
+#: them, so the rail can never accidentally read as a prompt.
+RAIL_TOKEN = "label"
+#: Narrowest body the prose is folded into WHEN THE LANE CAN AFFORD IT, the
+#: floor ``UserBlock.MIN_BODY`` established for the same trade: below it,
+#: wrapping into the two or three cells the rail leaves turns a sentence into a
+#: column of single characters.
+#:
+#: It is a floor on legibility, NOT a licence to paint outside the block. Where
+#: the lane cannot pay it, :meth:`AssistantBlock._body_width` clamps it to what
+#: the lane has — see that method for why containment wins the trade (design
+#: round 2, D9).
+MIN_BODY = 8
+#: Default for ``display.rail``. Lives beside the rail it governs so the
+#: registry entry and the render edge can be pinned to ONE constant by test.
+DEFAULT_RAIL = True
+
+
+def rail_rows(text: Text) -> Text:
+    """``text`` with the rail prepended to EVERY row, quote rows included.
+
+    Mirrors :meth:`UserBlock._build`'s geometry: the gutter runs down wrapped
+    continuations and the blank rows between paragraphs alike, because a marker
+    on ONE row marks a line while a marker on every row marks a BLOCK — and the
+    block is what a reader scrolling back is looking for. Skipping the blank
+    rows breaks the rail into one segment per paragraph, which is the same
+    "three separate things" failure wearing the new treatment.
+
+    **A blockquote row carries BOTH marks**, and there is no exception for it:
+    the rail in the block's own gutter at painted columns 0–1, Rich's bar in the
+    quote's own column at painted column 2. They never touch, and they are
+    distinguishable because ``U+258E`` and ``U+258C`` are different WIDTHS — a
+    quarter block beside a half block reads as one rail with a quote nested
+    inside it rather than as a double paint.
+
+    Design round 1 ruled the opposite — reserve the rail's cells on a quote row
+    and paint nothing into them — and that ruling was correct for the tree it
+    was made in, where the rail and the bar were the SAME glyph (``U+258C``) in
+    the same token and so read as a double-paint glitch. The isoluminance fix
+    (design finding D2) moved the rail to ``U+258E`` and made the collision
+    rationale stale; the reserved hole it left behind broke the column on
+    exactly the rows a reader is scanning past, which is what the maintainer
+    reported on PR #1229. The glyph difference IS the mechanism now, so the
+    reservation is gone. Do not re-introduce it without first changing the
+    glyphs back.
+
+    The colour is resolved HERE, at paint time, and never cached on the
+    instance: :meth:`AssistantBlock.retheme` re-enters ``_apply_rows``, so a
+    theme change re-inks the rail for free — a ``Style`` held on the block is
+    exactly what would break that.
+    """
+    glyph_style = Style(color=theme_mod.semantic_color(RAIL_TOKEN))
+    gutter = RAIL + " " * max(RAIL_COLS - cell_len(RAIL), 0)
+    railed = Text(end="", no_wrap=True, overflow="ellipsis")
+    for index, row in enumerate(text.split("\n")):
+        if index:
+            railed.append("\n")
+        railed.append(gutter, style=glyph_style)
+        railed.append_text(row)
+    return railed
 
 
 def flatten(renderable: RenderableType, width: int, console: Console | None = None) -> Text:
@@ -334,6 +439,17 @@ class AssistantBlock(TranscriptBlock):
         #: against it so a height-only resize — which every height pin raises
         #: — does not re-flatten a message to reproduce identical rows.
         self._built_width: int = -1
+        #: The gutter width the applied rows were actually PAINTED with, in the
+        #: ``_built_width`` mould: what the frame on screen is, not what the
+        #: setting says now. The copy path measures against this rather than
+        #: re-reading ``display.rail``, because the two reads happen at
+        #: different times and nothing forces them to agree — see
+        #: :meth:`copy_gutter` (review round 2, M1).
+        #:
+        #: ``-1`` means "never painted", which the copy path resolves live: a
+        #: block with no rows has no frame to be faithful to, and answering
+        #: from the setting is the only defined answer there.
+        self._painted_rail_cols: int = -1
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -371,6 +487,65 @@ class AssistantBlock(TranscriptBlock):
             self._frozen_epoch = epoch
         self._apply_rows(self._flat_rows(self._flat_width()))
 
+    def _rail_cols(self) -> int:
+        """:data:`RAIL_COLS` when the rail is on, 0 when it is off.
+
+        The block-level gutter width, read at the same rate as the paint in
+        :meth:`_apply_rows` so a flip cannot leave the fold and the paint
+        disagreeing about how many cells the gutter owns.
+
+        This is what makes OFF mean pre-rail rendering rather than pre-rail
+        rendering minus two columns: an ungated subtraction folds the prose two
+        cells narrower than the box while nothing is painted in the space it
+        left, which is an indent the reader did not ask for and cannot explain.
+
+        Read per call rather than cached on the instance, the same argument
+        :func:`rail_rows` makes about resolving colour at paint time — it is
+        what makes a mid-session flip apply to mounted blocks for free.
+        """
+        return RAIL_COLS if settings_get("display.rail", DEFAULT_RAIL) else 0
+
+    def _body_width(self, lane: int) -> int:
+        """``lane`` less the gutter, floored at :data:`MIN_BODY` — but never
+        wider than the lane can actually hold.
+
+        Two rules that can disagree, resolved here once so every caller gets the
+        same answer. The floor keeps prose legible; the CLAMP keeps the painted
+        row inside the block's own region, and the clamp wins.
+
+        The floor alone breaks containment at narrow widths, because it floors
+        the TEXT LANE while the row that gets painted is ``rail_cols + lane``.
+        Measured before the clamp, with the rail on: a 9-column terminal gives
+        this block a 5-column region, the lane floors at 8, and the row paints
+        10 cells — five cells outside its own container, over the scrollbar. It
+        overflowed at every terminal width up to 13 with the rail on and up to
+        11 with it off, where the pre-rail build (which had no floor at all)
+        always fit.
+
+        So where the lane cannot afford the floor, the floor gives way: fold to
+        what is actually there. That yields text which is nearly unreadable at a
+        2-cell body, and that is the deliberate trade — unreadable text inside
+        the block is recoverable by widening the terminal, whereas a row painted
+        outside its region corrupts the frame around it and the reader cannot
+        tell which widget is lying. Applied in BOTH rail states rather than by
+        special-casing the rail off: containment is not a property one state is
+        allowed to skip.
+
+        Not solved by dropping the rail under a width threshold: a rail that
+        vanishes at some width is a second behaviour to explain, and the block
+        would still have to decide what to do at the width below that one
+        (design round 2, D9).
+        """
+        body = lane - self._rail_cols()
+        if body < MIN_BODY:
+            # The floor would widen the fold past the lane and paint outside the
+            # block. Never negative, and 0 is a real answer rather than a
+            # degenerate one: at a 2-cell region the gutter is the whole lane,
+            # and a 0-cell body paints the rail alone and stays contained
+            # (measured). Asking for 1 there puts a cell back outside the block.
+            return max(body, 0)
+        return body
+
     def _flat_width(self) -> int:
         """The width the rows are built at — the block's own once laid out.
 
@@ -385,8 +560,33 @@ class AssistantBlock(TranscriptBlock):
         handed — so the invariant that a self-authoring block is never MEASURED
         holds exactly as before; only the width those rows are folded at is
         better informed.
+
+        The rail's cells come off the top: the markdown is folded into the BODY
+        the gutter leaves, not into the whole lane. Folding at the full lane and
+        then pushing two cells onto every row overhangs the block by two on
+        every wrapped row. :meth:`_body_width` applies the floor and the
+        containment clamp together, so this and :meth:`authored_width` cannot
+        disagree about how narrow is too narrow.
         """
-        return self.fold_width(FALLBACK_WIDTH)
+        return self._body_width(self.fold_width(FALLBACK_WIDTH))
+
+    def authored_width(self, lane: int) -> int:
+        """The lane, less the rail — this block's box is not the whole lane.
+
+        The container's lane walk (``TranscriptView._refit_authored_blocks``)
+        asks each authored block for its rebuild width rather than handing it
+        the lane, exactly so a block whose box is narrower than the lane can say
+        so. Without this override the walk re-folds the prose two cells wider
+        than the box the rail leaves it, and the two rebuild triggers — the lane
+        walk and this block's own ``on_resize`` — would name DIFFERENT widths
+        for one lane change, which is what turns ``refit_width``'s equality
+        guard into a rebuild loop rather than a no-op.
+
+        Same subtraction and same floor as :meth:`_flat_width`, through the same
+        :meth:`_body_width`, so whichever trigger fires first the rows are folded
+        at one number.
+        """
+        return self._body_width(super().authored_width(lane))
 
     def _flat_console(self) -> Console | None:
         """The app's console, or ``None`` when this block is detached.
@@ -423,8 +623,35 @@ class AssistantBlock(TranscriptBlock):
         exists, so this is the common case, not the rare one: it took the cost
         of a streaming delta from 4.54 ms to 1.98 ms at the median and from
         56.4 ms to 11.4 ms at the worst.
+
+        **The rail is painted HERE and nowhere else**, and that placement is
+        load-bearing rather than convenient. This method is the single choke
+        point every row-producing path funnels through — :meth:`update_text`,
+        :meth:`refit_width` and :meth:`retheme` all end in it — so the gutter is
+        applied once per assembled frame. Applying it inside :meth:`_flat_rows`
+        instead would bake it into ``_frozen_flat``, which that method caches
+        and CONCATENATES on every delta: the cached prefix would arrive already
+        railed and be railed again, growing by two cells per flush. Painting the
+        assembled output leaves the cache holding pure prose, so double-painting
+        is impossible by construction rather than by a guard.
         """
         self._built_width = self._flat_width()
+        # ONE read of the flag per paint, recorded beside the width it was
+        # painted at. Every later question about THIS frame — what the copy
+        # must strip, where a selection column starts — is answered from the
+        # record rather than by reading the setting again, so the frame and the
+        # clipboard cannot disagree even when the setting changes underneath a
+        # block that has not repainted (review round 2, M1). Recorded here
+        # because this method is the single funnel every row-producing path
+        # ends in, so one assignment covers update_text, refit_width, retheme
+        # and finalize_text alike.
+        rail_cols = self._rail_cols()
+        self._painted_rail_cols = rail_cols
+        if rail_cols:
+            text = rail_rows(text)
+        # Counted from the RAILED text, because that is what gets painted. The
+        # gutter adds no rows, but the pin must describe the frame it reserves
+        # space for rather than the one before the gutter went on.
         rows = text.plain.count("\n") + 1
         moved = rows != self._pinned_rows
         self._pinned_rows = rows
@@ -664,6 +891,48 @@ class AssistantBlock(TranscriptBlock):
         """The accumulated message text (for tests and export)."""
         return self._full_text
 
+    def copy_gutter(self, index: int) -> int:
+        """The rail's columns, on every row — the BLOCK-level constant.
+
+        :func:`rail_rows` prefixes the same two cells to every row this block
+        paints, blank paragraph rows included, so the count is uniform and needs
+        no row bookkeeping — the same argument ``UserBlock.copy_gutter`` makes
+        for its prompt rule.
+
+        This is only half the answer, and the smaller half.
+        :meth:`_furniture_width` is the PER-ROW one on top of it: a quote row
+        also carries a painted ``▌`` that is not this gutter, a list row carries
+        a ``•``. Returning the right number here while ``get_selection`` still
+        aligns against railed rows is exactly the shape of the bug this block's
+        copy path was fixed for — the constant is necessary and nowhere near
+        sufficient.
+
+        Zero when the rail was off when these rows were painted: there is no
+        gutter to strip, and reporting two would take two cells of real content
+        off the clipboard.
+
+        **Answered from what was PAINTED, not from what the setting says now**
+        (review round 2, M1). The paint and the copy happen at different times,
+        and nothing forces the flag to hold still between them: an external
+        write — another pane, ``lop config edit`` — drops the settings cache
+        without repainting anything, and the in-app repaint sweep can skip a
+        block too (a swallowed per-block ``retheme``, or the offscreen skip).
+        Re-reading the flag here then measures the CURRENT setting against rows
+        painted under the OLD one, and the reader silently gets the wrong
+        document: measured at 60 columns, painted-on/copied-off put the rail
+        itself on the clipboard, and painted-off/copied-on ate the first two
+        characters of every row and lost row 0 entirely. Reading the record
+        makes the frame and the clipboard unable to disagree by construction,
+        which is the argument this file makes everywhere else.
+
+        Falls back to the live answer only when this block has NEVER painted
+        (``-1``). There is no frame to be faithful to in that case, and the
+        empty-message path returns before any of this anyway.
+        """
+        if self._painted_rail_cols < 0:
+            return self._rail_cols()
+        return self._painted_rail_cols
+
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The selected text as MARKDOWN, so it pastes cleanly anywhere.
 
@@ -770,7 +1039,48 @@ class AssistantBlock(TranscriptBlock):
         if not self._full_text.strip():
             return super().get_selection(selection)
         rows = visual.plain.split("\n")
-        mapping = _copy_markdown.align(self._full_text, rows)
+        # ONE COORDINATE CONVENTION, and everything below depends on it: the
+        # alignment, the furniture measurement and every BLANKNESS test work in
+        # BARE columns — the row as Rich folded it, before :func:`rail_rows`
+        # prefixed this block's gutter. :data:`RAIL_COLS` is added back only
+        # where a column is compared against a SELECTION span, because the
+        # reader drags over the painted frame and their columns include the
+        # rail. The private helpers below are handed ``bare`` for the same
+        # reason and document that they expect it.
+        #
+        # The rail cannot simply be left on, for TWO independent reasons.
+        #
+        # 1. ``▌`` is not a neutral glyph here: :func:`_copy_markdown.align`
+        #    reads it as the BLOCKQUOTE bar, so a rail on every row makes every
+        #    row look like a quote row. Measured on a paragraph + bullets +
+        #    blockquote message, railed rows align to ``[0, 0, 2, 3, 3, 5]``
+        #    where bare rows align to ``[0, 1, 2, 3, 4, 5]``, and
+        #    ``furniture_width`` drops from 3 to 0 on the list rows — a copy
+        #    then pastes the bullet glyph AND lands on the wrong source line.
+        # 2. The rail makes no row BLANK any more. A separator row paints as
+        #    ``▌`` plus pad, which is truthy under ``.strip()``, so every
+        #    blankness predicate in this file inverts: blank rows would enter
+        #    ``content``, a railed blank would ``rstrip()`` to length 1 instead
+        #    of 0, and :meth:`_furniture_width`'s previous-painted-row scan —
+        #    which exists precisely so a separator row does not make the row
+        #    after it read as a list opener — would never skip anything,
+        #    flipping ``opens_line`` after every paragraph break and
+        #    re-introducing the issue #395 mismeasurement class.
+        #
+        # Bound ONCE here and used for every compensation below, because with
+        # ``display.rail`` off no gutter is painted: slicing a constant two
+        # would eat the first two characters of real content and every
+        # ``+ RAIL_COLS`` comparison would be off by the same two.
+        #
+        # Taken from :meth:`copy_gutter`, which answers from what was PAINTED
+        # rather than from the setting's current value. ``rows`` above came out
+        # of the rendered frame, so the number that de-rails them has to be the
+        # number that railed them — re-reading the flag here is how a copy ends
+        # up measuring this frame against a setting that changed after it was
+        # painted (review round 2, M1).
+        rail_cols = self.copy_gutter(0)
+        bare = [row[rail_cols:] for row in rows]
+        mapping = _copy_markdown.align(self._full_text, bare)
 
         # The same ``Selection.get_span`` the band paints with, chrome rows
         # dropped, so the clipboard and the highlight cannot disagree.
@@ -786,7 +1096,10 @@ class AssistantBlock(TranscriptBlock):
         # sub-line take: a whole-message copy legitimately spans the blank
         # separator rows between paragraphs, and letting one veto the markdown
         # path would degrade every multi-paragraph copy to rendered text.
-        content = [(i, span) for i, span in selected if rows[i].strip()]
+        # Blankness judged on the BARE row (reason 2 above): every painted row
+        # opens with the gutter, so ``rows[i].strip()`` is true even of a blank
+        # paragraph row and this filter would stop filtering anything.
+        content = [(i, span) for i, span in selected if bare[i].strip()]
 
         sub_line = False
         if content:
@@ -830,8 +1143,15 @@ class AssistantBlock(TranscriptBlock):
                 # whether or not the reader's drag began on the ``▌`` cell, or
                 # the same gesture one cell left would fall to the glyph path
                 # and paste a different document (design round 1, D1).
-                starts_full = first_start <= self._furniture_width(rows, mapping, first_index)
-                ends_full = last_end == -1 or last_end >= len(rows[last_index].rstrip())
+                # Converted INTO selection columns: the furniture and the row
+                # content are measured bare, the drag is reported painted, and
+                # the rail is exactly the difference. ``rstrip`` on the bare row
+                # rather than the painted one for reason 2 — a railed blank row
+                # rstrips to ``▌``, a length of 1 where the honest answer is 0.
+                starts_full = first_start <= rail_cols + self._furniture_width(
+                    bare, mapping, first_index
+                )
+                ends_full = last_end == -1 or last_end >= rail_cols + len(bare[last_index].rstrip())
                 sub_line = not (starts_full and ends_full)
 
         if sub_line:
@@ -841,17 +1161,24 @@ class AssistantBlock(TranscriptBlock):
             # reader never highlighted — and clamped past each row's PAINTED
             # furniture rather than past ``copy_gutter``.
             #
-            # ``copy_gutter`` is 0 on this block and cannot be anything else:
-            # an assistant message has no fixed gutter, because what is
-            # furniture depends on the construct the row belongs to. Clamping
-            # to it stripped nothing, so a sub-line take across a wrapped
-            # quote's fold put the ``▌`` on the clipboard and a column-0 drag
-            # picked up the ``•`` — furniture the base commit never copied, and
-            # the exact leak this method's docstring claims to prevent (review
-            # round 1, R1-1; design round 1, D1).
+            # ``copy_gutter`` is the rail and NOTHING MORE. It used to be 0
+            # here, and the note that it "cannot be anything else" was true
+            # while the block painted no gutter of its own; the rail made it a
+            # fixed two cells, but only those two. What is furniture BEYOND the
+            # rail still depends on the construct the row belongs to, so the
+            # clamp remains per-row: clamping to the block constant alone
+            # stripped nothing beyond the gutter, and a sub-line take across a
+            # wrapped quote's fold put the ``▌`` on the clipboard while a
+            # column-0 drag picked up the ``•`` — furniture the base commit
+            # never copied, and the exact leak this method's docstring claims to
+            # prevent (review round 1, R1-1; design round 1, D1).
+            # Sliced out of the PAINTED rows, because ``start`` and ``end`` are
+            # painted columns — so the clamp is the rail plus the construct's
+            # own furniture, which is what keeps the gutter off the clipboard
+            # when the reader's drag began on it.
             glyphs = [
                 rows[index][
-                    max(start, self._furniture_width(rows, mapping, index)) : (
+                    max(start, rail_cols + self._furniture_width(bare, mapping, index)) : (
                         None if end == -1 else end
                     )
                 ]
@@ -882,7 +1209,7 @@ class AssistantBlock(TranscriptBlock):
             # about what a fold consumed. Asking anyway would make an unplaceable
             # line degrade a take that was never at risk.
             source_line = self._source_line(mapping, content[0][0])
-            fold_rows, first_offset = self._source_line_rows(rows, mapping, content)
+            fold_rows, first_offset = self._source_line_rows(bare, mapping, content)
             separators: list[str] | None = []
             if len(trimmed) > 1:
                 separators = _copy_markdown.wrap_separators(fold_rows, source_line)
@@ -1012,6 +1339,11 @@ class AssistantBlock(TranscriptBlock):
     ) -> tuple[list[str], int]:
         """Every rendered row of the selected source line, and the drag's offset.
 
+        ``rows`` is the BARE row list — the rail stripped — for the convention
+        :meth:`get_selection` states: the blankness filter below and the
+        furniture measurement both have to see a blank separator row as blank,
+        and a railed row never is.
+
         :func:`_copy_markdown.wrap_separators` is end-anchored, so it can only
         place rows that are the WHOLE of the source line. The selection is not
         that: a reader highlighting exactly a URL stops before the paragraph's
@@ -1065,7 +1397,14 @@ class AssistantBlock(TranscriptBlock):
         mapping: list[int | None],
         row: int,
     ) -> int:
-        """Painted-furniture columns on rendered row ``row``.
+        """Painted-furniture columns on rendered row ``row``, in BARE columns.
+
+        ``rows`` is the rail-stripped list and the answer excludes the rail:
+        this is the CONSTRUCT's own furniture, and :meth:`copy_gutter` is the
+        block-level constant on top of it. Callers comparing against a selection
+        column add :data:`RAIL_COLS` back. Handing this the painted rows breaks
+        it two ways — ``▌`` would be read as a quote bar, and the blank-row skip
+        below would never fire.
 
         The per-row gutter this block cannot express as a constant. See
         :func:`_copy_markdown.furniture_width` for why the answer needs the
