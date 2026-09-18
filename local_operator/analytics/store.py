@@ -19,19 +19,21 @@ mean a read-modify-write on every call and a lock contended by every session.
 Instead each call is an append (no contention beyond the WAL) and the
 ``/analytics`` screen reads a GROUP BY when it opens. That GROUP BY is over the
 maintained ``session_daily`` rollup rather than the raw ledger, because the
-ledger stopped being bounded in practice. THE NUMBERS BELOW ARE THE COMMITTED
+ledger stopped being bounded in practice. THE NUMBERS BELOW ARE THE RECORDED
 ONES — ``bench/analytics-rollup-before.json`` / ``-after.json``, produced by
 ``scripts/bench_panel_latency.py`` against a copy of that ledger, p50 — and they
-are the only set any comment or document should quote; a second, uncommitted
-sample of the same code is not a second opinion, it is a second measurement. On
-the operator's 342.8 MB, 1 155 845 call ledger the panel's 30-day window costs
+are the only set any comment or document should quote; a second sample of the
+same code is not a second opinion, it is a second measurement. That pair left the
+tree with the rest of ``bench/`` (AGENTS.md §7) and is quoted from the last
+``main`` that carried it, ``git show ba225070:bench/analytics-rollup-after.json``.
+On the operator's 342.8 MB, 1 155 845 call ledger the panel's 30-day window costs
 4 868 ms wall / 3 179 ms CPU on the raw ledger (2 764 ms / 2 134 ms CPU for the
 first read of a fresh copy), while the rollup answers the same window in 187 ms
 wall / 166 ms CPU. Both arms were measured in ONE session at load ~215-280 on a
 shared 14-core host under a RAM hold, and that matters more than it looks: CPU is
 MORE portable than wall but not immune to this box's memory pressure (the same
 fast path measured 121 ms of CPU at load 38 and 166 ms at load 237), so a
-committed pair is only meaningful read as a pair, with its load. The ratio — 19x
+recorded pair is only meaningful read as a pair, with its load. The ratio — 19x
 of CPU, 26x of wall — is the durable part. The raw-ledger query is still there,
 unchanged, behind a fail-closed gate that answers whenever the rollup cannot prove
 the same numbers (``aggregate()``'s docstring has the account).
@@ -310,7 +312,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 -- 2 764 ms / 2 134 ms CPU for the FIRST touch of a fresh copy, which is what a
 -- cold start feels like. The rollup answers the same window in 187 ms wall /
 -- 166 ms CPU, reads 1.1 MB instead of the ledger's hundreds, and its cost stops
--- tracking ledger growth. Every number here comes from the ONE committed pair —
+-- tracking ledger growth. Every number here comes from the ONE recorded pair —
 -- ``bench/analytics-rollup-before.json`` / ``-after.json``, both arms in one
 -- session at load ~215-280 — and no other sample belongs in a comment.
 --

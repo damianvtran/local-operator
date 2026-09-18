@@ -123,10 +123,10 @@ def _median(values: list[float]) -> float:
 def _display_path(path: str | Path) -> str:
     """A path as it goes into the artifact: ``~/...`` under the home directory.
 
-    These artifacts are committed, and the repo's convention for anything that
-    travels is a home-relative path (``AGENTS.md``). What the artifact has to
-    record is WHICH CHECKOUT was measured — the caller's own layout is not part
-    of the measurement.
+    These artifacts travel — published on the PR that cites them, never committed
+    (``AGENTS.md`` §7) — and the repo's convention for anything that travels is a
+    home-relative path. What the artifact has to record is WHICH CHECKOUT was
+    measured — the caller's own layout is not part of the measurement.
     """
     resolved = Path(path).resolve()
     try:
@@ -471,13 +471,13 @@ def _ps_rss_by_pid(pids: list[int]) -> dict[int, int]:
 
 
 def _process_label(comm: str) -> str:
-    """A pid's process, in a form that is safe to commit.
+    """A pid's process, in a form that is safe to publish.
 
     ``ps`` returns either a path or, for a branded runtime, mac's ``Local
     Operator [session] id=<hex>``. The id half names one of the operator's own
-    sessions and these artifacts are committed, so it is dropped; the path half
-    is reduced to its basename for the same reason (the operator's home and
-    worktree layout is not part of the measurement). What is kept is what the
+    sessions and these artifacts are published on a PR, so it is dropped; the
+    path half is reduced to its basename for the same reason (the operator's home
+    and worktree layout is not part of the measurement). What is kept is what the
     row is for: whether the pid is a fixture interpreter or a real session
     process.
     """
