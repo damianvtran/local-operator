@@ -65,6 +65,11 @@ class _Recommendation:
     block: str = ""
     vendor: str | None = None
     cost_usd: float | None = None
+    #: The package's ``Recommendation`` carries the vendor's token counts (they are
+    #: what ``_log_classification_cost`` prints), so the stand-in does too — "field
+    #: for field" is the contract this double exists to keep.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     latency_s: float = 0.0
     skipped: str | None = None
     #: §4's per-resource attribution. Part of "field for field": the renderer reads it,
@@ -774,6 +779,8 @@ def test_the_cost_line_carries_the_vendors_own_figures(
                 resources=(_Candidate("guide", "tunnel", "g", "guide://tunnel"),),
                 vendor="typesafe",
                 cost_usd=0.000042,
+                input_tokens=4238,
+                output_tokens=380,
                 latency_s=0.31,
             )
         )
@@ -781,6 +788,28 @@ def test_the_cost_line_carries_the_vendors_own_figures(
     assert "vendor=typesafe" in caplog.text
     assert "$0.000042" in caplog.text
     assert "resources=1" in caplog.text
+    # Input is the whole bill at this vendor's pricing, so the counts have to be
+    # on the line rather than a placeholder.
+    assert "tokens=4238/380" in caplog.text
+
+
+def test_a_call_that_reports_no_counts_prints_none_rather_than_a_zero(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing or cleared count is ``-``: ``0`` would claim a call returned no input.
+
+    Two shapes reach this: a seam that publishes no counts at all, and the
+    package's own cache hit, which clears them because that call spent nothing.
+    """
+    with caplog.at_level("INFO", logger="local_operator.session_factory"):
+        session_factory._log_classification_cost(
+            _Recommendation(vendor="typesafe", cost_usd=None, input_tokens=None, output_tokens=None)
+        )
+        session_factory._log_classification_cost(
+            _Recommendation(vendor="typesafe", cost_usd=None, latency_s=0.1)
+        )
+
+    assert "tokens=-/-" in caplog.text
 
 
 def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -> None:
