@@ -623,3 +623,43 @@ def test_denying_an_injection_counts_as_a_denial_that_happened(
         "a denial that removed an injected name DID happen; reporting it as unmatched "
         f"is a false alarm: {warnings}"
     )
+
+
+def test_denying_a_parent_defined_name_is_a_denial_that_happened(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The README's own sample config must not raise a false alarm.
+
+    ``mode: allowlist`` with ``exclude: [GH_TOKEN]`` is the sample this repo
+    documents. The name is defined in the PARENT and never granted to the child,
+    so it is not in the child's names — and reporting that as "the environment
+    being filtered does not define it" is both false and noisy on a correct
+    config. Membership is measured against the child's names plus the parent's
+    plus the injections, so a denial of anything the harness could have handed
+    over counts as matched, while a genuine typo still warns.
+    """
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=shell_env.MODE_ALLOWLIST,
+        exclude=frozenset({"GH_TOKEN"}),
+    )
+    with caplog.at_level(logging.WARNING, logger=shell_env.logger.name):
+        env = shell_env.child_environment(
+            policy, parent={"PATH": "/usr/bin", "GH_TOKEN": "sentinel-not-a-token"}
+        )
+
+    assert "GH_TOKEN" not in env
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any(
+        "GH_TOKEN" in m for m in warnings
+    ), f"a denial of a parent-defined name is not a miss: {warnings}"
+
+    # And the typo case still warns: the fix must not silence the real signal.
+    caplog.clear()
+    typo = shell_env.ShellEnvironmentPolicy(
+        mode=shell_env.MODE_ALLOWLIST, exclude=frozenset({"GH_TOKEN"})
+    )
+    with caplog.at_level(logging.WARNING, logger=shell_env.logger.name):
+        shell_env.child_environment(typo, parent={"PATH": "/usr/bin"})
+    assert any(
+        "GH_TOKEN" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    ), "a name nothing defines must still warn"
