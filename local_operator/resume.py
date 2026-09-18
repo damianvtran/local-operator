@@ -1355,7 +1355,7 @@ def recent_sessions(
     file read per subagent directory: 1127 ms over 31,700 dirs, of which the
     reads were 639 ms. The verdict cache removed the READS (~310 ms warm,
     ``bench/resume-picker-after.json``), and the hidden-skip above removed the
-    remaining per-directory STAT. Quote the committed bench figure here rather
+    remaining per-directory STAT. Quote the recorded bench figure here rather
     than a remembered one — an optimistic number in a docstring is how the next
     person's regression looks like an improvement.
 

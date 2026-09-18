@@ -1790,11 +1790,15 @@ have the build you are testing.
 
 **Do not commit PR evidence artifacts** — before/after frames (SVG or PNG),
 screenshots, terminal byte captures, measurement logs, review-round
-transcripts, or a `docs/evidence/<change>/`, `docs/assets/pr-<n>/` or
+transcripts, or a `bench/`, `docs/evidence/<change>/`, `docs/assets/pr-<n>/` or
 `docs/pr-<n>/` directory of any kind. Those directories used to exist and
 were removed in one sweep: they had grown to ~60 MB of frames that nothing in
 the code or tests loaded, that every clone paid for forever, and that
-described a UI several releases out of date.
+described a UI several releases out of date. `bench/` was the same mistake in a
+second place — 13 JSON dumps and the two hand-built markdown tables beside them,
+written by the `scripts/bench_*.py` harnesses and read by nothing at runtime —
+and was swept on its own: a measurement store is regenerable, so it belongs with
+the PR that cites it, and it is ignored now (`.gitignore`).
 
 The evidence still has to exist; it just lives where the review does. Attach
 images to the PR description or the review comment (drag them into the GitHub
@@ -1811,12 +1815,13 @@ document whose only purpose is to hold a PR's proof is a PR comment, not a
 doc.
 
 Comments and docstrings still cite a few of the removed directories by path
-(`docs/evidence/cmd-chords/MEASURED.md`, the compaction-ruler measurements,
-and so on). Those citations are kept as-is — the measurements they name are
-real and the reasoning built on them still holds — and the files are one
-`git show` away. Last commit that carried each:
+(`docs/evidence/cmd-chords/MEASURED.md`, the compaction-ruler measurements, the
+`bench/*.json` pairs the analytics and info-snapshot code quote, and so on).
+Those citations are kept as-is — the measurements they name are real and the
+reasoning built on them still holds — and the files are one `git show` away.
+The commit to retrieve each from:
 
-| directory | `git show <sha>:docs/evidence/<dir>/…` |
+| directory | `git show <sha>:<path>` |
 |---|---|
 | `cmd-chords`, `aside-chord` | `f3ae0441`, `1634a53b` |
 | `compaction-ruler` | `9eb9bb33` |
@@ -1824,7 +1829,8 @@ real and the reasoning built on them still holds — and the files are one
 | `fork-ux`, `fork-cache` | `a70e3460` |
 | `browser-extension` | `39691ea0` |
 | `sibling-modes-boot-layout` | `2c4ebc77` |
-| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `5cbea141` (the last `main` before the sweep) |
+| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
+| `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
 ## Timing, flakes, and how to assert that something is fast
 
@@ -2626,8 +2632,14 @@ Things that will bite you if you forget them:
   unchanged, naming the refusal in a `debug` log. Measured on the operator's
   342.8 MB ledger (1 155 845 calls), p50, both arms measured in one session at
   load ~215-280: the panel's 30-day window goes from 4 868 ms wall / 3 179 ms CPU
-  to 187 ms / 166 ms CPU — `scripts/bench_panel_latency.py`, `bench/analytics-rollup-*.json`, and THOSE
-  committed numbers are the canonical ones. Wall is not portable between hosts,
+  to 187 ms / 166 ms CPU — both arms produced by `scripts/bench_panel_latency.py`,
+  and THOSE numbers are the canonical ones. They were stored in
+  `bench/analytics-rollup-before.json` / `-after.json`, which left the tree with
+  the rest of `bench/` (see "Evidence goes on the PR, never into the
+  repository"), so quote them from `ba225070` — the `main` this sweep branched
+  from, where the whole store is still present:
+  `git show ba225070:bench/analytics-rollup-after.json` (`-before.json` is the arm
+  it is compared against). Wall is not portable between hosts,
   and neither is CPU to the same degree: the same fast path cost 121 ms of CPU at
   load 38 and 166 ms at load 237 on this box, so quote the pair with its load and
   never one arm alone. Three properties matter more than the mechanism:
