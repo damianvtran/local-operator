@@ -105,8 +105,21 @@ from ..harness.test_comms import FakeChild
 from .test_band_panels import FakeSession, _async_factory, _fake_jobs, _Job
 
 
-def _text(mid: str, body: str) -> list[dict[str, Any]]:
-    """A complete assistant message, the way the child stream emits one."""
+def _text(
+    mid: str, body: str, *, calls: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """A complete assistant message, the way the child stream emits one.
+
+    ``calls`` is the batch this message FINALIZED INTO, and the engine carries
+    it on the message itself (``Message.tool_calls`` — the relay stores
+    ``event.model_dump(mode="json")``), so a fixture that omits it is not a
+    shape the child can emit. The fold reads that field to classify the row as
+    mid-turn progress rather than an answer (``tui/narration.py``), which is
+    what the page's rail now depends on: a fixture without calls would fold
+    every prose row as an answer and pass while the page railed a progress
+    sentence.
+    """
+    calls = calls or []
     return [
         {"type": "message_start", "message": {"role": "assistant", "id": mid}},
         {"type": "message_update", "message": {"role": "assistant", "id": mid}, "delta": body},
@@ -116,6 +129,8 @@ def _text(mid: str, body: str) -> list[dict[str, Any]]:
                 "role": "assistant",
                 "id": mid,
                 "content": [{"type": "text", "text": body}],
+                "tool_calls": calls,
+                "stop_reason": "toolUse" if calls else "stop",
             },
         },
     ]
@@ -145,10 +160,19 @@ def _result(call_id: str, name: str, text: str = "", is_error: bool = False) -> 
     }
 
 
-#: One ordinary child run: a sentence, a tool that worked, a tool that failed.
+#: One ordinary child run: a sentence before a tool batch, a tool that worked, a
+#: tool that failed, then the closing sentence. The first message carries the
+#: calls it finalized into — the shape the fold classifies as mid-turn progress.
 TRAJECTORY = [
     {"type": "agent_start"},
-    *_text("m1", "Reading the ingest path."),
+    *_text(
+        "m1",
+        "Reading the ingest path.",
+        calls=[
+            {"id": "c1", "name": "read", "arguments": {"path": "pipeline/ingest.py"}},
+            {"id": "c2", "name": "bash", "arguments": {"command": "pytest -q"}},
+        ],
+    ),
     _call("c1", "read", path="pipeline/ingest.py"),
     _result("c1", "read", "def ingest(batch):\n    ..."),
     _call("c2", "bash", command="pytest -q"),
@@ -240,6 +264,57 @@ def test_fold_produces_prose_and_tool_rows_in_call_order() -> None:
     assert entries[1].outcome == "success"
     assert entries[2].outcome == "error"
     assert entries[2].result_text == "2 failed"
+
+
+def test_both_folds_classify_a_progress_row_from_the_messages_own_calls() -> None:
+    """The page's rail marks the ANSWER, so a row has to know which one it is.
+
+    Both folds read the SHARED rule (``tui/narration.py``) off the message's own
+    ``tool_calls`` — never off the tool rows beside it, which would be a second
+    rule free to disagree about a batch that was never executed. Asserted on both
+    because they read different sources (the relayed event dump against the
+    durable row payload): a page that answered differently depending on which one
+    painted the row would drop the rail from a live child's progress sentence and
+    put it back after a resume.
+    """
+    live = {
+        entry.key: entry.narration
+        for entry in fold_trajectory(TRAJECTORY, settled=True)
+        if entry.kind == "text"
+    }
+    assert live == {"m1": True, "m2": False}
+
+    def row(
+        entry_id: str, text: str, *, calls: list[dict[str, Any]] | None = None
+    ) -> TranscriptEntry:
+        return TranscriptEntry(
+            id=entry_id,
+            ts=1.0,
+            type=ENTRY_MESSAGE,
+            payload={
+                "kind": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "tool_calls": calls or [],
+                "stop_reason": "toolUse" if calls else "stop",
+            },
+        )
+
+    durable = {
+        entry.key: entry.narration
+        for entry in fold_transcript_entries(
+            [
+                row(
+                    "a-1",
+                    "Reading the ingest path.",
+                    calls=[{"id": "c1", "name": "read", "arguments": {"path": "p.py"}}],
+                ),
+                row("a-2", "Two tests fail on the retry budget."),
+            ]
+        )
+        if entry.kind == "text"
+    }
+    assert durable == {"a-1": True, "a-2": False}
 
 
 @pytest.mark.parametrize(

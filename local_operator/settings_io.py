@@ -1437,8 +1437,11 @@ SETTINGS: tuple[Setting, ...] = (
         label="Assistant gutter rail",
         kind=Kind.BOOL,
         default=True,
-        help="A rule down the left edge of the assistant's answer, echoing the prompt's.",
-        choices=_bool_choices("rail on the answer", "no rail"),
+        help=(
+            "A rule marks the ANSWER: the message that ends the turn. "
+            "Mid-turn narration takes no rail."
+        ),
+        choices=_bool_choices("rail the answer only", "no rail"),
     ),
     Setting(
         # Default changed to False by maintainer
