@@ -410,8 +410,8 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Whether write and command tools prompt, in every running session. A config "
         "write tightens every running session at once; loosening one needs a write "
-        "from that session's own process (/approvals auto in it, or its own /settings "
-        "page).",
+        "from that session's own process (/approvals auto in it, or a /settings page "
+        "in that process).",
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript

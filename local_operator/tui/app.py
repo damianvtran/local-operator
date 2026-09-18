@@ -83,6 +83,7 @@ from local_operator.ansi import strip_control_sequences
 # cannot drift on which writes may loosen a live gate (issue #1282). Pure and
 # import-cheap: `harness.approval` pulls in `inspect` and nothing else.
 from local_operator.harness.approval import (
+    LOOSENING_KEPT_BY_ASK_NOTICE,
     LOOSENING_REFUSED_NOTICE,
     loosening_is_authorised,
 )
@@ -1712,15 +1713,6 @@ ORG_CHART_LAYOUT_CLASS = "org-chart"
 #: ``_open_settings_view``/``_close_settings_view``. Named to match its
 #: ``Screen.settings`` tcss block, the sibling of ``Screen.org-chart``.
 SETTINGS_LAYOUT_CLASS = "settings"
-
-#: What the ``/settings`` page says when ITS OWN write could not loosen the gate
-#: (UX round 1, U1). The page's copy of ``LOOSENING_REFUSED_NOTICE``, worded for
-#: a surface that has no transcript on screen: it reports the half that LANDED
-#: (the file) and the half that did not (this session), and names the command.
-#: 61 cells, against the detail line's measured 74 at 80x24 — the page's own
-#: budget, which the row help is also written to (see the ``approvals`` section
-#: in ``settings_io``).
-PAGE_LOOSENING_KEPT_NOTICE = "saved; this session keeps asking — /approvals auto loosens it"
 
 #: Class the SCREEN carries while the `/btw` aside card owns the composer. The
 #: transcript is inert then — Enter goes to the card — so it recedes behind it,
@@ -4510,13 +4502,16 @@ class OperatorApp(App[None]):
         # contract. Held here for the same reason the two above are: the Esc
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
-        #: ``(changed_keys, sentence)`` for a ``/settings`` page write this pane
-        #: could not loosen — the gate belongs to an attached runtime. Read and
-        #: cleared by the page right after its save (`_take_page_kept_loosening`),
-        #: because `SettingsView._save` clears the page's own message slots on
-        #: success and anything pushed during the write would be wiped by the
-        #: line that reports it.
-        self._page_kept_loosening: tuple[str, str] | None = None
+        #: The KEY of a ``/settings`` page write this pane could not loosen — the
+        #: gate belongs to an attached runtime. Read and cleared by the page right
+        #: after its save (`_take_page_kept_loosening`), because
+        #: `SettingsView._save` clears the page's own message slots on success and
+        #: anything recorded during the write would be wiped by the line that
+        #: reports it. The SENTENCE lives on the page
+        #: (`SettingsView`'s alert ladder) because it is that surface's copy: it
+        #: is read with no transcript on screen, and it is shed by that line's own
+        #: rules.
+        self._page_kept_loosening: str | None = None
         self._settings_focus_restore: Any | None = None
         #: True while a ``/settings`` hotkey row is LISTENING for a key to
         #: bind. :meth:`check_action` reads it and disarms every app binding,
@@ -21412,7 +21407,8 @@ class OperatorApp(App[None]):
             )
         else:
             notice(
-                "tool approvals: ask — write and command tools will prompt again " "(this session)"
+                "tool approvals: ask — write and command tools prompt before running "
+                "(this session)"
             )
 
     def _report_approvals(self, notice: NoticeFn) -> None:
@@ -27987,11 +27983,7 @@ class OperatorApp(App[None]):
             # to weight. See the refusal branch below for why `note` is not
             # available to either.
             if not self._gate_is_owned_elsewhere():
-                self._system_notice(
-                    "keeping tool approvals: ask — set with /approvals in this session; "
-                    "config.yml now says auto, /approvals auto adopts it",
-                    "warning",
-                )
+                self._system_notice(LOOSENING_KEPT_BY_ASK_NOTICE, "warning")
             self._set_approve_all(self._approve_all)
             return _ApprovalsFollow("", True)
         if wanted_auto and not loosening_is_authorised(
@@ -28029,7 +28021,7 @@ class OperatorApp(App[None]):
                 # wordings never share a viewport, and the page's is written for
                 # a surface with no transcript on it.
                 if not announce:
-                    self._page_kept_loosening = ("tool_approval_mode", PAGE_LOOSENING_KEPT_NOTICE)
+                    self._page_kept_loosening = "tool_approval_mode"
             else:
                 self._system_notice(LOOSENING_REFUSED_NOTICE, "warning")
             self._set_approve_all(self._approve_all)
@@ -28060,8 +28052,8 @@ class OperatorApp(App[None]):
             else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
 
-    def _take_page_kept_loosening(self, key: str) -> str:
-        """Hand the page the sentence for a loosening THIS page could not make.
+    def _take_page_kept_loosening(self, key: str) -> bool:
+        """Whether THIS page write was a loosening this pane could not make.
 
         Read-and-clear: the write and the refusal happen on one call stack (the
         page's ``settings_io.write_setting`` reaches the app's own config
@@ -28071,15 +28063,13 @@ class OperatorApp(App[None]):
         from re-printing it. Keyed by the setting so a record can never be
         handed to a different row's write.
 
-        ``""`` when nothing was refused, which is every write in the embedded
+        ``False`` when nothing was refused, which is every write in the embedded
         app (it owns its gate, so its own facade writes are authorised) and
         every write of another key.
         """
         held = self._page_kept_loosening
         self._page_kept_loosening = None
-        if held is None or held[0] != key:
-            return ""
-        return held[1]
+        return held == key
 
     def _gate_is_owned_elsewhere(self) -> bool:
         """Whether an attached RUNTIME, not this app, owns the approval gate.
@@ -38666,7 +38656,8 @@ class OperatorApp(App[None]):
             )
         return SlashResult(
             kind="notice",
-            text="tool approvals: ask — write and command tools will prompt again (this session)",
+            text="tool approvals: ask — write and command tools prompt before running "
+            "(this session)",
             style="info",
         )
 

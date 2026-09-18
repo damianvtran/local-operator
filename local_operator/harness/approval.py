@@ -173,4 +173,21 @@ LOOSENING_REFUSED_NOTICE = (
 )
 
 
-__all__ = ["ApprovalGate", "LOOSENING_REFUSED_NOTICE", "ask_approval", "loosening_is_authorised"]
+#: The sibling sentence, and the reason it is a constant too (agent review round
+#: 2, n2's family): the same event — the file says ``auto``, this session keeps
+#: its typed ``ask`` — is emitted by the runtime and by the embedded pane, and
+#: round 1 left the two copies inline in each host. Two copies of one sentence is
+#: the drift U5 found for the receipts, one surface over.
+LOOSENING_KEPT_BY_ASK_NOTICE = (
+    "keeping tool approvals: ask — set with /approvals in this session; config.yml "
+    "now says auto, /approvals auto adopts it"
+)
+
+
+__all__ = [
+    "ApprovalGate",
+    "LOOSENING_KEPT_BY_ASK_NOTICE",
+    "LOOSENING_REFUSED_NOTICE",
+    "ask_approval",
+    "loosening_is_authorised",
+]
