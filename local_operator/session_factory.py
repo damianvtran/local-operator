@@ -650,7 +650,21 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
         return auto_approve
 
     async def prompt_approval(tool_name: str, description: str) -> bool:
-        if not sys.stdin.isatty():
+        # ``sys.stdin`` is checked for ``None`` BEFORE ``isatty()`` is called
+        # because a launcher or daemoniser may start the process with fd 0
+        # CLOSED, and Python leaves ``sys.stdin`` as ``None`` for that shape
+        # rather than raising on it. ``lop exec`` without ``--tools`` reaches
+        # this gate on the ordinary path, so the unguarded call was not a
+        # corner: it raised ``'NoneType' object has no attribute 'isatty'`` out
+        # of the gate, and the loop answers a raising gate as an approval-gate
+        # FAULT — the call still did not run (fail closed), but the operator was
+        # told "This is a harness fault, not a refusal by the user" instead of
+        # the actionable CL-04 notice below, which is the same notice a pipe
+        # emits. An absent stdin has to read the way a pipe does: nobody can be
+        # asked. Same guard, and the same reason, as ``exec_startup``'s
+        # declaration gate at its ``sys.stdin`` test.
+        stdin_is_tty = sys.stdin is not None and sys.stdin.isatty()
+        if not stdin_is_tty:
             print(
                 f"approval required but no tty; run with --yolo to auto-approve "
                 f"(tool '{tool_name}')",
