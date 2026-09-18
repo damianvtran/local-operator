@@ -30,7 +30,16 @@ from typing import Any, Sequence, cast
 
 import pytest
 
-from local_operator.harness.types import ImageContent, ModelSpec, ToolResult, Usage
+from local_operator.harness.types import (
+    AgentStartEvent,
+    ImageContent,
+    ModelSpec,
+    TextContent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    ToolResult,
+    Usage,
+)
 from local_operator.media import sniff_image
 from local_operator.mobile.attach_client import (
     _FRAME_ENCODING_SLACK_BYTES,
@@ -744,6 +753,19 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
                     "tool_call_id": f"call-{index}",
                     "tool_name": "read",
                     "is_error": False,
+                    # The clock the fold stamps onto a retained end, copied
+                    # verbatim from the start that row replaced — the same value
+                    # `live_tool_started_at` carries below, and as wide as a real
+                    # one gets (an 18-character epoch: `time.time()` at 1.789e9
+                    # needs ten integer digits and, because the value is
+                    # microsecond-quantised, up to seven fractional ones). The
+                    # width is charged at its MAXIMUM rather than at a typical
+                    # sample, because this fixture is the calibration the text
+                    # budget below is derived from. It is charged against the
+                    # line HERE, with every other field at its own maximum,
+                    # rather than reasoned about; the marginal cost is measured
+                    # by `test_the_seed_stamp_costs_a_bounded_sliver_of_the_line`.
+                    "started_at_epoch": 1_789_696_914.5158982,
                     "result": {
                         "tool_call_id": f"call-{index}",
                         "tool_name": "read",
@@ -782,7 +804,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # maximum — say "the default" rather than "the largest possible" when
         # describing it. Ids are the width a provider actually issues rather
         # than `call-0`.
-        "live_tool_started_at": {f"call_{index:024d}": 1_756_000_000.123456 for index in range(8)},
+        "live_tool_started_at": {f"call_{index:024d}": 1_789_696_914.5158982 for index in range(8)},
         "mcp_servers": [
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)
         ],
@@ -3218,6 +3240,116 @@ def test_an_evicted_tool_end_takes_its_start_with_it() -> None:
     assert starts - ends == {"still-running"}
     # ...and the call that never ended keeps its card.
     assert "still-running" in starts
+
+
+#: The epoch a stamped seed end carries, as the fold copies it from the call's
+#: own start. EIGHTEEN characters, which is the widest ``time.time()`` takes at
+#: this magnitude and a width it commonly does take — ten integer digits plus
+#: seven fractional ones, because the value is microsecond-quantised and a
+#: float64 near 1.79e9 needs that seventh digit to round-trip. The width is the
+#: point of the measurement below, so it is charged at the maximum the producer
+#: can emit rather than at a shorter sample.
+_STAMPED_EPOCH = 1_789_696_914.5158982
+
+#: How many settled calls the measurement below folds, deliberately past the row
+#: cap: what survives bounding is the charge the stamp is paid for.
+_STAMPED_CALLS = 600
+
+
+def _seed_sync_line(rows: list[dict[str, Any]]) -> int:
+    """``_bounded_live_events`` plus the line: what the socket would write."""
+    state = FrontendSessionState(session_id="s1", epoch="e1", live_events=rows)
+    payload = sync_wire_payload(
+        FrontendSync(epoch=state.epoch, sequence=state.sequence, snapshot=state, live_cursor=None)
+    )
+    return _line_bytes({"op": "frontend_sync", "data": payload})
+
+
+def _fold_stamped_seed(count: int) -> list[dict[str, Any]]:
+    """The seed ``count`` settled calls leave behind, folded the way the runtime folds.
+
+    Mid-turn (``is_streaming``), because ``observe_event`` refreshes from the
+    session at every ``tool_execution_end`` and a session with no turn in flight
+    publishes no seed at all — which would leave every assertion below vacuous.
+    """
+    session = SimpleNamespace(
+        effective_model=ModelSpec(
+            provider="openai",
+            model_id="gpt-5.6-sol",
+            display_name="GPT 5.6 Solid",
+            context_window=1_000_000,
+            max_output_tokens=128_000,
+            supports_images=True,
+            supports_tools=True,
+        ),
+        is_streaming=True,
+    )
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    store.observe_event(session, AgentStartEvent(generation=1))
+    for index in range(count):
+        store.observe_event(
+            session,
+            ToolExecutionStartEvent(
+                tool_call_id=f"call-{index}",
+                tool_name="read",
+                args={},
+                started_at_epoch=_STAMPED_EPOCH + index,
+            ),
+        )
+        store.observe_event(
+            session,
+            ToolExecutionEndEvent(
+                tool_call_id=f"call-{index}",
+                tool_name="read",
+                result=ToolResult(
+                    tool_call_id=f"call-{index}",
+                    tool_name="read",
+                    content=[TextContent(text=_SEED_TEXT)],
+                ),
+            ),
+        )
+    return list(store.state.live_events)
+
+
+def test_the_seed_stamp_costs_a_bounded_sliver_of_the_line() -> None:
+    """What the stamp costs, MEASURED on the wire rather than reasoned about.
+
+    The stamp is one key per retained end, on a field already bounded to
+    ``LIVE_EVENT_END_ROWS_MAX`` rows whose worst case is a large share of the
+    socket's 1,048,576-byte line — the class guard above is what holds that field
+    against every other field at maximum. "It must be small" is therefore not the
+    claim worth making; the NUMBER is what decides whether the frame still fits,
+    so the seed is serialized through the real boundary twice, once as the store
+    holds it and once with that one key taken back off, and the difference is
+    asserted.
+
+    The rows are the FOLD's own, not written here by hand. A hand-built stamped
+    row measures ``json.dumps`` and would pass on a build whose end arm never
+    stamps at all — which is the whole change — so the measurement has to arrive
+    the way the key arrives in production: on the end arm of
+    ``_fold_live_event``, read from the anchor its start left. Each variant folds
+    its own store, because the wire bound clips the snapshot it is given in
+    place and a second pass over the same rows would measure clipped ones.
+    """
+    stamped = _seed_sync_line(_fold_stamped_seed(_STAMPED_CALLS))
+    plain = _seed_sync_line(
+        [
+            {key: value for key, value in row.items() if key != "started_at_epoch"}
+            for row in _fold_stamped_seed(_STAMPED_CALLS)
+        ]
+    )
+    delta = stamped - plain
+
+    # One key per SURVIVING row: the cap holds the seed at 100 regardless of how
+    # long the turn ran, so the charge is bounded by the row count and does not
+    # track the conversation. Under 1% of the line is the "far inside" claim
+    # stated as a number rather than as confidence.
+    assert 0 < delta < _MAX_LINE_BYTES // 100, f"the stamp added {delta:,} B to the seed line"
+    assert (
+        delta / LIVE_EVENT_END_ROWS_MAX < 50
+    ), f"{delta / LIVE_EVENT_END_ROWS_MAX:.1f} B a row is not a sliver"
+    # And the stamped line itself is still inside the socket's limit.
+    assert stamped < _MAX_LINE_BYTES, f"a stamped seed line is {stamped:,} B"
 
 
 @pytest.mark.asyncio
