@@ -47,10 +47,19 @@ is served, while the one that was already connected is cut).
 
 Those cuts are *recoverable by reconnect* — the app re-opens its relay and
 re-reads history, and the turn itself is running inside the runtime, which never
-stopped. The one genuinely irreversible term is a runtime being SPAWNED, whose
-~1.2 s handshake would be cut in the middle. So the drain is narrow and
-specific: wait for that handshake, and do not wait for the standing relays,
-which by construction never end.
+stopped. Two things are NOT recoverable, and the original version of this
+paragraph named only one of them (review round 1, R1-6):
+
+* **A runtime being SPAWNED**, whose ~1.2 s handshake would be cut in the middle.
+  This is what the drain below waits for.
+* **Daemon-owned `SchedulerService` work.** ``SchedulerService._run_tasks`` runs
+  inside THIS process, and a reload does not run the lifespan's shutdown, so a
+  scheduled run in flight is cut exactly as a SIGKILL would cut it. No probe
+  reports it (``server/retire``'s own module docstring says the same about its
+  drain predicate) and the drain deliberately does not gate on it: waiting for
+  "no scheduled work anywhere" would be a reload that never happens, and this is
+  a strictly better position than the status quo it replaces, which had no route
+  off a stale build at all. It is recorded as a limit rather than smoothed over.
 
 FAIL-CLOSED, ALWAYS
 -------------------
@@ -117,6 +126,14 @@ DRAIN_BUDGET_S = 10.0
 #: The poll period inside the drain. Not zero: a reload that spun the event loop
 #: while it waited would stop the very handlers it is waiting for.
 DRAIN_POLL_S = 0.1
+
+#: How long the target build's CLI is given to prove it can start.
+#:
+#: Generous on purpose: it is paid once, immediately before an irrecoverable
+#: step, and a cold import of a CLI with a large dependency closure on a loaded
+#: machine is seconds rather than milliseconds. An expiry is treated as "the
+#: check could not run" and the reload proceeds — see :func:`_smoke`.
+SMOKE_TIMEOUT_S = 30.0
 
 
 class ReloadRefusal(Exception):
@@ -269,6 +286,7 @@ class ReloadWatch:
         """
         plan = self.plan()
         await self.drain()
+        _smoke(plan.interpreter)
         logger.info(
             "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
             os.getpid(),
@@ -403,6 +421,11 @@ def _exec(plan: ReloadPlan) -> None:
     ``-P`` (``SAFE_PATH_FLAG``) rides along for the reason it does on every other
     product spawn: the successor must import from its own generation rather than
     from whatever directory this one happened to be started in.
+
+    TWO THINGS HAPPEN HERE THAT ARE NOT ABOUT THE EXEC ITSELF, and both exist for
+    the window between this call and the successor's first instruction — a window
+    the record CANNOT cover, because the record it will publish does not exist
+    yet (review round 1, R1-1 and NIT-2).
     """
     fd = plan.listener_fd
     # The fd must survive ``execve``. Python 3's PEP 446 makes every fd
@@ -410,6 +433,22 @@ def _exec(plan: ReloadPlan) -> None:
     # listener and the port is simply gone — the failure mode this whole module
     # exists to avoid, and it is silent from the outside.
     os.set_inheritable(fd, True)
+    # AND THE SIGNAL MUST BE MADE HARMLESS, which is not belt-and-braces. For the
+    # successor's whole boot the LAST published record is still live and
+    # heartbeat-fresh, still advertising ``reloadable: true``, while the process
+    # it names has not yet reached ``add_signal_handler`` — so SIGUSR1 is still
+    # at its DEFAULT disposition of terminate. A second ``lop services restart``,
+    # or the app's own updater firing twice (measured 24 s apart on the reporting
+    # host), signals inside that window and kills the daemon it was moving.
+    # Reproduced end to end in review: 1.45 s of stale-but-live record, SIGUSR1
+    # at t=0.8 s, pid gone, port dead, nothing logged.
+    #
+    # ``SIG_IGN`` SURVIVES ``execve`` (POSIX inherits ignored dispositions across
+    # it, unlike handlers), so the successor starts deaf and
+    # ``add_signal_handler`` then installs the real handler. That closes the
+    # window by construction rather than by timing.
+    previous = signal.getsignal(RELOAD_SIGNAL)
+    signal.signal(RELOAD_SIGNAL, signal.SIG_IGN)
     argv = [
         str(plan.interpreter),
         SAFE_PATH_FLAG,
@@ -423,7 +462,64 @@ def _exec(plan: ReloadPlan) -> None:
         "--listener-fd",
         str(fd),
     ]
-    os.execve(str(plan.interpreter), argv, dict(os.environ))
+    try:
+        os.execve(str(plan.interpreter), argv, dict(os.environ))
+    finally:
+        # Reached only when the exec FAILED — a successful one never returns.
+        # The descriptor and the disposition go back exactly as the reload found
+        # them, because this process is still serving: an fd left inheritable
+        # would be handed to every child it later spawns, including the runtime
+        # spawns that are its whole purpose, and a signal left ignored would make
+        # this daemon permanently deaf to the next request.
+        os.set_inheritable(fd, False)
+        signal.signal(RELOAD_SIGNAL, previous)
+
+
+def _smoke(interpreter: Path) -> None:
+    """Prove the target build can even start its CLI, or refuse. Bounded.
+
+    THE ONE THING THAT MAKES "FAIL-CLOSED, ALWAYS" TRUE ON THE FAR SIDE OF THE
+    EXEC (review round 1, R1-5). Every other refusal in this module happens
+    BEFORE anything is interrupted, which is what makes a refusal cheap: the
+    daemon keeps its pid, its socket and its record. An exec into a build that
+    cannot import its own CLI is the one failure with no such floor — a dead
+    daemon, a dead port, and no process left to log it. This is the cheapest
+    check that distinguishes "a build is there" from "a build works".
+
+    A CHECK THAT COULD NOT RUN IS NOT A BAD BUILD, which is the same rule
+    ``server/retire`` applies to its own probes and the app's seal probe applies
+    to ``codesign``: a spawn failure, a timeout or a vanished interpreter is
+    logged and the reload PROCEEDS, because a machine where the probe cannot run
+    is a machine where refusing would strand the daemon on the old build for that
+    reason alone — and the pointer was already trusted enough to resolve. A check
+    that RAN and exited non-zero is a refusal.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [str(interpreter), SAFE_PATH_FLAG, "-c", "import local_operator.cli"],
+            capture_output=True,
+            text=True,
+            timeout=SMOKE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # noqa: PERF203 — one probe, once
+        logger.warning(
+            "serve reload: the build at %s could not be smoke-tested; proceeding on the "
+            "pointer's word alone",
+            interpreter,
+            exc_info=True,
+        )
+        return
+    if completed.returncode == 0:
+        return
+    output = (completed.stderr or completed.stdout or "").strip().splitlines()
+    detail = output[-1][:200] if output else "no output"
+    raise ReloadRefusal(
+        f"the build at {interpreter} cannot import its own CLI "
+        f"(exit {completed.returncode}: {detail}); still serving the loaded build"
+    )
 
 
 def observe_reload(task: asyncio.Task[None]) -> None:

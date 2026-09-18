@@ -984,11 +984,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         dest="no_services",
         action="store_true",
         help=(
-            "Replace the install and stop there. Default is to finish the job: the "
-            "supervised daemons are repaired and every `lop serve` daemon still on the "
-            "old build is asked to move onto the new one (their conversations keep "
-            "running). Use this only when you want the trees alone, e.g. from a script "
-            "that will start the daemons itself."
+            "Do not bring the `lop serve` daemons onto the new build (review round 1, "
+            "NIT-1: 'stop there' was wrong, because the supervised daemons are still "
+            "repaired — that is the pre-change behaviour exactly). Use this only when "
+            "something else will start the serves, e.g. a script that owns their launch."
         ),
     )
 
@@ -5457,7 +5456,7 @@ def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
     return 1
 
 
-def adopt_serve_socket(fd: int) -> socket.socket:
+def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     """Take over an already-bound listener handed across ``execve``.
 
     WHY THIS EXISTS AT ALL. A reload replaces this process's image and keeps the
@@ -5468,6 +5467,15 @@ def adopt_serve_socket(fd: int) -> socket.socket:
     close it and rebind — is a window in which ``connect`` gets refused, which is
     the outage the in-place design was chosen to avoid.
 
+    THE FAMILY COMES FROM ``host``, NOT FROM A CONSTANT (review round 1, R1-3).
+    ``socket.fromfd`` needs a family to reinterpret the descriptor under, and a
+    hardcoded ``AF_INET`` reinterprets an IPv6 listener's address bytes as IPv4:
+    measured in review, an adopted ``--host ::1`` daemon logged its peer as
+    ``::24:b503:100:0:61963`` where an ordinary bind on the same host logs
+    ``::1:62246``. The daemon still served, which is exactly why it would have
+    gone unnoticed. This is the same rule `_bind_serve_socket` already follows by
+    giving ``uvicorn.Config`` a host with a colon in it.
+
     ``socket.fromfd`` DUPLICATES the descriptor rather than wrapping it, so the
     inherited fd is closed here: leaving it open would leak one descriptor per
     reload in a process that may live for months, and would keep a second handle
@@ -5477,7 +5485,8 @@ def adopt_serve_socket(fd: int) -> socket.socket:
     socket is already fully configured and listening, and touching it would undo
     the only property this path is for.
     """
-    listener = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.fromfd(fd, family, socket.SOCK_STREAM)
     # The dup ``fromfd`` just made is the one we keep, and it must NOT be
     # inherited by anything this process later spawns — only a future reload of
     # this daemon should see it, and that reload publishes its own fd.
@@ -5550,7 +5559,7 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
         # failure can only be a bad descriptor — reported like a bind failure,
         # because from the client's side the consequence is the same one.
         try:
-            listener = adopt_serve_socket(listener_fd)
+            listener = adopt_serve_socket(listener_fd, host)
         except OSError as exc:
             print(f"--listener-fd {listener_fd} could not be adopted: {exc}", file=sys.stderr)
             return 1

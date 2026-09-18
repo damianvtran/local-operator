@@ -4024,7 +4024,23 @@ def update_command(
         return 0
 
     if not result.behind:
+        # NOT AN EARLY RETURN ANY MORE, and that is the whole fix for the report
+        # this change exists for (review round 1, R1-2). "Nothing to install" is
+        # not "nothing to do": the reported machine printed exactly this line
+        # while its backend went on serving a build four releases old, because
+        # `behind` is a version-string compare and the SERVICES are not versioned
+        # by the pointer at all — a daemon's build is whatever generation it
+        # resolved at exec, so an install that never moves can still leave four
+        # supervisors and a serve daemon behind it forever.
+        #
+        # The stage is idempotent and says so out loud: a service already on the
+        # current build is reported as such and not touched, so the cost of
+        # running it on every `lop update` is a health probe per daemon.
         print(f"local-operator {result.installed} is the latest")
+        if services:
+            _services_stage()
+        else:
+            _print_daemon_refreshes(refresh_daemons_after_upgrade())
         return 0
 
     kind = install_kind()

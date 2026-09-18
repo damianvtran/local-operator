@@ -61,14 +61,21 @@ def _run(
     after: dict[int, Any] | None = None,
     wait_s: float = 1.0,
     clock: list[float] | None = None,
+    probe: Any = None,
 ) -> list[services.ServiceRefresh]:
     """Drive one reload pass with every seam injected.
 
     ``scan`` answers differently AFTER the signal, which is how a real
     replacement announces itself: the same pid, a new ``instance_id``.
+
+    ``probe`` defaults to ASSENT, because the identity check is its own test and
+    every other test here is about something else: without that default each of
+    them would open a real loopback connection to the port in its own fixture and
+    fail for a reason that has nothing to do with what it asserts.
     """
     after = after or {record.pid: record for record in records}
     ticks = clock if clock is not None else [0.0]
+    answers = probe if probe is not None else (lambda record: None)
 
     def scan() -> list[Any]:
         return records if not kills else list(after.values())
@@ -80,8 +87,62 @@ def _run(
         ticks[0] += 0.05
 
     return services.reload_serve_daemons(
-        wait_s=wait_s, sleep=sleep, scan=scan, kill=kill, monotonic=lambda: ticks[0]
+        wait_s=wait_s,
+        sleep=sleep,
+        scan=scan,
+        kill=kill,
+        probe=answers,
+        monotonic=lambda: ticks[0],
     )
+
+
+def test_an_unproven_process_is_never_signalled(pointer: dict[str, Any]) -> None:
+    """THE IDENTITY GUARD (review round 1, R1-4).
+
+    A record is a file whose name is a pid, and a pid is recycled: review
+    constructed a live `sleep` named by a hand-written live, reloadable record and
+    this command killed it (rc -30). Nothing is signalled unless the address
+    answers AS the instance the record names — and the refusal is a warning that
+    says nothing was sent, not a silence.
+    """
+    record = _record()
+    kills: list[tuple[int, int]] = []
+    out = _run(
+        [record],
+        kills=kills,
+        wait_s=0.0,
+        probe=lambda _record: "127.0.0.1:1111 is answering as nobody, not the instance one…",
+    )
+    assert kills == []
+    warnings = [warning for refresh in out for warning in refresh.warnings]
+    assert any("was not asked to reload" in warning for warning in warnings)
+    assert any("Nothing was signalled" in warning for warning in warnings)
+
+
+def test_the_identity_check_is_a_real_health_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default probe reads /health and compares `instance_id`, not the port."""
+    record = _record(port=61111, host="127.0.0.1", instance_id="expected-instance")
+
+    class _Response:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b'{"status":200,"result":{"instance_id":"a-different-process"}}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _Response())
+    mismatch = services._answers_as_record(record)
+    assert mismatch is not None and "a-different-process" in mismatch
+
+    class _Matching(_Response):
+        def read(self) -> bytes:
+            return b'{"status":200,"result":{"instance_id":"expected-instance"}}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _Matching())
+    assert services._answers_as_record(record) is None
 
 
 def test_a_daemon_already_on_the_current_build_is_left_alone(pointer: dict[str, Any]) -> None:

@@ -499,12 +499,23 @@ def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> None:
+    """Nothing to INSTALL is not nothing to do.
+
+    This test used to assert that the daemon refresh was NOT called on this path,
+    which was the bug rather than the contract (review round 1, R1-2): the
+    reporting machine printed exactly this line, returned 0, and left its backend
+    on a build four releases old. The canary is now the SERVICES STAGE, and it is
+    asserted to run — with the install itself untouched, which is what "is the
+    latest" still means.
+    """
     with (
         patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False)),
-        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+        patch.object(update_mod, "perform_upgrade") as perform,
+        patch.object(update_mod, "_services_stage") as stage,
     ):
         assert update_command(check=False) == 0
-        refresh.assert_not_called()
+        perform.assert_not_called()
+        stage.assert_called_once_with()
     assert capsys.readouterr().out.strip() == "local-operator 0.27.0 is the latest"
 
 
@@ -583,6 +594,56 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
         cmd.assert_called_once_with(
             check=False, refresh_daemons=False, from_snapshot=None, services=False
         )
+
+
+def test_update_runs_the_services_stage_when_nothing_needs_installing(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """R1-2: the reported bug, as a regression test.
+
+    `lop update` on the reporting machine printed "0.59.0 is the latest" and
+    returned 0 without reaching the daemon/services stage — because `behind` is a
+    version-string compare and the SERVICES are not versioned by the pointer at
+    all. So the one machine this change exists for was the one machine where the
+    change did nothing. The stage is idempotent (a daemon already on the current
+    build is reported and not touched), so it runs on both paths.
+    """
+    from types import SimpleNamespace
+
+    from local_operator import update
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        update,
+        "check_latest",
+        lambda force=False: SimpleNamespace(installed="0.59.0", latest="0.59.0", behind=False),
+    )
+    monkeypatch.setattr(update, "_services_stage", lambda: ran.append("services"))
+    assert update.update_command() == 0
+    assert ran == ["services"]
+    assert "0.59.0 is the latest" in capsys.readouterr().out
+
+
+def test_update_no_services_still_repairs_the_supervised_daemons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-services`` is the pre-change behaviour, not "do nothing"."""
+    from types import SimpleNamespace
+
+    from local_operator import update
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        update,
+        "check_latest",
+        lambda force=False: SimpleNamespace(installed="0.59.0", latest="0.59.0", behind=False),
+    )
+    monkeypatch.setattr(update, "_services_stage", lambda: ran.append("services"))
+    monkeypatch.setattr(
+        update, "refresh_daemons_after_upgrade", lambda: ran.append("daemons") or []
+    )
+    assert update.update_command(services=False) == 0
+    assert ran == ["daemons"]
 
 
 def test_main_dispatches_services_status(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
