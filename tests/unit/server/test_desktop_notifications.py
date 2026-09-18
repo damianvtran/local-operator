@@ -931,3 +931,31 @@ async def test_a_stored_mock_session_emits_no_notification(tmp_path: Path) -> No
 
     assert bridge.kinds == ["attention"], bridge.kinds
     assert state["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_silenced_process_offers_no_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process switch is asked FIRST, before even the compose.
+
+    A rig that runs its own backend is silenced by the same inherited variable
+    it handed its children (``tui.notify.suppress_notifications_for_process``),
+    and a frame nobody may raise is worth neither the compose nor the round trip
+    — the renderer turns frames into native banners. The attention frame still
+    goes out, because that is the receipt sync rather than chrome.
+
+    This module opts IN to the notification path for every other cell, so this
+    one puts the switch back for the length of the read.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="A real answer.", title="Real work")
+    bridge = await _baselined(tmp_path, sid)
+
+    _publish(tmp_path, sid, "result-1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    state = await bridge.refresh_attention()
+
+    assert bridge.kinds == ["attention"], bridge.kinds
+    assert state["unseen"] is True
