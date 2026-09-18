@@ -638,8 +638,10 @@ class ClassificationService:
     async def provider_available(self) -> bool:
         """Whether any leg has a usable credential, without calling anything.
 
-        The wiring asks this before it builds a request or waits, so an install with
-        no recommender provider pays neither the wait nor a log line.
+        The wiring asks this inside its budgeted task, before it builds a request, so an
+        install with no recommender provider places no decision call, appends no block and
+        emits no notice — and the turn waits only as long as this probe takes, bounded
+        by ``waitMs``.
 
         What it costs: the credential resolution the cascade would perform anyway,
         cached on the service after the first call. That resolution is not purely

@@ -1426,6 +1426,11 @@ class _KnowledgeHooks:
     #: re-selecting with ``""`` would drop the skills the frozen block carried, which is
     #: what a review round reproduced before this existed.
     frozen_query: str = ""
+    #: The task id whose in-turn answer has already been harvested. The freeze is not the
+    #: only thing a later render of the same message can have lost — a skill-tree change
+    #: mid-turn invalidates it — so the skip of the classification leg keys on THIS rather
+    #: than on ``frozen_block`` being present (review round 2, R2-2).
+    classification_answered_task_id: str | None = None
     # A new admitted user row is a task boundary, unlike tool continuations.
     # Selection updates enter history as host state, so refreshing here no
     # longer rewrites the historical system prefix.
@@ -1952,6 +1957,9 @@ def _refresh_knowledge_freshness(hooks: _KnowledgeHooks) -> tuple[object, ...] |
     hooks.frozen_block = None
     hooks.frozen_task_id = None
     hooks.frozen_compaction_id = None
+    # ... and the query it was selected with, which only ever exists to reproduce a
+    # frozen block this invalidation has just retired (review round 2, NIT-2).
+    hooks.frozen_query = ""
     return fingerprint
 
 
@@ -2275,6 +2283,8 @@ def _harvest_classification(hooks: _KnowledgeHooks, *, task_id: str | None = Non
         # behaviour: everything harvested is treated as late.
         in_turn = task_id is not None and call.task_id is not None and call.task_id == task_id
         hooks.classification_pending.append((recommendation, not in_turn))
+        if in_turn:
+            hooks.classification_answered_task_id = task_id
         arrived_in_turn = arrived_in_turn or in_turn
     hooks.classification_outstanding = running
     return arrived_in_turn
@@ -2297,7 +2307,9 @@ async def _classification_recommendation(
     ``values.classification.timeoutMs``, which the service enforces itself. When
     the answer misses the wait, the turn does NOT pay the difference: the call is
     left running (``shield``, so the wait's own cancellation cannot reach it),
-    kept in ``classification_outstanding``, and delivered by a later message. Two
+    kept in ``classification_outstanding``, and delivered when this turn renders its
+    knowledge block again — its next model step while the turn runs, else the next user
+    message. Two
     properties follow:
 
     - the added wall-clock per user message is bounded by the wait, whatever the
@@ -2321,8 +2333,9 @@ async def _classification_recommendation(
     # Radient OAuth grant over the network (see ``cascade.py``), so awaiting it inline
     # before the task would put that I/O OUTSIDE ``waitMs`` — the one thing the budget
     # exists to bound. Inside the task it is waited on exactly as long as any other part
-    # of the call, so the turn's added wall-clock stays bounded by ``wait_s``, and an
-    # install with no provider still pays only the probe's own cost and logs nothing.
+    # of the call, so the turn's added wall-clock stays bounded by ``wait_s`` on every
+    # path — including the no-provider one, where the turn waits only for the probe and
+    # logs nothing unless that probe itself outlives ``wait_s``.
     #
     # A seam without the probe (an injected classifier, a host's own) keeps the old
     # behaviour: the probe is an optimisation for the shipped service, not a new
@@ -2355,13 +2368,15 @@ async def _classification_recommendation(
     try:
         recommendation = await asyncio.wait_for(asyncio.shield(task), timeout=wait_s)
     except asyncio.TimeoutError:
-        # NOT a failure and NOT an empty answer: the call is still in flight and
-        # its result is collected by a later user message. The prompt is unchanged
-        # either way (§7), so the only thing worth saying is where the answer went.
+        # NOT a failure and NOT an empty answer: whatever the call is doing — asking a
+        # vendor, or still resolving the credentials that decide whether there is a vendor
+        # to ask — it is still in flight and the turn is not waiting any longer. The prompt
+        # is unchanged either way (§7), so the only thing worth saying is that something is
+        # still running and where its answer would go.
         logger.info(
-            "classification: no recommendation within %.0f ms; the turn continues "
-            "without one and the answer is delivered to this turn's next step (or, "
-            "if the turn ends first, to the next user message)",
+            "classification: no recommendation within %.0f ms; the call is still in flight "
+            "and the turn continues without one (its answer is delivered to this turn's next "
+            "step, or — if the turn ends first — to the next user message)",
             wait_s * 1000,
         )
         return None
@@ -2675,12 +2690,19 @@ async def _select_knowledge_block(
         and not arrived_in_turn
     ):
         return hooks.frozen_block
-    # AN IN-TURN ANSWER SUPERSEDES THE FREEZE, so everything below must reproduce the
-    # block the freeze replaced — with the same query and WITHOUT a second call.
-    superseded_for_answer = arrived_in_turn and hooks.frozen_block is not None
-    if superseded_for_answer and not query.strip() and hooks.frozen_query.strip():
-        # The provider decided this render was unchanged and handed ``""``; the query
-        # that actually selected the frozen block is the only one that reproduces it.
+    # THIS MESSAGE ALREADY HAS ITS ANSWER — now, or on an earlier render of the same
+    # task — so this render must deliver it and never ask again. Keyed on the task rather
+    # than on ``frozen_block``: an invalidated freeze (a skill installed or edited
+    # mid-turn) still has an answer waiting, and asking a second time would spend a vendor
+    # call for a message that already has one (review round 2, R2-2).
+    already_answered = arrived_in_turn or (
+        task_id is not None and hooks.classification_answered_task_id == task_id
+    )
+    if arrived_in_turn and not query.strip() and hooks.frozen_query.strip():
+        # AN IN-TURN ANSWER SUPERSEDES THE FREEZE, so everything below must reproduce the
+        # block the freeze replaced — with the same query. The provider decided this render
+        # was unchanged and handed ``""``; the query that actually selected the frozen block
+        # is the only one that reproduces it.
         query = hooks.frozen_query
 
     picked: list[Skill] = []
@@ -2692,10 +2714,10 @@ async def _select_knowledge_block(
         # historical signature, and there is no globs matching to do without
         # a cwd anyway.
         select_kwargs: dict[str, Any] = {"cwd": Path(cwd)} if cwd else {}
-        if hooks.classifier is not None and not superseded_for_answer:
-            # Not when this render EXISTS to deliver the answer already harvested: a
-            # second call would duplicate the work and could deliver its own answer
-            # later, for a message that already has one.
+        if hooks.classifier is not None and not already_answered:
+            # Not when this message already has an answer: a second call would duplicate
+            # the work and could deliver its own answer later, for a message that already
+            # has one.
             # ONE gather, so the classification's latency is the DIFFERENCE
             # against the embedder selection rather than the sum (§7 step 2) —
             # and the request build, which is where the package serializes the

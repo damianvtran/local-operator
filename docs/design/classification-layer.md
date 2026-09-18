@@ -245,20 +245,22 @@ The layer is advisory, so its failure modes must never reach the user. Two cases
 they are not the same case:
 
 * **No provider has a credential.** Nothing to ask. The wiring asks the service for
-  this (`ClassificationService.provider_available`) and returns without a request,
-  without a decision call and without a log line above DEBUG. The probe is a credential
-  resolution — the same one the cascade would do, cached per session, and NOT purely
-  local: an expired Radient OAuth grant can be refreshed over the network
-  (`cascade.resolve_vendor`) — so it is awaited INSIDE the `waitMs`-bounded task, never
-  in front of it. An install that never logs into a recommender therefore pays no
-  decision call and no noise, and its prompt is byte-identical to a build without the
-  layer.
+  this (`ClassificationService.provider_available`) and returns without a request and
+  without a decision call. The probe is a credential resolution — the same one the
+  cascade would do, cached per session, and NOT purely local: an expired Radient OAuth
+  grant can be refreshed over the network (`cascade.resolve_vendor`) — so it is awaited
+  INSIDE the `waitMs`-bounded task, never in front of it. An install that never logs into
+  a recommender therefore places no decision call, appends no block and emits no notice,
+  and its prompt is byte-identical to a build without the layer. The turn waits for the
+  probe itself: nothing once resolution is warm, and at most the remainder of `waitMs`
+  when a cold resolution outlives it.
 * **A provider is configured and the call fails.** That is an incident the operator
   can act on, so it is a WARNING, and it says enough to act on: the cascade walks
-  every leg first, then walks the whole list ONE more time if any failure was a
-  retryable kind (`transport`, `server`, `overloaded`, `rate-limit`) — a blip is
-  cleared rather than punished — and the resulting warning names the per-leg attempt
-  counts, the kind and the elapsed time. It repeats at most
+  every leg first, then walks the whole list ONE more time when EVERY failure in that
+  walk was a retryable kind (`transport`, `server`, `overloaded`, `rate-limit`) — a blip
+  is cleared rather than punished, while a leg that answered `auth` is never re-asked —
+  and the resulting warning names the per-leg attempt counts, the kind and the elapsed
+  time. It repeats at most
   `CIRCUIT_FAILURE_THRESHOLD` times per session: after three consecutive failed
   messages the breaker opens and later messages short-circuit before any call.
 
@@ -401,7 +403,8 @@ Evidence obligations:
 - harness: a hermetic test asserting the local path (build state → cache lookup → credential memo
   hit → serialize) is far under budget, a hermetic test asserting the per-message wait is BOUNDED by
   `waitMs` (a seam that hangs costs the turn the budget and nothing more, and its answer is delivered
-  by the following message), plus a measured median and worst-case added wall-clock per user message
+  by the following message or — while the turn still runs — by that turn's next step), plus
+  a measured median and worst-case added wall-clock per user message
   with the layer on versus off, on the real path, reported separately for a cache hit and a cache miss;
 - server: a test proving a repeated call performs no second auth-repository lookup, a test proving
   price resolution performs no upstream fetch, and a timed warm-path measurement of the route's own
