@@ -645,6 +645,7 @@ def _classify_orphaned_run(
     from local_operator.incidents import (
         CUT_OFF_UNKNOWN,
         DELIBERATE_CUT_OFF_CAUSE,
+        involuntary_kill_detail,
         render_cut_off_reason,
         render_stop_attribution,
     )
@@ -658,25 +659,62 @@ def _classify_orphaned_run(
     if dead is None:
         dead = reaped_owner
     marker = _durable_stop_marker(directory)
-    if (
-        marker is not None
-        and marker.get("deliberate")
-        and _stop_marker_covers_run(marker, directory, dead, run_started_at=run_started_at)
+    if marker is not None and _stop_marker_covers_run(
+        marker, directory, dead, run_started_at=run_started_at
     ):
         raw_killer = marker.get("killer")
         killer: dict[str, Any] = raw_killer if isinstance(raw_killer, dict) else {}
-        return (
-            "interrupted",
-            DELIBERATE_CUT_OFF_CAUSE,
-            render_cut_off_reason(
-                DELIBERATE_CUT_OFF_CAUSE,
-                detail=render_stop_attribution(
-                    rung=str(marker.get("rung") or ""),
-                    command=str(killer.get("command") or killer.get("argv0") or ""),
-                    killer_pid=killer.get("pid"),
+        # ``deliberate is False`` EXACTLY, rather than a falsy test: the arm below
+        # must not swallow a marker that predates the flag. A marker with no
+        # ``deliberate`` field at all is a deliberate stop from a build older than
+        # this one, and its refusal to claim otherwise is what keeps this change
+        # from re-labelling history.
+        if marker.get("deliberate") is False:
+            # AN INVOLUNTARY ACT, ATTRIBUTED BY ITS OWN MARKER. The harness
+            # recorded what it was about to do before it did it
+            # (``control.note_involuntary_stop``), so this death is NAMED rather
+            # than inferred — and it is emphatically not a ``user-stop``: the
+            # marker says ``deliberate: false``, which is what every caller asking
+            # "did someone ask for this" reads. A marker outranks the journal row
+            # below because it is an act's own attestation where the row is only
+            # the victim's last statement; the row is not consulted here, so the
+            # reason is the shared sentence plus the attribution (or
+            # ``(unattributed)`` when the marker named no actor).
+            return (
+                "error",
+                "runtime-killed",
+                render_cut_off_reason(
+                    "runtime-killed",
+                    detail=involuntary_kill_detail(
+                        mechanism=str(marker.get("mechanism") or ""),
+                        # The acting component's own name when the writer gave one, else
+                        # the same command-or-argv0 the deliberate arm falls back to —
+                        # because a marker ALWAYS knows which process staged it, and a
+                        # pid alone is the weakest form of the attribution this arm
+                        # exists to provide when its process is long gone.
+                        actor=str(
+                            marker.get("actor")
+                            or killer.get("command")
+                            or killer.get("argv0")
+                            or ""
+                        ),
+                        killer_pid=killer.get("pid"),
+                    ),
                 ),
-            ),
-        )
+            )
+        if marker.get("deliberate"):
+            return (
+                "interrupted",
+                DELIBERATE_CUT_OFF_CAUSE,
+                render_cut_off_reason(
+                    DELIBERATE_CUT_OFF_CAUSE,
+                    detail=render_stop_attribution(
+                        rung=str(marker.get("rung") or ""),
+                        command=str(killer.get("command") or killer.get("argv0") or ""),
+                        killer_pid=killer.get("pid"),
+                    ),
+                ),
+            )
     if _stopped_marker(directory):
         return (
             "interrupted",
