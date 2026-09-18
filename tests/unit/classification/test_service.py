@@ -333,7 +333,16 @@ async def test_three_consecutive_failures_open_the_breaker_for_the_session(
     manager, install_legs, caplog
 ) -> None:
     failure = DecisionVendorError("down", kind="transport")
-    subject, legs = service(manager, install_legs, radient={"script": [failure]})
+    # Every leg is stubbed: a real leg left in place resolves this machine's own key and
+    # answers with ``auth``, which is not weather — that would silently turn the retry
+    # walk off and make this test assert the wrong call count.
+    subject, legs = service(
+        manager,
+        install_legs,
+        radient={"script": [failure]},
+        typesafe={"script": [failure]},
+        openrouter={"script": [failure]},
+    )
 
     for index in range(CIRCUIT_FAILURE_THRESHOLD):
         recommendation = await subject.recommend_resources(request(f"message {index}"))
@@ -369,6 +378,8 @@ async def test_a_success_resets_the_consecutive_failure_count(manager, install_l
                 failure,
             ]
         },
+        typesafe={"script": [failure]},
+        openrouter={"script": [failure]},
     )
     for index in range(2):
         assert (await subject.recommend_resources(request(f"f{index}"))).skipped == "error"

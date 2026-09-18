@@ -245,11 +245,14 @@ The layer is advisory, so its failure modes must never reach the user. Two cases
 they are not the same case:
 
 * **No provider has a credential.** Nothing to ask. The wiring asks the service for
-  this BEFORE it builds a request (`ClassificationService.provider_available`, one
-  local credential read, no network), and returns without a call, without the wait and
-  without a log line at any level above DEBUG. An install that never logs into a
-  recommender therefore pays nothing — not latency, not noise — and its prompt is
-  byte-identical to a build without the layer.
+  this (`ClassificationService.provider_available`) and returns without a request,
+  without a decision call and without a log line above DEBUG. The probe is a credential
+  resolution — the same one the cascade would do, cached per session, and NOT purely
+  local: an expired Radient OAuth grant can be refreshed over the network
+  (`cascade.resolve_vendor`) — so it is awaited INSIDE the `waitMs`-bounded task, never
+  in front of it. An install that never logs into a recommender therefore pays no
+  decision call and no noise, and its prompt is byte-identical to a build without the
+  layer.
 * **A provider is configured and the call fails.** That is an incident the operator
   can act on, so it is a WARNING, and it says enough to act on: the cascade walks
   every leg first, then walks the whole list ONE more time if any failure was a

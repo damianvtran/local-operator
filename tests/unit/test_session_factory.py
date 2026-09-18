@@ -4440,7 +4440,9 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
             captured[0], "a question about the tunnel", task_id="t1"
         )
         await asyncio.wait_for(started.wait(), timeout=5)
-        outstanding = [task for task in captured[0].classification_outstanding if not task.done()]
+        outstanding = [
+            call for call in captured[0].classification_outstanding if not call.task.done()
+        ]
         assert outstanding, "the call must still be running for this test to mean anything"
 
         with caplog.at_level(logging.WARNING):
@@ -4454,7 +4456,7 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
     for task in outstanding:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
-    assert all(task.done() for task in outstanding), "the call outlived the session"
+    assert all(call.task.done() for call in outstanding), "the call outlived the session"
     assert closed == [True], "dispose still closes the seam it opened"
     assert captured[0].classification_outstanding == []
     # The failure this replaces: the client closed under a live call logged a
