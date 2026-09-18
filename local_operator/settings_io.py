@@ -1438,9 +1438,8 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         help=(
-            "A rule down the left edge of the assistant's answer, echoing the "
-            "prompt's. Marks the message that ENDS the turn: mid-turn narration "
-            "keeps its prose and takes no rail."
+            "A rule marks the ANSWER: the message that ends the turn. "
+            "Mid-turn narration takes no rail."
         ),
         choices=_bool_choices("rail the answer only", "no rail"),
     ),
