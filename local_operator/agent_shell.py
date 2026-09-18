@@ -15,18 +15,29 @@ no ``origin.json``, so :func:`local_operator.resume.is_user_session` reports a
 human started it and the desktop feed, the ``/resume`` picker and the phone's
 history all offer it as the operator's own work. It also runs outside the
 parent's job manager, so the parent cannot see, steer, cancel or account for it,
-and it is not a child by this harness's definition (children are one level deep,
-capacity-gated and observed through the parent's roster). Two facts made it the
+and it is not a child by this harness's definition (children are
+capacity-gated, observed through the parent's roster, and navigable as a tree in
+the TUI and the desktop UI). Two facts made it the
 path of least resistance for a model trying to do the right thing: ``--profile``
 is advertised in ``lop exec --help``, and a role that does not delegate holds no
 ``task`` tool to use instead — see ``harness.subagent``'s prune, which drops
 ``task``/``wait``/``wake`` for exactly the ``coder``-shaped role that was
 running here.
 
+The other half of that incident is the role's ALLOWANCE, and it is a role
+question rather than a guard question (operator, 2026-09-18): a subagent that
+holds ``task`` delegates with it, and one that does not hold it may not create
+subagents at all — it does the work itself. So the fix for a team brief that owes
+a review round to a slice is to give that slice a role that may delegate, or to
+keep the round with the session that delegates; reaching for the CLI was never
+the answer, and using the CLI a second time to get around this guard is not one
+either.
+
 So the rule is enforced where the act happens: a ``lop`` invocation that
 descends from an agent's shell may not open a session, and is told what to do
 instead — ``task`` when this session holds it, ``hub`` back to the session that
-delegated when it does not, and ``wake`` for work that belongs later.
+delegated when it does not, and, for work that belongs later, ``wake`` when the
+reader holds it and the session that delegated when it does not.
 
 WHAT THE MARKER IS, AND WHAT IT IS NOT. ``LOCAL_OPERATOR_AGENT_SHELL`` is set by
 the ``bash`` tool on every command it runs (see
@@ -159,11 +170,14 @@ def refusal_message() -> str:
     ``task`` (what the user's instruction asks for and what most sessions that
     reach here will hold), ``hub`` back to the delegating session (the route for
     a role that does not delegate — the case this guard was written for), and
-    ``wake`` for anything that must happen later. The text deliberately does not
-    mention :data:`ALLOW_NESTED_SESSION_ENV`: teaching the bypass to the reader
-    it exists to stop would be the whole change talking itself out of a job, and
-    the human-facing documentation is where a person (or a QA run that needs the
-    real CLI) looks for it.
+    ``wake`` for anything that must happen later, named as the DELEGATING
+    session's to arm rather than the reader's: ``harness.subagent`` prunes
+    ``wake`` from every child, so a reader who reached for it would find the
+    tool missing on top of the refusal it already got. The text deliberately
+    does not mention :data:`ALLOW_NESTED_SESSION_ENV`: teaching the bypass to the
+    reader it exists to stop would be the whole change talking itself out of a
+    job, and the human-facing documentation is where a person (or a QA run that
+    needs the real CLI) looks for it.
     """
     return (
         "a `lop` invocation from inside an agent session cannot open one — the "
@@ -171,11 +185,14 @@ def refusal_message() -> str:
         "opened, listed in their session list and desktop sidebar as if they "
         "had, and running outside the job manager that lets this session see, "
         "steer, cancel and account for delegated work.\n"
-        "Launch delegated work with the `task` tool instead. A session without "
-        "it — a role that does not delegate runs one level deep and loses "
-        "`task`/`wait`/`wake` — asks the session that delegated to it, with "
-        "`hub`, to launch the child; the brief travels in the message. Work "
-        "that must happen later belongs in `wake`."
+        "Delegated work is launched with the `task` tool. A session that does "
+        "not hold `task` may not create subagents at all: do the work yourself, "
+        "and say so with `hub` if the slice genuinely cannot be done alone — "
+        "`hub` reaches the session that delegated to you and the brief travels "
+        "in the message. Work that must happen later is not a child session's to "
+        "arm — `wake` is pruned from every child — so a child routes it back to "
+        "the session that delegated to it, while a session that holds `wake` "
+        "arms it there itself."
     )
 
 

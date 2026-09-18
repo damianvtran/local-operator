@@ -1198,12 +1198,21 @@ lop exec --profile reviewer --background --name lo-1281-review < brief.md
 That happened on 2026-09-18: two sessions (`lo-1281-review`, `lo-1281-qa`)
 appeared in the operator's sidebar for a PR they had never asked about, because
 the coder that owed the review round held no `task` tool (a role that does not
-delegate runs one level deep and loses `task`/`wait`/`wake` — see
-`harness.subagent`'s prune). So the guard is in the product now: a `lop`
+delegate is never handed `task`/`wait`/`wake` — see `harness.subagent`'s prune).
+So the guard is in the product now: a `lop`
 invocation that descends from an agent's bash tool call may not open a session,
-and the refusal names the routes — `task` when the session holds it, `hub` back
-to the delegating session when it does not (send it the brief; it holds the
-launcher), and `wake` for work that belongs later.
+and the refusal states the rule — a session that HOLDS `task` delegates with it,
+and one that does not may not create subagents at all, does the work itself, and
+reports a genuine blocker with `hub` to the session that delegated to it. Work
+that belongs later is not the child's to arm either — `wake` is pruned from
+EVERY child session — so it goes back to the session that delegated.
+
+WHO may delegate is the role's answer, never the depth's (operator, 2026-09-18).
+A subagent whose role allows delegation is expected to use `task` at any depth —
+a `manager`'s child is a manager too — and the tree it grows is navigable: the
+TUI re-scopes its roster to the page you have open and climbs with `p`/`Esc`, and
+the desktop UI walks the same edges with its breadcrumbs and back control. A role
+that does not delegate gets no `task` at any depth and must do the work itself.
 
 Delegate with `task`, always. If you think you need a separate live session —
 something a human must steer, or work that must outlive this turn — say so in
