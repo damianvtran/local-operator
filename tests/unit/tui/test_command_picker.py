@@ -2510,3 +2510,44 @@ async def test_team_chart_subcommand_never_paints_a_name() -> None:
             # ...and nothing on the row is painted with the argument-name colour:
             # neither `chart` nor the second-slot name is highlighted.
             assert all(fg != green for _, fg in cells)
+
+
+def test_the_overflow_row_counts_the_directory_not_the_capped_set() -> None:
+    """D6: the visible-window total is not the directory's total when a scan capped it.
+
+    The file list is the one list fed by a scan with its own limit
+    (``references.SCAN_CANDIDATE_LIMIT`` = 2000), so the picker can be handed
+    2000 rows for a directory holding 2500. Its own total then describes the set
+    it was GIVEN, and the row read ``… 1992 more`` for a directory with 500
+    entries it had never been told about — the expansion side accounts for its
+    own limit (``[N more entries; use glob or read to list them]``) and this side
+    did not.
+
+    ``unlisted`` is that missing number, and it is deliberately NOT folded into
+    ``visible_window``: that reports the rows this widget holds, and a test that
+    asked it for the directory's size would be asking it something it cannot
+    know. The marker is the only place the two add up.
+    """
+    picker = CommandPicker(lambda _name: None)
+    choices = [ArgumentChoice(name=f"file_{index:02d}.txt", detail="") for index in range(20)]
+    picker.set_choices(choices, unlisted=500)
+    # The FILE list, which is the only one with a capped source. Reached the way
+    # the editor reaches it, from a buffer holding an `@` token, because the
+    # count is cleared when the list stops being that one (asserted below) and a
+    # direct `sync_argument` would therefore measure the clearing rather than the
+    # counting.
+    picker.sync_files("@file_", 6)
+
+    start, end, total = picker.visible_window()
+    assert total == 20, "the widget's own total must stay its own"
+    assert picker.mode is PickerMode.FILE, "premise: the file list is the one under test"
+    marker = picker._overflow_row(80)
+    assert marker is not None
+    assert f"… {20 - (end - start) + 500} more" in marker.plain, "the cap is uncounted"
+    assert cell_len(marker.plain) == 80
+
+    # Leaving the FILE list takes the count with it: a `/theme` or `/model` list
+    # has no capped source, and carrying 500 invisible files into one would be a
+    # number about a directory that is not on screen.
+    picker.sync("/")
+    assert picker._unlisted == 0, "the count outlived the listing it described"

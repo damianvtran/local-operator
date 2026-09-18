@@ -308,6 +308,35 @@ def _entry_detail(entry: os.DirEntry[str], is_dir: bool) -> str:
 def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
     """One directory's listable entries, as picker rows. Never raises.
 
+    The rows alone: :func:`scan_directory_report` is the same scan plus the
+    number of entries :data:`SCAN_CANDIDATE_LIMIT` kept out, and this is the
+    first element of that call. It is a separate name rather than a keyword
+    argument because the great majority of callers — the expansion path, the
+    approval descriptions, the tests — have no use for the count, and a
+    required second return value would have made every one of them unpack a
+    tuple to throw half of it away.
+    """
+    rows, _unlisted = scan_directory_report(directory, cwd)
+    return rows
+
+
+def scan_directory_report(directory: str, cwd: str) -> tuple[list["ArgumentChoice"], int]:
+    """One directory's listable entries AND how many the cap kept out.
+
+    ``(rows, unlisted)``. ``unlisted`` is the number of listable entries the
+    directory holds beyond :data:`SCAN_CANDIDATE_LIMIT` — 0 for every directory
+    under the cap, and the reason a 2500-entry directory's picker can say how
+    many it is not showing instead of reporting the capped set as if it were the
+    whole directory (design round 1, D6).
+
+    It is EXACT, not an estimate, and it costs no extra syscall: the cap is
+    applied to ``eligible`` after the cheap pass has already enumerated every
+    listable entry, so ``len(eligible)`` is a number this function had in hand
+    and dropped.
+
+    Drop-in for :func:`scan_directory` on the three questions it answers — one
+    level, synchronous, never raises.
+
     SYNCHRONOUS AND ONE LEVEL, and both halves are load-bearing. This runs from
     ``_sync_picker`` on EVERY keystroke (``editor.py:3101``) and every buffer
     mutation, with no debounce, no cancellation and no generation counter. The
@@ -341,7 +370,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
 
     path, _inside, resolvable = _resolve_workspace_path(directory or ".", cwd)
     if not resolvable:
-        return []
+        return [], 0
     try:
         rules = [("", _load_ignore_rules(path, ""))]
         # The CHEAP pass: stream the listing and keep only what survives the
@@ -373,7 +402,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
         # A missing, unreadable or racing directory is an empty list, never an
         # exception: the caller is a keystroke handler and Textual turns an
         # escaped error into a full-screen crash.
-        return []
+        return [], 0
 
     # THE CAP BOUNDS THE EXPENSIVE WORK, not just the list length. The previous
     # shape sorted every entry and then `break`ed at the cap, so the ordering
@@ -389,8 +418,16 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
     # picker's ordering is unchanged.
     if len(eligible) > SCAN_CANDIDATE_LIMIT:
         kept = heapq.nsmallest(SCAN_CANDIDATE_LIMIT, eligible, key=lambda item: item[0])
+        # What the cap cost, counted HERE because this is the last point at
+        # which the whole enumeration is still in hand. The picker's overflow
+        # row is the only consumer, and without this number it reported the
+        # capped set as if it were the directory: a 2500-entry directory read
+        # ``… 1992 more`` and never mentioned the 500 it had not even looked at
+        # (design round 1, D6).
+        unlisted = len(eligible) - len(kept)
     else:
         kept = sorted(eligible, key=lambda item: item[0])
+        unlisted = 0
 
     # Hoisted out of the loop because it is a property of the PARENT and so is
     # constant for every entry in one listing. Inside the loop it rebuilt a
@@ -399,7 +436,7 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
     # path with a 16.7 ms frame budget.
     under_sensitive_dir = bool(SENSITIVE_DIR_PARTS.intersection(path.parts))
 
-    return [
+    rows = [
         ArgumentChoice(
             # Trailing ``/`` on a directory, matching ``_list_dir_entries``
             # (``builtin.py:3272-3278``) so one listing convention serves
@@ -410,6 +447,53 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
         )
         for name, is_dir, entry in kept
     ]
+    return rows, unlisted
+
+
+def reference_resolves(query: str, cwd: str) -> bool:
+    """Whether ``@query`` names something that EXISTS — the composer's ink gate.
+
+    THE RESOLVER'S OWN QUESTION, asked the same way, because the composer's ink
+    is a promise about what happens at submit: :func:`expand_references` calls a
+    token whose path does not resolve PROSE and sends it as written
+    (``@me — no such path``). Painting that token as a reference would be a
+    false positive on precisely the token the Q-2 fix exists to keep as prose,
+    and a highlight that lies is worse than no highlight — it is the same
+    "structured token, not text" claim ``text-area--at-reference`` makes, made
+    about text the operator is not, in fact, referencing.
+
+    THE SAME THREE PARTS as one entry of :func:`_resolve_tokens`, in the same
+    order, so the ink and the expansion cannot drift:
+
+    1. the kill switch, read per call — with ``@`` expansion off, no token is a
+       reference and none of them gets reference ink;
+    2. :func:`_resolve_workspace_path`, whose ``resolvable`` is the first half of
+       the governing rule;
+    3. :func:`_kind_of`, which is one ``stat`` answering ``is_dir``/``is_file``,
+       the second half.
+
+    One ``stat`` per call, and the caller memoizes per frame, so this is the
+    same order of cost as the ``scandir`` the picker already runs per keystroke
+    — measured at 0.04-0.07 ms — rather than a new budget.
+
+    ``OSError`` is ``False``, matching the resolver rather than the operating
+    system's opinion: an unstatable path takes the ``could not be read``
+    branch there, which is a notice and therefore prose, so it is not a
+    reference here either. The one deliberate difference is that a directory is
+    not required to be LISTABLE — a listing can be empty and the token is still
+    a reference, which is exactly the distinction :func:`scan_directory` draws
+    for the approval gate.
+    """
+    if not query or not at_references_enabled():
+        return False
+    try:
+        path, _inside, resolvable = _resolve_workspace_path(query, cwd)
+        if not resolvable:
+            return False
+        is_dir, is_file = _kind_of(path)
+    except OSError:
+        return False
+    return is_dir or is_file
 
 
 #: The attribute carrying the token as typed, named once because two places
@@ -1591,6 +1675,8 @@ __all__ = [
     "at_token",
     "expand_references",
     "reference_block_spans",
+    "reference_resolves",
     "scan_directory",
+    "scan_directory_report",
     "split_token",
 ]

@@ -106,6 +106,22 @@ _ARGUMENT_ROWS_MIN = 3
 #: vocabulary rather than introducing a second cursor glyph.
 _CURSOR = "❯"
 
+#: The mark for a highlighted row an ACCEPT KEY WOULD SEND rather than complete,
+#: one cell wide so it drops into the cursor's own cell without moving the row.
+#:
+#: The file list is the only list where an accept key has two different
+#: meanings: a row that would APPEND something completes it, and a row the
+#: buffer already holds has nothing left to accept, so Enter sends the draft
+#: (see ``Editor._file_row_is_already_in_the_buffer``). Until this mark existed
+#: the two states were pixel-identical — same ``❯``, same ink, same ground — so
+#: the one press in this feature that CAN send was the one press with no
+#: pre-press tell (design round 1, D5). ``↵`` is the return glyph the reply line
+#: already uses for "this is what Enter does", rather than a second colour on
+#: the row: the row's ink carries selection state (``tint-select`` ground,
+#: ``accent`` name, ``danger`` for an alert row) and spending any of it here
+#: would make "selected" and "will send" compete in one channel.
+_SEND_CURSOR = "↵"
+
 #: Gutter width. THREE, not two: the prompt occupies ``❯`` plus a space and the
 #: editor's own text starts in the third cell, so a two-cell gutter left every
 #: suggestion one cell to the LEFT of the text it completes into — while the
@@ -1369,9 +1385,9 @@ class CommandPicker(Static):
         self._hovered: int | None = None
         self._query = ""
         self._dismissed_query: str | None = None
-        # Set when an ARGUMENT list has nothing to offer AND that is worth saying.
-        # Not a match: it is never selectable, so it lives beside the rows rather
-        # than among them (see set_notice).
+        #: Set when an ARGUMENT list has nothing to offer AND that is worth saying.
+        #: Not a match: it is never selectable, so it lives beside the rows rather
+        #: than among them (see set_notice).
         self._notice = ""
         # Widest-first phrasings for a notice whose TAIL must not crop, resolved
         # at paint time so the choice survives a resize (see set_notice_rungs).
@@ -1392,6 +1408,19 @@ class CommandPicker(Static):
         # Closed picker takes no layout space at all — `visible: hidden` would
         # still reserve the rows and leave a hole above the status band.
         self.display = False
+        # Asked at PAINT time for each row an accept key could act on, rather
+        # than read from a flag the caller has to keep in step: the answer
+        # changes when the row set changes, when the arrow keys move the
+        # highlight, when the app refills the list one tick later, and when the
+        # buffer changes under it — four sites and one of them is a message the
+        # editor never sees. A predicate has none (see set_send_predicate).
+        self._sends: Callable[[str], bool] | None = None
+        #: How many LISTABLE entries the directory holds beyond the scan cap
+        #: (see ``references.scan_directory_report`` and `set_choices`). Counted
+        #: into the overflow row only: it is a fact about the directory, not a
+        #: suggestion this widget holds, so it deliberately does NOT move
+        #: ``visible_window``'s total.
+        self._unlisted = 0
 
     # -- public API ---------------------------------------------------------
     def set_commands(self, commands: list[SlashCommand]) -> None:
@@ -1423,7 +1452,31 @@ class CommandPicker(Static):
             for name in command.names
         )
 
-    def set_choices(self, choices: list[ArgumentChoice], highlight: str | None = None) -> None:
+    def set_send_predicate(self, predicate: Callable[[str], bool] | None) -> None:
+        """Install the question "would an accept key SEND row ``name`` instead?"
+
+        A PREDICATE, not a name, and the difference is the whole design. A flag
+        has to be refreshed at every site that can change the answer — the row
+        set, an arrow press, the app's one-tick-later refill, the buffer itself
+        — and each site forgotten is a row whose mark lies about the key. The
+        predicate is asked once per painted row from ``_gutter``, so it cannot
+        lag any of them, and the editor's implementation is a pure function of
+        the buffer and the caret (``Editor._file_row_would_send``).
+
+        It reports ``False`` where the question does not apply: the widget
+        paints one list at a time and should not have to know which list means
+        what, so a COMMAND or ARGUMENT row simply gets ``False`` from the
+        editor's own gate rather than needing a second lookup here.
+        """
+        self._sends = predicate
+
+    def set_choices(
+        self,
+        choices: list[ArgumentChoice],
+        highlight: str | None = None,
+        *,
+        unlisted: int = 0,
+    ) -> None:
         """Replace the values offered for the current command's ARGUMENT.
 
         Re-derives the visible rows immediately, because the app fills these in
@@ -1438,8 +1491,20 @@ class CommandPicker(Static):
         non-default user to the default theme before they touched a key
         (review round 1, F2). Seeding the row where the user already IS makes
         the first report a no-op — and is where a browse should start anyway.
+
+        ``unlisted`` is how many LISTABLE entries the source held beyond the cap
+        its own scan applies (``references.SCAN_CANDIDATE_LIMIT``), 0 for every
+        ordinary list. It reaches the overflow row only, so that row can say how
+        much of the directory is not on screen instead of describing the capped
+        set as if it were the directory (design round 1, D6). Held as state
+        rather than threaded through ``_apply`` because the editor re-derives
+        the rows on every keystroke: the count is a property of the LISTING,
+        which the editor does not know, so it has to survive those
+        re-derivations. Reset by ``_close`` and by a mode change for the same
+        reason the notice is.
         """
         self._choices = list(choices)
+        self._unlisted = max(0, unlisted)
         # SKILL and FILE ride the same fill path as ARGUMENT: all three are
         # app-pushed ``ArgumentChoice`` sets that land one message-loop tick
         # after the keystroke that opened the list, so all three need the
@@ -1828,6 +1893,15 @@ class CommandPicker(Static):
             self._window_start = 0
             self._chosen_by_hand = False
             self._notice = ""
+            # The unlisted count describes the FILE listing — the one list whose
+            # source can be capped — so it is cleared when the list STOPS being
+            # that, and never on the way in: `set_choices` fills it on the same
+            # tick this branch runs, and zeroing it here would throw away the
+            # answer the app just delivered (measured: it made the 2500-entry
+            # count read 1992 again whenever the fill arrived before the
+            # editor's own sync).
+            if mode is not PickerMode.FILE:
+                self._unlisted = 0
             # The rungs go with the notice they phrase, for the same reason.
             self._notice_rungs = ()
             # The loading reserve goes with the notice it was riding: it
@@ -1842,6 +1916,40 @@ class CommandPicker(Static):
         # Esc once with no way to get the list back while still typing.
         self._dismissed_query = None
         if not matches:
+            if mode is PickerMode.FILE and query and self._choices:
+                # The directory listed FINE and the QUERY matched nothing in it
+                # — one keystroke from `@srx/`, which explains itself, and the
+                # two are the same gesture: the user asked "what is here" and
+                # got a withdrawn list with nothing said (`@me`, 0 rows,
+                # ``display=False``, ``notice=''``, measured). Silence reads as
+                # "the surface is broken" rather than as an answer, and the
+                # answer exists: nothing in this directory starts with that.
+                #
+                # A NOTICE AND NOT A ROW, which is the property the Q-2 fix
+                # depends on: a notice is not a match, so the fuzzy near-miss
+                # stays unoffered, ``is_open()`` stays False and every key still
+                # reaches the buffer. `@me` remains prose that will be sent as
+                # written — it is now prose that SAYS SO.
+                #
+                # The arm immediately below does the painting, so this writes
+                # state and nothing else: one repaint per keystroke rather than
+                # ``set_notice``'s paint followed by this arm's. ``query`` is
+                # The copy is RE-WRITTEN on every derivation rather than set
+                # once, because it quotes the query and the query moves: holding
+                # the first one left `@zz` reading "nothing here matches `z`".
+                #
+                # Gated on ``self._choices``, which is what makes this a
+                # statement about THIS directory rather than about the buffer:
+                # the listing is the only thing that can say the directory was
+                # readable and the query matched none of it. An empty listing is
+                # the app's own notice ("nothing to reference in srx/"), which
+                # the arm below holds.
+                #
+                # ``query`` is non-empty for the same reason: a bare `@` with
+                # nothing to list is that same app notice, and its one-tick fill
+                # window must not flash a notice about a query nobody has typed.
+                self._notice = f"nothing here matches `{query}`"
+                self._notice_rungs = ()
             if mode in (PickerMode.ARGUMENT, PickerMode.FILE) and self._notice:
                 # No rows, but something to say in their place. The list stays up
                 # holding the one informational row, and holds it across every
@@ -2152,17 +2260,31 @@ class CommandPicker(Static):
             cursor=cursor_style,
         )
 
-    def _gutter(self, styles: _RowStyles) -> Text:
-        # Padded from the constant rather than written out: a hard-coded two-cell
-        # mark under a three-cell gutter would shift only the SELECTED row, which
-        # is the one row a misalignment is guaranteed to be noticed on.
+    def _gutter(self, styles: _RowStyles, name: str) -> Text:
+        """The selection mark for one row, plus the D5 "this key SENDS" variant.
+
+        ``name`` is the row's own name so the send question can be asked of the
+        row being painted rather than of a flag set elsewhere — see
+        :meth:`set_send_predicate`. It is REQUIRED: every call site has a row
+        identity, and a default of ``""`` for a hypothetical caller without one
+        would have that caller's rows silently claim "this row cannot send"
+        rather than fail where the omission is.
+
+        The mark stays in the cursor's own cell and the padding stays derived
+        from the constant rather than written out: a hard-coded mark under a
+        wider gutter would shift only the SELECTED row, which is the one row a
+        misalignment is guaranteed to be noticed on.
+        """
         row = Text()
-        mark = (_CURSOR if styles.selected else "").ljust(_GUTTER_CELLS)
-        row.append(mark, style=styles.cursor)
+        mark = ""
+        if styles.selected:
+            sends = bool(name) and self._sends is not None and self._sends(name)
+            mark = _SEND_CURSOR if sends else _CURSOR
+        row.append(mark.ljust(_GUTTER_CELLS), style=styles.cursor)
         return row
 
     def _command_row(self, name: str, command: SlashCommand, width: int, s: _RowStyles) -> Text:
-        row = self._gutter(s)
+        row = self._gutter(s, name)
         row_bg = s.ground
 
         primary = f"/{name}"
@@ -2182,7 +2304,7 @@ class CommandPicker(Static):
                 return _pad_to(row, width, row_bg)
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
-            row = self._gutter(s)
+            row = self._gutter(s, name)
 
         budget = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         self._append_primary(row, primary, alias_run, budget, s.name, s.alias)
@@ -2197,7 +2319,7 @@ class CommandPicker(Static):
         only text that completes into the buffer is the provider id, so listing
         the alias would advertise input the command does not accept.
         """
-        row = self._gutter(s)
+        row = self._gutter(s, name)
         row_bg = s.ground
         # `danger` only when the state is a problem; an unfinished login is not
         # one. Tinting every un-logged-in provider red would make the ordinary
@@ -2277,7 +2399,7 @@ class CommandPicker(Static):
                 return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
-            row = self._gutter(s)
+            row = self._gutter(s, name)
 
         row.append(truncate_cells(name, max(1, body)), style=name_style)
         return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
@@ -2329,6 +2451,15 @@ class CommandPicker(Static):
     def _overflow_row(self, width: int) -> Text | None:
         start, end, total = self.visible_window()
         hidden = total - (end - start)
+        # PLUS what the scan never returned. The two are different facts and
+        # this row is the only place the user can learn either: ``total`` counts
+        # the rows this widget was GIVEN, and ``_unlisted`` counts the entries
+        # the directory holds beyond the scan's own cap. Reporting only the
+        # first is how a 2500-entry directory came to read ``… 1992 more`` — 500
+        # entries invisible AND uncounted (design round 1, D6), where the
+        # expansion side accounts for its own limit honestly (``[N more entries;
+        # use glob or read to list them]``).
+        hidden += self._unlisted
         if hidden <= 0:
             return None
         dim = Style(
@@ -2514,6 +2645,11 @@ class CommandPicker(Static):
         # submission all arrive here, and each one is the user done with it.
         self._notice = ""
         self._notice_rungs = ()
+        # And with the list gone, so is the account of what its source held
+        # beyond the scan cap (see `set_choices`): the next list's own fill sets
+        # it, and until then any stale count belongs to a listing that is no
+        # longer on screen.
+        self._unlisted = 0
         self._loading = False
         self.display = False
         self._report_highlight()
