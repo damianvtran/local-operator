@@ -859,7 +859,7 @@ stealing these credentials a long way. It is not a guarantee.
 **One provider login you keep by hand** is the QwenCloud console ticket: a
 browser session cookie you capture and store yourself, expiring roughly weekly.
 Its value goes into the encrypted `lop secret` store rather than into `auth.db`,
-which keeps only the ticket's metadata — its name, when it was captured, and
+which keeps only the ticket's metadata: its name, when it was captured, and
 its length. The
 [QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
 including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
@@ -985,10 +985,13 @@ values:
 
 Set it per deployment, not globally: the interactive session you are sitting at
 wants `inherit`, a server-owned run wants `allowlist`. Why the strict mode
-exists: `lop` reads its provider API key **from its own environment**, falling
-back to `credentials.env` only when the name is not exported — so an inherited
-copy is the one a request uses, and it is a spend credential in the hands of
-any command the model writes. A run whose whole job is fetching
+exists: `lop` reads its provider API key **from its own environment** before the
+copy in `credentials.env`, and falls back to that file only when the environment
+does not supply a value for the key. The file is not consulted for every
+provider: a request reads Anthropic's key from the environment or a stored
+login, and never from `credentials.env`. An inherited copy is the copy a request
+uses when the provider has no stored login, and it is a spend credential in the
+hands of any command the model writes. A run whose whole job is fetching
 attacker-influenceable pages is exactly the run that must not have one. `mode`
 unset (or blank) is `inherit`;
 an unrecognised value (`strict`, `allow-list`) resolves to `allowlist` and warns
