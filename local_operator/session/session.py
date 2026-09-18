@@ -70,7 +70,7 @@ from local_operator.compaction.marker import (
     replayed_user_message,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
-from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
@@ -1928,6 +1928,27 @@ class Session:
         self._wire_budget_override: int | None = None
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
+        #: This session's DECLARED tool inventory, or ``None`` for the default:
+        #: every tool the host built is reachable and the ordinary gate governs.
+        #: Set through :meth:`set_tool_inventory` by a host that needs a BOUNDED
+        #: runtime rather than a trusted one — an unattended compliance worker
+        #: that must reach its screening tools and nothing else.
+        self._declared_tools: frozenset[str] | None = None
+        #: Whether the declaration above also stands as the APPROVAL for its own
+        #: members. Set with it, never implied by it: see
+        #: :meth:`set_tool_inventory` for why an interactive host that narrows a
+        #: role still wants its human asked per call.
+        self._declared_tools_unattended = False
+        #: The ``tools:`` allow-list of the role CURRENTLY attached to this
+        #: session, recorded when the role was attached rather than re-resolved
+        #: later. Re-resolution would have to go back through a DISPLAY name,
+        #: and a name that a role and a specialist can both answer is exactly the
+        #: ambiguity the shared resolver exists to keep out of attach; recording
+        #: the fact at the one point that already resolved it cannot drift.
+        #: Holds ``()`` for a role that declares none, which the exec path must
+        #: tell apart from "declare nothing" (an empty inventory strands a
+        #: session with nothing to reach).
+        self._attached_profile_tools: tuple[str, ...] = ()
         self._has_ui = has_ui
         self._cwd = cwd or "."
         self._skill_resolver = skill_resolver
@@ -3247,8 +3268,14 @@ class Session:
                 merged = [tool if t.name == name else t for t in merged]
             else:
                 merged.append(tool)
-        self._tools = merged
-        self._context.tools = merged
+        # Through the declaration, like every other write: these are the tools
+        # gated on the session's own capabilities (``task``/``wait``/``jobs``, and
+        # ``ask`` rescued by ``set_ask_handler``), and a declared inventory that
+        # bounded only what the FACTORY built would still leave this session able
+        # to delegate to an unrestricted child — the excluded set reachable one
+        # hop away, which is not excluded.
+        self._tools = self._filter_declared(merged)
+        self._context.tools = self._tools
 
     async def async_init(self) -> None:
         """Async second half of construction.
@@ -4438,8 +4465,18 @@ class Session:
         """
         kind, profile, specialist_prompt, display_name = self._resolve_profile_or_specialist(name)
         if kind in ("role", "seed") and profile is not None:
+            # Recorded BEFORE the brief is stamped, and only on a resolved
+            # attach: a typo must not half-attach, which includes half-declaring
+            # a tool surface for the role that was NOT attached. See
+            # :attr:`attached_profile_tools` for why this is recorded rather
+            # than re-resolved on demand.
+            self._attached_profile_tools = tuple(profile.tools or ())
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
+            # A specialist carries instructions only — the registry row has no
+            # ``tools:`` surface to record, and the slot must not keep the
+            # previous role's allow-list after a switch.
+            self._attached_profile_tools = ()
             # Tagged with the specialist's name so the model can tell whose
             # voice this is — the same shape a role preamble carries.
             body = f"[agent: {display_name}]\n{specialist_prompt}" if specialist_prompt else ""
@@ -4456,6 +4493,11 @@ class Session:
         can still report plainly.
         """
         self._goal_state.agent_brief = ""
+        # The slot this recorded for the detached role goes with it: it is a
+        # statement about the profile in force, and "no profile" has no tool
+        # surface. Left behind it would let a host that bounds itself on the
+        # attached role honour a role the user has already taken off.
+        self._attached_profile_tools = ()
         # Blank the NAME as well, not just the brief. The band's active-profile
         # segment (U2) reads ``active_agent`` (i.e. ``agent_name``), so a detach
         # that dropped only the brief would leave ``◉ auditor`` painted next to a
@@ -5961,11 +6003,263 @@ class Session:
         ``context.tools`` fresh on every model call and every tool resolution,
         so the new set is effective from the NEXT model call onward — and even
         mid-turn at the next tool batch — with no restart.
+
+        A session with a declared inventory (:meth:`set_tool_inventory`) narrows
+        the set it is handed here before swapping it in, so an MCP tool that
+        arrives after the declaration is subject to it. That ordering is the
+        whole point: MCP tools are discovered lazily, so filtering only the
+        construction-time builtins would leave the declaration unenforced on
+        exactly the surface an embedder declares it for.
         """
-        self._tools = list(tools)
+        self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
         if hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
+
+    def _filter_declared(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+        """Narrow a candidate inventory to this session's declared one.
+
+        THE enforcement point. Every writer of the inventory routes through
+        here — construction, :meth:`refresh_tools` (which is where a lazily
+        discovered MCP tool arrives), and :meth:`_merge_capability_tools` (which
+        is where ``task``/``wake``/``ask`` arrive after the fact) — because a
+        declaration that only filtered the surface the model is SHOWN would
+        leave the excluded tool reachable by name through the loop's resolution
+        path. The property a caller buys with a declaration is *the excluded
+        tools are not reachable*, not *the model was not told about them*.
+
+        An unknown name is not an error, deliberately: a declaration naming a
+        tool this build does not have (an MCP server that is not connected on
+        this host, a renamed builtin) simply matches nothing, exactly as
+        :func:`local_operator.agent_profiles.filter_tools` treats the same case
+        for a role. It fails CLOSED, which is the right direction for a security
+        control.
+        """
+        if self._declared_tools is None:
+            return list(tools)
+        allowed = self._declared_tools
+        return [tool for tool in tools if getattr(tool, "name", None) in allowed]
+
+    def set_tool_inventory(
+        self,
+        names: Sequence[str] | None,
+        *,
+        unattended: bool = False,
+    ) -> None:
+        """Declare — and ENFORCE — the set of tools THIS session may reach.
+
+        ``names=None`` applies NO declaration, which is the state a session is
+        constructed in. It does not LIFT one already in force — see the one-way
+        invariant below, which is why that is stated as an invariant rather than
+        left to be discovered.
+
+        WHY THIS IS A SESSION-LEVEL DECLARATION AND NOT A HOST-SIDE FILTER.
+        A headless embedder running an agent against a bounded capability — a
+        compliance worker that must call screening tools and must NOT be able to
+        run ``bash``, ``write``, ``edit`` or ``eval`` on the host it runs on —
+        previously had one option: ``--yolo``, which is the only way a
+        write/exec-tier tool call can succeed with no tty to answer the gate.
+        ``--yolo`` also unlocks every local-execution tool, so "reach my MCP
+        tools" and "be unable to shell out" were not jointly expressible. The
+        fix belongs at the INVENTORY rather than at the gate, because the gate is
+        consulted per call and the excluded-then-denied shape still leaves the
+        tool advertised, retried, and reported to the model as a denial it should
+        work around.
+
+        ``unattended=True`` makes the declaration stand as the APPROVAL for its
+        own members. This is the second half of the same fix rather than a
+        loosening of it: with the excluded set genuinely unreachable, a gate that
+        refuses a *permitted* tool is refusing the only thing the run was allowed
+        to do. The security property is the enumeration, so the enumeration is the
+        decision — and it is scoped to the names given here, never to the session
+        at large. It is deliberately NOT implied by narrowing alone: a host with a
+        human at the gate narrows a role's reach and still wants that human asked
+        per call (see ``attach_agent_profile``), which is why the two are separate
+        arguments and not one behaviour.
+
+        Invariants a caller can rely on:
+
+        * every tool a declared run reaches is named in ``names``;
+        * a name that matches nothing this build has is simply unreachable, never
+          an error (fail-closed, like a role allow-list);
+        * the declaration is inherited by the children this session delegates to,
+          so a declared session cannot reach an excluded tool one hop down;
+        * narrowing is ONE-WAY for the life of the session. Widening is refused
+          rather than honoured because the alternative is a live session whose
+          bounded reach can be lifted mid-run by whoever can call this method;
+          a host that needs a different set starts a session with it. Refused
+          means ENFORCED by this method rather than stated in this docstring: a
+          call naming anything outside the set already in force raises
+          ``ValueError`` and changes nothing, and ``names=None`` — the value an
+          absent declaration has — does not lift one in force;
+          * the APPROVAL half is one-way in the same direction, and enforced the
+          same way: a later call may turn the declaration's auto-approval OFF
+          (``unattended=False``) but never ON. A narrowing call cannot be the
+          loosening one.
+        """
+        incoming = None if names is None else frozenset(names)
+        in_force = self._declared_tools
+        if in_force is not None:
+            # THE one-way invariant, where a caller can actually break it. The
+            # bound is a security control, so the two refusals below are what
+            # stops whoever can reach this method (a host, a front end, a future
+            # writer) from re-admitting a tool the run was declared not to have:
+            # a superset would be re-admitted by the very next ``refresh_tools``
+            # (it re-derives the inventory from the declaration), and ``None``
+            # would restore the full builtin reach. Raising on a widening call
+            # rather than intersecting: a silent intersection leaves the caller
+            # believing its superset applied, which is the same "the declared
+            # guarantee does not hold" shape this whole mechanism exists to
+            # remove — and only the caller knows whether it meant to widen.
+            if incoming is None:
+                logger.warning(
+                    "set_tool_inventory(None) ignored: this session's declaration (%s) is "
+                    "one-way for its lifetime",
+                    ", ".join(sorted(in_force)),
+                )
+                return
+            widened = sorted(incoming - in_force)
+            if widened:
+                raise ValueError(
+                    "a tool declaration is one-way for the life of a session: refusing to "
+                    f"widen {sorted(in_force)} with {widened}"
+                )
+        self._declared_tools = incoming
+        # ``unattended`` is one-way in the direction that matters, for the same
+        # reason the reach above is: whoever can reach this method must not be
+        # able to LOOSEN what a declaration in force granted. Before this, the
+        # plain assignment let the *allowed* subset call be the loosening one —
+        # declare ``['read', 'bash']`` with a human at the gate, then narrow to
+        # ``['read']`` with ``unattended=True``, and the declared gate answered
+        # ``True`` for ``read`` without consulting the base gate at all (measured
+        # on a real session: the reach stayed bounded, the approval did not).
+        #
+        # Call shapes reachable after this change, against before:
+        #
+        #   * a FIRST declaration — either value applies, unchanged; this is the
+        #     call that decides whether the declaration stands as the approval;
+        #   * a later call with ``unattended=False`` — still applies: tightening
+        #     is not a loosening. A host that narrows and wants the human asked
+        #     again keeps the flow it had, and fails CLOSED on a run with no tty,
+        #     because every remaining call then goes to the base gate;
+        #   * a later call with ``unattended=True`` against a declaration in force
+        #     without it — IGNORED and logged, which is the hole this closes.
+        #
+        # The trade-off, stated rather than left implicit: a host that declares
+        # ``unattended=True`` and later re-declares a SUBSET with
+        # ``unattended=False`` turns its own auto-approval off, so where nobody
+        # can be asked the remaining calls are refused. That is the caller
+        # explicitly asking for the human back, and refusing is the direction to
+        # fail in; freezing the flag at its first value instead would silently
+        # ignore the request rather than honour it.
+        if in_force is None:
+            self._declared_tools_unattended = bool(unattended)
+        elif not unattended:
+            self._declared_tools_unattended = False
+        elif not self._declared_tools_unattended:
+            logger.warning(
+                "set_tool_inventory(unattended=True) ignored: this session's declaration "
+                "(%s) was made with a human at the gate, and a later call cannot turn "
+                "auto-approval on",
+                ", ".join(sorted(in_force)),
+            )
+        # Re-published through ``refresh_tools`` so the narrowing reaches the
+        # model-facing view (``self._context.tools``) by the same route every
+        # other inventory change takes, rather than by a second assignment that
+        # could drift from it.
+        self.refresh_tools(self._tools)
+        self.materialize_declared_tools()
+
+    def materialize_declared_tools(self) -> tuple[str, ...]:
+        """Grant the SCHEMAS of this session's declared tools that are lazy.
+
+        MCP tools are lazy by design: a connected server's tools stay off the
+        provider's schema list — and out of the prompt-cache prefix the tool
+        array shares with the system prompt — until something SELECTS one, which
+        by default means the model activating an entry from that server's
+        ``mcp://`` catalogue. The advertised way to do that is the ``read``
+        tool, and a bounded runtime is exactly the run that may deliberately not
+        have ``read``.
+
+        Measured, not theorised: ``--tools mcp__fixture_echo`` against a live
+        fixture server left the session reaching NOTHING — the declaration had
+        removed every builtin and nothing had put the declared MCP tool in their
+        place, so the model, shown no tools at all, emitted a tool call as prose
+        and the run answered nothing useful.
+
+        A declaration is that decision already made: the caller enumerated the
+        tools by name, so a declared name this session's MCP manager knows about
+        is granted its schema here, with no activation step and no capability the
+        caller did not ask for. Called when the declaration is made and again
+        when MCP discovery settles (see ``session_factory``), because a
+        declaration made while servers were still connecting would otherwise
+        have nothing to grant. Returns the names granted.
+        """
+        declared = self._declared_tools
+        manager = getattr(self, "mcp_manager", None)
+        if declared is None or manager is None:
+            return ()
+        try:
+            available = manager.get_tools()
+        except Exception:  # noqa: BLE001 — a reduced manager must not break a run
+            logger.debug("mcp get_tools() unavailable for a declaration", exc_info=True)
+            return ()
+        present = {tool.name for tool in self._tools}
+        granted = [
+            tool
+            for tool in available
+            if getattr(tool, "name", None) in declared and tool.name not in present
+        ]
+        if granted:
+            # Through ``refresh_tools``, so the grant is subject to the very
+            # declaration that asked for it rather than beside it.
+            self.refresh_tools([*self._tools, *granted])
+        return tuple(tool.name for tool in granted)
+
+    def unresolved_declared_tools(self) -> tuple[str, ...]:
+        """Declared names this session reaches NOTHING for, for a host to report.
+
+        Meaningful only once MCP discovery has settled: until then a declared
+        ``mcp__`` name may simply not have arrived yet, and a caller that asks
+        early can be told "unresolved" about a tool that is still connecting.
+        ``exec_session`` therefore asks at the END of the run, where nothing is
+        in flight and the answer is definitive — asking it at startup, which is
+        where it looks like it belongs, silenced the report on precisely the runs
+        it exists for (a server that is connecting looks identical to a typo).
+
+        What is left is a name that never arrived — a typo, or a tool this build
+        does not have — which fails closed but must not fail SILENTLY: with no
+        matching tool the run answers nothing, and every call comes back "Tool
+        not found", which reads as a harness fault rather than as the declaration
+        it is.
+        """
+        declared = self._declared_tools
+        if declared is None:
+            return ()
+        reachable = {tool.name for tool in self._tools}
+        return tuple(name for name in sorted(declared) if name not in reachable)
+
+    @property
+    def tool_inventory(self) -> tuple[str, ...]:
+        """The names of the tools this session can actually reach, in order.
+
+        The ENFORCED set — the live inventory, not the declaration — so a host
+        that declared an inventory can report which names matched nothing this
+        build. A typo in a security control fails closed, but it must not fail
+        silently: the model would then simply have no tools and the run would be
+        diagnosed as a harness fault rather than as the declaration it is.
+        """
+        return tuple(tool.name for tool in self._tools)
+
+    @property
+    def attached_profile_tools(self) -> tuple[str, ...]:
+        """The ``tools:`` allow-list the attached role declares, or ``()``.
+
+        ``()`` means "the role declares none", NOT "declare an empty
+        inventory"; a caller deciding whether to bound itself on this must treat
+        them as different answers (see :meth:`set_tool_inventory`).
+        """
+        return self._attached_profile_tools
 
     def set_fallback_tool_resolver(
         self, resolver: Callable[[str], AgentTool | None] | None
@@ -5975,6 +6269,63 @@ class Session:
         loop can dispatch calls to tools not yet materialized. ``None`` clears
         it."""
         self._fallback_tool_resolver = resolver
+
+    def _resolve_tool_outside_inventory(self, name: str) -> AgentTool | None:
+        """Resolve a name the inventory does not hold — unless it is declared out.
+
+        THE second half of a declared inventory's enforcement, and the half that
+        is easy to miss: the loop asks this resolver for any name that is not in
+        ``context.tools`` BEFORE reporting the call as an unknown tool (see
+        ``harness.loop._plan_call``). That is how a deferred or lazily discovered
+        MCP tool is dispatchable without being materialized. Left ungated it is
+        also how an EXCLUDED MCP tool stays reachable — the model can name a tool
+        whose schema it was never shown, and the resolver would hand it over.
+        So the declaration is consulted here too, and an excluded name resolves to
+        ``None``, which the loop reports as "Tool not found" exactly like any
+        other absent tool.
+        """
+        declared = self._declared_tools
+        if declared is not None and name not in declared:
+            return None
+        resolver = self._fallback_tool_resolver
+        return resolver(name) if resolver is not None else None
+
+    def _tool_approval_gate(self) -> ApprovalGate | None:
+        """The gate this turn's tool calls are decided by.
+
+        ``--yolo`` skips the gate OBJECT entirely, unchanged. Otherwise a session
+        whose host declared its inventory as unattended decides its DECLARED
+        members here, by the declaration — with the base gate still consulted for
+        anything else, so this narrows WHEN the host is asked and is never a
+        blanket approval of the session.
+
+        The membership check is not redundant with the inventory filter, and it
+        is not defensive padding: it is what keeps this method correct even if
+        some future writer reaches the inventory by a route the filter does not
+        cover. A gate that approved whatever it was handed would collapse the
+        whole design back to ``--yolo`` the first time one did.
+        """
+        if self._yolo:
+            return None
+        base = self._request_approval
+        declared = self._declared_tools
+        if base is None or declared is None or not self._declared_tools_unattended:
+            return base
+
+        async def declared_gate(
+            tool_name: str, description: str, job_id: str | None = None
+        ) -> bool:
+            if tool_name in declared:
+                return True
+            # Forwarded through the shared arity resolver rather than called
+            # directly: the base gate may take two arguments or three, and which
+            # one is resolved in exactly one place (``harness.approval``). Calling
+            # it here with three would ``TypeError`` inside every two-argument
+            # host gate, and both call sites turn that into a silent denial — the
+            # failure mode that module exists to stop.
+            return await ask_approval(base, tool_name, description, job_id)
+
+        return declared_gate
 
     def _record_tool_call(
         self, tool_name: str, origin: str, fault: str, duration_ms: float
@@ -7759,7 +8110,7 @@ class Session:
                 has_pending_fork=self.has_pending_fork,
                 get_aside_messages=self._drain_asides,
                 get_follow_up_messages=self._todo_continuation,
-                resolve_fallback_tool=self._fallback_tool_resolver,
+                resolve_fallback_tool=self._resolve_tool_outside_inventory,
                 # Redact stored credential values out of every tool result
                 # before the message lands in the transcript. The store is
                 # in-memory and session-scoped, so this is the one place a
@@ -8181,7 +8532,7 @@ class Session:
             job_label=self._job_label,
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
-            request_approval=None if self._yolo else self._request_approval,
+            request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,
