@@ -507,6 +507,19 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "How the built-in tools execute.",
     ),
+    # Split out of ``tools`` (review round 1, M2), for the reason the module's
+    # own history gives for ``providers`` and ``web_tools``: scope is uniform
+    # within a section by construction, and these three keys are the one part of
+    # how a tool executes that must NOT re-read per call — a live policy is a
+    # policy the agent's own shell can weaken between two commands.
+    Section(
+        "shell_environment",
+        "Agent shell",
+        Scope.NEW_LAUNCH,
+        "What a command the agent runs can see. Resolved once per session, so an "
+        "edit here applies at the next launch and cannot weaken a session that is "
+        "already running.",
+    ),
     Section(
         "local_providers",
         "Local servers",
@@ -1437,8 +1450,11 @@ SETTINGS: tuple[Setting, ...] = (
         label="Assistant gutter rail",
         kind=Kind.BOOL,
         default=True,
-        help="A rule down the left edge of the assistant's answer, echoing the prompt's.",
-        choices=_bool_choices("rail on the answer", "no rail"),
+        help=(
+            "A rule marks the ANSWER: the message that ends the turn. "
+            "Mid-turn narration takes no rail."
+        ),
+        choices=_bool_choices("rail the answer only", "no rail"),
     ),
     Setting(
         # Default changed to False by maintainer
@@ -2481,6 +2497,81 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.TEXT,
         default="",
         help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
+        empty_unsets=True,
+    ),
+    # -- shell_environment ----------------------------------------------
+    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the same
+    # way as the row above. The three rows are one policy and are read together
+    # by one reader, but they are three settings rather than a JSON blob because
+    # each answers a different question and each has a shape the editor already
+    # knows: a mode to pick, and two name lists to type.
+    #
+    # IN THEIR OWN SECTION, and specifically NOT in ``tools`` (review round 1,
+    # M2): scope is uniform within a section by construction, ``tools`` is LIVE,
+    # and these keys must NOT be live. ``tools.shell_env.load_policy`` resolves
+    # the policy once per process and memoises it, because ``config.yml`` is
+    # writable by the agent's own shell as the same uid — a policy re-read per
+    # command is a policy the constrained party can LOWER mid-run, which is how
+    # a strict run gets its provider key back in the next command. NEW_LAUNCH is
+    # that decision said in the vocabulary this module already has, and it is
+    # also what the config-change notice tells the user.
+    Setting(
+        key="shell_environment.mode",
+        path=("shell_environment", "mode"),
+        section="shell_environment",
+        label="Agent shell environment",
+        kind=Kind.ENUM,
+        # Pinned to ``shell_env.MODE_DEFAULT`` by
+        # ``test_shell_environment_rows_share_the_reader_paths`` rather than
+        # imported: the default must stay the permissive one, and the pin is
+        # what makes flipping it a decision rather than an edit.
+        default="inherit",
+        help=(
+            "'inherit' lets a command the agent runs see your environment "
+            "(gh, aws, npm keep their tokens). 'allowlist' passes only "
+            "PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, "
+            "so the provider key this session launched with is not handed to a "
+            "command the model writes. Read once per session: changing it takes "
+            "effect at the next launch."
+        ),
+        choices=(
+            Choice("inherit", "inherit", "your environment, as today (default)"),
+            Choice("allowlist", "allowlist", "the safe set plus the lists below, nothing else"),
+        ),
+    ),
+    Setting(
+        key="shell_environment.inherit",
+        path=("shell_environment", "inherit"),
+        section="shell_environment",
+        label="…kept in allowlist mode",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Empty = the safe set alone. Names the allowlist mode keeps ON TOP "
+            "of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that "
+            "must still resolve $(lop secret get NAME), or LANG. Inert in "
+            "inherit mode."
+        ),
+        # OPEN namespace: these are the operator's own variable names, so there
+        # is no vocabulary for this repo to bound.
+        placeholder="LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+        empty_unsets=True,
+    ),
+    Setting(
+        key="shell_environment.exclude",
+        path=("shell_environment", "exclude"),
+        section="shell_environment",
+        label="…removed in both modes",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Empty = nothing removed. Names never handed to a command the agent "
+            "runs, in either mode — including the session credential store's "
+            "own injections, so this is how a variable is denied outright. "
+            "Covers the bash and eval children only; MCP servers and the "
+            "harness's own processes are not governed by it."
+        ),
+        placeholder="OPENROUTER_API_KEY, …",
         empty_unsets=True,
     ),
     *[

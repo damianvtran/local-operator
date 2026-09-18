@@ -1151,10 +1151,18 @@ def project_settled_rows(
             # rather than mounting-then-removing: it has the settled message in
             # hand and no streaming to show, so not mounting avoids the
             # multi-block arrangement seam the live path cannot avoid.
-            hidden = hide_narration and is_intermediate_narration(
+            #
+            # Classified ONCE for this message and read twice below: the mount
+            # decision (`display.narration` OFF) and the RAIL mark. The rail
+            # marks the ANSWER, so a resumed session has to reproduce the
+            # un-railed progress sentence the live one painted — a second read
+            # of these two fields here is how the two surfaces come to disagree
+            # about which block earned the mark.
+            narration = is_intermediate_narration(
                 stop_reason=getattr(message, "stop_reason", None),
                 has_tool_calls=bool(tool_calls),
             )
+            hidden = hide_narration and narration
             if assistant_row_text(text) and not hidden:
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
@@ -1162,6 +1170,14 @@ def project_settled_rows(
                 # fold ladder on every update, and a hint set afterwards would
                 # only reach a rebuild that has already happened.
                 block.set_fold_hint(fold_width)
+                # And marked before it too, for exactly that reason: the rail is
+                # read at paint rate, so a mark applied after `update_text`
+                # would leave the rows this call authors carrying a rail the
+                # next rebuild drops. Replay is a REPLAY of the live frame, and
+                # the live one is marked in the same order at
+                # `app.py::on_assistant_message_end`.
+                if narration:
+                    block.mark_narration()
                 block.update_text(text)
                 block.finalize_text()
                 self._append_block(block)

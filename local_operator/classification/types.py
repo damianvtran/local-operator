@@ -169,13 +169,21 @@ class DecisionResponse:
     contract is explicit that a missing cost is reported as missing, never
     estimated. (No price row for a decision model exists in this repo yet, so
     the "compute it from the configured price row" path has nothing to read.)
+
+    The token counts follow the SAME rule, and it has to be stated because ``0``
+    is a legal figure here: ``usage`` is optional on the wire (the route answers
+    200 with an ``answers`` block and no ``usage`` at all), and the Radient route
+    is documented as billing with output tokens zero. So a count the vendor did
+    not send is ``None``, never ``0`` — a caller that conflated the two would
+    print a fabricated ``tokens=0/0`` beside a real cost, which is exactly the
+    unreadable figure this accounting exists to remove.
     """
 
     vendor: str
     model: str
     answers: dict[str, Answer]
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     cost_usd: float | None = None
     latency_s: float = 0.0
 

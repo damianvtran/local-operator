@@ -66,6 +66,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
+    from local_operator.tools import shell_env
     from local_operator.tools.builtin import BASH_SHELL_DEFAULT
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
@@ -177,6 +178,14 @@ def _consumer_defaults() -> dict[str, object]:
         "fork.mode": DEFAULT_FORK_MODE,
         "fork.cmux_placement": DEFAULT_FORK_CMUX_PLACEMENT,
     }
+    # The three ``shell_environment`` rows answer to constants in their reader
+    # (``tools/shell_env.py``), for the same reason the fork keys do and with a
+    # security stake: a registry default that disagreed with ``MODE_DEFAULT``
+    # would have the page offer to reset the policy to a mode the harness does
+    # not implement.
+    consumers["shell_environment.mode"] = shell_env.MODE_DEFAULT
+    consumers["shell_environment.inherit"] = []
+    consumers["shell_environment.exclude"] = []
     # The hotkeys have a REAL single-value consumer for the same reason the
     # fork keys do, and a stricter one: `KeyAction.default` is what
     # `OperatorApp.BINDINGS` binds and what `resolved_keymap` falls back to
@@ -566,6 +575,44 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_shell_environment_rows_share_the_reader_paths(manager: ConfigManager) -> None:
+    """The three ``shell_environment`` rows write exactly where
+    ``tools/shell_env.py`` reads, and a stored mode round-trips through the real
+    reader.
+
+    Pinned by test rather than import for the reason the row above is: the
+    reader lives in the tool layer (which the CLI must not pay for) while the
+    rows live in the registry. This is the security-relevant half of that split
+    — a registry writing ``shell_environment: {mode: allowlist}`` while the
+    reader looked for something else would leave the strict mode silently
+    unset, which is the failure class this key exists to close.
+    """
+    from local_operator.tools import shell_env
+
+    assert settings_io.BY_KEY["shell_environment.mode"].path == shell_env.MODE_PATH
+    assert settings_io.BY_KEY["shell_environment.inherit"].path == shell_env.INHERIT_PATH
+    assert settings_io.BY_KEY["shell_environment.exclude"].path == shell_env.EXCLUDE_PATH
+    assert settings_io.BY_KEY["shell_environment.mode"].default == shell_env.MODE_DEFAULT
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["shell_environment.mode"], "allowlist")
+    settings_io.write_setting(manager, settings_io.BY_KEY["shell_environment.inherit"], ["LANG"])
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["shell_environment.exclude"], ["GH_TOKEN"]
+    )
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["shell_environment"] == {
+        "mode": "allowlist",
+        "inherit": ["LANG"],
+        "exclude": ["GH_TOKEN"],
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        policy = shell_env.load_policy()
+    assert policy.mode == shell_env.MODE_ALLOWLIST
+    assert policy.inherit == ("LANG",)
+    assert policy.exclude == frozenset({"GH_TOKEN"})
 
 
 def test_cleanup_settings_are_nested_under_session_cleanup(manager: ConfigManager) -> None:

@@ -133,6 +133,17 @@ class Recommendation:
     block: str = ""
     vendor: str | None = None
     cost_usd: float | None = None
+    #: What the vendor reported for this call, in its own units. Carried on the
+    #: outcome rather than kept inside the vendor layer because the harness's cost
+    #: line is built from THIS object (``session_factory._log_classification_cost``),
+    #: and without them that line printed ``tokens=-/-``: the one figure that says how
+    #: much of a paid call was input — the whole bill, at Jev's pricing — was the one
+    #: figure the operator could not see. ``None`` means "no figure", which covers a
+    #: cache hit (nothing was spent: ``latency_s`` is 0 on those, and that is what
+    #: distinguishes them), a skipped pass, and a call whose vendor sent no
+    #: ``usage`` — it never means "zero tokens", which a vendor can and does report.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     latency_s: float = 0.0
     skipped: SkipReason | None = None
     #: Which of ``resources`` were asked for by an EARLIER message than the prompt
@@ -242,9 +253,15 @@ def build_questions(
         for candidate in kind_candidates:
             identifier = option_id(candidate.name, taken)
             # The option text is the candidate's name plus its harness-owned
-            # description, and it is the SAME text the state's candidate line
-            # carries: a model that sees two different descriptions for one
-            # resource is being asked to reconcile a contradiction (§6).
+            # description, and it is meant to be the SAME text the state's
+            # candidate line carries: a model that sees two different
+            # descriptions for one resource is being asked to reconcile a
+            # contradiction (§6). It is built UNTRIMMED here, while the state's
+            # copy is trimmed once the ladder reaches rung 2 (120, then 60
+            # characters) — so for a roster large enough to need that rung the
+            # two copies disagree, and the disagreement is measurable in the
+            # answers. §12 of the design doc carries the numbers; the copy was
+            # left in place because removing it moves the recommended set.
             criteria[identifier] = candidate_line(candidate)
             kind_options[identifier] = candidate
         criteria[NONE_OPTION] = NONE_OPTION_TEXT

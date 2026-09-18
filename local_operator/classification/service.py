@@ -117,6 +117,7 @@ from local_operator.classification.context import (
     build_state,
     candidates_digest,
     max_candidates,
+    select_candidates,
     setting_int,
 )
 from local_operator.classification.recommend import (
@@ -163,8 +164,8 @@ CIRCUIT_FAILURE_THRESHOLD = 3
 CACHE_SIZE = 64
 
 
-def _cache_key(request: RecommendationRequest) -> str:
-    """``sha256(user_message + candidates_digest)``, exactly as §4 specifies.
+def _cache_key(request: RecommendationRequest, limit: int | None) -> str:
+    """``sha256(user_message + candidates_digest)`` over the roster AS SENT.
 
     The digest covers the roster's names, URLs and descriptions, so a session
     whose discovered descriptions changed does not serve a recommendation built
@@ -173,8 +174,40 @@ def _cache_key(request: RecommendationRequest) -> str:
     :meth:`ClassificationService.recommend_resources` re-applies the cap to a
     cached result anyway, which keeps the key exactly what the contract says it
     is.
+
+    WHY THE CAPPED ROSTER AND NOT THE DISCOVERED ONE
+    ------------------------------------------------
+    ``limit`` is ``values.classification.maxCandidates``, and the roster is
+    capped by it BEFORE it is sent — :func:`select_candidates`, called by both
+    :func:`~local_operator.classification.context.build_state` and
+    :func:`~local_operator.classification.recommend.build_questions`. So an
+    entry past the cap never reaches the vendor and cannot change the question
+    that was asked. Digesting the DISCOVERED list instead made the key sensitive
+    to roster changes the request cannot carry: one more skill on disk moved the
+    key while the body stayed byte-identical, and the session paid for a second
+    call to re-ask a question it had already answered. Keying on the capped roster
+    is what makes the ROSTER half of the key a digest of the ROSTER half of the
+    body.
+
+    WHAT IS STILL OUTSIDE THE KEY, since this docstring is a future caller's only
+    warning. The key is ``user_message`` plus this digest, so two other body
+    inputs are not covered: ``context`` (a state field when a caller supplies
+    one — none does today) and the ladder rung that ``maxStateChars`` selects, a
+    session setting whose change moves the body without moving the key. Both are
+    benign while the first caller-side half is unbuilt, and closing them belongs
+    with whoever builds it rather than with the roster fix.
+
+    It stays a plain function taking the limit rather than reading the settings
+    itself, because the caller is the one that knows which limit its request
+    builder will apply — and the two must agree, or the key covers a different
+    roster than the body. ``limit`` has no default for that reason: a caller that
+    forgot it would key on the DEFAULT cap while its body carried the configured
+    one, and a configured cap ABOVE the default would then answer a changed
+    roster out of cache — a false hit, which is the expensive direction of this
+    mistake.
     """
-    payload = f"{request.user_message}\n{candidates_digest(request.candidates)}"
+    roster = select_candidates(request.candidates, limit)
+    payload = f"{request.user_message}\n{candidates_digest(roster)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -364,15 +397,23 @@ class ClassificationService:
         if self._circuit_open:
             return Recommendation(skipped="circuit-open")
 
-        key = _cache_key(request)
+        key = _cache_key(request, max_candidates(self._settings))
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
             # A hit costs nothing — no tokens, no time. ``cost_usd`` becomes
             # None rather than the original spend, because THIS call spent
-            # nothing; the resources themselves are free to reuse.
+            # nothing; the resources themselves are free to reuse. The token
+            # counts are cleared with it, so the cost line cannot report a spend
+            # for a call that was not made.
             return self._capped(
-                dataclasses.replace(cached, cost_usd=None, latency_s=0.0),
+                dataclasses.replace(
+                    cached,
+                    cost_usd=None,
+                    input_tokens=None,
+                    output_tokens=None,
+                    latency_s=0.0,
+                ),
                 request.max_recommendations,
             )
 
@@ -449,6 +490,11 @@ class ClassificationService:
             block=render_block(resources),
             vendor=response.vendor,
             cost_usd=response.cost_usd,
+            # The vendor's own counts, carried so the harness's cost line can print
+            # them: input is what this layer is billed for, so a line that could not
+            # show it could not answer "what does one of these calls cost".
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
             latency_s=time.monotonic() - started,
         )
         self._consecutive_failures = 0
