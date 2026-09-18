@@ -944,15 +944,35 @@ class Transcript:
         #: because both paths need the SAME store.
         self._attachments = AttachmentStore()
         if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    entry = TranscriptEntry.from_json(line)
-                    if entry is not None:
-                        self._entries.append(entry)
-                        self._index_entry(entry)
-                        command_id = _admitted_command_id(entry)
-                        if command_id is not None:
-                            self._admitted_command_ids.add(command_id)
+            # STREAM the file rather than ``read_text().splitlines()``. The eager
+            # form materialises the whole journal twice before the first row is
+            # parsed — once as one decoded string, once as the list of lines —
+            # which is 885 MB of traced peak (3.38x the file) and ~2.7 s on the
+            # 262 MB journal on the operator's store. Iterating the handle holds
+            # one row at a time, so the peak is the resident entries themselves
+            # plus a single row.
+            #
+            # Read through an OPEN HANDLE deliberately, not by re-stat'ing the
+            # path: ``compact_file`` replaces the journal with ``os.replace``,
+            # and an open handle keeps the inode it opened, so a fold landing
+            # mid-construction cannot splice the old file's rows and the new
+            # file's rows into one entry list. A path re-read could.
+            #
+            # Same rows, same order, same tolerance: rows are written by
+            # ``to_json`` with ``ensure_ascii`` on, so a row can never carry a
+            # raw newline or any other character ``splitlines`` would break on,
+            # and both forms decode strictly (a byte-corrupt journal still
+            # raises, which ``read_latest_custom_entry`` documents and pins).
+            with self.path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        entry = TranscriptEntry.from_json(line)
+                        if entry is not None:
+                            self._entries.append(entry)
+                            self._index_entry(entry)
+                            command_id = _admitted_command_id(entry)
+                            if command_id is not None:
+                                self._admitted_command_ids.add(command_id)
 
     # -- append -------------------------------------------------------------
 
