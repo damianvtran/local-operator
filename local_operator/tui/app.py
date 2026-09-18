@@ -33386,7 +33386,13 @@ class OperatorApp(App[None]):
             SearchProviderId,
             SearchStrategy,
         )
-        from local_operator.web_search.providers import provider_statuses
+        from local_operator.web_search.providers import (
+            chain_bands_label,
+            provider_landing_label,
+            provider_ready_label,
+            provider_state_label,
+            provider_statuses,
+        )
         from local_operator.web_search.service import (
             load_search_settings,
             set_provider_enabled,
@@ -33410,12 +33416,21 @@ class OperatorApp(App[None]):
                         "Web search",
                         f"{'On' if settings.enabled else 'Off'} · {strategy} · "
                         f"{order or 'No providers'}",
-                    )
+                    ),
+                    # `order:` is the priority prefix, not the whole chain. Without
+                    # this row the header would keep claiming the stored list is
+                    # everything a search can reach -- the exact claim the
+                    # operator's bug report was about.
+                    ("auto", chain_bands_label(statuses)),
                 ]
                 for status in statuses:
-                    enabled = "enabled" if status.enabled else "disabled"
-                    available = "available" if status.available else "setup needed"
-                    items.append((status.label, f"{enabled} · {available} · {status.detail}"))
+                    items.append(
+                        (
+                            status.label,
+                            f"{provider_state_label(status)} · "
+                            f"{provider_ready_label(status)} · {status.detail}",
+                        )
+                    )
                 items.extend(
                     [
                         ("toggle", "/search on|off · /search enable|disable <provider>"),
@@ -33453,12 +33468,32 @@ class OperatorApp(App[None]):
                 if provider not in PROVIDER_IDS:
                     notice(f"unknown search provider: {provider}", "warning")
                     return
-                set_provider_enabled(
+                settings = set_provider_enabled(
                     manager,
                     cast(SearchProviderId, provider),
                     command == "enable",
                 )
-                notice(f"{provider} {command}d; applies to the next search")
+                if command == "disable":
+                    notice(
+                        f"{provider} excluded; it will not be used by any search until "
+                        f"you run /search enable {provider}"
+                    )
+                elif provider in settings.providers:
+                    notice(f"{provider} enabled (in your priority order); applies now")
+                else:
+                    # Same vocabulary AND the same meanings as `search list`: `enable`
+                    # no longer appends to the priority list, so the landing spot is
+                    # the band the resolver puts it in.
+                    row = next(
+                        (
+                            status
+                            for status in provider_statuses(settings, credentials)
+                            if status.id == provider
+                        ),
+                        None,
+                    )
+                    landing = provider_landing_label(row) if row is not None else "enabled"
+                    notice(f"{provider} enabled ({landing}); applies to the next search")
                 return
             if command == "balance" and len(words) == 2:
                 strategy = words[1].lower()
@@ -33478,7 +33513,11 @@ class OperatorApp(App[None]):
                     cast(SearchProviderId, word) for word in provider_words
                 ]
                 set_provider_order(manager, providers)
-                notice("search order: " + ", ".join(providers))
+                notice(
+                    "search order: "
+                    + ", ".join(providers)
+                    + " (any exclusion named here was cleared)"
+                )
                 return
             if command == "setup" and len(words) == 2:
                 provider = words[1].lower()
@@ -33494,8 +33533,18 @@ class OperatorApp(App[None]):
                     notice(
                         "run in a shell: local-operator search setup searxng " "--endpoint <url>"
                     )
-                elif provider in ("brave", "exa", "serpapi", "perplexity"):
-                    notice(f"run in a shell: local-operator search setup {provider} " "--api-key")
+                elif provider in ("brave", "exa", "serpapi", "parallel"):
+                    if provider in ("exa", "parallel"):
+                        # Their keyless MCP tier is the default, so `--api-key` is an
+                        # upgrade rather than a requirement -- saying otherwise would
+                        # send a user hunting for a credential they do not need.
+                        notice(
+                            f"{provider} works keyless (free MCP tier); run in a shell: "
+                            f"local-operator search setup {provider} --api-key to raise "
+                            "the limits"
+                        )
+                    else:
+                        notice(f"run in a shell: local-operator search setup {provider} --api-key")
                 else:
                     notice("DuckDuckGo needs no setup; use /search enable duckduckgo")
                 return

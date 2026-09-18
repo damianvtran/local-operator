@@ -9,11 +9,17 @@ import pytest
 
 from local_operator.credentials import CredentialManager
 from local_operator.web_search.models import (
+    PROVIDER_IDS,
     SearchResponse,
     SearchSource,
     WebSearchSettings,
 )
-from local_operator.web_search.providers import PROVIDERS, parse_duckduckgo_html
+from local_operator.web_search.providers import (
+    PROVIDERS,
+    parse_duckduckgo_html,
+    parse_exa_mcp_text,
+    parse_parallel_mcp_text,
+)
 
 
 def _credentials(tmp_path) -> CredentialManager:
@@ -881,7 +887,15 @@ async def test_a_chain_of_empty_providers_fails_loudly(tmp_path, monkeypatch) ->
             self.search = fn
 
     monkeypatch.setattr(service_module, "PROVIDERS", _Table())
-    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"])
+    # Pin the chain: a bare providers=[...] now auto-joins every other usable
+    # provider, and the fake table would answer for those too -- turning a
+    # two-leg assertion into a six-leg one by accident.
+    settings = WebSearchSettings(
+        providers=["duckduckgo", "perplexity"],
+        excluded_providers=[
+            value for value in PROVIDER_IDS if value not in ("duckduckgo", "perplexity")
+        ],
+    )
     service = WebSearchService(settings, _credentials(tmp_path))
 
     with pytest.raises(RuntimeError) as caught:
@@ -1352,3 +1366,382 @@ async def test_a_keyed_search_reports_usage_so_it_is_not_priced_free(tmp_path) -
     assert response.usage.keyless is False
     assert response.usage.input_tokens == 14_500
     assert response.usage.output_tokens == 776
+
+
+# ---------------------------------------------------------------------------
+# The two keyless MCP transports, and the provider-resolution truth table
+# ---------------------------------------------------------------------------
+
+#: The two framings the servers were observed to answer with (2026-09-18): Exa
+#: sends SSE, Parallel sends a bare JSON body. Both are exercised for both
+#: providers, because a parser that handled only the one it was written against
+#: would report the other as unparseable.
+_MCP_FRAMINGS = ("sse", "json")
+
+
+def _mcp_request_body(**arguments: Any) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "web_search_exa", "arguments": arguments},
+    }
+
+
+def _mcp_sse(envelope: dict[str, Any]) -> str:
+    """SSE framing, as Exa answers: one ``event: message`` and a ``data:`` line."""
+    return f"event: message\ndata: {json.dumps(envelope)}\n\n"
+
+
+def _exa_text() -> str:
+    return (
+        "Title: Coroutines and tasks\n"
+        "URL: https://docs.example/asyncio-task\n"
+        "Published: 2026-01-02\n"
+        "Author: N/A\n"
+        "Highlights:\n"
+        "first fragment\n"
+        "...\n"
+        "second fragment\n"
+        "Title: A block with no URL\n"
+        "Published: N/A\n"
+        "Highlights:\n"
+        "orphan body text\n"
+        "Title: Second page\n"
+        "URL: https://docs.example/second\n"
+        "Published: N/A\n"
+        "Author: Ada\n"
+        "Highlights:\n"
+        "second page body\n"
+    )
+
+
+@pytest.mark.parametrize("framing", _MCP_FRAMINGS)
+@pytest.mark.asyncio
+async def test_exa_keyless_mcp_parses_the_rendered_text_blob(tmp_path, framing) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["headers"] = dict(request.headers)
+        seen["payload"] = json.loads(request.content)
+        envelope = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": _exa_text()}], "isError": False},
+        }
+        body = _mcp_sse(envelope) if framing == "sse" else json.dumps(envelope)
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["exa"].search(
+            client, _credentials(tmp_path), WebSearchSettings(), "semantic query", 4
+        )
+
+    assert seen["payload"]["params"]["name"] == "web_search_exa"
+    assert seen["payload"]["params"]["arguments"]["query"] == "semantic query"
+    assert seen["headers"]["content-type"] == "application/json"
+    # Exa refuses a JSON-only Accept with 406, reproduced live.
+    assert "text/event-stream" in seen["headers"]["accept"]
+    assert "application/json" in seen["headers"]["accept"]
+
+    assert response.auth_mode == "keyless-mcp"
+    assert [source.url for source in response.sources] == [
+        "https://docs.example/asyncio-task",
+        "https://docs.example/second",
+    ]
+    assert response.sources[0].title == "Coroutines and tasks"
+    assert response.sources[0].published_date == "2026-01-02"
+    assert response.sources[0].snippet == "first fragment\n...\nsecond fragment"
+    assert response.sources[1].published_date is None
+    assert response.usage is not None and response.usage.keyless is True
+
+
+def test_exa_mcp_drops_a_block_without_a_usable_url() -> None:
+    sources = parse_exa_mcp_text(_exa_text(), 10)
+
+    assert [source.url for source in sources] == [
+        "https://docs.example/asyncio-task",
+        "https://docs.example/second",
+    ]
+    assert all("orphan" not in (source.snippet or "") for source in sources)
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32602, "message": "Tool nope not found"},
+            },
+            "Exa MCP error -32602: Tool nope not found",
+        ),
+        (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": "MCP error -32602: Tool nope not found"}],
+                    "isError": True,
+                },
+            },
+            "Exa MCP error: MCP error -32602: Tool nope not found",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_mcp_error_envelope_raises_rather_than_returning_nothing(
+    tmp_path, payload, message
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_mcp_sse(payload))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError) as caught:
+            await PROVIDERS["exa"].search(
+                client, _credentials(tmp_path), WebSearchSettings(), "query", 3
+            )
+
+    assert message in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_http_error_carries_the_status_and_body(tmp_path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="rate limited")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError) as caught:
+            await PROVIDERS["parallel"].search(
+                client, _credentials(tmp_path), WebSearchSettings(), "query", 3
+            )
+
+    assert "Parallel returned HTTP 429: rate limited" in str(caught.value)
+
+
+def _parallel_envelope(text: str) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            # The vendor's own meter. It must NEVER become our `usd`: no account
+            # exists to bill, and the endpoint is documented as free.
+            "_meta": {"parallel/usage": [{"name": "sku_search", "count": 1, "cost_usd": 0.001}]},
+            "content": [{"type": "text", "text": text}],
+            "isError": False,
+        },
+    }
+
+
+@pytest.mark.parametrize("framing", _MCP_FRAMINGS)
+@pytest.mark.asyncio
+async def test_parallel_keyless_mcp_maps_excerpts_and_ignores_the_vendor_meter(
+    tmp_path, framing
+) -> None:
+    inner = {
+        "search_id": "search_abc",
+        "results": [
+            {
+                "url": "https://docs.example/one",
+                "title": "One",
+                "publish_date": "2026-03-04",
+                "excerpts": ["first crop", "second crop", "third crop"],
+            },
+            {
+                "url": "https://docs.example/two",
+                "title": "Two",
+                "publish_date": None,
+                "excerpts": [],
+            },
+        ],
+        "warnings": None,
+    }
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content)
+        seen["headers"] = dict(request.headers)
+        envelope = _parallel_envelope(json.dumps(inner))
+        body = json.dumps(envelope) if framing == "json" else _mcp_sse(envelope)
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["parallel"].search(
+            client, _credentials(tmp_path), WebSearchSettings(), "asyncio taskgroup", 3
+        )
+
+    assert seen["payload"]["params"]["name"] == "web_search"
+    arguments = seen["payload"]["params"]["arguments"]
+    assert arguments["objective"] == "asyncio taskgroup"
+    assert arguments["search_queries"] == ["asyncio taskgroup"]
+    # No key is stored: no Authorization header is sent, and the mode says so.
+    assert "authorization" not in seen["headers"]
+    assert response.auth_mode == "keyless-mcp"
+    assert [source.url for source in response.sources] == [
+        "https://docs.example/one",
+        "https://docs.example/two",
+    ]
+    assert response.sources[0].snippet == "first crop\nsecond crop"
+    assert response.sources[0].published_date == "2026-03-04"
+    assert response.usage is not None and response.usage.keyless is True
+
+    from local_operator.web_search.cost import estimate_search_cost
+
+    cost = estimate_search_cost("parallel", response.usage)
+    assert cost.usd == 0.0 and "keyless" in cost.basis, "the vendor's meter is not our spend"
+
+
+@pytest.mark.asyncio
+async def test_parallel_keyed_mode_sends_authorization_and_is_unpriced(tmp_path) -> None:
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("PARALLEL_API_KEY", "stored-test-key")
+    inner = {"results": [{"url": "https://docs.example/one", "title": "One", "excerpts": ["x"]}]}
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["headers"] = dict(request.headers)
+        return httpx.Response(200, text=json.dumps(_parallel_envelope(json.dumps(inner))))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["parallel"].search(
+            client, credentials, WebSearchSettings(), "query", 3
+        )
+
+    assert seen["headers"]["authorization"] == "Bearer stored-test-key"
+    assert response.auth_mode == "api-key"
+    assert response.usage is not None and response.usage.keyless is False
+
+    from local_operator.web_search.cost import estimate_search_cost
+
+    cost = estimate_search_cost("parallel", response.usage)
+    assert cost.usd is None, "no published rate for the keyed Search API: unpriced, not free"
+    assert cost.basis == "no published rate"
+
+
+def test_parallel_mcp_unparseable_text_raises() -> None:
+    with pytest.raises(RuntimeError, match="unparseable"):
+        parse_parallel_mcp_text("not json at all", 3)
+
+
+def test_parallel_parser_skips_rows_without_a_usable_url() -> None:
+    sources = parse_parallel_mcp_text(
+        json.dumps(
+            {
+                "results": [
+                    {"url": "not-a-url", "title": "Relative", "excerpts": []},
+                    {"url": "https://docs.example/one", "title": "One", "excerpts": ["body"]},
+                ]
+            }
+        ),
+        10,
+    )
+
+    assert [source.url for source in sources] == ["https://docs.example/one"]
+
+
+def test_provider_auth_mode_truth_table_covers_the_whole_catalogue(tmp_path) -> None:
+    """One function answers availability AND the transport each provider would use."""
+    from local_operator.web_search import providers as module
+
+    credentials = _credentials(tmp_path)
+    settings = WebSearchSettings()
+
+    # Keyless by default, in the order the catalogue declares them.
+    assert module.provider_auth_mode("duckduckgo", credentials, settings) == "credential-free"
+    assert module.provider_auth_mode("tavily", credentials, settings) == "keyless"
+    assert module.provider_auth_mode("perplexity", credentials, settings) == "anonymous"
+    assert module.provider_auth_mode("exa", credentials, settings) == "keyless-mcp"
+    assert module.provider_auth_mode("parallel", credentials, settings) == "keyless-mcp"
+    # Cannot serve without a credential, and none is stored.
+    for provider_id in ("deepseek", "brave", "serpapi"):
+        assert module.provider_auth_mode(provider_id, credentials, settings) == ""
+    # SearXNG needs an endpoint, not a key.
+    assert module.provider_auth_mode("searxng", credentials, settings) == ""
+    assert (
+        module.provider_auth_mode(
+            "searxng", credentials, WebSearchSettings(searxng_endpoint="https://searx.example")
+        )
+        == "self-hosted"
+    )
+
+    for provider_id in PROVIDER_IDS:
+        credentials.set_credential(
+            {
+                "tavily": "TAVILY_API_KEY",
+                "deepseek": "DEEPSEEK_API_KEY",
+                "perplexity": "PERPLEXITY_API_KEY",
+                "brave": "BRAVE_API_KEY",
+                "exa": "EXA_API_KEY",
+                "parallel": "PARALLEL_API_KEY",
+                "serpapi": "SERPAPI_API_KEY",
+            }.get(provider_id, "UNUSED_KEY"),
+            "stored",
+        )
+    # With a credential stored, every keyed provider reports the api-key transport
+    # -- including the two whose keyless mode is otherwise the default.
+    for provider_id in ("tavily", "deepseek", "perplexity", "brave", "exa", "parallel", "serpapi"):
+        assert (
+            module.provider_auth_mode(provider_id, credentials, settings) == "api-key"
+        ), provider_id
+
+
+def test_provider_statuses_reports_the_resolved_chain_not_the_stored_list(tmp_path) -> None:
+    from local_operator.web_search.providers import (
+        chain_bands_label,
+        provider_ready_label,
+        provider_state_label,
+        provider_statuses,
+    )
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    settings = WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"])
+    statuses = {status.id: status for status in provider_statuses(settings, credentials)}
+
+    # The bug report in one line: exa serves the chain while `listed` is False.
+    assert statuses["exa"].enabled is True
+    assert statuses["exa"].listed is False
+    assert statuses["exa"].tier == "rotate"
+    assert statuses["exa"].mode == "keyless-mcp"
+    assert provider_state_label(statuses["exa"]) == "auto free"
+    assert provider_ready_label(statuses["exa"]) == "ready"
+
+    assert provider_state_label(statuses["duckduckgo"]) == "enabled"
+    assert provider_state_label(statuses["tavily"]) == "excluded"
+    assert statuses["tavily"].enabled is False
+    assert provider_state_label(statuses["brave"]) == "off"
+    assert provider_ready_label(statuses["brave"]) == "setup needed"
+    assert provider_state_label(statuses["deepseek"]) == "auto paid"
+
+    # The auto line names ONLY the auto-joined providers, and prints `(none)` for
+    # an empty band so a reader can tell it from a surface that forgot to print.
+    label = chain_bands_label(list(statuses.values()))
+    assert label.startswith("free: Exa")
+    assert "best-effort: (none)" in label or "best-effort: Perplexity" in label
+
+
+def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
+    """`search enable` and `search list` must not describe the same provider differently.
+
+    Both read `provider_state_label` + `provider_landing_label`, so a change to the
+    vocabulary moves both surfaces; this pins the pairing rather than the prose.
+    """
+    from local_operator.web_search.providers import (
+        provider_landing_label,
+        provider_statuses,
+    )
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    settings = WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"])
+    statuses = {status.id: status for status in provider_statuses(settings, credentials)}
+
+    assert provider_landing_label(statuses["deepseek"]) == (
+        "auto paid; tried after the free providers, never before a free leg"
+    )
+    assert provider_landing_label(statuses["duckduckgo"]) == "enabled; in your priority order"
+    assert provider_landing_label(statuses["tavily"]) == (
+        "excluded; never used, whatever else is configured"
+    )
+    assert provider_landing_label(statuses["brave"]) == "off; not usable yet"

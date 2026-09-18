@@ -271,17 +271,17 @@ async def execute_web_read(
     # without the DeepSeek provider still gets an honest failure rather than a
     # hang.
     if page_context is None and parsed.search:
-        # Only pin the provider when the session actually has it CONFIGURED.
-        # ``provider_available`` answers whether a credential exists, not whether
-        # the provider is in the session's chain, and forcing an unconfigured one
-        # fails the whole call -- on a default install (duckduckgo, tavily,
-        # perplexity) a DeepSeek model login would make every `search=` read fail
-        # with "provider 'deepseek' is disabled". Falling back to the configured
-        # chain is honest: if it captures no pages, the refusal below says so.
+        # Pin DeepSeek whenever this install can actually use it and the user has
+        # not excluded it. The resolver joins EVERY available, non-excluded
+        # provider to the chain -- a logged-in DeepSeek lands in the metered band
+        # -- so "available and not excluded" now MEANS "in the chain", and forcing
+        # it cannot fail the way the old `"deepseek" in settings.providers` gate
+        # guarded against. Exclusion still wins, because a pin must not override an
+        # explicit "never".
         forced = (
             "deepseek"
-            if "deepseek" in settings.providers
-            and provider_available("deepseek", credentials, settings)
+            if provider_available("deepseek", credentials, settings)
+            and "deepseek" not in settings.excluded_providers
             else None
         )
         service = WebSearchService(
@@ -309,6 +309,8 @@ async def execute_web_read(
                 "Reading works only on pages a `web_search` through the DeepSeek "
                 "provider retrieved (its results carry the page payload; other "
                 "providers return links only), and the captured pages expire. "
+                "Reading needs the DeepSeek provider; if you excluded it, run "
+                "`local-operator search enable deepseek`. "
                 "Use `web_fetch` (or `read <url>`) on the URLs you need, or pass "
                 "`search` to run a search first."
             ),

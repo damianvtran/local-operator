@@ -2374,7 +2374,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="Providers",
         kind=Kind.LIST,
         default=["duckduckgo", "tavily"],
-        help="Comma-separated, in priority order.",
+        # A PRIORITY PREFIX, not an allowlist: naming a provider here means "try
+        # this first", and every other usable provider still follows in its
+        # automatic band. The help says so, because a user who reads the list as
+        # "exactly these" would be surprised by the chain -- and that surprise is
+        # the documented cost of not writing a freezing migration.
+        help="Comma-separated, in priority order; tried before the automatic free providers.",
         members=(
             "duckduckgo",
             "tavily",
@@ -2382,6 +2387,32 @@ SETTINGS: tuple[Setting, ...] = (
             "perplexity",
             "brave",
             "exa",
+            "parallel",
+            "serpapi",
+            "searxng",
+        ),
+    ),
+    Setting(
+        key="web_search.excluded_providers",
+        path=("web_search", "excluded_providers"),
+        section="web_search",
+        label="Excluded providers",
+        kind=Kind.LIST,
+        default=[],
+        # `empty_unsets` is required HERE and is exactly what is wrong for
+        # web_search.providers: [] is this key's DEFAULT (nothing excluded), so an
+        # empty field clears the key rather than failing validation the way an
+        # empty priority list does.
+        empty_unsets=True,
+        help="Never used, even in the automatic chain. Comma-separated; empty = none excluded.",
+        members=(
+            "duckduckgo",
+            "tavily",
+            "deepseek",
+            "perplexity",
+            "brave",
+            "exa",
+            "parallel",
             "serpapi",
             "searxng",
         ),

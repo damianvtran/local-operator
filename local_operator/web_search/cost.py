@@ -76,6 +76,10 @@ PROVIDER_USD_PER_SEARCH: dict[str, float | None] = {
     "perplexity": None,  # token-priced on Sonar; free when anonymous
     "brave": 0.004,  # $4 per 1,000 queries (Brave's own pricing page, 2026-09)
     "exa": 0.005,  # ≈$5 per 1,000 searches (list, 2026-09)
+    # No rate we can verify for Parallel's KEYED Search API, so it is unpriced
+    # rather than "free": the credential-free MCP tier is free (see the keyless
+    # branch below), but the metered one must never render as $0.00.
+    "parallel": None,
     "serpapi": 0.015,  # ≈$15 per 1,000 at the 5,000-search plan
     "searxng": 0.0,  # self-hosted
 }
@@ -90,7 +94,10 @@ PROVIDER_PRICE_NOTES: dict[str, str] = {
     "deepseek": "one model turn billed as tokens at deepseek-flash list price",
     "perplexity": "anonymous mode is free; Sonar bills tokens plus a per-request fee",
     "brave": "$4 per 1,000 queries, subscription",
-    "exa": "≈$5 per 1,000 searches, subscription",
+    "exa": (
+        "≈$5 per 1,000 searches on the REST API; the keyless MCP tier is free within its rate limit"
+    ),
+    "parallel": ("keyless MCP tier is free; no published rate for the keyed Search API"),
     "serpapi": "subscription plans; ≈$15 per 1,000 searches",
     "searxng": "self-hosted; costs no money",
 }
@@ -116,6 +123,15 @@ def deepseek_is_peak_hour(moment: datetime | None = None) -> bool:
     means.
     """
     return tariff.is_peak(tariff.DEEPSEEK_TOU, moment)
+
+
+#: Providers with a documented credential-free tier, so a ``keyless`` usage flag
+#: means "free tier", not "unknown price". Kept as a set rather than one inline
+#: ``provider_id == "tavily"`` test because the two MCP providers joined the same
+#: class: each documents anonymous access as its free tier (tavily's official
+#: keyless mode; Exa's "rate-limited free-tier access for users without a key";
+#: Parallel's "free to use -- no API key required").
+KEYLESS_FREE_PROVIDERS = frozenset({"tavily", "exa", "parallel"})
 
 
 def _deepseek_cost(usage: SearchUsage, moment: datetime | None) -> SearchCost:
@@ -211,7 +227,7 @@ def estimate_search_cost(
             )
         return SearchCost(usd=0.0, basis=f"{BASIS_FREE} (anonymous)", priced_from_usage=False)
 
-    if provider_id == "tavily" and usage is not None and usage.keyless:
+    if provider_id in KEYLESS_FREE_PROVIDERS and usage is not None and usage.keyless:
         return SearchCost(usd=0.0, basis=f"{BASIS_FREE} (keyless tier)", priced_from_usage=False)
 
     rate = PROVIDER_USD_PER_SEARCH.get(provider_id)

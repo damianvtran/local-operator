@@ -25,6 +25,11 @@ def test_search_enable_disable_and_order_persist(monkeypatch, tmp_path) -> None:
     settings = load_search_settings(ConfigManager(config_dir()))
     assert settings.strategy == "ordered"
     assert settings.providers == ["brave", "duckduckgo"]
+    # `disable` commits an EXCLUSION and leaves the priority list alone (removing
+    # the id could empty the prefix into a value the settings registry rejects);
+    # `order` is the explicit "use this" verb, so it clears the exclusion for the
+    # ids it names -- duckduckgo here, and not tavily.
+    assert settings.excluded_providers == ["tavily"]
 
 
 def test_setup_tavily_oauth_writes_http_oauth_server(monkeypatch, tmp_path) -> None:
@@ -40,7 +45,13 @@ def test_setup_tavily_oauth_writes_http_oauth_server(monkeypatch, tmp_path) -> N
         "url": "https://mcp.tavily.com/mcp/",
         "auth": {"type": "oauth"},
     }
-    assert "tavily" in load_search_settings(ConfigManager(config_dir())).providers
+    # Assert the EFFECTIVE chain, not the stored prefix: `enable` no longer appends
+    # to `providers`, and membership of the chain is what the user is asking about.
+    from local_operator.credentials import CredentialManager
+    from local_operator.web_search.providers import resolve_providers
+
+    settings = load_search_settings(ConfigManager(config_dir()))
+    assert "tavily" in resolve_providers(settings, CredentialManager(config_dir()))
 
 
 def test_setup_tavily_oauth_repairs_global_non_oauth_entry(monkeypatch, tmp_path) -> None:
@@ -115,9 +126,15 @@ def test_setup_searxng_validates_and_stores_endpoint(monkeypatch, tmp_path) -> N
         search_command(_args("setup", "searxng", "--endpoint", "https://search.example.test/")) == 0
     )
 
+    from local_operator.credentials import CredentialManager
+    from local_operator.web_search.providers import resolve_providers
+
     settings = load_search_settings(ConfigManager(config_dir()))
     assert settings.searxng_endpoint == "https://search.example.test"
-    assert "searxng" in settings.providers
+    # `setup` calls `enable`, which now means "clear the exclusion" rather than
+    # "append to the stored list". Pin the effective chain instead of the list.
+    assert "searxng" in resolve_providers(settings, CredentialManager(config_dir()))
+    assert "searxng" not in settings.excluded_providers
 
 
 def test_setup_rejects_oauth_for_non_tavily(monkeypatch, tmp_path, capsys) -> None:
@@ -126,3 +143,49 @@ def test_setup_rejects_oauth_for_non_tavily(monkeypatch, tmp_path, capsys) -> No
     assert search_command(_args("setup", "brave", "--oauth")) == 1
 
     assert "--oauth is supported only for Tavily" in capsys.readouterr().out
+
+
+def test_enable_is_an_un_exclusion_and_the_landing_line_names_the_band(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.credentials import CredentialManager
+
+    assert search_command(_args("disable", "deepseek")) == 0
+    assert "excluded" in capsys.readouterr().out
+
+    # No DeepSeek credential here: enabled, but honestly reported as not usable yet
+    # (the landing line reads the SAME state the `search list` row shows).
+    assert search_command(_args("enable", "deepseek")) == 0
+    assert "off; not usable yet" in capsys.readouterr().out
+
+    settings = load_search_settings(ConfigManager(config_dir()))
+    assert settings.excluded_providers == []
+    # `enable` must NOT promote the provider into the priority prefix: for a
+    # metered provider that would be a spend decision the user did not make.
+    assert "deepseek" not in settings.providers
+
+    # With a credential the same verb reports the band it will serve from.
+    CredentialManager(config_dir()).set_credential("DEEPSEEK_API_KEY", "stored")
+    assert search_command(_args("disable", "deepseek")) == 0
+    capsys.readouterr()
+    assert search_command(_args("enable", "deepseek")) == 0
+    assert "auto paid; tried after the free providers" in capsys.readouterr().out
+
+
+def test_search_list_states_the_chain_bands_and_the_new_vocabulary(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    assert search_command(_args("disable", "brave")) == 0
+    capsys.readouterr()
+
+    assert search_command(_args("list")) == 0
+    table = capsys.readouterr().out
+
+    assert "auto:" in table and "free: Exa, Parallel" in table
+    assert "excluded: brave" in table
+    # The stored prefix is no longer the whole chain, and the table says so.
+    assert "duckduckgo   enabled" in table
+    assert "exa          auto free" in table
+    assert "brave        excluded" in table
