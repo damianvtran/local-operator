@@ -142,6 +142,49 @@ async def _settled(app: OperatorApp, pilot: Any, ticks: int = 80) -> None:
         await asyncio.sleep(0.01)
 
 
+async def _wait_for_band_figure(
+    app: OperatorApp, pilot: Any, floor: str, *, timeout: float = 30.0
+) -> str:
+    """The band's cost segment, as soon as it has MOVED off ``floor``.
+
+    The rebuild's own ``rebuilt`` flag is NOT that event, and waiting on it is
+    what CI run 35336307899 caught: the flag is set when the reconstruction is
+    adopted onto the session, one *awaited* record write and one *deferred*
+    apply BEFORE the band reads a figure. The publish is
+    ``refresh_frontend_usage()``, and the app does not paint from it inline —
+    ``_on_frontend_update`` schedules ``_apply_pending_frontend_state`` through
+    ``call_later``. So the old shape (poll the flag, then one ``pause()``) is a
+    bet that both complete inside that pause, and the two sides of the bet do
+    not move together: measured on this box the record write takes 0.9 ms,
+    while ``pause()`` — which waits for the process to look *idle*, and an
+    I/O-bound write looks exactly that — can return after one 20 ms sleep, or
+    under load loop as long as its 1.0 s ceiling.
+
+    This waits on the publication the assertion actually reads instead, with a
+    deadline only so a genuine hang fails the run with a diagnostic rather
+    than blocking the shard. Same shape as ``_settled`` above and as
+    ``tests/unit/tui/waiting.py``'s ``MessageWaiter``: re-test the observable,
+    never the elapsed time.
+    """
+    status = app._status
+    assert status is not None
+    guard = asyncio.timeout(timeout)
+    try:
+        async with guard:
+            while True:
+                figure = status._cost
+                if figure != floor:
+                    return figure
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+    except TimeoutError as error:
+        if not guard.expired():
+            raise
+        raise AssertionError(
+            f"the band never moved off {floor!r}; it still reads {status._cost!r}"
+        ) from error
+
+
 @pytest.mark.asyncio
 async def test_a_resumed_session_opens_on_the_provider_s_own_context_reading(
     tmp_path: Path,
@@ -1046,14 +1089,9 @@ async def test_a_pre_ledger_resume_moves_from_its_floor_to_the_accumulated_figur
             assert app._status is not None
             before = app._status._cost
             release.set()
-            # Wait on the PUBLICATION (the rebuild marks itself rebuilt), with a
-            # deadline only so a genuine hang fails the run instead of blocking.
-            async with asyncio.timeout(30):
-                while not session.spend.rebuilt:
-                    await pilot.pause()
-                    await asyncio.sleep(0.01)
-            await pilot.pause()
-            after = app._status._cost
+            # Wait on the FIGURE, not on the rebuild's flag: see
+            # `_wait_for_band_figure`, which names what the flag's order costs.
+            after = await _wait_for_band_figure(app, pilot, before)
     print(f"BEFORE (newest reading, floor): {before!r}   AFTER (accumulated): {after!r}")
 
     # Two identical $2.10 turns: the band opens on one of them, marked.
