@@ -933,3 +933,107 @@ def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, c
     out = capsys.readouterr().out
     assert "→ release cutter (pid 20): delivered to the mailbox" in out, out
     assert "2 matches skipped (not engaged yet)" in out, out
+
+
+def test_an_exact_session_naming_a_live_composer_is_refused_live_not_cold(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """Q8: the cold lookup runs only when the live scan did not know the id.
+
+    An exact ``--session`` naming a live-but-unengaged record is a refusal about
+    a session the call DID reach, so it has to stand as the live refusal. Asking
+    the store the same question again handed the sender the cold sentence for a
+    live composer ("… it becomes a recipient once someone opens it …"), and for
+    a session with history it would spool a note behind the live process that
+    still owns the conversation — the BLOCKER-1/MAJOR-1 class this module's own
+    comment says must never happen.
+
+    The store here holds the SAME id with real history, so a regressed gate
+    spools a file and is caught rather than silently passing.
+    """
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "composer0001"
+    _engaged(tmp_path, sid)
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_send_mod, "config_dir", lambda: tmp_path)
+
+    record = _Record(4242)
+    record.session_id = sid
+    record.started = False
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [(record, "live")])
+    monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
+    monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
+
+    rc = send_command(_parse_send(["--session", sid, "note to a live composer"]))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"session '{sid}' has not been engaged yet" in err, err
+    # The LIVE remedy, not the cold one — that is the whole of Q8's wording half.
+    assert "its owner has to send a first message" in err, err
+    assert "once someone opens it" not in err, err
+    # And nothing was spooled behind the live record.
+    assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists()
+
+
+def test_an_exact_session_naming_a_wedged_record_is_refused_not_stored(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """Q8, second shape: a wedged match is "the session, not dialable", never a
+    cold delivery. The store holds the same id with history, so the old
+    unconditional lookup would have spooled the note behind the wedged process
+    and reported it as merely held.
+    """
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "wedged000001"
+    _engaged(tmp_path, sid)
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_send_mod, "config_dir", lambda: tmp_path)
+
+    record = _Record(4343)
+    record.session_id = sid
+    # ``_not_dialable`` words the age from the record's own heartbeat.
+    record.heartbeat_at = time.time() - 240
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [(record, "wedged")])
+    monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
+    monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
+
+    rc = send_command(_parse_send(["--session", sid, "note to a wedged session"]))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "has not reported for 4m" in err, err
+    assert "held for the next runtime" not in err, err
+    assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists()
+
+
+def test_an_exact_session_the_live_scan_never_knew_still_spools(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """The documented stored-exact feature, preserved: an id nothing is running
+    answers with the not-found form, so the store IS a new question and the note
+    is spooled for the next runtime.
+    """
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "closed000001"
+    _engaged(tmp_path, sid)
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_send_mod, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(peer_send_mod.registry, "scan", lambda root=None: [])
+    monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
+    monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
+
+    rc = send_command(_parse_send(["--session", sid, "note to a closed session"]))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    from local_operator.session.runtime.inbox import SPOOL_RECEIPT_NOTE
+
+    assert SPOOL_RECEIPT_NOTE in out, out
+    assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()

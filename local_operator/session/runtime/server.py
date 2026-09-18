@@ -1231,7 +1231,16 @@ class RuntimeServer:
                 self._started = True
                 self._record.started = True
         except Exception:  # noqa: BLE001 — a host that cannot answer keeps the conservative False
-            logger.debug("could not read the resumed session's history at boot", exc_info=True)
+            # WARNING, not debug (review round 3, N2): where this fires on a
+            # RESUMED session the record publishes ``started=false`` over a
+            # conversation that has run turns, which is the false-refusal shape
+            # of the F-1 defect — a peer send to it is answered with "no user
+            # message has been sent in it". Benign on a reduced host, and a
+            # signal worth seeing when it is not.
+            logger.warning(
+                "could not read the resumed session's history at boot; " "publishing started=false",
+                exc_info=True,
+            )
         self._publisher: RecordPublisher | None = None
         #: The config dir this runtime was STARTED in, captured by ``start`` /
         #: ``start_in_process`` and handed to the publisher. The record path is
