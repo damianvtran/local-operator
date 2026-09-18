@@ -35,10 +35,11 @@ os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = _SCRATCH
 # This driver boots the REAL ``OperatorApp`` over a seeded session, and it runs
 # the app's turns far enough to settle them — so it is a notification surface
 # (the completion ladder's rung 4 is a genuine macOS banner). Gated here,
-# before the app import below, for the same reason the config dir is set here.
-from scripts.rig_safety import disable_notifications  # noqa: E402
+# before the app import below, for the same reason the config dir is set here
+# (``tui.notify.suppress_notifications_for_process``).
+from local_operator.tui.notify import suppress_notifications_for_process  # noqa: E402
 
-disable_notifications()
+suppress_notifications_for_process("fork evidence driver")
 
 from local_operator.harness.types import Message  # noqa: E402
 from local_operator.session.transcript import Transcript  # noqa: E402

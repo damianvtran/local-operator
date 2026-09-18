@@ -40,13 +40,13 @@ from typing import Any
 # Ensure the repo is importable regardless of the caller's cwd.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.rig_safety import disable_notifications  # noqa: E402
+from local_operator.tui.notify import suppress_notifications_for_process  # noqa: E402
 
 # Both processes this repro forks are real ``lop`` sessions against the scratch
 # store, so both are notification surfaces. Set before the first child env is
 # copied from ``os.environ`` below; the child re-enters this module and the
 # call is idempotent.
-disable_notifications()
+suppress_notifications_for_process("notion 401 repro")
 
 SERVER_URL = "https://mcp.notion.test/mcp"
 
