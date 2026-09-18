@@ -141,8 +141,8 @@ class DecisionResponse:
     vendor: str                                     # "radient" | "typesafe" | "openrouter"
     model: str
     answers: dict[str, Answer]
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None     # None = the vendor sent no usage, NEVER a fabricated 0
+    output_tokens: int | None = None    # (0 is a real figure: Radient bills with output zero)
     cost_usd: float | None = None
     latency_s: float = 0.0
 
@@ -191,6 +191,8 @@ class Recommendation:
     block: str = ""                 # "" means "inject nothing"
     vendor: str | None = None
     cost_usd: float | None = None
+    input_tokens: int | None = None    # None = no figure (a cache hit, a skipped pass,
+    output_tokens: int | None = None   # or a 200 with no usage) -- never a fabricated 0
     latency_s: float = 0.0
     skipped: str | None = None      # "disabled" | "no-vendor" | "empty-roster" | "timeout" | "error" | "circuit-open"
     late_urls: tuple[str, ...] = ()  # the resource_url values on this view that a CALLER's
@@ -214,7 +216,11 @@ class ClassificationService:
 - Returns `Recommendation()` (empty, `skipped` set) rather than raising, for every failure mode.
 - Never calls a vendor when: the setting is off, the cascade has no available leg, the candidate
   list is empty, or the circuit breaker is open.
-- Caches by `sha256(user_message + candidates_digest)` in a bounded per-session LRU (64 entries);
+- Caches by `sha256(user_message + candidates_digest)` in a bounded per-session LRU (64 entries),
+  taken over the roster AS SENT — i.e. after `maxCandidates` has been applied, so a roster change
+  that never reaches the request body cannot force a paid re-call. The key covers the ROSTER, not
+  the whole body: `context` and the `maxStateChars` rung are body inputs outside it (both benign
+  today — no caller supplies `context`, and the rung is a session setting);
   a cache hit costs nothing and must be visible in the returned `latency_s` as ~0.
 - Opens the circuit breaker after **3 consecutive failures** (transport error, 401/403, 429, 529,
   or a 5xx) and leaves it open for the rest of the session. A 422 (our request was malformed) is
@@ -517,6 +523,24 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
   move it), not `build_state` (0.05 ms), not the roster (0.04 ms once per session). It is bounded
   and paid once, so it is not a blocker, but a reader planning from the budget deserves the honest
   figure rather than a mechanism. Next step would be a sampling profile of that single call.
+
+- **The roster duplicate is real, and removing it is a quality decision rather than a byte
+  diet** (measured 2026-09-18 on v0.59.0, operator's own 38-candidate roster as the state builder
+  caps it to 32). `state.candidates` carries the ladder-trimmed candidate lines and each question's
+  `criteria` carry the same descriptions untrimmed, so the roster is sent twice: 3,334 characters
+  of roster text are duplicated inside a 15,934-character body (3,564 wire characters, JSON
+  scaffolding included), i.e. **911 input tokens and $0.000038 of every call — 21.5%**, and input
+  is the whole bill at this vendor's pricing. Dropping `state.candidates` (the criteria ARE the
+  rubric) was measured on a fixed eight-message set with six real calls per leg: the cost fell by
+  exactly 21.5% on every message, and the recommended set held on 5 of 8 — `mcp://notion` on the
+  data-agent message was picked 6/6 with the second copy and 0/6 without it, and the Pergamon
+  message's second pick flipped from `mcp://hubspot` (6/6) to `guide://agents` (6/6). The duplicate
+  is therefore NOT inert: the extra copy acts as a prior that raises the pick rate of the MCP
+  servers, so it is a rubric input rather than a second copy of one. Left in place; revisit as a
+  deliberate answer-quality decision, not as a cost tweak. (For the record, the obvious
+  "fix the contradiction" variant — sending the state's copy untrimmed so the two agree — is worse
+  on both counts: 5,862 input tokens per call, and it moves the answers on 3 of the 8 over two calls
+  per leg, so that variant was not carried further than the second round.)
 
 - Whether the recommendation should be allowed to *remove* an embedder-selected resource when
   its confidence is high. Today: no — additive only. Revisit with data.

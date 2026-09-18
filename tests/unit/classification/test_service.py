@@ -130,8 +130,28 @@ async def test_a_successful_call_carries_the_vendor_the_cost_and_the_block(
     assert recommendation.block == render_block(recommendation.resources)
     assert recommendation.vendor == "radient"
     assert recommendation.cost_usd == pytest.approx(0.00002)
+    # The vendor's own token counts ride the outcome too: they are what the
+    # harness's cost line prints, and input is what this layer is billed for.
+    assert recommendation.input_tokens == 100
+    assert recommendation.output_tokens == 10
     assert recommendation.latency_s > 0.0
     assert legs["radient"].calls[0].state["request"] == "deploy core to qa"
+
+
+async def test_a_leg_that_reports_no_counts_leaves_them_absent(manager, install_legs) -> None:
+    """A 200 whose vendor omitted ``usage`` must not become a fabricated zero.
+
+    The whole point of the cost line is that its figures can be believed, and
+    ``tokens=0/0`` beside a real ``cost=`` is not a figure a reader can act on.
+    The service therefore carries the vendor's absence through as absence — the
+    leg's own default response here is the usage-less shape
+    (``DecisionResponse`` with no counts set).
+    """
+    subject, _ = service(manager, install_legs, radient={})
+    recommendation = await subject.recommend_resources(request())
+    assert recommendation.skipped is None
+    assert recommendation.input_tokens is None
+    assert recommendation.output_tokens is None
 
 
 async def test_one_question_is_asked_per_kind_with_candidates(manager, install_legs) -> None:
@@ -382,9 +402,13 @@ async def test_a_cache_hit_returns_the_same_resources_for_free(manager, install_
     assert second.resources == first.resources
     assert second.block == first.block
     assert second.vendor == first.vendor
-    # A hit costs nothing: no second call, no reported spend, no wall time.
+    # A hit costs nothing: no second call, no reported spend, no wall time — and
+    # no tokens either, so the cost line cannot report a spend for a call that
+    # was not made.
     assert len(legs["radient"].calls) == 1
     assert second.cost_usd is None
+    assert second.input_tokens is None
+    assert second.output_tokens is None
     assert second.latency_s == 0.0
 
 
@@ -400,6 +424,58 @@ async def test_a_changed_roster_is_a_different_cache_key(manager, install_legs) 
     await subject.recommend_resources(request())
     await subject.recommend_resources(
         RecommendationRequest(user_message="deploy core to qa", context=None, candidates=ROSTER[:1])
+    )
+    assert len(legs["radient"].calls) == 2
+
+
+async def test_a_roster_change_past_the_cap_is_a_cache_hit(manager, install_legs) -> None:
+    """A roster change the request cannot carry must not cost a second call.
+
+    ``maxCandidates`` caps the roster per kind before it is sent, so a 13th skill
+    on disk changes nothing about the question the vendor is asked. The cache key
+    used to be taken over the DISCOVERED list, so that entry moved the key while
+    the request body stayed byte-identical — and the session paid for a call it had
+    already made (and answered) for the same message.
+
+    Both requests below carry the SAME sent roster: ``maxCandidates: 1`` keeps the
+    first skill and drops the second, so the body is identical and the second
+    message must be a hit.
+    """
+    subject, legs = service(
+        manager, install_legs, settings_map=settings(maxCandidates=1), radient={}
+    )
+    message = "deploy core to qa"
+    capped = ROSTER[:1]
+    await subject.recommend_resources(
+        RecommendationRequest(user_message=message, context=None, candidates=capped)
+    )
+    beyond_cap = tuple(capped) + (
+        candidate("minerva-router", kind="skill", description="Routes a request to a skill"),
+    )
+    await subject.recommend_resources(
+        RecommendationRequest(user_message=message, context=None, candidates=beyond_cap)
+    )
+    assert len(legs["radient"].calls) == 1
+
+
+async def test_a_roster_change_inside_the_cap_is_a_cache_miss(manager, install_legs) -> None:
+    """The other half of the same property: what IS sent still moves the key.
+
+    Without this, keying the cache on nothing at all would pass the test above.
+    A replacement entry that survives the cap is a different rubric — a different
+    question — and must be asked.
+    """
+    subject, legs = service(
+        manager, install_legs, settings_map=settings(maxCandidates=2), radient={}
+    )
+    message = "deploy core to qa"
+    first = (ROSTER[0], ROSTER[1])
+    second = (ROSTER[0], candidate("tunnel-2", kind="guide", description="Another tunnel guide"))
+    await subject.recommend_resources(
+        RecommendationRequest(user_message=message, context=None, candidates=first)
+    )
+    await subject.recommend_resources(
+        RecommendationRequest(user_message=message, context=None, candidates=second)
     )
     assert len(legs["radient"].calls) == 2
 

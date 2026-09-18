@@ -72,6 +72,11 @@ class Config:
             rag_enabled (bool): Whether RAG is enabled
             auto_save_conversation (bool): Whether to automatically save the conversation
             tool_approval_mode (str): Interactive tool-approval default, ask or auto
+            shell_environment (Dict): What a child process the MODEL asks for may
+                see of this process's own environment. mode is inherit (the
+                default: a copy, today's behaviour) or allowlist (strict: only
+                the SDK's safe set plus inherit); inherit extends that safe set,
+                exclude removes names from both modes
     """
 
     version: str
@@ -274,6 +279,33 @@ DEFAULT_CONFIG = Config(
                     "max_total_bytes": 0,
                     "remove_empty": False,
                 },
+            },
+            # What a child process the MODEL asks for may see of this
+            # process's own environment. ``mode`` is ``inherit`` (the default:
+            # the child gets a copy, so an operator's own commands behave as
+            # they do in their terminal) or ``allowlist`` (the strict mode a
+            # server-owned deployment turns on: only the SDK's safe set plus
+            # ``inherit`` reaches the child, and credential-shaped names have to
+            # be named explicitly). ``inherit`` lists extra names the strict
+            # mode keeps (``LOCAL_OPERATOR_CONFIG_DIR`` when a command in the
+            # shell must still resolve ``$(lop secret get ...)``); ``exclude``
+            # names variables NEITHER mode passes on, winning even over the
+            # harness's own injections.
+            #
+            # WHY the strict mode exists: the harness reads its provider API
+            # key out of its own environment, so the copy is a spend credential
+            # in the hands of any command the model writes — and the runs that
+            # matter are the ones fetching attacker-influenceable pages. The
+            # default is deliberately the permissive one because which mode is
+            # right is a property of the DEPLOYMENT, not something the process
+            # can observe: a laptop session and a server-owned run look
+            # identical from inside. Read live, per call, by
+            # ``tools/shell_env.py`` — the one reader, shared by the bash tool
+            # and the eval worker.
+            "shell_environment": {
+                "mode": "inherit",
+                "inherit": [],
+                "exclude": [],
             },
         },
     }
