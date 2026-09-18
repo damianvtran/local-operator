@@ -1175,6 +1175,15 @@ class AttachedSession:
         #: starts unmuted and only this flag can put the mute back.
         self._event_mute_requested = False
         self._event_mute_tasks: set[asyncio.Task[None]] = set()
+        #: Whether this viewer last told the owner it is DISPLAYING the session
+        #: (see ``viewer_watch``). Remembered for the same reason the mute
+        #: above is: the claim is per CONNECTION and a fresh socket defaults to
+        #: displaying, so a parked source that redialed would silently resume
+        #: suppressing the owner's parked-gate notification until it was
+        #: released. ``True`` is the pre-signal behaviour and the honest start:
+        #: a source that has never declared otherwise IS the one on screen for
+        #: every single-session viewer.
+        self._viewer_displaying = True
         self._name_state = ConversationName()
         self._model: ModelSpec | None = None
         # Double-Esc subagent cancel: the synchronous protocol method issues
@@ -3968,6 +3977,23 @@ class AttachedSession:
                 await asyncio.wait_for(client.set_event_muted(True), timeout=5.0)
             except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
                 logger.debug("event mute re-assert failed", exc_info=True)
+        # Re-assert a switched-away claim across a reconnect, for the same
+        # reason and on the same terms as the mute above: the claim is per
+        # connection and a fresh one defaults to displaying, so a parked
+        # source that redialed would resume suppressing its owner's parked-gate
+        # notification for the rest of the sidebar retention (independent
+        # review round 4, F1b). Only the AWAY claim is re-sent -- `True` is the
+        # owner's own default, so restating it would spend a dial-path round
+        # trip to change nothing.
+        if not self._viewer_displaying:
+            try:
+                # Bounded exactly like the mute re-assert: a wedged owner must
+                # not hold the redial open over a routing signal. A lost
+                # re-assert costs a notification, never correctness -- the
+                # source's release still closes the socket and republishes.
+                await asyncio.wait_for(client.viewer_watch(displaying=False), timeout=5.0)
+            except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
+                logger.debug("viewer watch re-assert failed", exc_info=True)
         if self._surface == "desktop":
             from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
 
