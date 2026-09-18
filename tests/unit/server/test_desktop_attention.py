@@ -710,3 +710,71 @@ def test_every_receipts_refusal_arm_is_composed_for_this_route():
         # ...and the arm is still true about the operation and actionable.
         assert claim in text, (code, text)
         assert remedy in text, (code, text)
+
+
+@pytest.mark.asyncio
+async def test_the_single_receipt_route_answers_in_its_own_nouns(tmp_path, monkeypatch):
+    """M1: BOTH receipt routes compose their copy, pinned at each handler.
+
+    ``POST /v1/desktop/sessions/{session_id}/seen`` is the shipped
+    ``sessions.seen`` contract, and it was left on the classifier's send-path
+    sentences (a full volume: "the message could not be written ... and send it
+    again"; contention: "it will catch up on its own") after the bulk route was
+    fixed -- the same defect class graded MAJOR twice in this PR. Dropping the
+    composer at either route has to fail a test, so this one drives both arms on
+    THIS route rather than asserting the composer's own output.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "synthetic-desktop-token")
+    app = FastAPI()
+    app.include_router(desktop_sessions.router)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    sid = await pool.create(str(tmp_path))
+    token = _publish(tmp_path, sid, "result-1")
+    store = AttentionStore(tmp_path / "attention.db")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer synthetic-desktop-token"},
+    ) as client:
+        route = f"/v1/desktop/sessions/{sid}/seen"
+
+        # A real full volume, raised from the store call the route makes.
+        def full(self, conversation, observed):  # noqa: ANN001 — mirrors the method
+            error = sqlite3.OperationalError("database or disk is full")
+            error.sqlite_errorname = "SQLITE_FULL"
+            raise error
+
+        with monkeypatch.context() as patch:
+            patch.setattr(AttentionStore, "acknowledge", full)
+            response = await client.post(route, json={"completion_token": token})
+        assert response.status_code == 507, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "store_out_of_space", response.text
+        assert "Free some space on the volume holding" in detail["message"], detail["message"]
+        assert "message" not in detail["message"], detail["message"]
+        assert "send it again" not in detail["message"], detail["message"]
+        assert store.state(f"session/{sid}")["unseen"] is True
+
+        # Real contention: a second writer holding the store's write lock.
+        holder = sqlite3.connect(tmp_path / "attention.db")
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            busy = await client.post(route, json={"completion_token": token})
+        finally:
+            holder.rollback()
+            holder.close()
+        assert busy.status_code == 503, busy.text
+        busy_detail = busy.json()["detail"]
+        assert busy_detail["code"] == "store_busy", busy.text
+        assert "Try again in a moment" in busy_detail["message"], busy_detail["message"]
+        assert "catch up on its own" not in busy_detail["message"], busy_detail["message"]
+        assert "message" not in busy_detail["message"], busy_detail["message"]
+        assert store.state(f"session/{sid}")["unseen"] is True
+
+        # …and the healthy path still clears, so the composer did not cost the
+        # route its job.
+        read = await client.post(route, json={"completion_token": token})
+        assert read.status_code == 200, read.text
+        assert read.json()["result"]["unseen"] is False

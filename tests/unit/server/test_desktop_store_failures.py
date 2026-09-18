@@ -340,7 +340,7 @@ def test_every_ladder_call_site_passes_the_request() -> None:
     from pathlib import Path
 
     routes = Path(__file__).resolve().parents[3] / "local_operator" / "server" / "routes"
-    calls: list[tuple[str, int, int, bool]] = []
+    calls: list[tuple[str, int, int, bool, bool]] = []
     for path in sorted(routes.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -350,12 +350,19 @@ def test_every_ladder_call_site_passes_the_request() -> None:
                 and node.func.id == "errors"
             ):
                 first = node.args[0] if node.args else None
+                second = node.args[1] if len(node.args) > 1 else None
                 calls.append(
                     (
                         path.name,
                         node.lineno,
                         len(node.args),
                         isinstance(first, ast.Name) and first.id == "request",
+                        # A composer, when one is passed, is a NAMED reference —
+                        # the module-level function defined next to the ladder, so
+                        # a reader can find the sentence and a test can pin it —
+                        # not an inline lambda or a literal. Never typed because the
+                        # third element only counts arguments (review round 4).
+                        second is None or isinstance(second, (ast.Name, ast.Attribute)),
                     )
                 )
     # 53 at the time of writing, across six modules: a floor rather than an exact
@@ -369,6 +376,7 @@ def test_every_ladder_call_site_passes_the_request() -> None:
     # every future composer into a failure of this test rather than of its own.
     assert [call for call in calls if not call[3]] == [], calls
     assert [call for call in calls if call[2] not in (1, 2)] == [], calls
+    assert [call for call in calls if not call[4]] == [], calls
 
 
 async def test_a_full_volume_answers_out_of_space_and_says_what_to_do(
