@@ -732,14 +732,23 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # 50 cells, inside the /help wrap budget (74 at 80 columns). The word
     # `notifications` is long enough that the description has to stay short or
     # the composed row wraps and the tail lands in the glyph gutter.
+    #
+    # THE VERB IS `read`, and neither rejected alternative is spelled here
+    # (design round 1, D1): `clear` collides with `/clear` on the one surface a
+    # user reads BEFORE typing, and `all` is content-free next to the command's
+    # own name while over-claiming the scope -- this clears the completions the
+    # app paints, not everything unseen on the machine. The row taught both
+    # words and the command refuses both by name, which is how a user learns a
+    # vocabulary it then rejects. The receipt below says "marks … read", so the
+    # row and the answer now use one verb for one act.
     SlashCommand(
         "notifications",
-        "Unread completions; /notifications read clears all",
+        "Unread completions; `read` marks them read",
         arguments=ArgumentMode.OPTIONAL,
         # The vocabulary is one word (`read`). Declared `WORD` rather than
         # `NONE` because the trailing text IS read by the handler, which is the
         # criterion `ArgumentShape` states: a second word is refused by name
-        # rather than silently run as the clearing form.
+        # rather than silently run as the marking form.
         argument_shape=ArgumentShape.WORD,
     ),
     # Uses this computer's Radient login and user service. The final setup or

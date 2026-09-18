@@ -607,7 +607,7 @@ async def test_store_contention_costs_the_whole_batch_and_writes_nothing(tmp_pat
 async def test_an_unreadable_store_costs_the_whole_batch_and_writes_nothing(tmp_path, monkeypatch):
     """R4's other arm: the store failure the classifier cannot name as transient.
 
-    ``server/utils/store_failures`` splits the three sqlite conditions rather
+    ``session/store_failures`` splits the three sqlite conditions rather
     than answering all of them with the contention sentence; this route must
     inherit that split instead of flattening it, so an unreadable store answers
     the 500 that says retrying will not help. The batch-wide guarantee is the

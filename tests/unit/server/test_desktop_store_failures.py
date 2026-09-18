@@ -35,8 +35,14 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.config import ConfigManager
 from local_operator.server.routes import desktop_profiles, desktop_sessions
 from local_operator.server.routes.desktop_sessions import errors
-from local_operator.server.utils import store_failures
-from local_operator.server.utils.store_failures import (
+
+# The classifier itself lives under ``session/`` so the TUI can reach it without
+# importing ``local_operator.server`` (agent review round 1, R1). Patched through
+# THAT module rather than the server shim: ``shutil`` is looked up in the module
+# the implementation runs in, so a patch on the re-exporting shim would be a
+# silent no-op.
+from local_operator.session import store_failures
+from local_operator.session.store_failures import (
     BUSY_MESSAGE,
     FULL_VOLUME_FLOOR_BYTES,
     OUT_OF_SPACE_MESSAGE,
@@ -459,7 +465,7 @@ async def test_a_corrupt_receipt_store_refuses_over_http_on_another_modules_rout
     # SQLite's own text never reaches the client -- the rule this ladder keeps
     # for store errors. The CONFIG ROOT does now, deliberately: that is a path
     # this process chose as the place to look, not one SQLite's message carried
-    # (see the constants' comments in ``server/utils/store_failures.py``).
+    # (see the constants' comments in ``session/store_failures.py``).
     assert "not a database" not in detail["message"]
     assert "unable to open database file" not in detail["message"]
     assert any(
