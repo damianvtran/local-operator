@@ -190,6 +190,11 @@ async def test_stop_target_uses_the_send_vocabulary(monkeypatch: pytest.MonkeyPa
             if 'stopped "other agent"' in _notices(app):
                 break
         assert resolved and resolved[0]["target"] == "other"
+        # The KILL-SWITCH carve-out, pinned at the call site: a session that has
+        # not run a turn yet must stay stoppable by name, while `send` refuses
+        # it. Losing this flag here silently re-hides the fresh `/new` window
+        # from `/stop`.
+        assert resolved[0]["require_started"] is False
         assert 'stopped "other agent"' in _notices(app)
         assert commands == ["/stop"]
         # This session is untouched: a target stop never ends the caller.

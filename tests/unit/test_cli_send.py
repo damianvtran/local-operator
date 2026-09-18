@@ -24,12 +24,38 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from local_operator.cli import _bind_send_positionals, build_cli_parser, send_command
+
+
+def _engaged(root: Path, session_id: str) -> None:
+    """Give a STORED session a real turn on disk.
+
+    The stored fallback now skips a row whose session has no durable history
+    (and the cold delivery refuses one), because a session nobody has typed in
+    is not a recipient — so every stored row that is meant to resolve or to be
+    listed as a candidate needs a transcript holding a plain ``Message`` row.
+    """
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _send_args(**overrides) -> argparse.Namespace:
@@ -553,11 +579,14 @@ def test_send_to_a_stored_session_by_name_spools(monkeypatch, tmp_path, capsys) 
 
     ``resolve_peer_target`` sees no live record, so the CLI falls back to the
     stored store, resolves the name to the stored id, and delivers through the
-    unchanged cold path — a quiet mailbox spool, not a refusal.
+    unchanged cold path — a quiet mailbox spool, not a refusal. The stored
+    session HAS run a turn: that is what makes it a recipient at all now (a
+    never-engaged stored row is skipped by the resolver and refused by the cold
+    gate).
     """
     monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
     sid = "cafe0123beef"
-    (tmp_path / "sessions" / sid).mkdir(parents=True)
+    _engaged(tmp_path, sid)
 
     class _Row:
         id = sid
@@ -609,7 +638,8 @@ def test_no_match_now_names_both_live_and_stored(capsys, tmp_path, monkeypatch) 
 
 def test_ambiguous_stored_matches_list_sessions_not_pids(capsys, tmp_path, monkeypatch) -> None:
     """A stored ambiguity names session ids (a pid is an address that can never
-    resolve for a session that is not running)."""
+    resolve for a session that is not running). Both rows have run a turn, so
+    both are recipients and neither is skipped for being unengaged."""
     monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
     monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
     monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
@@ -619,6 +649,8 @@ def test_ambiguous_stored_matches_list_sessions_not_pids(capsys, tmp_path, monke
             self.id, self.name, self.mtime = sid, name, 0.0
 
     rows = [_Row("aaaa1111bbbb", "review multi A"), _Row("cccc2222dddd", "review multi B")]
+    for row in rows:
+        _engaged(tmp_path, row.id)
     monkeypatch.setattr("local_operator.resume.recent_session_rows", lambda d, limit=None: rows)
     with patch(
         "local_operator.cli._resolve_peer_target",
