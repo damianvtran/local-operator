@@ -374,6 +374,39 @@ def test_an_adopted_listener_keeps_its_address_family() -> None:
         donor.close()
 
 
+def test_a_spawn_that_arrives_during_the_smoke_is_still_waited_for(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1: the drain does not cover the off-loop smoke, so it is re-asked.
+
+    Moving the smoke to a thread made the pre-exec phase longer than the wait that
+    guards it, and the term the wait exists for — a runtime being SPAWNED, whose
+    ~1.2 s handshake is the one cut this module calls unrecoverable — can begin in
+    that window. A first drain that returned at t=0 says nothing about t=0.3.
+
+    The blocker answers "clear" once and "busy" thereafter, which is exactly a
+    spawn arriving during the smoke: with only the first drain, this test's
+    `_exec` would be reached and would fail.
+    """
+    reloader = _watch(_app(fd=19))
+    answers = {"n": 0}
+
+    def blocker() -> str | None:
+        answers["n"] += 1
+        return None if answers["n"] == 1 else "a runtime is being spawned"
+
+    monkeypatch.setattr(reloader, "blocker", blocker)
+    # Zero budgets so the single-poll refusal is immediate instead of ten seconds.
+    monkeypatch.setattr(serve_reload, "DRAIN_BUDGET_S", 0.0)
+    monkeypatch.setattr(serve_reload, "_smoke", lambda interpreter: None)
+    monkeypatch.setattr(
+        serve_reload, "_exec", lambda plan: pytest.fail("exec'd with a spawn in flight")
+    )
+    with pytest.raises(serve_reload.ReloadRefusal, match="being spawned"):
+        asyncio.run(reloader.perform())
+    assert answers["n"] >= 2
+
+
 def test_install_refuses_a_boot_with_no_listener(install: dict[str, Any]) -> None:
     """``None`` is a refusal the record then publishes, not a failure to report."""
     assert serve_reload.install(_app(fd=None)) is None  # type: ignore[arg-type]

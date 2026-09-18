@@ -36,6 +36,25 @@ from local_operator.update import (
     update_command,
 )
 
+_REAL_SERVICES_REFUSAL = update_mod._services_refusal
+
+
+@pytest.fixture(autouse=True)
+def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default to "this install owns the fleet" for every test in this module.
+
+    The ownership check has its own tests below; every OTHER test here is about
+    the shape of `lop update`'s output or its failure paths, and without this each
+    of them would have to fabricate an install tree whose root happens to equal
+    `sys.prefix` — which is a pytest process's venv, not a generation, so they
+    would all be asserting against a refusal instead of against the thing they
+    were written for.
+
+    A test that wants the real guard puts `_REAL_SERVICES_REFUSAL` back, which
+    wins because a test's own `monkeypatch` runs after this fixture.
+    """
+    monkeypatch.setattr(update_mod, "_services_refusal", lambda: None)
+
 
 def _pypi_transport(
     status: int = 200, version: str = "0.28.0", delay: float = 0
@@ -646,24 +665,80 @@ def test_update_no_services_still_repairs_the_supervised_daemons(
     assert ran == ["daemons"]
 
 
-def test_the_services_stage_refuses_a_checkout(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_the_services_stage_refuses_an_install_that_is_not_the_one_the_pointer_names(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """R3-2: the guard must ask OWNERSHIP, not just install kind.
+
+    Asking only "is this an installation at all" let a pip-installed `lop update`
+    reload the fleet the uv-tool install owns. Harmless in destination — everything
+    converges on the shared pointer — but not in authority, and a spurious reload
+    cuts the app's relay for nothing. This mirrors `_repair_refusal`'s second
+    question.
+    """
+    from pathlib import Path
+
+    from local_operator import services, update
+    from local_operator.update import InstallKind
+
+    called: list[str] = []
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "current_generation", lambda: Path("/generations/g1"))
+    monkeypatch.setattr(
+        update, "_generation_install_root", lambda generation: Path("/someone/elses/install")
+    )
+    monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
+    update._services_stage()
+    assert called == []
+    assert "is not the install the pointer names" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", [InstallKind.EDITABLE, InstallKind.UNKNOWN])
+def test_the_services_stage_refuses_a_checkout(
+    kind: object, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
     """R2-1's sentence: a worktree does not own this machine's services.
 
     Before the services stage existed this was unreachable by construction (a
     checkout that was behind hit `editable_refusal`; one that was not behind
     returned early). Wiring the stage to the "nothing to install" path is what
     opened it, and the consequence was measured in review — an editable caller
-    classifies every daemon as stale and signals the fleet.
+    classifies every daemon as stale and signals the serve fleet.
     """
     from local_operator import services, update
-    from local_operator.update import InstallKind
 
     called: list[str] = []
-    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.EDITABLE)
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", lambda *a, **k: kind)
     monkeypatch.setattr(services, "restart_services", lambda **k: called.append("ran"))
     update._services_stage()
     assert called == []
     assert "does not own this machine's services" in capsys.readouterr().err
+
+
+def test_a_uv_tool_caller_that_is_the_pointer_install_may_proceed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard must not refuse the caller it exists for.
+
+    Checked against the REAL install on this machine before this was written: the
+    `current` generation's `lop` has `sys.prefix == _generation_install_root(current)`,
+    so this is the shape a legitimate caller actually has.
+    """
+    import sys
+    from pathlib import Path
+
+    from local_operator import update
+    from local_operator.update import InstallKind
+
+    monkeypatch.setattr(update, "_services_refusal", _REAL_SERVICES_REFUSAL)
+    monkeypatch.setattr(update, "install_kind", lambda *a, **k: InstallKind.UV_TOOL)
+    monkeypatch.setattr(update, "current_generation", lambda: Path("/generations/g1"))
+    monkeypatch.setattr(
+        update, "_generation_install_root", lambda generation: Path(sys.prefix).resolve()
+    )
+    assert update._services_refusal() is None
 
 
 def test_main_dispatches_services_status(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

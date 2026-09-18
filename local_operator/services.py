@@ -246,6 +246,12 @@ def reload_serve_daemons(
         # end in review with a fabricated-root daemon: stale → signalled →
         # really reloaded.
         #
+        # THE BLAST RADIUS IS THE SERVES, not the whole fleet (review round 3,
+        # R3-4: an earlier version of this comment listed the mobile daemon, the
+        # browser bridge and the tunnel, and overclaimed — `_repair_refusal`
+        # already refuses an editable caller inside the plist refresh child, so
+        # the only part with no guard at all was this one).
+        #
         # The invariant this restores: "stale" is a comparison, and a comparison
         # against an absent right-hand side is not a verdict. Fail-closed, and
         # said out loud — an operator whose pointer is unreadable AND who has
