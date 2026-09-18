@@ -216,7 +216,7 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: distinction the 13-byte precedent above did not make. Measure the guard, not
 #: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
 #: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
-#: (the fixture's frame lands at 1,048,400 of 1,048,576, i.e. 176 B under, with
+#: (the fixture's frame lands at 1,048,408 of 1,048,576, i.e. 168 B under, with
 #: the catalogue grown from its 50-row floor to 54). The number that matters is
 #: the one the overshoot was about — whether the FLOOR fits: with the catalogue
 #: held at its floor the frame now has 1,384 B of line where it had 416 B too
@@ -390,21 +390,37 @@ _SHAREABLE_STATE_FIELDS = frozenset(
 #:
 #: The value is 60,000 less the clock a retained end now carries. The fold
 #: stamps every settled end with its call's own ``started_at_epoch`` (see
-#: ``_fold_live_event``), which is 39 B on the row's ENVELOPE — outside the
+#: ``_fold_live_event``), which is 40 B on the row's ENVELOPE — outside the
 #: ``result`` this budget clips — so the only thing in this field that can give
-#: those bytes back is the text share itself: 60,000 - 39 x
-#: :data:`LIVE_EVENT_END_ROWS_MAX` (100) = 56,100. Without it the field's own
-#: worst case grows past the frame it has to coexist with, and the class guard
-#: is where that lands: with every other field at its own maximum the all-year
-#: fixture measures 1,051,092 B against the 1,048,576-byte line — 2,516 B over,
-#: because ``model_catalogue``, the frame's slack absorber, could give back only
-#: 1,208 B of the stamp's 3,900 B before its own floor. Paid here instead, the
-#: same fixture measures 1,048,400 B, which is what it measures on the released
-#: build: the stamp costs the frame nothing and the seed keeps its row cap, its
-#: fixture and its ~99 KB worst case. The cost is 39 characters off a preview
-#: the field already truncates, spent in the order the retention rule already
-#: ranks (identity and outcome first, then preview text, then ``details``).
-LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 56_100
+#: those bytes back is the text share itself: 60,000 - 40 x
+#: :data:`LIVE_EVENT_END_ROWS_MAX` (100) = 56,000. The per-row figure is the
+#: stamp's cost at the WIDEST epoch the producer emits, not at a typical
+#: sample: the only producer is ``time.time()`` (``harness/loop.py``), whose
+#: 10-integer-digit values at this magnitude carry six or seven fractional
+#: digits, so ``json.dumps`` writes an 18-character number —
+#: ``1789696914.5158982`` — for a large share of a run and never more than 18.
+#: Charging anything short of that maximum instead would leave the guard — the
+#: mechanism whose whole job is to catch the NEXT field's growth — reporting
+#: headroom the real frame does not have.
+#:
+#: Without the pay-down the field's own worst case grows past the frame it has
+#: to coexist with, and the class guard is where that lands: with every other
+#: field at its own maximum the all-year fixture measures 1,051,200 B against
+#: the 1,048,576-byte line — 2,624 B over. That is not the full 4,000 B because
+#: ``model_catalogue``, the frame's slack absorber, reclaims 1,208 B of what the
+#: text cut releases: it sits on its 50-row floor at the larger text share
+#: (15,080 B) and grows to 54 rows at the smaller one (16,288 B). Paid here
+#: instead the same fixture measures 1,048,408 B, 168 B under the line — and 8 of
+#: those bytes are not the stamp's: the fixture's own 8-entry
+#: ``live_tool_started_at`` map now carries the real epoch's width too, and that
+#: map exists on the released build. Measured, the frame is 1,048,400 B — the
+#: figure the released fixture signed off — when that one literal keeps its old
+#: width, and 1,048,408 B when it does not. Either way the stamp costs the frame
+#: nothing, the seed keeps its row cap, its fixture and its ~99 KB worst case,
+#: and the give-back is 40 characters off a preview the field already truncates —
+#: spent in the order the retention rule already ranks (identity and outcome
+#: first, then preview text, then ``details``).
+LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 56_000
 LIVE_EVENT_TEXT_FLOOR_CHARS = 200
 
 #: Placeholder for a result block too big to ride the reconnect seed.
@@ -460,6 +476,12 @@ LIVE_EVENT_BLOCK_ELIDED_SEPARATOR = "\n"
 #: Dropping OLDEST-first is what makes the cap safe: the newest calls are the
 #: ones most likely to still be on screen unsettled, and a dropped row costs
 #: nothing durable — the transcript replay repaints those cards regardless.
+#:
+#: Raising this cap is not a change to this constant alone. Each added row
+#: carries the settled end's own clock, and that clock's bytes come out of
+#: :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS` — 40 B a row at the widest epoch
+#: ``time.time()`` emits — so a new cap obliges the text budget to give back
+#: ``40 x (new cap - 100)`` characters, or the frame guard above fails.
 LIVE_EVENT_END_ROWS_MAX = 100
 
 #: Smallest catalogue the wire will clip to, however little the frame has left.
