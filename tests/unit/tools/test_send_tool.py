@@ -621,3 +621,107 @@ async def test_a_wedged_unique_live_match_is_refused_not_stored_delivered(
     # asserted a cause and a timetable the record cannot support.
     assert "has not reported for 4m" in result.text
     assert not (tmp_path / "sessions" / "wedge0000abc" / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_stored_row_is_named_by_the_tool_path_too(monkeypatch, tmp_path) -> None:
+    """F-10: the tool's half of F-4.
+
+    ``builtin`` reads the stored resolver's refusal off its third element
+    (``elif stored_error: error = stored_error``) rather than overwriting it
+    with the composed two-search sentence. Only the CLI twin was pinned, so a
+    regression here would have been visible only to a human typing ``lop
+    send`` — nothing else in this file mentioned the withheld case at all.
+
+    The stored row is real and really unengaged: its transcript holds a peer
+    note and no message row, which is the state the incident produced.
+    """
+    from local_operator.mobile import peer_send
+
+    sid = "quiet0000abc"
+    session_dir = tmp_path / "sessions" / sid
+    session_dir.mkdir(parents=True)
+    (session_dir / "transcript.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "p1",
+                "ts": 1,
+                "type": "message",
+                "payload": {
+                    "kind": "custom",
+                    "custom_type": "peer_message",
+                    "attribution": "user",
+                    "details": {"body": "a peer got here first"},
+                },
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(peer_send, "config_dir", lambda: tmp_path)
+
+    class _Row:
+        id = sid
+        name = "credential work"
+        mtime = 0.0
+
+    # The listing rule is the picker's, and this row is on it while its store
+    # has no durable history — the only shape that reaches the withheld branch.
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows", lambda directory, limit=None: [_Row()]
+    )
+    monkeypatch.setattr(
+        peer_send, "resolve_peer_target", lambda **_kwargs: (None, [], "no live session matches")
+    )
+
+    result = await execute_send(
+        "t14",
+        {"target": "credential", "message": "hello", "wake": False},
+        None,
+        None,
+        _context(),
+    )
+
+    assert result.is_error is True
+    assert "has not been engaged yet" in result.text, result.text
+    assert f"session '{sid}'" in result.text, result.text
+    assert "searched live and stored" not in result.text, result.text
+    # Nothing was spooled to the row on the way to that answer.
+    assert not (session_dir / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_receipt_reports_the_matches_a_name_send_skipped(monkeypatch) -> None:
+    """D1 (design round 1), tool half: the model sees what a human sees.
+
+    ``execute_send`` appends ``skipped_clause`` to the delivered line, so a
+    name send that reached one recipient and passed over unengaged matches does
+    not tell the model it was a clean success. The resolver's own half — that
+    it collects those matches into ``skipped`` — is pinned in
+    ``mobile/test_peer_send.py``; this pins the receipt plumbing, with a real
+    delivery to a real registrant.
+    """
+    from local_operator.mobile import peer_send
+
+    registrant, alias, _handle = await _start_peer("release cutter")
+    try:
+
+        def _resolve(**kwargs):
+            skipped = kwargs["skipped"]
+            assert skipped == []
+            skipped.extend([object(), object()])
+            return (alias, [], "")
+
+        monkeypatch.setattr(peer_send, "resolve_peer_target", _resolve)
+        result = await execute_send(
+            "t15",
+            {"target": "release", "message": "announce to every peer", "wake": False},
+            None,
+            None,
+            _context(),
+        )
+        assert result.is_error is False
+        assert result.text.startswith("→ release cutter"), result.text
+        assert "delivered to the mailbox (will be read on the next turn)" in result.text
+        assert "2 matches skipped (not engaged yet)" in result.text, result.text
+    finally:
+        registrant.close()

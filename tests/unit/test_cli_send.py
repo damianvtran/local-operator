@@ -26,6 +26,7 @@ import argparse
 import io
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,7 +73,15 @@ def _send_args(**overrides) -> argparse.Namespace:
 
 
 class _Record:
-    """The minimal SessionRecord shape the guard and sender identity touch."""
+    """The minimal SessionRecord shape the guard, sender identity and the
+    resolver's two gates touch.
+
+    ``heartbeat_at`` and ``started`` are the fields the live resolver reads:
+    liveness is judged from the heartbeat (the age is clamped against
+    ``HEARTBEAT_TIMEOUT_S``), and the engagement gate reads ``started``. The
+    defaults here are a live, engaged record, so a test that only needs an
+    addressable target says nothing about either.
+    """
 
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -82,6 +91,8 @@ class _Record:
         self.cwd = "/tmp"
         self.control_port = 1
         self.control_key = "k"
+        self.heartbeat_at = time.time()
+        self.started = True
 
 
 class _FakeTtyStdin:
@@ -877,3 +888,48 @@ def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
     assert "could not deliver" not in line, line
     assert "delivery is UNCONFIRMED" in line, line
     assert "do not send it again" in line, line
+
+
+def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, capsys) -> None:
+    """D1 (design round 1): the CLI receipt carries the clause the tool's result
+    text carries.
+
+    A name send that reached one recipient and passed over two unengaged
+    matches must not print a bare success — the sender typed one command
+    believing it reached its needle, and the GUIDE's "skips such a session and
+    says so" has to be true of the product, not just of the guide.
+
+    This one drives the REAL resolver (only the registry scan and the dial are
+    doubled), because the clause is composed from what the scan held back.
+    """
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    engaged = _Record(20)
+    engaged.conversation_name = "release cutter"
+    fresh = [_Record(10), _Record(11)]
+    for rec in fresh:
+        rec.conversation_name = "release build"
+        # The double already carries a fresh heartbeat and ``started=True``;
+        # only the engagement bit has to be flipped for the held-back pair.
+        rec.started = False
+
+    monkeypatch.setattr(
+        peer_send_mod.registry,
+        "scan",
+        lambda root=None: [(engaged, "live"), (fresh[0], "live"), (fresh[1], "live")],
+    )
+
+    async def _deliver(_record, **_kwargs):
+        return "delivered to the mailbox (will be read on the next turn)"
+
+    monkeypatch.setattr(peer_send_mod, "deliver_peer_message", _deliver, raising=True)
+    monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
+    monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
+
+    rc = send_command(_parse_send(["release", "announce to every peer"]))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "→ release cutter (pid 20): delivered to the mailbox" in out, out
+    assert "2 matches skipped (not engaged yet)" in out, out

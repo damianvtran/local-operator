@@ -2218,8 +2218,11 @@ class Session:
         #: handle (``ServingSessionHandle._publish_session_started``) and probed
         #: so a reduced host without it is a no-op.
         self._publish_session_started: Callable[[], None] | None = None
-        #: Guards the once-per-lifetime peer-inbox drain at the top of
-        #: ``_run_turn_pipeline`` — see ``_drain_spooled_peer_inbox``.
+        #: Guards the once-per-lifetime peer-inbox drain inside
+        #: ``_run_turn_pipeline``. That drain is deliberately NOT at the top of
+        #: the pipeline: it runs once this turn's own messages are durable, so a
+        #: leftover spool can never become the opening row of the history (see
+        #: ``_drain_spooled_peer_inbox``).
         self._peer_inbox_drained = False
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
@@ -7912,9 +7915,12 @@ class Session:
         # reason the flip above is here — this is the single choke point every
         # spawn path funnels through — and guarded the same way, because a
         # record that could fail a turn would be a worse defect than the
-        # unattributable death it exists to fix. Called AFTER the inbox drain
-        # above on purpose: a drain that aborts before the turn starts should
-        # not leave a row claiming a turn that never ran.
+        # unattributable death it exists to fix. The row opens the turn at
+        # ADMISSION, above both the pre-abort drop and the peer-inbox drain that
+        # run further down this pipeline; the drain in particular is no longer
+        # above this line — it runs AFTER this turn's own messages are durable
+        # (see ``_drain_spooled_peer_inbox``) — so nothing here is ordered
+        # against it any more.
         note_open = getattr(self, "note_turn_open", None)
         if callable(note_open):
             try:
@@ -8163,6 +8169,18 @@ class Session:
             # as pre-aborted, or a turn that fails before its own rows are
             # written, leaves the spool whole for the next real turn instead of
             # discarding rows it never showed anyone.
+            #
+            # A spooled row's own ``wake`` is NOT authoritative here, and that
+            # is a property of this position rather than an oversight: the drain
+            # runs inside a turn that is already streaming (``_is_streaming`` is
+            # True above), so ``receive_peer_message`` takes its busy branch and
+            # the row rides THIS turn's context as a quiet note instead of
+            # spawning a second turn. That is the benign direction — nothing is
+            # lost, the row is durable and in live context, and it is exactly
+            # what a live dial into a busy session does — but do not read the
+            # row's field as "a turn will be driven for this": a sender's
+            # ``--wake`` asks for attention, and it gets the attention of the
+            # turn already running.
             await self._drain_spooled_peer_inbox()
 
             # Inventory changes deferred from a `web_*.enabled` edit land HERE,

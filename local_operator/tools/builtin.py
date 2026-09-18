@@ -8022,17 +8022,25 @@ async def execute_send(
         live_scan_found_nothing,
         peer_sender_identity_async,
         resolve_peer_target,
+        skipped_clause,
         validate_peer_body,
     )
 
     # Off the loop: the resolver reads and parses every registry record, and
     # this tool runs inside the session's own event loop, where a blocking
     # filesystem walk stalls the UI along with every other task.
+    #
+    # ``skipped`` carries the name-matches held back for being unengaged into
+    # the receipt below, so a model that broadcast a name learns which part of
+    # its needle was not delivered (design round 1, D1). The CLI appends the
+    # same clause from the same helper, so a model and a human read one wording.
+    skipped: list[Any] = []
     record, candidates, error = await asyncio.to_thread(
         resolve_peer_target,
         target=params.target,
         pid=params.pid,
         session=params.session,
+        skipped=skipped,
     )
     if candidates:
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
@@ -8186,16 +8194,20 @@ async def execute_send(
         return _text(
             tool_call_id,
             "send",
-            f"→ {name} (pid {record.pid}): {detail}",
+            f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}",
             details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
         )
     # A session with no runtime: the receipt names the session rather than a
     # pid, because there is no process to name and claiming one would be a lie
-    # the model might then try to signal.
+    # the model might then try to signal. The clause is normally empty here — a
+    # stored fallback happens only when the live scan matched NOTHING, and a
+    # live match that was merely unengaged returns the refusal instead — but it
+    # is composed once for both receipts, so a future stored delivery cannot
+    # silently drop the fact that a live namesake was skipped.
     return _text(
         tool_call_id,
         "send",
-        f"→ {cold_session_id} (not running): {detail}",
+        f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}",
         details={
             "session_id": cold_session_id,
             "mode": mode,

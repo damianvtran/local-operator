@@ -241,9 +241,17 @@ reach until that first message is sent:
 - an exact `--pid`/`--session` send is refused with the reason — *"… has not
   been engaged yet (no user message has been sent in it), so it cannot receive
   peer messages — its owner has to send a first message"* — and nothing is
-  delivered or spooled;
-- a substring/broadcast match skips such a session and says so, rather than
-  falling through to a stored session that merely shares its name;
+  delivered or spooled. On a **stored** session (nothing running) the closing
+  clause is worded for a window nobody can type into — *"it becomes a
+  recipient once someone opens it and sends a first message"* — because a
+  sender cannot open it;
+- a substring/broadcast match skips such sessions, without falling through to
+  a stored session that merely shares the name. A send that still reaches a
+  recipient says how many were left out — `→ name (pid N): delivered to the
+  mailbox (will be read on the next turn); 3 matches skipped (not engaged yet)`
+  — so a partly-delivered broadcast is never reported as a clean success; when
+  nothing else matched, the refusal names the sessions it passed over instead
+  of the `no session matches` form;
 - `/stop <target>` (and `lop stop <target>`) still resolves it — the kill
   switch names a session in order to stop it, so a composer window someone
   needs to end stays reachable.
