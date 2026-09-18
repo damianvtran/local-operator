@@ -61,6 +61,21 @@ INBOX_NAME = "inbox.jsonl"
 #: above is 38 and 51 — inside that measured budget — because a longer receipt
 #: buys precision the sender does not need at the cost of the one property that
 #: was checked. A frame is not the place to discover a wrap.
+#:
+#: WHICH CONSUMER HONOURS A SPOOLED WAKE, since the string promises a turn
+#: (QA round 3, Q9): the BOOT drain (``process.amain``, idle session, before the
+#: socket listens) drives the turn this string promises, and that is the only
+#: shape the send path can produce — ``deliver_peer_message`` spools only when
+#: ``not wake and mode == "mailbox"``, so a wake row comes only from a successor
+#: handover (``serving._spool_for_successor``, the one writer holding the
+#: sender's ``wake``); a row written before the field existed parses as a
+#: QUIET note (``InboxLine.from_json`` reads an absent ``wake`` as False), which
+#: is the NOTE receipt, not this one (review round 4, NIT-2). The FIRST-TURN
+#: drain reaches the receiver
+#: mid-turn instead, where the row rides that turn's context (see the paragraph
+#: at its call site in ``session._run_turn_pipeline``); the string is left as the
+#: boot drain's promise rather than stretched to describe both, because the
+#: over-claim needs a row no send can write.
 SPOOL_RECEIPT_WAKE = "held for the next runtime — it runs it"
 SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
 

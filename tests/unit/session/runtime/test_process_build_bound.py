@@ -619,6 +619,14 @@ async def test_the_boot_drain_runs_a_spooled_wake(tmp_path: Path) -> None:
 
     append_inbox(tmp_path, InboxLine(text="run the report", sender={}, mode="mailbox", wake=True))
     append_inbox(tmp_path, InboxLine(text="fyi", sender={}, mode="mailbox", wake=False))
+    # The session this spool belongs to has run a turn, which is what makes it a
+    # recipient at boot at all: an unengaged session keeps its spool for the
+    # first turn instead (see tests/unit/session/runtime/test_inbox.py).
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
     seen: list[tuple[str, str, bool]] = []
 
     class Handle:

@@ -7955,7 +7955,8 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
             "right away; `wake=False` is the quiet "
             "mailbox drop (read on the peer's next turn), and `now=True` steers "
             "mid-turn (opens a turn if the peer is idle). The result says how the "
-            "peer received it."
+            "peer received it. A session with no message sent in it yet (a fresh "
+            "`/new`) is not a recipient: sends to it are refused."
         ),
         parameters=SendParams.model_json_schema(),
         # write tier: a delivery can start an autonomous turn in ANOTHER session
@@ -8035,17 +8036,26 @@ async def execute_send(
         live_scan_found_nothing,
         peer_sender_identity_async,
         resolve_peer_target,
+        session_id_unowned,
+        skipped_clause,
         validate_peer_body,
     )
 
     # Off the loop: the resolver reads and parses every registry record, and
     # this tool runs inside the session's own event loop, where a blocking
     # filesystem walk stalls the UI along with every other task.
+    #
+    # ``skipped`` carries the name-matches held back for being unengaged into
+    # the receipt below, so a model that broadcast a name learns which part of
+    # its needle was not delivered (design round 1, D1). The CLI appends the
+    # same clause from the same helper, so a model and a human read one wording.
+    skipped: list[Any] = []
     record, candidates, error = await asyncio.to_thread(
         resolve_peer_target,
         target=params.target,
         pid=params.pid,
         session=params.session,
+        skipped=skipped,
     )
     if candidates:
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
@@ -8063,11 +8073,18 @@ async def execute_send(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     cold_session_id = ""
-    if record is None:
-        # An exact ``session`` may still name a stored session that is simply
-        # not running. A quiet note to one of those is spooled rather than
-        # refused (that is what ``wake=false`` asks for); anything wanting
-        # attention engages a runtime. See ``peer_send.deliver_peer_message``.
+    if record is None and session_id_unowned(error):
+        # No live record OWNS this id — the scan did not know it, or the record
+        # it found was stale (the pid is gone) — so an exact ``session`` may
+        # name a stored session that is simply not running. A quiet note to one
+        # of those is spooled rather than refused (that is what ``wake=false``
+        # asks for); anything wanting attention engages a runtime. See
+        # ``peer_send.deliver_peer_message``.
+        #
+        # The predicate keeps a refusal about a LIVE session standing (QA
+        # round 3, Q8; review round 4, MINOR-1): a wedged or unengaged match is
+        # the live resolver's answer, and re-asking the store for the same id
+        # would deliver behind a process that still owns the session.
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")
@@ -8098,12 +8115,14 @@ async def execute_send(
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, _stored_error = await asyncio.to_thread(
+        stored_id, stored_candidates, stored_error = await asyncio.to_thread(
             resolve_stored_target, params.target
         )
-        # ``_stored_error`` is deliberately unread: the resolver returns ""
-        # for a no-match by contract (see its docstring) and the refusal that
-        # reaches the user is composed below, where the live miss is known.
+        # ``stored_error`` is read here, unlike a plain no-match (which returns
+        # "" by contract, because the refusal for THAT is composed below from
+        # both searches): a row that answered to the name but was withheld for
+        # never having been engaged comes back as its own refusal, and printing
+        # "no session matches" over it would be false (review round 1, F-4).
         if stored_candidates:
             lines = [
                 f"{len(stored_candidates)} stored sessions match; drop `target` and "
@@ -8113,6 +8132,8 @@ async def execute_send(
             return _error(tool_call_id, "send", "\n".join(lines))
         if stored_id:
             cold_session_id = stored_id
+        elif stored_error:
+            error = stored_error
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             error = f"no session matches {params.target!r} (searched live and stored sessions)"
@@ -8195,16 +8216,20 @@ async def execute_send(
         return _text(
             tool_call_id,
             "send",
-            f"→ {name} (pid {record.pid}): {detail}",
+            f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}",
             details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
         )
     # A session with no runtime: the receipt names the session rather than a
     # pid, because there is no process to name and claiming one would be a lie
-    # the model might then try to signal.
+    # the model might then try to signal. The clause is normally empty here — a
+    # stored fallback happens only when the live scan matched NOTHING, and a
+    # live match that was merely unengaged returns the refusal instead — but it
+    # is composed once for both receipts, so a future stored delivery cannot
+    # silently drop the fact that a live namesake was skipped.
     return _text(
         tool_call_id,
         "send",
-        f"→ {cold_session_id} (not running): {detail}",
+        f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}",
         details={
             "session_id": cold_session_id,
             "mode": mode,

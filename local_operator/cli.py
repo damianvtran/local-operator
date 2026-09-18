@@ -2963,6 +2963,8 @@ def _bind_send_positionals(
 def _resolve_peer_target(
     args: argparse.Namespace,
     target: "str | None",
+    *,
+    skipped: "list[Any] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a ``lop send`` target to one live SessionRecord.
 
@@ -2978,7 +2980,11 @@ def _resolve_peer_target(
     target or the message body; ``args.target`` is the RAW parse and using it
     here would re-introduce the binding bug one layer down. It is required
     rather than defaulted for that reason: a caller that forgets it should fail
-    loudly, not silently resolve as though no target was given."""
+    loudly, not silently resolve as though no target was given.
+
+    ``skipped`` is forwarded to the core for ``lop send`` only: the send path
+    reports how many name-matches were held back for being unengaged, and no
+    other caller (the stop path) has a receipt to qualify."""
     from local_operator.mobile.peer_send import resolve_peer_target
 
     # The flag grammar is passed in so the CLI's user-visible error keeps saying
@@ -2989,6 +2995,7 @@ def _resolve_peer_target(
         session=args.session,
         pid_hint="--pid",
         session_hint="--session",
+        skipped=skipped,
     )
 
 
@@ -3011,6 +3018,7 @@ def send_command(args: argparse.Namespace) -> int:
     from local_operator.mobile.peer_send import (
         candidate_lines,
         deliver_peer_message,
+        skipped_clause,
         validate_peer_body,
     )
 
@@ -3058,9 +3066,17 @@ def send_command(args: argparse.Namespace) -> int:
     # ``peer_send.live_scan_found_nothing`` for why a bare ``record is None``
     # is not enough (it is also how a conflicting selector pair and a wedged
     # unique match come back, and neither may be converted into a stored send).
-    from local_operator.mobile.peer_send import live_scan_found_nothing
+    from local_operator.mobile.peer_send import (
+        live_scan_found_nothing,
+        session_id_unowned,
+    )
 
-    record, candidates, error = _resolve_peer_target(args, target)
+    # Matches the name/substring scan held back for being unengaged. Filled by
+    # the resolver and reported on the receipt below: a sender who typed one
+    # command believing it reached its needle has to learn that part of it went
+    # nowhere (design round 1, D1). Always empty for the exact and stop paths.
+    skipped: list[Any] = []
+    record, candidates, error = _resolve_peer_target(args, target, skipped=skipped)
     if candidates:
         # "REPLACE the target with", not "add --pid": appending the flag to the
         # command the user just typed produces `NAME BODY --pid N`, which the
@@ -3097,11 +3113,18 @@ def send_command(args: argparse.Namespace) -> int:
             print(f"  e.g. `{example}`", file=sys.stderr)
         return 1
     cold_session_id = ""
-    if record is None:
-        # No LIVE record, but an exact `--session` may still name a stored
-        # session that simply is not running. A quiet note to one of those is
-        # the mailbox mode's whole purpose, so it is spooled rather than
-        # refused; anything wanting attention starts a runtime for it.
+    if record is None and session_id_unowned(error):
+        # No live record OWNS this id — the scan did not know it at all, or the
+        # record it found was stale (the pid is gone) — so an exact `--session`
+        # may name a stored session that is simply not running. A quiet note to
+        # one of those is the mailbox mode's whole purpose, so it is spooled
+        # rather than refused; anything wanting attention starts a runtime.
+        #
+        # The predicate is what keeps a refusal about a LIVE session standing
+        # (QA round 3, Q8; review round 4, MINOR-1): an unengaged or wedged
+        # match is the live resolver's answer, and re-asking the store for the
+        # same id would spool the note behind a process that still owns the
+        # conversation while telling the sender it was merely held.
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = resolve_cold_session(args.session or "") or ""
@@ -3129,10 +3152,13 @@ def send_command(args: argparse.Namespace) -> int:
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, _stored_error = resolve_stored_target(target)
-        # ``_stored_error`` is deliberately unread: a no-match returns "" by
-        # contract and the refusal the user sees is composed in the final
-        # block below, where the live miss is known to have happened too.
+        stored_id, stored_candidates, stored_error = resolve_stored_target(target)
+        # ``stored_error`` is read here, unlike a plain no-match (which returns
+        # "" by contract): a row that ANSWERED to the name but was withheld for
+        # never having been engaged comes back as its own refusal, and printing
+        # "no session matches" over it would be a false statement about a
+        # session the user can see on the picker (review round 1, F-4). The
+        # composed miss below still applies to a true no-match.
         if stored_candidates:
             print(
                 f"{len(stored_candidates)} stored sessions match; replace the "
@@ -3144,6 +3170,8 @@ def send_command(args: argparse.Namespace) -> int:
             return 1
         if stored_id:
             cold_session_id = stored_id
+        elif stored_error:
+            error = stored_error
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH
@@ -3212,9 +3240,9 @@ def send_command(args: argparse.Namespace) -> int:
         return 1
     if record is not None:
         name = record.conversation_name or record.session_id
-        print(f"→ {name} (pid {record.pid}): {detail}")
+        print(f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}")
     else:
-        print(f"→ {cold_session_id} (not running): {detail}")
+        print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
     return 0
 
 
@@ -5164,6 +5192,12 @@ def _resolve_stop_target(
         # Wedged sessions are stoppable (the ladder's signal rungs exist for
         # them); `send` keeps refusing them because nobody would read it.
         include_wedged=True,
+        # A composer window is stoppable, and this is the one caller that wants
+        # it resolved: the kill switch names a target in order to END it, not to
+        # message it. `lop send` keeps the default True, so the fresh `/new`
+        # nobody has typed in stays out of reach of delivery while remaining
+        # reachable by `lop stop`.
+        require_started=False,
     )
 
 

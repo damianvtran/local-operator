@@ -1332,6 +1332,61 @@ class TestDurableConversationPath:
         )
         assert durable_conversation_path(path) is True
 
+    @pytest.mark.asyncio
+    async def test_the_reader_agrees_with_the_real_writer(self, tmp_path: Path) -> None:
+        """THE DRIFT GUARD (review round 1, F-3): the reader's row spellings are
+        pinned against the REAL writer, not against hand-written JSONL.
+
+        ``session/runtime/engagement.py`` carries its own copies of the two
+        spellings because it may not import this module (its import weight is
+        a pinned contract — see that module's docstring), so a format change
+        here that missed the copy would make every session read as unengaged.
+        Under the peer rule that is not a quiet note, it is a REFUSAL. Every
+        other test in this class writes JSONL by hand, which is precisely the
+        shape that cannot catch a partial move; this one goes through
+        ``Transcript`` for both kinds of row the discriminator separates.
+        """
+        from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+        from local_operator.session.runtime.engagement import (
+            durable_conversation_path,
+            session_has_durable_history,
+        )
+
+        # A real turn, written by the real writer: user, assistant, a tool
+        # result, and a peer note persisted the way the product persists one
+        # (``Session.receive_peer_message``'s record-only branch appends a
+        # ``peer_message`` CustomMessage through ``append_message``).
+        engaged_dir = tmp_path / "sessions" / "engaged"
+        transcript = Transcript(engaged_dir)
+        await transcript.append_message(Message.user("the first real prompt"))
+        await transcript.append_message(Message.assistant("ack"))
+        await transcript.append_message(
+            CustomMessage(
+                custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                attribution="user",
+                details={"text": "a peer note"},
+            )
+        )
+        engaged_path = engaged_dir / TRANSCRIPT_FILENAME
+        assert engaged_path.is_file(), "the writer must write the file the reader reads"
+        assert durable_conversation_path(engaged_path) is True
+        assert session_has_durable_history("engaged", root=tmp_path) is True
+
+        # The other direction through the same writer: a transcript holding only
+        # custom rows (a quiet-dialled peer note) is NOT history.
+        notes_only_dir = tmp_path / "sessions" / "notes-only"
+        notes = Transcript(notes_only_dir)
+        await notes.append_message(
+            CustomMessage(
+                custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                attribution="user",
+                details={"text": "a peer note"},
+            )
+        )
+        notes_path = notes_only_dir / TRANSCRIPT_FILENAME
+        assert durable_conversation_path(notes_path) is False
+        assert session_has_durable_history("notes-only", root=tmp_path) is False
+
     def test_missing_and_torn_files_read_as_unstarted(self, tmp_path: Path) -> None:
         from local_operator.session.transcript import durable_conversation_path
 
