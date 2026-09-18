@@ -1497,18 +1497,22 @@ class _KnowledgeHooks:
     #: call's deadline.
     classification_wait_s: float = DEFAULT_CLASSIFICATION_WAIT_MS / 1000.0
     #: Calls that are STILL RUNNING after their own turn stopped waiting. Harvested
-    #: on a later user message (never awaited mid-turn): each is a task the turn has
-    #: already given up on, whose answer is worth keeping — a late recommendation is
-    #: still a recommendation for the conversation it was computed against.
-    classification_outstanding: list[Any] = field(default_factory=list)
+    #: with a ``done()`` check — never awaited — on every render of block 3, which is
+    #: once per model STEP of the message that started them and once per later user
+    #: message. Each entry carries the task id it was computed for, because whether an
+    #: answer belongs to the message being rendered decides where it is delivered:
+    #: into THIS turn's next step, or onto the next user message.
+    classification_outstanding: list[_OutstandingClassification] = field(default_factory=list)
     #: The resource urls announced on the PREVIOUS message, so an unchanged set can
     #: stay quiet rather than printing the same sentence again (design round 1, D7).
     classification_last_announced: tuple[str, ...] | None = None
-    #: Recommendations that arrived too late for their own turn and have not reached
-    #: a prompt yet, oldest first. Rendered by the NEXT ``_select_knowledge_block``
-    #: (a new user message re-renders block 3, which the harness journals as a
-    #: ``[session-state]`` update) and consumed exactly once there.
-    classification_pending: list[Any] = field(default_factory=list)
+    #: Recommendations that have not reached a prompt yet, oldest first, each paired
+    #: with whether it MISSED the message it was computed for. ``False`` means the
+    #: answer arrived while that message's turn was still running, so it is delivered
+    #: into this turn's next model step — which is what keeps a suggestion attached to
+    #: the question that produced it instead of arriving one message late. Consumed
+    #: exactly once.
+    classification_pending: list[tuple[Any, bool]] = field(default_factory=list)
 
 
 #: The capability line a configured MCP server contributes when no release-owned
@@ -2180,6 +2184,21 @@ async def _classification_call(service: Any, request: Any) -> Any:
     return recommendation
 
 
+@dataclass(frozen=True)
+class _OutstandingClassification:
+    """One background call, with the message it was computed for.
+
+    The task id is the whole reason this is a record rather than the bare task. When
+    an answer lands, the harness has to know whether it belongs to the message being
+    rendered — in which case it is delivered into that turn's next model step, before
+    the model does its real work — or to a message the user has already moved past,
+    which is the older behaviour of carrying it to the next message.
+    """
+
+    task: Any
+    task_id: str | None
+
+
 def _prune_outstanding(hooks: _KnowledgeHooks) -> None:
     """Bound the background calls one session may leave running.
 
@@ -2191,8 +2210,8 @@ def _prune_outstanding(hooks: _KnowledgeHooks) -> None:
     """
     while len(hooks.classification_outstanding) > _MAX_OUTSTANDING_CLASSIFICATION_CALLS:
         abandoned = hooks.classification_outstanding.pop(0)
-        if not abandoned.done():
-            abandoned.cancel()
+        if not abandoned.task.done():
+            abandoned.task.cancel()
 
 
 def _task_outcome(task: Any) -> Any | None:
@@ -2207,30 +2226,49 @@ def _task_outcome(task: Any) -> Any | None:
         return None
 
 
-def _harvest_classification(hooks: _KnowledgeHooks) -> None:
+def _harvest_classification(hooks: _KnowledgeHooks, *, task_id: str | None = None) -> bool:
     """Move every FINISHED background call into the pending slot. Never blocks.
 
-    Called once per user message, before the block is rendered. ``done()`` is the
-    only test that matters: a turn must never wait for a call it already gave up
-    on, so a call still running stays outstanding and is looked at again next
-    message. A recommendation with no resources is dropped here rather than
-    queued — it has nothing to deliver, and a session whose answers are always
-    empty must append nothing at all.
+    Called before every render of block 3 — once per model step of the message that
+    started the call, and once per later user message. ``done()`` is the only test
+    that matters: a turn must never wait for a call it already gave up on, so a call
+    still running stays outstanding and is looked at again. A recommendation with no
+    resources is dropped here rather than queued — it has nothing to deliver, and a
+    session whose answers are always empty must append nothing at all.
+
+    Returns ``True`` when an answer for ``task_id`` ITSELF just arrived. That is the
+    signal :func:`_select_knowledge_block` uses to supersede this turn's frozen block
+    so the NEXT model step of the same turn carries the advisory. Measured on this
+    machine (2026-09-18): the vendor takes 540-1500 ms against a 50 ms wait, so
+    without this the answer for a message could never reach the message — it rode the
+    NEXT user message instead, which is how a Slack question was answered with a
+    suggestion about MCP guides (live child session, `guide://mcp` for a message whose
+    roster clearly contained `mcp://slack`).
     """
     if not hooks.classification_outstanding:
-        return
-    running: list[Any] = []
-    for task in hooks.classification_outstanding:
-        if not task.done():
-            running.append(task)
+        return False
+    arrived_in_turn = False
+    running: list[_OutstandingClassification] = []
+    for call in hooks.classification_outstanding:
+        if not call.task.done():
+            running.append(call)
             continue
-        recommendation = _task_outcome(task)
-        if recommendation is not None and getattr(recommendation, "resources", ()):
-            hooks.classification_pending.append(recommendation)
+        recommendation = _task_outcome(call.task)
+        if recommendation is None or not getattr(recommendation, "resources", ()):
+            continue
+        # Belongs to the message being rendered, or to one already gone. ``task_id``
+        # is None for callers that never had a task (legacy paths), which keeps their
+        # behaviour: everything harvested is treated as late.
+        in_turn = task_id is not None and call.task_id is not None and call.task_id == task_id
+        hooks.classification_pending.append((recommendation, not in_turn))
+        arrived_in_turn = arrived_in_turn or in_turn
     hooks.classification_outstanding = running
+    return arrived_in_turn
 
 
-async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> Any | None:
+async def _classification_recommendation(
+    hooks: _KnowledgeHooks, query: str, *, task_id: str | None = None
+) -> Any | None:
     """One classification pass for one user message, waited on for ``waitMs``. NEVER raises.
 
     Runs INSIDE the gather that also runs the embedder selection (see
@@ -2264,6 +2302,26 @@ async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> 
     service = hooks.classifier
     if service is None:
         return None
+    # NOTHING TO ASK, NOTHING TO WAIT FOR. An install with no recommender provider
+    # configured or logged in must pay neither the wait nor a log line: the probe is
+    # a local read (the service caches the resolved legs for the session) and never a
+    # network call, so this costs microseconds and removes the call, the throttle and
+    # the "no recommendation within N ms" note from every message of such an install.
+    # A seam without the probe (an injected classifier) keeps the old behaviour: this
+    # is an optimisation for the shipped service, not a new requirement on the seam.
+    probe = getattr(service, "provider_available", None)
+    if probe is not None:
+        try:
+            available = bool(await probe())
+        except Exception:  # noqa: BLE001 — a probe fault must not change the prompt
+            logger.debug("classification: provider probe failed", exc_info=True)
+            available = True
+        if not available:
+            logger.debug(
+                "classification: no recommender provider has a credential; "
+                "skipping without waiting"
+            )
+            return None
     try:
         request = _classification_request(hooks, query)
     except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
@@ -2271,7 +2329,7 @@ async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> 
         return None
     wait_s = _classification_wait_s(hooks, service)
     task = asyncio.create_task(_classification_call(service, request))
-    hooks.classification_outstanding.append(task)
+    hooks.classification_outstanding.append(_OutstandingClassification(task, task_id))
     _prune_outstanding(hooks)
     try:
         recommendation = await asyncio.wait_for(asyncio.shield(task), timeout=wait_s)
@@ -2298,7 +2356,7 @@ async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> 
         hooks.classification_outstanding = [
             outstanding
             for outstanding in hooks.classification_outstanding
-            if outstanding is not task
+            if outstanding.task is not task
         ]
         raise
     except Exception:  # noqa: BLE001 — the layer may never fail a turn (§4)
@@ -2306,7 +2364,9 @@ async def _classification_recommendation(hooks: _KnowledgeHooks, query: str) -> 
         return None
     # Delivered to THIS turn, so the harvest must not deliver it a second time.
     hooks.classification_outstanding = [
-        outstanding for outstanding in hooks.classification_outstanding if outstanding is not task
+        outstanding
+        for outstanding in hooks.classification_outstanding
+        if outstanding.task is not task
     ]
     return recommendation
 
@@ -2580,17 +2640,19 @@ async def _select_knowledge_block(
     # query is even handed over, and invalidating after that decision would re-render
     # the block with nothing selected.
     fingerprint = _refresh_knowledge_freshness(hooks)
+    # HARVEST BEFORE THE FREEZE, because a harvest that arrives for THIS task is
+    # exactly what must break it. A call that finished while this session was idle,
+    # or while this message's own turn was running, belongs to the prompt being built:
+    # the first rides in as a late answer, the second as an in-turn one. A ``done()``
+    # check per outstanding call — never a wait.
+    arrived_in_turn = _harvest_classification(hooks, task_id=task_id)
     if (
         hooks.frozen_block is not None
         and hooks.frozen_compaction_id == compaction_id
         and hooks.frozen_task_id == task_id
+        and not arrived_in_turn
     ):
         return hooks.frozen_block
-
-    # BEFORE the gather, and before anything can return early: a call that finished
-    # while this session was idle belongs to the prompt this turn is about to
-    # build. A ``done()`` check per outstanding call — never a wait.
-    _harvest_classification(hooks)
 
     picked: list[Skill] = []
     recommendation: Any | None = None
@@ -2620,7 +2682,7 @@ async def _select_knowledge_block(
                 else _empty_selection()
             )
             selected, recommendation = await asyncio.gather(
-                selection, _classification_recommendation(hooks, query)
+                selection, _classification_recommendation(hooks, query, task_id=task_id)
             )
             picked = selected
         elif hooks.index is not None:
@@ -2663,7 +2725,7 @@ async def _select_knowledge_block(
     # own printed two lines (review round 2, MINOR 1). Late first, so the line reads
     # in the order the sections appear.
     pending, hooks.classification_pending = hooks.classification_pending, []
-    answers: list[tuple[Any, bool]] = [(answer, True) for answer in pending]
+    answers: list[tuple[Any, bool]] = [(answer, late) for answer, late in pending]
     if recommendation is not None:
         answers.append((recommendation, False))
     carried: set[str] = set()
@@ -4307,9 +4369,9 @@ def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | No
 
     def _release_the_seam() -> Any:
         """Cancel what is running, then close the seam. Returns the awaitable."""
-        for task in hooks.classification_outstanding:
-            if not task.done():
-                task.cancel()
+        for call in hooks.classification_outstanding:
+            if not call.task.done():
+                call.task.cancel()
         hooks.classification_outstanding.clear()
         hooks.classification_pending.clear()
         # ``getattr`` rather than a typed call, matching

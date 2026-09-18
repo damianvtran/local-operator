@@ -63,7 +63,14 @@ class DecisionVendorError(RuntimeError):
     breaker's accounting — never in control flow.
     """
 
-    def __init__(self, message: str, *, kind: str, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        status: int | None = None,
+        attempts: int = 1,
+    ) -> None:
         super().__init__(message)
         #: One of ``transport`` | ``auth`` | ``rate-limit`` | ``overloaded`` |
         #: ``server`` | ``http`` | ``response``. Free-form on purpose: a new
@@ -72,6 +79,10 @@ class DecisionVendorError(RuntimeError):
         self.kind = kind
         #: The upstream HTTP status when there was one, else ``None``.
         self.status = status
+        #: How many attempts the cascade spent before it gave up across all legs.
+        #: Carried here so the ONE warning the operator sees can say whether the
+        #: failure was a single refusal or a retried-and-still-failing leg.
+        self.attempts = attempts
 
 
 class DecisionSchemaError(RuntimeError):

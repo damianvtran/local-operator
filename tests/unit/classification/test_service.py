@@ -22,6 +22,7 @@ from local_operator.classification.service import (
     CACHE_SIZE,
     CIRCUIT_FAILURE_THRESHOLD,
     DEFAULT_AUTO,
+    DEFAULT_CASCADE_ATTEMPTS,
     DEFAULT_NOTICE,
     DEFAULT_TIMEOUT_MS,
     ClassificationService,
@@ -337,13 +338,16 @@ async def test_three_consecutive_failures_open_the_breaker_for_the_session(
     for index in range(CIRCUIT_FAILURE_THRESHOLD):
         recommendation = await subject.recommend_resources(request(f"message {index}"))
         assert recommendation.skipped == "error", index
-    assert len(legs["radient"].calls) == CIRCUIT_FAILURE_THRESHOLD
+    # SECOND WALK INCLUDED: one message against a vendor that fails on a retryable
+    # kind now spends two attempts (the retry pass) before it is declared failed, and
+    # the breaker still counts MESSAGES — three consecutive failures, not six calls.
+    assert len(legs["radient"].calls) == CIRCUIT_FAILURE_THRESHOLD * DEFAULT_CASCADE_ATTEMPTS
 
     with caplog.at_level(logging.WARNING, logger="local_operator.classification.service"):
         opened = await subject.recommend_resources(request("message after the failures"))
     assert opened.skipped == "circuit-open"
     # Open means no call at all, on any later message in this session.
-    assert len(legs["radient"].calls) == CIRCUIT_FAILURE_THRESHOLD
+    assert len(legs["radient"].calls) == CIRCUIT_FAILURE_THRESHOLD * DEFAULT_CASCADE_ATTEMPTS
     assert any("circuit breaker opened" in record.message for record in caplog.records)
 
 
@@ -354,10 +358,14 @@ async def test_a_success_resets_the_consecutive_failure_count(manager, install_l
         install_legs,
         radient={
             "script": [
+                # Four failures cover the two failing messages that come before the
+                # success: each of them spends its retry walk, so each costs two
+                # attempts. The trailing entry repeats for everything after.
+                failure,
+                failure,
                 failure,
                 failure,
                 choice_response("recommend_skill", "minerva-deploy"),
-                failure,
                 failure,
             ]
         },
@@ -370,7 +378,7 @@ async def test_a_success_resets_the_consecutive_failure_count(manager, install_l
         # is CONSECUTIVE, and a stale count would open it on a healthy session.
         assert (await subject.recommend_resources(request(f"g{index}"))).skipped == "error"
     assert (await subject.recommend_resources(request("still trying"))).skipped == "error"
-    assert len(legs["radient"].calls) == 6
+    assert len(legs["radient"].calls) == 11, [call for call in legs["radient"].calls]
 
 
 async def test_a_schema_error_does_not_count_toward_the_breaker(manager, install_legs) -> None:
@@ -809,3 +817,131 @@ async def test_the_credential_is_resolved_once_per_session_not_per_message(
         await subject.recommend_resources(request(f"message {index}"))
     assert len(legs["radient"].calls) == 3
     assert legs["radient"].credential_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Transient failures: one retry per leg, and a warning that says what happened
+# (2026-09-18: the live vendor answers in 540-1500 ms against a 50 ms wait, so a
+# single refused connection used to end the pass — and three of them opened the
+# breaker for the session, which read as "the feature does not work" rather than
+# as a network blip the operator could fix).
+# ---------------------------------------------------------------------------
+
+
+async def test_a_transient_failure_gets_one_retry_on_the_same_leg(manager, install_legs) -> None:
+    """A blip must not cost the message its recommendation."""
+    subject, legs = service(
+        manager,
+        install_legs,
+        radient={
+            "script": [
+                DecisionVendorError("connection reset", kind="transport"),
+                choice_response("recommend_skill", "minerva-deploy"),
+            ]
+        },
+        typesafe={"script": [DecisionVendorError("down", kind="transport")]},
+        openrouter={"script": [DecisionVendorError("down", kind="transport")]},
+    )
+    recommendation = await subject.recommend_resources(request())
+    assert recommendation.skipped is None
+    assert recommendation.vendor == "radient"
+    assert len(legs["radient"].calls) == 2, "the second walk is the retry"
+    assert len(legs["typesafe"].calls) == 1, "the first walk still crossed every leg"
+
+
+async def test_a_transient_failure_that_persists_moves_to_the_next_leg(
+    manager, install_legs
+) -> None:
+    """One retry, not a retry loop: the leg is abandoned after the second attempt."""
+    subject, legs = service(
+        manager,
+        install_legs,
+        radient={"script": [DecisionVendorError("down", kind="transport")]},
+        typesafe={"script": [choice_response("recommend_skill", "minerva-deploy")]},
+        openrouter={"script": [DecisionVendorError("down", kind="transport")]},
+    )
+    recommendation = await subject.recommend_resources(request())
+    assert recommendation.vendor == "typesafe"
+    assert len(legs["radient"].calls) == 1, "failover stays fast: no retry before the next leg"
+    assert len(legs["typesafe"].calls) == 1
+    assert legs["openrouter"].calls == []
+
+
+async def test_a_dead_credential_is_not_retried_on_its_own_leg(manager, install_legs) -> None:
+    """``auth`` is a property of the leg, not of the moment: ask the NEXT leg instead."""
+    subject, legs = service(
+        manager,
+        install_legs,
+        radient={"script": [DecisionVendorError("revoked", kind="auth")]},
+        typesafe={"script": [choice_response("recommend_skill", "minerva-deploy")]},
+        openrouter={"script": [DecisionVendorError("down", kind="transport")]},
+    )
+    recommendation = await subject.recommend_resources(request())
+    assert recommendation.vendor == "typesafe"
+    assert len(legs["radient"].calls) == 1
+
+
+async def test_a_total_failure_warns_once_with_the_attempts_and_the_legs(
+    manager, install_legs, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The operator's case: providers are configured, the call keeps failing.
+
+    One WARNING, naming which legs were tried and how many attempts each got, so the
+    log says "which leg, how many times, and how" instead of only that it failed. The
+    message repeats at most ``CIRCUIT_FAILURE_THRESHOLD`` times per session because the
+    breaker short-circuits the rest.
+    """
+    subject, _legs = service(
+        manager,
+        install_legs,
+        settings_map=settings(waitMs=50),
+        radient={"script": [DecisionVendorError("down", kind="transport")]},
+        typesafe={"script": [DecisionVendorError("down", kind="server")]},
+        openrouter={"script": [DecisionVendorError("down", kind="transport")]},
+    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.classification.service"):
+        recommendation = await subject.recommend_resources(request())
+    assert recommendation.skipped == "error"
+    warnings = [
+        record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert any("6 attempt(s)" in line for line in warnings), warnings
+    assert any(
+        "radient:transport x2" in line and "typesafe:server x2" in line for line in warnings
+    ), warnings
+
+
+async def test_a_pass_with_no_vendor_warns_about_nothing(manager, install_legs, caplog) -> None:
+    """No provider is configuration, not weather: silence (§4, and the operator asked)."""
+    subject, _legs = service(
+        manager,
+        install_legs,
+        radient={"credential": False},
+        typesafe={"credential": False},
+        openrouter={"credential": False},
+    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.classification.service"):
+        recommendation = await subject.recommend_resources(request())
+    assert recommendation.skipped == "no-vendor"
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+
+
+async def test_provider_available_is_false_when_no_leg_has_a_credential(
+    manager, install_legs
+) -> None:
+    subject, _legs = service(
+        manager,
+        install_legs,
+        radient={"credential": False},
+        typesafe={"credential": False},
+        openrouter={"credential": False},
+    )
+    assert await subject.provider_available() is False
+    # And the probe is a resolution, not a call: nothing was asked.
+    assert subject._legs == ()
+
+
+async def test_provider_available_is_true_when_a_leg_can_serve(manager, install_legs) -> None:
+    subject, legs = service(manager, install_legs, radient={"credential": True})
+    assert await subject.provider_available() is True
+    assert legs["radient"].calls == []

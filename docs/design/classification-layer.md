@@ -238,6 +238,31 @@ surface reports a 64k window for `jev-1.13`. Our own ceiling is far below the wi
 because the entire point is to be cheap: a recommendation that costs more than the resources it
 saves is a net loss.
 
+FAILURE POLICY: SILENT WITHOUT A PROVIDER, LOUD WITH ONE (added 2026-09-18)
+--------------------------------------------------------------------------
+
+The layer is advisory, so its failure modes must never reach the user. Two cases, and
+they are not the same case:
+
+* **No provider has a credential.** Nothing to ask. The wiring asks the service for
+  this BEFORE it builds a request (`ClassificationService.provider_available`, one
+  local credential read, no network), and returns without a call, without the wait and
+  without a log line at any level above DEBUG. An install that never logs into a
+  recommender therefore pays nothing — not latency, not noise — and its prompt is
+  byte-identical to a build without the layer.
+* **A provider is configured and the call fails.** That is an incident the operator
+  can act on, so it is a WARNING, and it says enough to act on: the cascade walks
+  every leg first, then walks the whole list ONE more time if any failure was a
+  retryable kind (`transport`, `server`, `overloaded`, `rate-limit`) — a blip is
+  cleared rather than punished — and the resulting warning names the per-leg attempt
+  counts, the kind and the elapsed time. It repeats at most
+  `CIRCUIT_FAILURE_THRESHOLD` times per session: after three consecutive failed
+  messages the breaker opens and later messages short-circuit before any call.
+
+The retry is a second WALK of the leg list, never a retry loop inside one leg, so a
+dead leg still costs one attempt and the next leg is reached immediately — failover
+stays fast, and only a failure that no leg could answer is reconsidered.
+
 MEASURED AT CATALOGUE SCALE (2026-09-18, this branch, defaults for `maxStateChars` and
 `maxCandidates`, a 537-resource roster — 500 skills, 30 guides, 7 servers — each skill and guide
 carrying a realistic ~85-character description, and an 8×-repeated user message): state 3 279
@@ -419,17 +444,19 @@ Sequence per user message:
 2. `await asyncio.gather(...)` the existing selection and the classification, so the added
    latency is the *difference*, not the sum — and bound the WAIT for the classification by
    `values.classification.waitMs` rather than by its deadline (see §5a rule 6: a call that misses
-   the wait keeps running, and its answer rides the next user message);
+   the wait keeps running, and its answer is delivered to that same turn's next model step — or, if
+   the turn is over, carried to the next user message);
 3. render the recommendation block, dropping anything already selected by the router, and append
-   it to the knowledge/tail block. A LATE answer is rendered the same way by the next admitted
-   user message, oldest first, inside the same per-message cap, and is delivered exactly once;
+   it to the knowledge/tail block. A LATE answer is rendered the same way, oldest first, inside the
+   same per-message cap, and is delivered exactly once;
 4. emit the notice ONCE per user message, at the moment an answer actually reaches the prompt —
    never when a call times out (nothing was delivered then) and never a second time for an answer
    an earlier turn already rendered. When one prompt gains a late answer AND its own, BOTH sets are
    announced on one line: the contract sentence is once per MESSAGE. The line is attributed to the
-   message it answers ("for your previous message" when the answer is late — the ordinary case
-   against a 250 ms vendor and a 50 ms wait), because otherwise it reads as advice about the
-   question it happens to sit under. A prompt that gains BOTH sets has no single true attribution,
+   message it answers — "for this message" when the answer arrived inside that message's turn (the
+   ordinary case now: the answer is delivered to the turn's next model step, see step 2), and "for
+   your previous message" only when the turn had already ended and the answer was carried — because
+   otherwise it reads as advice about the question it happens to sit under. A prompt that gains BOTH sets has no single true attribution,
    so that one shape tags each resource — `Suggestion added: skill://a (your previous message),
    guide://b (this message)` — rather than labelling the union from whichever answer arrived last,
    which told the user a resource chosen for the question they had just asked came from the one
@@ -493,7 +520,7 @@ entry in `_consumer_defaults()` in `tests/unit/test_settings_io.py`:
 | `vendor` | choice | `auto` | `auto` \| `radient` \| `typesafe` \| `openrouter` (pins one leg) |
 | `model` | text | `""` | override the vendor's model id |
 | `timeoutMs` | int | `1500` | per-call deadline (the vendor's budget, and the breaker's clock) |
-| `waitMs` | int | `50` | how long a TURN waits for an answer; a slower one rides the next message (§5a rule 6) |
+| `waitMs` | int | `50` | how long a TURN waits for an answer; a slower one is delivered to that turn's next step, or — once the turn has ended — to the next message (§5a rule 6) |
 | `maxStateChars` | int | `6000` | hard cap on the serialized state |
 | `maxCandidates` | int | `12` | candidates sent per kind, chosen by local relevance when the catalogue is larger |
 | `maxRecommendations` | int | `3` | recommendations injected per message |
@@ -503,8 +530,9 @@ entry in `_consumer_defaults()` in `tests/unit/test_settings_io.py`:
 "off, because an upgrade must never silently change behaviour or spend" rule was followed until
 2026-09-18, when `auto` flipped to ON. The three measurements that replaced the analogy: the spend
 is bounded (~1 091 tokens ≈ $0.00003 per user message at catalogue scale, measured on the Radient
-route), the latency is off the turn's critical path (the turn waits `waitMs`; a slower answer
-rides the next message), and the failure mode is a line of context rather than a wrong action. An
+route), the latency is off the turn's critical path (the turn waits `waitMs`; a slower answer is
+delivered to that turn's next step, or to the next message if the turn has ended), and the failure
+mode is a line of context rather than a wrong action. An
 explicit `auto: false` remains the byte-identical, no-import path.
 
 ## 9. Provider login for Jev (API key only)
