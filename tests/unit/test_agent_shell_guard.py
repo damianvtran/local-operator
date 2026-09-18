@@ -68,11 +68,11 @@ def test_the_marker_refuses_and_names_what_to_do_instead(in_agent: None) -> None
 
     The three routes are the ones that exist: `task` for a session that holds
     it, `hub` for the non-delegating child this guard was written for (the one
-    that cannot launch anything itself), and `wake` for work that belongs
-    later — named as the DELEGATING session's to arm, because `wake` is pruned
-    from every child session and the reader this text reaches is a child
-    (review round 1, F3). The escape hatch is the one thing the text must NOT
-    name — see the next test.
+    that cannot launch anything itself), and `wake` for work that belongs later
+    — named as the DELEGATING session's to arm for a child, because `wake` is
+    pruned from every child session, and as the reader's own for a root session,
+    which holds it (review rounds 1 and 2, F3 and R2-2). The escape hatch is the
+    one thing the text must NOT name — see the next test.
     """
     message = nested_session_refusal()
     assert message is not None
@@ -83,10 +83,16 @@ def test_the_marker_refuses_and_names_what_to_do_instead(in_agent: None) -> None
     # The last sentence may not route the reader to a tool it does not hold.
     # `wake` is pruned from EVERY child regardless of role, so "put it in
     # `wake`" sent it looking for a tool that is not in its set — the same
-    # class of dead end the refusal exists to end (review round 1, F3).
+    # class of dead end the refusal exists to end (review round 1, F3). The
+    # sentence that fixed that was wrong the OTHER way (review round 2, R2-2):
+    # the marker rides every bash call, so a ROOT session holding `wake` reads
+    # this text too, and there is no session that delegated to it. Both readers
+    # are named now, and this pins both halves rather than one.
     assert "belongs in `wake`" not in message
-    assert "`wake` is pruned from every child session" in message
-    assert message.endswith("so it belongs to the session that delegated to you.")
+    assert "`wake` is pruned from every child" in message
+    assert "not a child session's to arm" in message
+    assert "a session that holds `wake`" in message
+    assert message.endswith("arms it there itself.")
 
 
 def test_the_exec_doc_quotes_the_refusal_byte_for_byte() -> None:

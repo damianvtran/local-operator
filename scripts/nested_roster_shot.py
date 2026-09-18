@@ -13,7 +13,8 @@ Run before and after the change to get the pair: the BEFORE frame (no scope, no
 mark) is what a reader saw when a mid-level page and the root looked identical.
 
     .venv/bin/python scripts/nested_roster_shot.py /tmp/nested 120x40
-    .venv/bin/python scripts/nested_roster_shot.py /tmp/nested 60x30   # the narrow dock: the mark's floor
+    # the narrow dock: the mark's floor, and the scope's live-width bound
+    .venv/bin/python scripts/nested_roster_shot.py /tmp/nested 60x30
     rsvg-convert /tmp/nested/nested-root-120x40.svg -o /tmp/nested-root.png
     rsvg-convert /tmp/nested/nested-scoped-120x40.svg -o /tmp/nested-scoped.png
     rsvg-convert /tmp/nested/nested-root-60x30.svg -o /tmp/nested-narrow.png

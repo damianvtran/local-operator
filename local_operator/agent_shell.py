@@ -36,7 +36,8 @@ either.
 So the rule is enforced where the act happens: a ``lop`` invocation that
 descends from an agent's shell may not open a session, and is told what to do
 instead — ``task`` when this session holds it, ``hub`` back to the session that
-delegated when it does not, and ``wake`` for work that belongs later.
+delegated when it does not, and, for work that belongs later, ``wake`` when the
+reader holds it and the session that delegated when it does not.
 
 WHAT THE MARKER IS, AND WHAT IT IS NOT. ``LOCAL_OPERATOR_AGENT_SHELL`` is set by
 the ``bash`` tool on every command it runs (see
@@ -188,9 +189,10 @@ def refusal_message() -> str:
         "not hold `task` may not create subagents at all: do the work yourself, "
         "and say so with `hub` if the slice genuinely cannot be done alone — "
         "`hub` reaches the session that delegated to you and the brief travels "
-        "in the message. Work that must happen later is not yours to arm "
-        "either — `wake` is pruned from every child session, this one included "
-        "— so it belongs to the session that delegated to you."
+        "in the message. Work that must happen later is not a child session's to "
+        "arm — `wake` is pruned from every child — so a child routes it back to "
+        "the session that delegated to it, while a session that holds `wake` "
+        "arms it there itself."
     )
 
 
