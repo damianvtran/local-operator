@@ -1,9 +1,0 @@
-services:
-  server:
-    container_name: server
-    command: ["make", "dev-server"]
-    build: .
-    ports:
-      - "1111:1111"
-    volumes:
-      - .:/app

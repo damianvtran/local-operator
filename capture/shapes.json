@@ -1,0 +1,76 @@
+{
+ "ipv6": {
+  "answer": "It is https://[2001:db8::1]/path on the internal net.",
+  "targets": [
+   "https://[2001:db8::1]/path"
+  ],
+  "rows": [
+   "\u276f https://[2001:db8::1]/path  agent"
+  ]
+ },
+ "wiki_bracket": {
+  "answer": "See [https://en.wikipedia.org/wiki/Foo_(bar)] for the case.",
+  "targets": [
+   "https://en.wikipedia.org/wiki/Foo_(bar)"
+  ],
+  "rows": [
+   "\u276f https://en.wikipedia.org/wiki/Foo_(bar)  agent"
+  ]
+ },
+ "bracket_then_prose": {
+  "answer": "Sources: [https://one.test/a] and [https://two.test/b] here.",
+  "targets": [
+   "https://one.test/a",
+   "https://two.test/b"
+  ],
+  "rows": [
+   "\u276f https://one.test/a        agent",
+   "  https://two.test/b        agent"
+  ]
+ },
+ "citation_marker": {
+  "answer": "See [1] at https://a.test/x for the table.",
+  "targets": [
+   "https://a.test/x"
+  ],
+  "rows": [
+   "\u276f https://a.test/x          agent"
+  ]
+ },
+ "bare_then_cite": {
+  "answer": "From https://a.test/y [2] we know the rest.",
+  "targets": [
+   "https://a.test/y"
+  ],
+  "rows": [
+   "\u276f https://a.test/y          agent"
+  ]
+ },
+ "raw_query_bracket": {
+  "answer": "The feed is https://a.test/x?q=a]b today.",
+  "targets": [
+   "https://a.test/x?q=a"
+  ],
+  "rows": [
+   "\u276f https://a.test/x?q=a      agent"
+  ]
+ },
+ "md_bracket_target": {
+  "answer": "Read [the case](https://a.test/a[b]) once more.",
+  "targets": [
+   "https://a.test/a[b]"
+  ],
+  "rows": [
+   "\u276f https://a.test/a[b]       agent"
+  ]
+ },
+ "squared_paren": {
+  "answer": "Deep: https://a.test/a_(b_[c])_d and then stopped.",
+  "targets": [
+   "https://a.test/a_(b_[c])_d"
+  ],
+  "rows": [
+   "\u276f https://a.test/a_(b_[c])_d  agent"
+  ]
+ }
+}

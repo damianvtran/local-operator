@@ -1,1 +1,0 @@
-"""Evidence bundle tests."""
