@@ -485,7 +485,7 @@ def _block_shape(block: NoticeBlock) -> str:
     race. The opening characters and the width distinguish those in one line
     instead of costing the next reader a round of re-measurement.
     """
-    return f"h={block.size.height} w={block.content_size.width} text[:32]={block._text[:32]!r}"
+    return f"h={block.size.height} w={block.content_size.width} text[:32]={block.text()[:32]!r}"
 
 
 @pytest.mark.asyncio
@@ -533,12 +533,15 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         # AND THE LONG ONE, measured rather than computed (design round 3, D14;
         # agent R3-5). The block wraps at its OWN content width — 40 cells at a
         # 44-column terminal, not 44 — so this 345-character copy renders as 12
-        # rows, against a transcript area that is 11 rows in the tightest case:
-        # at most one row scrolls off in a conversation, and what stays on screen
-        # is the reason and the primary remedy, which is why the copy leads with
-        # them. A wrap-based pin said "9 rows" and measured a wrapping the frame
-        # does not do; this one measures the widget. The transcript is given a
-        # row of its own first so the two areas are the same shape.
+        # rows, against a transcript area that is 11 rows in the tightest case
+        # measured here (`size [41,11] virtual [40,15] scroll_y=4`): the block's
+        # first TWO rows are above the fold — not "at most one", which is what
+        # this comment claimed until design round 5 re-read the frame — and what
+        # stays on screen is the rest of the reason and the remedies, which is
+        # why the copy leads with them. A wrap-based pin said "9 rows" and
+        # measured a wrapping the frame does not do; this one measures the widget.
+        # The transcript is given a row of its own first so the two areas are the
+        # same shape.
         app._system_notice("a row of its own", "info")
         app._note_gate_refusal_on_app_loop(OperatorAuthorityRequired())
         await pilot.pause()
@@ -549,12 +552,14 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         # width. The block is pinned; the AREA is not, because it is a property of
         # what else is in the transcript — and it does NOT always hold the block:
         # 13 rows in this staging, 11 in a conversation (where the block's first
-        # row is above the fold), 2 with the re-armed card docked, showing only a
-        # middle slice of the notice (design round 4b, D19: the claim that it fits
-        # at every height was wider than the frames, which is the class of
-        # defect this PR exists to fix). The ORDER of the copy is what carries the
-        # narrow frames: the reason and the remedies are what a reader reaches
-        # first, and the detail is recoverable once the card is answered.
+        # TWO rows are above the fold), 2 with the re-armed card docked, where the
+        # painted rows are the notice's TAIL — its last two, `blocked until
+        # someone does.` / `Denying it works from here.` — not a middle slice
+        # (design rounds 4b/5, D19: the claim that it fits at every height was
+        # wider than the frames, which is the class of defect this PR exists to
+        # fix). The ORDER of the copy is what carries the narrow frames: the
+        # reason and the remedies are what a reader reaches first, and the detail
+        # is recoverable once the card is answered.
         assert tall.size.height == 12, _block_shape(tall)
         assert OPERATOR_CAP_REQUIRED_NOTICE in tall._text
 

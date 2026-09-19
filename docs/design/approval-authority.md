@@ -214,14 +214,16 @@ not 44 — where the command's copy renders as **12 rows** and the card's as **6
 **The block does not fit at every height, and the copy's order is the reason it
 matters.** Measured at 44x20 on this head, the transcript's content area is
 **13 rows** in the pin's staging, **11 rows** in a conversation (`refusal-44x20`:
-`size [41,11] virtual [40,15]`, `scroll_y=4`, vertical bar — the 12-row block's
-first row is above the fold, so what the operator reads first is the remainder of
-the reason sentence, not its opening words), and **2 rows** with the re-armed card
-docked (`region [1,1,42,4] size [41,2] virtual [40,8] scroll_y=6`), where only a
-middle slice of the notice paints at all. So at 44 columns the operator gets the
-reason and the remedies — minus the first row — in a conversation, and gets **the
-notice's tail with the card up**, which is the frame where the card is the thing
-that has to be answered anyway and the notice's detail is recoverable once it is.
+`size [41,11] virtual [40,15]`, `scroll_y=4`, vertical bar — the block's first
+**two** rows are above the fold, so what the operator reads first is the remainder
+of the reason sentence, not its opening words), and **2 rows** with the re-armed
+card docked (`region [1,1,42,4] size [41,2] virtual [40,8] scroll_y=6`, the notice
+itself at `region [2,-2,40,6]`), where the rows that paint are the block's **last
+two** — `blocked until someone does.` / `Denying it works from here.` So at 44
+columns the operator gets the reason and the remedies — minus the first two rows —
+in a conversation, and gets **the notice's tail with the card up**, which is the
+frame where the card is the thing that has to be answered anyway and the notice's
+detail is recoverable once it is.
 Both block heights are pinned as exact numbers in
 `tests/unit/tui/test_approvals_ux.py::test_the_refused_card_notice_reaches_the_screen`
 (design round 3 D14 and agent R3-5 corrected a wrap-based pin that said "9 rows"
