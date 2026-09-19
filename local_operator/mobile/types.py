@@ -49,6 +49,7 @@ from typing import Any, Literal
 # stack — daemon, web layer, attach client, peer send — keeps importing them
 # from the path it always has. See local_operator/session/runtime/types.py for
 # why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
+from local_operator.harness.approval import OPERATOR_CAP_BYTES, is_wire_hex
 from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
@@ -59,6 +60,14 @@ from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ClientKind,
     SessionRecord,
 )
+
+#: The wire form of a handshake nonce, salt or proof (issue #1310): 32 bytes,
+#: hex-encoded, which is what ``operator_nonce`` mints and what an HMAC-SHA256
+#: proof renders as. Derived from the byte count rather than spelled as 64, so
+#: the validator cannot accept a length the mint cannot produce. The SHAPE check
+#: itself is ``harness.approval.is_wire_hex`` — one definition, shared with the
+#: runtime's auth reader and the attach client's handshake verification.
+OPERATOR_CAP_HEX_CHARS = OPERATOR_CAP_BYTES * 2
 
 
 @dataclass(frozen=True)
@@ -153,6 +162,32 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
     op = frame.get("op")
     if not isinstance(op, str) or not op:
         raise ValueError("op must be a non-empty string")
+    if "operator_cap" in frame:
+        # ONE OPTIONAL FIELD (issue #1310). It is validated wherever it appears —
+        # the shape check is cheap and a field that reaches the seam untyped is
+        # a field the seam has to defend against — and READ only on the three ops
+        # that can carry an authority-increasing request (see
+        # ``harness/approval.frame_authority``). Typed here for the reason
+        # ``credential`` is: this is a CREDENTIAL's wire form, and a non-string or
+        # an ill-shaped value must be refused rather than coerced into a
+        # comparison the far side would then fail in its own way. The check is on
+        # SHAPE only — this module never learns what the right value is, and must
+        # not, since the runtime is the only holder.
+        #
+        # Length plus hexdigits, matching what ``mint_operator_cap`` produces
+        # (``token_bytes(32).hex()``, always 64 lowercase hex characters). A
+        # value that fails this is refused as malformed rather than as
+        # unauthorised, so the two cases stay distinguishable in the logs.
+        if not is_wire_hex(frame.get("operator_cap")):
+            raise ValueError("operator_cap must be a hex string")
+    # ``operator_nonce`` is deliberately NOT validated here, and the reason is the
+    # one rule the two ends have to agree on (agent review round 2, R2-5/R2-6).
+    # The nonce is read on exactly one frame — the CONNECT frame, by the runtime's
+    # auth path — and an ill-shaped one there is demoted to "no handshake", which
+    # fails closed: no handshake, no authority, and the ordinary ops are untouched.
+    # On any OTHER frame it is inert, so shape-checking it there would refuse a
+    # frame for a field that has no meaning in it, and the previous check was the
+    # only place the two ends disagreed about what a malformed nonce meant.
     if op in ("prompt", "steer"):
         text = frame.get("text")
         if not isinstance(text, str) or (

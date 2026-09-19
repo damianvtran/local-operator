@@ -58,6 +58,16 @@ if TYPE_CHECKING:
 
     from local_operator.harness.types import ImageContent
 
+from local_operator.harness.approval import (
+    AUTHORITY_OPS,
+    frame_authority,
+    handshake_proof,
+    handshake_proof_ok,
+    is_wire_hex,
+    operator_nonce,
+    report_operator_cap_guarantee,
+    request_proof_ok,
+)
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
 from local_operator.paths import config_dir
@@ -711,6 +721,22 @@ _PAYLOAD_OPS = {
 }
 
 
+#: Every control op that can reach an authority-INCREASING sink (issue #1310).
+#:
+#: The set itself lives in ``harness/approval.py`` beside the class predicate,
+#: because the CONSOLE reads it too (it presents the capability on exactly these
+#: frames) and a set that drifted between the two ends would leave a route the
+#: client believes it authorised and the server believes is ordinary. What is
+#: asserted here is the correspondence with THIS module's dispatch: every op
+#: whose dispatch reaches ``SessionHandle.slash`` / ``slash_images`` /
+#: ``run_slash_authoritative`` / ``approval_answer`` — the only ways to
+#: ``_approvals_slash``, ``_set_approve_all`` or a card approval — must appear in
+#: the set, and ``test_approval_authority_seam.py`` re-derives that group from
+#: this file's source so a route added in a new op fails the suite instead of
+#: shipping an unguarded way to loosen a running gate.
+_AUTHORITY_OPS = AUTHORITY_OPS
+
+
 def _accepts_kw(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes the keyword ``name``.
 
@@ -849,6 +875,15 @@ class _ClientConn:
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
+    #: The per-connection operator proof material (issue #1310). The client
+    #: offers a NONCE in its auth frame; this runtime answers with a random salt
+    #: and a proof over both, and later demands the same construction on an
+    #: authority-increasing request. Neither value is secret, and both die with
+    #: the connection, so a proof seen on the wire is worthless on another one.
+    #: Empty when the client offered no nonce — an old console, or one that
+    #: holds no capability for this runtime — which is the fail-closed state.
+    operator_nonce: str = ""
+    operator_salt: str = ""
     #: This viewer negotiated ``display-history-audit-v1`` and can therefore be
     #: sent the audit fields on a display page. A property of the CONNECTION,
     #: so it is read where the connection is known and never inferred from the
@@ -1030,7 +1065,22 @@ class RuntimeServer:
         *,
         kind: str = "tui",
         projection_sink: ProjectionSink | None = None,
+        operator_cap: bytes | None = None,
     ) -> None:
+        #: The capability this runtime demands for an authority-INCREASING
+        #: control request, or ``None`` when nothing handed one over (issue
+        #: #1310). Minted by whichever process started this runtime — the
+        #: detached spawn hands it over on an inherited descriptor, the TUI
+        #: passes the one it minted for its own in-process gate — and held ONLY
+        #: here. It is deliberately not a ``SessionRecord`` field and not on the
+        #: handle's projection: everything published in the record is readable
+        #: under this same uid, which is the defect this exists to close.
+        #:
+        #: ``None`` is a supported, fail-closed state rather than a bug: a
+        #: runtime started by an older console, or by a background spawn with no
+        #: console at all, keeps serving every ordinary operation and refuses
+        #: every loosening (see ``_authority_admitted``).
+        self._operator_cap = operator_cap
         #: Live state mirrored into the discovery record. Held here rather
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
@@ -1739,6 +1789,14 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
+        # HOW STRONG THE CAPABILITY'S BOUNDARY IS ON THIS HOST, reported rather
+        # than assumed, and reported HERE so every host says it exactly once (the
+        # helper latches): on Linux with ``ptrace_scope=0`` and on Windows a
+        # same-uid process can read this one's memory, so there the capability
+        # raises the cost of the attack instead of closing it. See
+        # ``harness/approval.operator_cap_guarantee`` and the residual section of
+        # ``docs/design/approval-authority.md``.
+        report_operator_cap_guarantee()
         try:
             # Port 0: the OS picks; the record carries the number. Binding
             # loopback only is the security invariant of the whole design.
@@ -2005,6 +2063,17 @@ class RuntimeServer:
             if isinstance(raw_consumers, (list, tuple))
             else None
         )
+        # The client's half of the handshake (issue #1310). Only the SHAPE is
+        # checked here — a nonce is not a credential, and an ill-shaped one
+        # degrades to "this client asked for no handshake", which refuses rather
+        # than admits. Nothing is remembered across connections.
+        raw_nonce = frame.get("operator_nonce")
+        client_nonce = raw_nonce if is_wire_hex(raw_nonce) else ""
+        # The salt is minted per connection and only when there is a nonce to
+        # bind it to: a connection that will never be offered a proof does not
+        # need one minted.
+        server_salt = operator_nonce() if client_nonce else ""
+
         if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
             writer.close()
             return
@@ -2046,6 +2115,8 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            operator_nonce=client_nonce,
+            operator_salt=server_salt,
         )
         self._clients[id(writer)] = conn
         # A terminal arriving flips ``detached`` (round 1, U2: it was computed
@@ -2710,6 +2781,79 @@ class RuntimeServer:
             watching.add("viewer")
         return frozenset(watching)
 
+    def _authority_admitted(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
+        """Whether this frame may reach an authority-INCREASING sink.
+
+        True for every frame that is not in :data:`_AUTHORITY_OPS` — the
+        overwhelming majority of traffic, and the set whose authorization really
+        is the record key alone. True for an increasing frame that presents THIS
+        CONNECTION's proof of the runtime's capability; False otherwise,
+        including when this runtime holds no capability at all.
+
+        The connection is taken rather than reached for because the proof is
+        bound to it: the client's nonce came in on the auth frame that created
+        ``conn`` and the salt was minted for it, so a proof is only ever valid
+        where it was produced.
+
+        The classification is by OP plus the fields that op carries, and it is
+        deliberately NOT by the handle method or by the resulting value: a frame
+        is judged before anything is dispatched, so a refused request cannot
+        have had a partial effect on the way to being refused.
+        """
+        if frame.get("op") not in _AUTHORITY_OPS:
+            return True
+        authority = frame_authority(frame)
+        if authority is None or authority == "ordinary":
+            return True
+        return request_proof_ok(
+            supplied=frame.get("operator_cap"),
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        )
+
+    def _connection_may_loosen(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
+        """Whether THIS connection has PROVEN it may loosen this session's gate.
+
+        ``True``, or ``None`` for "it has not said", which the sentence builders
+        read as the conservative branch. Never ``False``: a follower and a
+        capable console must not be indistinguishable by accident, and the
+        distinction that matters is "proved" vs "did not".
+
+        WHY NOT ``_authority_admitted`` ON A SYNTHETIC FRAME. That predicate
+        reads the proof off the ``frame`` it is handed, and a frame constructed
+        here has none — so it answered a constant ``False`` and told a console
+        that had just loosened the gate that loosening "has to come from the
+        window that started it" (agent review round 3, R3-1 = UX U10 = QA Q6:
+        measured on production objects, on both the desktop and the phone).
+        Passing the REQUEST frame instead is not a fix either: the request is
+        ordinary, so an ordinary op would answer "may loosen" for a follower.
+
+        What CAN be verified here is the HANDSHAKE proof: HMAC over THIS
+        connection's nonce and salt, computable only by a process holding the
+        capability. A client that spawned this runtime has both; a follower, an
+        impostor holding the rewritten record, and a relay forwarding someone
+        else's frames do not — the proof is bound to the connection's own nonce
+        and salt, so another connection's proof does not verify here.
+        """
+        if self._operator_cap is None:
+            return None
+        supplied = frame.get("operator_handshake")
+        if not is_wire_hex(supplied) or not conn.operator_nonce or not conn.operator_salt:
+            # Not proved: an unchanged client (the field is optional and
+            # additive), a follower, or a relay. The conservative sentence is
+            # the right answer for all three, and for a capable client on an
+            # older build it is only cosmetically wrong until it updates.
+            return None
+        if not handshake_proof_ok(
+            supplied=supplied,
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        ):
+            return None
+        return True
+
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
         # HERE rather than at the reader's parse because this is the line that
@@ -2749,6 +2893,54 @@ class RuntimeServer:
         op = str(frame.get("op") or "")
         req = frame.get("req")
         try:
+            # THE ONE SEAM WHERE THE GATE'S AUTHORITY IS DECIDED (issue #1310).
+            #
+            # `control_key` — published 0600 in the session record — is the
+            # whole authorization story for ORDINARY operations and stays that
+            # way. An authority-INCREASING one additionally demands the
+            # per-session operator capability, which exists only in the memory
+            # of the process that started this runtime and in the console that
+            # typed the command. A model-authored `bash` call runs as this same
+            # uid, can read the record, and can dial this loopback port; it
+            # cannot hold a value that was never written anywhere it can read.
+            #
+            # HERE rather than at each sink, because every route in the tree —
+            # the daemon's HTTP command surface, the phone relay, a peer send,
+            # a follower terminal, the CLI — arrives at the handle through this
+            # method. A second dispatch route added later is covered by
+            # construction, and `tests/unit/session/runtime/
+            # test_approval_authority_seam.py` fails if one appears that reaches
+            # a sink without being classified below.
+            #
+            # The refusal is raised rather than answered inline so it reuses the
+            # existing `{"op": "error"}` reply the branches below already
+            # produce: one shape for the client to surface, and the copy names
+            # the one-step remedies (see OPERATOR_CAP_REQUIRED_NOTICE).
+            #
+            # A TYPED refusal, not a bare `ValueError`, and the code is what
+            # makes it survivable: every route that carries a control request
+            # (the desktop command surface, the desktop card route, the relay,
+            # the attach screen) can name this outcome instead of guessing from
+            # the message, and the copy reaches the operator verbatim rather
+            # than being reported as "the runtime is unreachable" or "the
+            # question expired" (agent review round 1 R1-2 = design D1 = UX U4 =
+            # QA Q1, from four independent rounds on the same defect).
+            if not self._authority_admitted(frame, conn):
+                logger.warning(
+                    "session runtime: refused an authority-increasing request "
+                    "(op %r) from %s at %s",
+                    op,
+                    conn.kind,
+                    conn.writer.get_extra_info("peername"),
+                )
+                from local_operator.session.errors import OperatorAuthorityRequired
+
+                # WHICH REFUSAL, from the op rather than from prose: a card
+                # answer is refused as a card (the question is still parked, and
+                # a deny works from here), a slash is refused as a command. The
+                # far side rebuilds the same sentence from this token, so the
+                # copy never travels as text (UX round 2, U8).
+                raise OperatorAuthorityRequired(trigger=op)
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
@@ -3018,6 +3210,13 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    # Whether THIS connection PROVED it may loosen the gate,
+                    # or ``None`` for "it has not said" (design round 2 D10, UX
+                    # round 2 U9; corrected in agent review round 3, R3-1): the
+                    # reports a routed command returns must not offer a command
+                    # this connection would be refused, and must not deny one it
+                    # could carry.
+                    may_loosen=self._connection_may_loosen(frame, conn),
                 )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
@@ -3097,17 +3296,29 @@ class RuntimeServer:
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
                 AttachmentUnavailable,
+                OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
                 RuntimeRetiring,
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
             if isinstance(
-                exc, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)
+                exc,
+                (
+                    AttachmentUnavailable,
+                    OperatorAuthorityRequired,
+                    ProfileRegistryUnavailable,
+                    RuntimeRetiring,
+                ),
             ):
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+                if isinstance(exc, OperatorAuthorityRequired) and exc.trigger:
+                    # A token from a closed set, never text: the far side picks
+                    # the sentence that matches the frame it refused (a refused
+                    # command vs a refused card).
+                    frame["error_trigger"] = exc.trigger
             if isinstance(exc, RuntimeRetiring) and exc.trigger:
                 # WHICH DEPARTURE, as one of the enumerated tokens — the same
                 # shape as ``error_count`` below, and for the same reason: the
@@ -3632,6 +3843,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        may_loosen: bool | None = None,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -3689,6 +3901,12 @@ class RuntimeServer:
                 kwargs["locality"] = locality
             if _accepts_kw(run, "consumers"):
                 kwargs["consumers"] = consumers
+            if _accepts_kw(run, "may_loosen"):
+                # The connection's own property, read where the connection is
+                # known — the same reason ``consumers`` is (design round 2 D10,
+                # UX round 2 U9).
+                kwargs["may_loosen"] = may_loosen
+
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
@@ -4412,12 +4630,48 @@ class RuntimeServer:
         return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
-        """The welcome form of a push: one full projection to one connection."""
+        """The welcome form of a push: one full projection to one connection.
+
+        The ONE frame that may also carry the operator capability's handshake
+        proof (issue #1310) — deliberately here and not in ``_projection_frame``,
+        which every repaint goes through: the proof is per CONNECTION and belongs
+        to the frame that decides whether the client will present anything at
+        all. A client that sees no proof (this runtime holds no capability, or
+        the client offered no nonce) presents nothing, which is the fail-closed
+        reading of a runtime nobody handed one to.
+        """
         conn.sending_welcome = True
         try:
-            await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
+            frame = self._projection_frame(conn, self._projection_payload())
+            proof = self._welcome_operator_proof(conn)
+            if proof is not None:
+                # Salt alongside the proof, because the client needs both
+                # nonces to build its own proof and only the PROOF is
+                # credential-shaped: the salt is a value it just chose for a
+                # connection that will not outlive this list.
+                frame["operator_salt"] = conn.operator_salt
+                frame["operator_proof"] = proof
+            await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
+
+    def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
+        """This connection's handshake proof, or ``None`` when there is none to give.
+
+        MUTUAL, and that direction is the point: the console must be able to
+        tell a real runtime from an endpoint that merely has the record's
+        ``control_port`` written into it. A rewritten record points the console
+        at an impostor, and an impostor cannot compute this proof — it does not
+        hold the capability — so the console presents nothing. See
+        ``harness/approval._proof`` for the attack this closes.
+        """
+        if not conn.operator_nonce or not conn.operator_salt:
+            return None
+        if self._operator_cap is None:
+            return None
+        return handshake_proof(
+            self._operator_cap, client_nonce=conn.operator_nonce, server_salt=conn.operator_salt
+        )
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating

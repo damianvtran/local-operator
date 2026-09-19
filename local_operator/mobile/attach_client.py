@@ -42,6 +42,15 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Sequence
 
+from local_operator.harness.approval import (
+    frame_authority,
+    handshake_proof,
+    handshake_proof_ok,
+    is_wire_hex,
+    operator_cap_for,
+    operator_nonce,
+    request_proof,
+)
 from local_operator.mobile.types import (
     PROTOCOL_VERSION,
     ContinuationCommand,
@@ -862,6 +871,29 @@ class AttachClient:
         # different from ``[]`` only to a reader of the frame -- both mean the
         # type was not declared, which is the one rule the runtime applies.
         self._slash_consumers = list(slash_consumers) if slash_consumers is not None else None
+        #: The operator capability for the runtime this connection dials, or
+        #: ``None`` when ANOTHER process started it (issue #1310). Resolved at
+        #: ``connect`` from the record's pid against the capabilities THIS
+        #: process minted (`harness/approval.operator_cap_for`) — which is what
+        #: makes "works iff this process started the session" the rule rather
+        #: than a per-surface special case. It rides the frame only for the ops
+        #: that increase authority; every ordinary op is byte-identical to what
+        #: this client sent before the field existed, which is why no
+        #: ``PROTOCOL_VERSION`` moves.
+        #:
+        #: THE VALUE NEVER GOES ON THE WIRE (agent review round 1, R1-1). What
+        #: rides a frame is a per-connection PROOF of it — see
+        #: ``harness/approval._proof`` for the record-rewriting attack that
+        #: ended the earlier value-sending shape — and it is only sent to an
+        #: endpoint that has already proved it holds the same value.
+        self._operator_cap: bytes | None = None
+        #: This connection's nonce (ours), salt (the runtime's) and whether the
+        #: runtime PROVED possession of the capability. ``_authority_bearing`` is
+        #: the only flag the presentation path reads: a capability we hold is not
+        #: enough to present anything to an endpoint that did not prove itself.
+        self._operator_nonce = ""
+        self._operator_salt = ""
+        self._authority_bearing = False
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         #: Fired the moment a ``retiring`` frame ARRIVES, with the frame itself.
@@ -966,6 +998,22 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        # THE CAPABILITY IS RESOLVED PER DIAL, from the pid in the record being
+        # dialled, because "may I loosen this session's gate" is a property of
+        # the pairing (this process, that runtime) and not of this client. A
+        # reconnect to a SUCCESSOR runtime re-resolves it: a successor this
+        # process spawned carries its own capability, and a successor someone
+        # else started resolves to ``None``, which is the honest answer.
+        self._operator_cap = operator_cap_for(record.pid)
+        # THE HANDSHAKE'S FIRST HALF. A nonce is not a secret, and it is offered
+        # only when this process actually holds a capability for the runtime
+        # behind this record: it exists so the runtime can prove, in its
+        # welcome, that it holds the same one. A record rewritten to point at an
+        # impostor therefore produces no proof, and this client presents nothing
+        # (see the verification below).
+        self._operator_nonce = operator_nonce() if self._operator_cap is not None else ""
+        self._operator_salt = ""
+        self._authority_bearing = False
         # A reconnect dials what may be a different conversation (the welcome
         # below fails the identity check when it is), so no phrase the previous
         # one published may survive into this one's refusals.
@@ -1007,6 +1055,8 @@ class AttachClient:
             # the owner's strip decision a negotiation rather than a guess.
             if "display-history-audit-v1" in record.capabilities:
                 auth["display_history_audit"] = True
+        if self._operator_nonce:
+            auth["operator_nonce"] = self._operator_nonce
         if self._slash_consumers is not None:
             # Additive and advisory, exactly the shape ``events`` and
             # ``frontend_state`` are: an older owner ignores the unknown auth
@@ -1037,6 +1087,7 @@ class AttachClient:
             raise ConnectionError("owner sent a malformed frame") from exc
         if frame.get("op") not in ("projection", "welcome"):
             raise ConnectionError(f"owner replied {frame.get('op')!r}, not its state")
+        self._adopt_handshake(frame)
         projection = _projection_from_json(frame.get("data") or {}, record)
         if projection.session_id != session_id:
             raise ConnectionError(f"owner moved to another conversation ({projection.session_id})")
@@ -1284,6 +1335,106 @@ class AttachClient:
             raise known
         raise RuntimeError(str(reply.get("message", "request failed")))
 
+    def _adopt_handshake(self, welcome: dict[str, Any]) -> None:
+        """Verify the runtime's proof that it holds OUR capability (issue #1310).
+
+        THE HALF THAT CLOSES THE HARVEST. The discovery record is writable by
+        anything under this uid, so ``control_port`` is not trustworthy: an
+        impostor can rewrite it and receive whatever this client sends. It
+        cannot, however, compute the proof this method checks — it does not hold
+        the capability — so a console presents nothing to it, not even a proof.
+
+        A failed or missing proof is NOT a connection failure: ordinary control
+        keeps working exactly as it did (the record key is the whole
+        authorization story for ordinary operations), and only the
+        authority-increasing class is withheld. Holding a capability and hearing
+        no proof is the one case worth a warning, because it means this process
+        started a runtime for this pid and something else answered.
+        """
+        self._operator_salt = ""
+        self._authority_bearing = False
+        if self._operator_cap is None or not self._operator_nonce:
+            return
+        salt = welcome.get("operator_salt")
+        if is_wire_hex(salt) and handshake_proof_ok(
+            supplied=welcome.get("operator_proof"),
+            held=self._operator_cap,
+            client_nonce=self._operator_nonce,
+            server_salt=str(salt),
+        ):
+            self._operator_salt = str(salt)
+            self._authority_bearing = True
+            return
+        logger.warning(
+            "attach: %s holds the operator capability for pid %s but the endpoint answering did "
+            "not prove it holds the same one; authority-increasing requests will be withheld",
+            self._surface,
+            getattr(self, "_runtime_pid", None),
+        )
+
+    def authority_proof(self, op: str, fields: dict[str, Any]) -> str | None:
+        """The proof for an authority-increasing frame, or ``None`` for any other.
+
+        THE SINGLE ENTRY POINT for every producer of control frames THIS client
+        owns, including the phone relay's own writer (``mobile/daemon.request``),
+        which writes frames by hand rather than through ``_request_frame`` and
+        would otherwise be a surface that can never loosen. Returns ``None``
+        when the op is ordinary (leaving the frame byte-identical to what an
+        older runtime served, which is why no ``PROTOCOL_VERSION`` moves), when
+        this process holds no capability, and when the runtime never proved it
+        holds the same one.
+
+        ``getattr`` for the three members: three cells drive a real op over
+        ``object.__new__(AttachClient)`` with ``_request_frame`` stubbed, so a
+        double must not have to know they exist to exercise an ordinary path.
+        """
+        if not getattr(self, "_authority_bearing", False):
+            return None
+        cap = getattr(self, "_operator_cap", None)
+        if cap is None:
+            return None
+        if frame_authority({"op": op, **fields}) != "authority-increasing":
+            return None
+        return request_proof(
+            cap,
+            client_nonce=self._operator_nonce,
+            server_salt=self._operator_salt,
+        )
+
+    def _present_authority(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Add this connection's proof to a frame that INCREASES authority.
+
+        The console's half of the rule in ``harness/approval.frame_authority``:
+        the runtime demands the proof on exactly the frames this adds it to, and
+        both sides read the one classification.
+
+        Attached HERE, at the single outbound chokepoint, rather than in each
+        caller: ``slash``, ``slash_result`` and ``approval_answer`` are reached
+        from the TUI's routed slash path, the desktop command route, the phone
+        relay and the peer paths, and a per-caller field would be a field some
+        future caller forgets.
+        """
+        op = str(frame.get("op", ""))
+        proof = self.authority_proof(op, frame)
+        out = {**frame, "operator_cap": proof} if proof is not None else dict(frame)
+        # THE SENTENCE HALF. ``slash_result`` returns REPORTS that name remedies,
+        # and whether this connection may loosen decides which remedy is true —
+        # so the runtime is given the one thing it can verify about us (agent
+        # review round 3, R3-1 = UX U10: without this the runtime could only
+        # answer "not proved", and told a console that had just loosened the gate
+        # that loosening belonged to another window). The value is the HANDSHAKE
+        # proof, not the capability: it is the same value this connection was
+        # already sent, it is bound to this connection's nonce and salt, and it
+        # authorises nothing on its own — a frame that needed authority would
+        # still have to carry ``operator_cap`` for that frame.
+        if op == "slash_result" and self._authority_bearing and self._operator_cap is not None:
+            out["operator_handshake"] = handshake_proof(
+                self._operator_cap,
+                client_nonce=self._operator_nonce,
+                server_salt=self._operator_salt,
+            )
+        return out
+
     async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""
         reply = await self._request_frame(op, deadline_s=deadline_s, **fields)
@@ -1324,7 +1475,7 @@ class AttachClient:
         # until the connection closes, then takes the teardown's
         # `ConnectionError` with nobody awaiting it — an "exception was never
         # retrieved" log for a refusal the caller had already handled cleanly.
-        frame = await fit_request_frame({"op": op, "req": req, **fields})
+        frame = await fit_request_frame(self._present_authority({"op": op, "req": req, **fields}))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
         try:
@@ -1358,7 +1509,7 @@ class AttachClient:
         # Fitted before the future is registered, for the reason spelled out in
         # :meth:`_request_frame`: a refusal must leave nothing parked in
         # ``_pending``.
-        frame = await fit_request_frame({"op": op, "req": req, **fields})
+        frame = await fit_request_frame(self._present_authority({"op": op, "req": req, **fields}))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
         try:

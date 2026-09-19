@@ -12,9 +12,12 @@ The child builds a session with the CLI's composition root, wraps it in the
 owned-session handle (approval/ask gates resolved from the phone), registers
 it through the normal record + control socket path, and idles until a signal
 arrives or the residency predicate (:func:`_should_exit`) holds for one
-sustained drain. Environment variables are the
-spawn contract (``LOP_MOBILE_CHILD_CWD``, ``_PROVIDER``, ``_MODEL``) — argv
-would be ps-readable.
+sustained drain. Environment variables are the spawn contract
+(``LOP_MOBILE_CHILD_CWD``, ``_PROVIDER``, ``_MODEL``) — argv would be
+ps-readable. The ONE thing that rides in argv is ``--operator-fd <n>``, the
+NUMBER of the descriptor the operator capability arrives on: a descriptor
+number is not a secret and is useless without the 32 bytes written through it
+(issue #1310, see ``harness/approval.py``).
 
 **Residency (design §6.1).** The runtime is a unit of WORK, not of state; it
 runs its trajectory to completion and exits when idle, so a closed terminal
@@ -2287,7 +2290,17 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
         logger.warning("could not install the SIGHUP ignore", exc_info=True)
 
 
-async def amain() -> int:
+async def amain(operator_cap: bytes | None = None) -> int:
+    """Run the owned session to completion.
+
+    ``operator_cap`` is the capability handed over by the spawner on an
+    inherited descriptor (see ``harness/approval.py``). It is threaded to the
+    ``RuntimeServer`` rather than stashed on the handle, because the runtime is
+    the seam that demands it and the handle is an injected collaborator that
+    every test double also implements. ``None`` — a hand-run module, an older
+    spawner — is the fail-closed state: ordinary operations keep working and
+    nothing may loosen the gate.
+    """
     # SIGHUP FIRST, before the deferred imports below, the lease arbitration,
     # session construction, MCP bring-up and ``start_in_process``: the guarantee
     # is "no interface can end this session's work", and a HUP during boot has
@@ -2406,7 +2419,7 @@ async def amain() -> int:
         except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
-    runtime = RuntimeServer(handle, kind="daemon")
+    runtime = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
     await runtime.start_in_process()
 
     stop = asyncio.Event()
@@ -2628,12 +2641,25 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     if configure_file_logging(path=target, level=logging.INFO) is None:
         logger.warning("session runtime could not open a log file; records stay on stderr")
+    # THE OPERATOR CAPABILITY IS READ HERE, and it is read from a DESCRIPTOR
+    # rather than from argv/env/a file: a model-run ``bash`` tool can read any of
+    # those (the record is 0600 under this same uid, which is the defect), and
+    # the 32 bytes travel on an inherited fd the spawner closes as soon as it has
+    # written them. Read above the lease and the session construction, and closed
+    # inside the reader — by the time this process serves anything the descriptor
+    # is gone from its table, so no tool subprocess can inherit it. ``None``
+    # means no capability was handed over: ordinary operations keep working and
+    # every authority-increasing request is refused. AFTER the logging setup, so
+    # a malformed handoff's warning actually lands in ``runtime.log``.
+    from local_operator.harness.approval import read_operator_cap_from_argv
+
+    operator_cap = read_operator_cap_from_argv(sys.argv[1:])
     # One record per runtime, naming its own process: this file is shared by every
     # runtime child, so a reader has to be able to attribute a line to the
     # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
     try:
-        return asyncio.run(amain())
+        return asyncio.run(amain(operator_cap=operator_cap))
     except KeyboardInterrupt:
         return 0
 

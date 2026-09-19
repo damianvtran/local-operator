@@ -1860,3 +1860,202 @@ def test_the_search_route_names_the_store_it_could_not_read(tmp_path, monkeypatc
         "the screen the operator actually looks at must be able to tell an "
         "unreadable store from an empty one"
     )
+
+
+class _SlashHandle(FakeHandle):
+    """``FakeHandle`` plus the one op the authority seam guards (issue #1310)."""
+
+    async def run_slash_authoritative(  # noqa: ANN001, ANN202
+        self, command, args, images, locality=None, consumers=None
+    ):
+        return await self._record("slash_result", command, args)
+
+
+def test_a_failed_handshake_clears_a_standing_one_and_a_repaint_does_not() -> None:
+    """The two halves of the relay's adopt rule, pinned as a FUNCTION.
+
+    Both halves are security-relevant and only one of them was covered: every
+    existing test drives the repaint half through a socket, so a mutation that
+    preserved the state on ANY proof-less frame — i.e. one that treats an
+    impostor's answer to our nonce as a repaint — left all 359 delta tests green
+    (agent review round 3, R3-2). The impostor's shape is a frame that answers
+    our nonce with a salt and no usable proof, and it has to CLEAR: a connection
+    that just failed a handshake must not keep the authority of one that
+    succeeded.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.harness.approval import (
+        handshake_proof,
+        mint_operator_cap,
+        operator_nonce,
+    )
+    from local_operator.mobile.daemon import SessionEntry, _adopt_operator_handshake
+
+    cap = mint_operator_cap()
+    nonce = operator_nonce()
+    salt = operator_nonce()
+
+    def handshaken() -> Any:
+        # ``Any`` rather than a real record: this test is about the ADOPT rule,
+        # which reads four fields the entry owns and never touches the record.
+        record: Any = SimpleNamespace(pid=4242, session_id="sess-1")
+        entry = SessionEntry(record)
+        entry.operator_cap = cap
+        entry.operator_nonce = nonce
+        entry.operator_salt = salt
+        entry.authority_bearing = True
+        return entry
+
+    # A REPAINT carries neither key, and must leave the handshake standing.
+    repaint = handshaken()
+    _adopt_operator_handshake(repaint, {"op": "projection", "data": {"epoch": "e-2"}})
+    assert repaint.authority_bearing is True
+    assert repaint.operator_salt == salt
+
+    # The WELCOME re-establishes it, from the proof this runtime can compute.
+    welcome = handshaken()
+    good_salt = operator_nonce()
+    _adopt_operator_handshake(
+        welcome,
+        {
+            "op": "projection",
+            "operator_salt": good_salt,
+            "operator_proof": handshake_proof(cap, client_nonce=nonce, server_salt=good_salt),
+        },
+    )
+    assert welcome.authority_bearing is True
+    assert welcome.operator_salt == good_salt
+
+    # A SALT WITH NO USABLE PROOF is the impostor, whatever its shape: no proof
+    # at all, a wrong-but-well-formed proof, and a salt that is not wire hex.
+    for frame in (
+        {"op": "projection", "operator_salt": operator_nonce()},
+        {
+            "op": "projection",
+            "operator_salt": operator_nonce(),
+            "operator_proof": handshake_proof(
+                mint_operator_cap(), client_nonce=nonce, server_salt=salt
+            ),
+        },
+        {"op": "projection", "operator_salt": "not-hex"},
+        # A proof WITHOUT a salt is a handshake attempt too, and cannot verify.
+        {
+            "op": "projection",
+            "operator_proof": handshake_proof(cap, client_nonce=nonce, server_salt=salt),
+        },
+    ):
+        failed = handshaken()
+        _adopt_operator_handshake(failed, frame)
+        assert failed.authority_bearing is False, frame
+        assert failed.operator_salt == "", frame
+
+
+@pytest.mark.asyncio
+async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
+    operator_cap: bytes,
+) -> None:
+    """THE PHONE'S HALF, and the surface table's claim made true (UX round 1, U3).
+
+    ``MobileDaemon.request`` writes its own frames rather than going through
+    ``AttachClient._present_authority``, so before this the phone could never
+    loosen or approve ANYTHING — including a session whose runtime the relay
+    itself had started, which is the one case the table promises works. The
+    relay is a legitimate console exactly when it spawned the runtime, so the
+    capability is resolved per dial (``_dial``) and the proof attached per
+    request (``_operator_request_proof``).
+
+    Three claims, and the third is what stops the first from being vacuous:
+
+    * a relay dialling a runtime IT started completes the handshake and its
+      ``/approvals auto`` reaches the sink — a receipt, not a refusal;
+    * the same relay dialling a runtime another process started completes no
+      handshake, so its request is refused with the typed category rather than
+      a bare message (which is what the phone's HTTP layer renders as 422);
+    * an ORDINARY request still works on the refused connection, because the
+      seam guards one class and nothing else.
+    """
+    from local_operator.harness.approval import (
+        OPERATOR_CAP_REQUIRED_NOTICE,
+        reset_operator_caps_for_tests,
+    )
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    handle = _SlashHandle()
+    # ``operator_cap`` registers the value under THIS process's pid, which is
+    # the key ``_dial`` resolves against — i.e. "this relay started it".
+    registrant = RuntimeServer(handle, kind="tui", operator_cap=operator_cap)
+    registrant.start()
+    try:
+        deadline = asyncio.get_running_loop().time() + 5
+        record = None
+        while asyncio.get_running_loop().time() < deadline:
+            found = registry.scan()
+            if found and found[0][1] == "live":
+                record = found[0][0]
+                break
+            await asyncio.sleep(0.1)
+        assert record is not None
+
+        daemon = MobileDaemon(port=0, password="pw")
+        entry = SessionEntry(record)
+        daemon.table.entries[record.pid] = entry
+        dial = asyncio.ensure_future(_dial(daemon, entry))
+        try:
+            for _ in range(50):
+                if entry.authority_bearing:
+                    break
+                await asyncio.sleep(0.1)
+            assert entry.authority_bearing, "the relay did not complete the handshake it owns"
+
+            reply = await daemon.request(
+                record.pid, "slash_result", command="approvals", args="auto", images=[]
+            )
+            assert reply["op"] == "result", reply
+            assert handle.calls[-1][0] == "slash_result"
+        finally:
+            dial.cancel()
+
+        # THE SAME RELAY, A RUNTIME IT DID NOT START: nothing to present. The
+        # capability table is dropped rather than the registrant restarted,
+        # because the two ends of this claim are "this process holds a value for
+        # that pid" and "it does not" — which is exactly what the table is.
+        reset_operator_caps_for_tests()
+        entry2 = SessionEntry(record)
+        daemon.table.entries[record.pid] = entry2
+        dial = asyncio.ensure_future(_dial(daemon, entry2))
+        try:
+            for _ in range(50):
+                if entry2.projection is not None:
+                    break
+                await asyncio.sleep(0.1)
+            assert entry2.authority_bearing is False
+            with pytest.raises(OperatorAuthorityRequired) as refusal:
+                await daemon.request(
+                    record.pid, "slash_result", command="approvals", args="auto", images=[]
+                )
+            assert str(refusal.value) == OPERATOR_CAP_REQUIRED_NOTICE
+            # ...AND A REFUSED CARD IS REBUILT AS THE CARD'S SENTENCE (UX review
+            # round 3, U11). The runtime sends the op as a token; this writer
+            # dropped it, so the phone — the surface the card copy was written
+            # for — read about a command its user never typed, on a question that
+            # had survived. The trigger is forwarded now, and this is the
+            # assertion that keeps it.
+            from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+
+            with pytest.raises(OperatorAuthorityRequired) as card_refusal:
+                await daemon.request(
+                    record.pid,
+                    "approval_answer",
+                    request_id="deadbeefdeadbeef",
+                    approved=True,
+                )
+            assert str(card_refusal.value) == CARD_APPROVAL_REFUSED_NOTICE
+            # An ORDINARY op is unaffected on the same connection: the seam
+            # guards one class, and the phone keeps everything else.
+            reply = await daemon.request(record.pid, "prompt", text="hello")
+            assert reply["op"] == "ack"
+        finally:
+            dial.cancel()
+    finally:
+        registrant.close()
