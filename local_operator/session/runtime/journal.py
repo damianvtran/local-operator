@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from local_operator.helpers import retention_label
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import HOST_RUN_DIRNAME
@@ -394,6 +395,20 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     storage. A torn record younger than the retention window is KEPT and logged —
     the age is what makes ageing a decision rather than a deletion of fresh
     evidence, and the log line is what keeps the condition from being silent.
+
+    AND THE TWO BOUNDS AGREE, so no entry can be IMMORTAL BY MTIME (review round 3,
+    MINOR 1). The age rule alone is ``age > REAPED_MAX_AGE_S``, which a future-dated
+    mtime makes NEGATIVE — never expired — while the count rule below keeps the
+    NEWEST entries, which is exactly where a future-dated file sorts. Measured with
+    the two together: 250 dead records were pruned and the future-dated one
+    survived both. A negative age is therefore STALE. The producers are restore,
+    ``os.utime`` and clock skew rather than anything written here, which is why the
+    line for that shape says the stamp is in the future instead of promising a
+    retention window that will not apply to it.
+
+    THE WARNING NAMES THE EXCEPTION TYPE, so a bug inside ``BootRecord.from_json``
+    does not read exactly like a torn file (review round 3, MINOR 5);
+    ``update._entries_in_directory`` has named it that way all along.
     """
     directory = (root or config_dir()) / HOST_RUN_DIRNAME
     try:
@@ -405,22 +420,45 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     moment = _now() if now is None else now
     dead: list[tuple[float, Path]] = []
     for path in paths:
+        failure = ""
         try:
             record = BootRecord.from_json(json.loads(path.read_text()))
-        except Exception:  # noqa: BLE001 — see the docstring: an entry costs itself
+        except Exception as exc:  # noqa: BLE001 — see the docstring: an entry costs itself
             record = None
+            # THE TYPE IS KEPT AS A NAME, not the exception: ``exc`` is unbound once
+            # its handler ends, and the warning below is outside it. This is the
+            # half of review round 3's MINOR 5 that makes a bug inside
+            # ``BootRecord.from_json`` stop reading exactly like a torn file.
+            failure = type(exc).__name__
         if record is None:
+            why = failure or "not a record of this kind"
             try:
                 landed = path.stat().st_mtime
             except OSError:  # pragma: no cover — vanished under us, nothing to age
                 continue
-            logger.warning(
-                "unreadable boot record %s: keeping it for %s, then ageing it out like "
-                "a dead runtime's record (an unreadable entry keeps every generation "
-                "until it goes)",
-                path,
-                _ttl_label(),
-            )
+            if landed > moment:
+                # A STAMP IN THE FUTURE IS NOT A KEEP (review round 3, MINOR 1): the
+                # age below is negative, so the window would never expire it and the
+                # count path keeps the NEWEST entries — a future-dated file sorts last
+                # and survives both bounds, immortal by mtime. ``os.utime``, a restore
+                # and clock skew are the plausible producers, and the writers here
+                # never make one; the line says which shape it is rather than
+                # promising a retention window that will not apply to it.
+                logger.warning(
+                    "boot record %s cannot be read (%s) and is stamped in the future: "
+                    "ageing it out now, because no mtime may make an entry immortal",
+                    path,
+                    why,
+                )
+            else:
+                logger.warning(
+                    "boot record %s cannot be read (%s): keeping it for %s, then ageing "
+                    "it out like a dead runtime's record (an unreadable entry keeps "
+                    "every generation until it goes)",
+                    path,
+                    why,
+                    retention_label(registry.REAPED_MAX_AGE_S),
+                )
             dead.append((landed, path))
             continue
         if registry.pid_alive(record.pid):
@@ -436,7 +474,14 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     dead.sort()
     removed = 0
     for started_at, path in dead:
-        aged_out = (moment - started_at) > registry.REAPED_MAX_AGE_S
+        # A NEGATIVE AGE IS STALE, NOT FRESH (review round 3, MINOR 1). It could not be:
+        # the count path keeps the NEWEST ``REAPED_MAX_FILES``, so an entry stamped ten
+        # years ahead sorts last and is never evicted either — measured: 250 dead records
+        # pruned and the future-dated one surviving. Together the two bounds therefore
+        # left one shape nothing could ever reclaim, which is the wedge this function
+        # exists to close for every other shape.
+        age = moment - started_at
+        aged_out = age > registry.REAPED_MAX_AGE_S or age < 0
         over_count = len(dead) - removed > registry.REAPED_MAX_FILES
         if not (aged_out or over_count):
             continue
@@ -446,12 +491,6 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
         except OSError:
             continue
     return removed
-
-
-def _ttl_label() -> str:
-    """``registry.REAPED_MAX_AGE_S`` in the words the log line reads: ``24h``."""
-    hours = registry.REAPED_MAX_AGE_S / 3600
-    return f"{hours:g}h" if hours >= 1 else f"{hours * 60:g}m"
 
 
 # ---------------------------------------------------------------------------
