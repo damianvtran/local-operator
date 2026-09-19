@@ -1397,3 +1397,62 @@ async def test_a_real_bash_command_never_publishes_an_open_key_body(
     text = "".join(getattr(part, "text", "") for part in result.content)
     assert body not in text, f"the key body reached the tool result for {command!r}"
     assert "[redacted]" in text
+
+
+def test_two_stores_in_one_process_are_independent() -> None:
+    """The registration set and its cap are PER STORE, not per process.
+
+    They were declared in the class body, and `.add()` on a class-level set cannot
+    create an instance attribute — so every `VariableStore` in the process shared one
+    set. One session's masked credentials were then scanned in another session's
+    results, and after 64 values process-wide containment stopped for everybody. It
+    surfaced as a red CI shard (an earlier test in the shard had filled the shared set)
+    and as the cross-session coupling the design note forbids.
+    """
+    a = VariableStore(cwd=".")
+    b = VariableStore(cwd=".")
+    a.redact("MONGO_DSN=mongodb+srv://u:sh4pedSentinelPw@host/db")
+
+    assert "sh4pedSentinelPw" in a.redaction_values()
+    assert b.redaction_values() == [], "a fresh store already holds another store's values"
+    assert a._shape_registrations is not b._shape_registrations
+
+
+def test_the_registration_cap_is_per_store() -> None:
+    """Filling one store past the cap must not stop containment in another."""
+    a = VariableStore(cwd=".")
+    b = VariableStore(cwd=".")
+    for index in range(VariableStore.MAX_DETECTED_REGISTRATIONS + 5):
+        a.redact(f"PASSWORD=secretValue{index:03d}xx")
+
+    assert len(a.redaction_values()) == VariableStore.MAX_DETECTED_REGISTRATIONS
+    b.redact("PASSWORD=otherStoreSecret9x")
+    assert "otherStoreSecret9x" in b.redaction_values(), "the cap leaked across stores"
+
+
+def test_a_fresh_store_does_not_inherit_another_stores_containment() -> None:
+    """What the per-store fix GUARANTEES, and what it deliberately does not.
+
+    Guaranteed: store A's registrations and A's cap are A's alone. A fresh store B
+    registers its own values normally, is not masked by A's set, and is not silenced by
+    A's cap — which is what the class-level set broke, deterministically, because the
+    sink it guards (`self._redactions`) was per-instance while the guard was not: the
+    first store in a process registered a value and every later store skipped it, so a
+    value a later store should have contained came back IN THE CLEAR.
+
+    NOT guaranteed, and by design: B does not inherit A's containment. Two stores in one
+    process are two security domains — the product creates ONE store per session, so
+    per-session containment is the intended scope, and a process-wide set is exactly the
+    coupling that made one session's reads affect another's text.
+    """
+    a = VariableStore(cwd=".")
+    b = VariableStore(cwd=".")
+    a.redact("MONGO_DSN=mongodb+srv://svc:storeASecret1234@host/db")
+
+    assert "storeASecret1234" in a.redaction_values()
+    # B is fresh: it holds nothing of A's, and it still masks what it registers itself.
+    assert b.redaction_values() == []
+    assert "storeBSecret5678" in (b.redact("PASSWORD=storeBSecret5678") and b.redaction_values())
+    # The boundary, stated as an assertion so it cannot drift into a claim: A's value is
+    # not contained in B, because containment is per store by design.
+    assert "storeASecret1234" not in b.redaction_values()
