@@ -353,12 +353,49 @@ plus every cursor key.
 
 **Widget-level (pickers, panels):** `ctrl+p` `ctrl+n` (`ask_picker.py:546`,
 `session_picker.py:734`, `settings_view.py:353`), `q` `t` `e` `f` `y` `n`
-`0`-`9`, `space`, `enter`, arrows/page/home/end.
+`0`-`9`, `space`, `enter`, arrows/page/home/end — plus the `/resume` picker's
+own `ctrl+e` and `ctrl+a` (see C.2).
 
 **Free `ctrl+<letter>` slots remaining:** `h` `i` `j` `m` `s` — and four of
 those five are terminal aliases (`ctrl+h`=backspace, `ctrl+i`=tab,
 `ctrl+j`=LF, `ctrl+m`=CR). **`ctrl+s` is the only genuinely free
 `ctrl+<letter>` in the entire application.** That fact drives §E.
+
+That sentence is about the APP and COMPOSER sets, and C.2 is the exception it
+implies rather than contradicts: a modal picker owns the keyboard while it is
+open, so a chord an unfocused composer also uses is not a conflict — which is
+the argument the picker's pre-existing `ctrl+e` was already resting on.
+
+### C.2 The `/resume` picker's own chords
+
+`SessionPickerScreen` binds two chords the composer also uses, and both are
+sound for the same reason: while the picker is open it is the focused widget,
+so its bindings resolve before anything the composer holds. The editor is not
+on screen behind it, and the picker's filter is a plain string on the widget
+(its `on_key` feeds printable characters to `set_query`), not a `TextArea` —
+so no inherited editing gesture is being displaced by either one.
+
+| key | action | why this key |
+|---|---|---|
+| `ctrl+e` | verbose preview | pre-existing |
+| `ctrl+a` | reveal/hide the ARCHIVED rows | spells the feature; see below |
+
+`ctrl+a` for the Archived reveal, added with session archive:
+
+* **Not a printable character**, which is a recorded rule for this widget: the
+  filter owns every printable character, so a letter binding would make that
+  letter untypable while a filter is being typed.
+* **Not one of the picker's other chords** — `ctrl+e` `ctrl+u` `ctrl+d`
+  `ctrl+g` `ctrl+p` `ctrl+n` are all taken on this screen.
+* **The same key reveals and hides.** A revealed archive is the same
+  population one toggle away, so one chord with two states is fewer things to
+  learn than a pair — and the row it lives on says which state it is in.
+* **`input` in a filter is not `ctrl+a` here.** The picker's filter is not a
+  text field with a selection, so there is no select-all to displace; a user
+  who reaches for it after a stray keystroke gets the archive instead of a
+  surprise edit. The row the binding owns is drawn as soon as — and only when
+  — an archived conversation exists, so a user who never archives never meets
+  the key at all.
 
 ### C.2 Hard-reserved — refused by the capture UI, always
 
