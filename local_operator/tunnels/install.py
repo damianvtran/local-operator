@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from local_operator import launchd, procname, supervisors
+from local_operator import launchd, procname, procstate, supervisors
 from local_operator.paths import CONFIG_DIR_ENV, config_dir
 from local_operator.tunnels import config
 
@@ -47,17 +47,6 @@ def service_path() -> Path:
     raise ValueError(NO_SUPERVISOR_ERROR)
 
 
-def _quoted(value: str) -> str:
-    """Quote a value for systemd's OWN grammar, which is not shell escaping.
-
-    Percent is doubled because unit specifiers expand even inside quoted
-    strings; a path or a store with a ``%`` in it would otherwise be silently
-    mangled. Hoisted out of ``install`` so the tunnel's unit and the shared
-    renderer's caller agree on one spelling.
-    """
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
-
-
 def render_systemd(config_base: Path | None = None) -> str:
     """The systemd user unit, for the store ``config_base`` names.
 
@@ -78,9 +67,9 @@ def render_systemd(config_base: Path | None = None) -> str:
         description="Radient personal tunnel",
         after="network-online.target",
         pre_lines=["Type=simple"],
-        exec_start=f"{_quoted(str(image))} -m local_operator.tunnels.service",
+        exec_start=f"{supervisors.quoted(str(image))} -m local_operator.tunnels.service",
         post_lines=[
-            f"Environment={_quoted(f'{CONFIG_DIR_ENV}={base}')}",
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={base}')}",
             "UMask=0077",
         ],
         restart_sec=10,
@@ -126,6 +115,23 @@ def _run(args: list[str], *, checked: bool = True) -> None:
             "Tunnel service action failed; check your user service manager."
             + (f"\n{stderr[:200]}" if stderr else "")
         )
+
+
+def _domain() -> str:
+    """``gui/<uid>`` — the launchd domain the ``bootout`` below addresses.
+
+    The sibling installers each have this helper; the tunnel arm was the one
+    still spelling ``f"gui/{os.getuid()}"`` inline, which put ``os.getuid`` in
+    a function (``action``) that is reachable on every platform. The guard is
+    here rather than at that call site because ``os.getuid`` does not exist off
+    POSIX: an inline spelling is an ``AttributeError`` waiting for the next
+    caller, and only a guard INSIDE the function it protects is visible to a
+    reader — or to the static scan that grades this branch — as "safe to call
+    anywhere" rather than "currently unreachable".
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
+    return f"gui/{os.getuid()}"
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
@@ -290,7 +296,7 @@ def action(name: str) -> None:
         if name == "stop":
             # A bare bootout, deliberately: stopping is not a reload, and there
             # is nothing to bootstrap afterwards.
-            _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], checked=False)
+            _run(["launchctl", "bootout", f"{_domain()}/{LABEL}"], checked=False)
         else:
             # start/restart both mean "load the plist that is on disk now", so
             # both go through the shared reload: the old shape bootstrapped with
@@ -342,6 +348,12 @@ def _uninstall_task() -> None:
     ``<path>.unlink`` by function and count, and a second one riding on that
     row would be a new unreviewed remover — which is what the inventory exists
     to catch.
+
+    ``/End`` before ``/Delete`` for the same reason ``mobile``'s arm sends it:
+    ``schtasks /Delete`` deregisters the task without interrupting the program
+    it runs, so the connector would keep serving after ``lop tunnel uninstall``
+    reported it removed.
     """
+    supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
     supervisors.delete_task(TASK_NAME)
     task_record_path().unlink(missing_ok=True)

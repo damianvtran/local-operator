@@ -82,7 +82,12 @@ def _uid_token() -> int:
     ownership question that matters is asked of the directory itself
     (:func:`ensure_runtime_dir`), which does not ask it there at all.
     """
-    if not _UID_IS_MEANINGFUL:
+    # ``hasattr`` and not bare ``os.getuid``: the capability is what would be
+    # dereferenced, and spelling it as a capability keeps the function safe to
+    # call on any platform on its own merits — the constant above is a proxy for
+    # the attribute existing, and a reader (or the branch's static scanner) has
+    # to be able to see the guard rather than infer it.
+    if not _UID_IS_MEANINGFUL or not hasattr(os, "getuid"):
         return 0
     return os.getuid()
 

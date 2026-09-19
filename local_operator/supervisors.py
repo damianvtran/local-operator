@@ -45,6 +45,7 @@ time with Task Scheduler's own words rather than looking installed.
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import re
@@ -257,6 +258,34 @@ def systemd_writes_log_file() -> bool:
     return version is not None and version >= MIN_SYSTEMD_APPEND_VERSION
 
 
+def quoted(value: str) -> str:
+    """Quote one value for systemd's OWN grammar, which is not shell escaping.
+
+    Percent is doubled because unit specifiers expand even inside quoted
+    strings; a path or a store with a ``%`` in it would otherwise be silently
+    mangled. Hoisted out of ``tunnels.install`` (where it began, for the
+    tunnel's unit) once the wakes and mobile arms emitted the same three kinds
+    of value unquoted — one spelling, because the failure mode otherwise is
+    per-daemon.
+
+    WHY THIS IS NOT COSMETIC, measured on real systemd 255 with the text the
+    unquoted arms emitted (a store and an interpreter under a path containing a
+    space):
+
+    * ``Environment=LOCAL_OPERATOR_CONFIG_DIR=/home/a b/store`` — systemd logs
+      ``Invalid environment assignment, ignoring: b/store`` and keeps the
+      variable at its first word, so the supervisor silently watches a
+      DIFFERENT store than the one the operator armed the wake in.
+    * ``ExecStart=/home/a b/python3 -m …`` — ``Command /home/a is not
+      executable: No such file or directory``, a unit that can never start.
+
+    This is the same class that ``_windows_quote`` closes for ``<Command>`` in
+    the task XML: an interpreter or store path is user data, and every grammar
+    that carries it needs its own escaping rather than a shared guess.
+    """
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
 def output_redirect_lines(log: Path) -> list[str]:
     """``StandardOutput``/``StandardError`` for ``log``, or ``[]`` when unsupported.
 
@@ -419,7 +448,24 @@ TASK_XML_ENCODING = "utf-16"
 
 #: ``schtasks`` refuses a restart interval below one minute, and caps the count.
 TASK_RESTART_INTERVAL = "PT1M"
-TASK_RESTART_COUNT = 999
+
+#: 255 rather than 999: the value goes into ``<RestartOnFailure><Count>``, whose
+#: published type is ``xs:restriction base="xs:unsignedByte" minInclusive=1`` —
+#: max 255. The Windows runner accepted the out-of-range 999 (``wake.install``
+#: reported ``supervisor: installed`` and then ``running``), so this was latent
+#: rather than broken, but a value outside the schema is a documented
+#: ``SCHED_E_INVALIDVALUE`` (0x80041318) waiting for a Task Scheduler build that
+#: validates, and the intent — "retry as often as the field allows" — is
+#: unchanged at the type's own maximum.
+TASK_RESTART_COUNT = 255
+
+#: The ONE status word Task Scheduler spells that this code can interpret, and
+#: the ones it can interpret as idle. Everything else is reported without a
+#: verdict: ``Status`` is localized, and the cost of guessing is asymmetric —
+#: a wrong "running" issues a spurious ``/Run``, while a wrong "not running"
+#: makes ``mobile.install``'s verification loop unable to ever succeed.
+RUNNING_STATUS_WORD = "running"
+IDLE_STATUS_WORDS = frozenset({"ready", "disabled"})
 
 
 def _windows_quote(value: str) -> str:
@@ -644,7 +690,14 @@ def task_delete_args(name: str) -> list[str]:
 
 
 def task_query_args(name: str) -> list[str]:
-    return ["/Query", "/TN", name, "/FO", "LIST", "/V"]
+    """``/FO CSV`` and not ``/FO LIST /V``: see :func:`task_state`.
+
+    CSV's COLUMN ORDER is fixed by the format, which is what makes the status
+    field findable without matching a localized label. ``/V`` is dropped with
+    it — the verbose form adds columns this code never reads, and every extra
+    column is another positional assumption.
+    """
+    return ["/Query", "/TN", name, "/FO", "CSV"]
 
 
 def task_create_args(name: str, xml_path: Path) -> list[str]:
@@ -694,15 +747,44 @@ def delete_task(name: str) -> tuple[bool, str]:
     return True, "deleted"
 
 
-def task_state(name: str) -> tuple[bool, bool, str]:
+def _csv_status_field(stdout: str) -> str | None:
+    """The Status column of a ``schtasks /FO CSV`` body, found by POSITION.
+
+    The DATA row is identified structurally rather than by text: its first
+    field is the task's full path, which always starts with the root backslash,
+    while the header's first field is the localized word for "TaskName". A
+    locale therefore changes what the words SAY and nothing about where the
+    field is — which is the whole reason this is not a ``"status:"`` match.
+    """
+    try:
+        rows = [row for row in csv.reader(stdout.splitlines()) if row]
+    except csv.Error:  # pragma: no cover - malformed quoting is not a status
+        return None
+    for row in reversed(rows):
+        if len(row) >= 2 and row[0].startswith("\\"):
+            return row[-1].strip()
+    return None
+
+
+def task_state(name: str) -> tuple[bool, bool | None, str]:
     """``(registered, running, detail)`` for ``name``, from one ``schtasks`` call.
 
     One call and not a query plus a probe: this runs on the wake persist path
     (through ``ensure_supervisor_installed``), so a second subprocess would be a
-    cost paid by every scheduling operation. ``Status`` is the only field that
-    distinguishes a live daemon from a registered-but-stopped one, and an
-    unparseable status reports ``running=False`` with the raw text as detail
-    rather than a confident lie.
+    cost paid by every scheduling operation.
+
+    ``running`` is a TRI-STATE, and the ``None`` is the point. The status is a
+    WORD Task Scheduler localizes (English "Running", German "Wird
+    ausgeführt", Japanese "実行中"), so a parser that answers a definite
+    ``False`` for anything it does not recognise reports "registered but not
+    running" for a task that IS running. That was not theoretical: the wake
+    installer then issues a needless ``/Run``, and ``mobile.install``'s shared
+    20-second verification loop — which requires this to be true before it will
+    report success — could never pass, so a daemon that was up and serving was
+    reported as "daemon did not come up healthy". ``None`` says "registered,
+    and I could not read the state", which is the honest answer and is what the
+    callers that can act on it already have a branch for
+    (:attr:`local_operator.wakes.install.SupervisorState.verifiable`).
     """
     try:
         result = schtasks(*task_query_args(name))
@@ -711,8 +793,15 @@ def task_state(name: str) -> tuple[bool, bool, str]:
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()
         return False, False, detail[:200] or "not registered"
-    for line in (result.stdout or "").splitlines():
-        if line.strip().lower().startswith("status:"):
-            status = line.partition(":")[2].strip()
-            return True, status.lower() == "running", status
-    return True, False, ""
+    status = _csv_status_field(result.stdout or "")
+    if not status:
+        # Registered (the query succeeded) but the body carried no status field
+        # at all: an unparseable answer, reported as such rather than as "not
+        # running". Only a POSITIVELY recognised word may say either way.
+        return True, None, "registered; the status field could not be read"
+    if status.lower() == RUNNING_STATUS_WORD:
+        return True, True, status
+    # Any other word — "Ready", or the same state spelled in another locale —
+    # is reported with its own text and no verdict, because this cannot tell
+    # "idle" from "running, in a language I do not read".
+    return True, False if status.lower() in IDLE_STATUS_WORDS else None, status

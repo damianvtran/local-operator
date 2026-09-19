@@ -219,14 +219,27 @@ _WINDOWS_GIT_BASH_RELPATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: is a wrong answer the model cannot see, which is worse than a message that
 #: names the install step. The lines stay short because the tool card truncates
 #: per line, and the path is spelled out because the operator has to paste it.
+#:
+#: The LONGEST line is 69 cells against the 74-cell lane budget, and the two
+#: that overran it are design round 1's D2/D3. The card is 76 cells wide at
+#: 80x24 and truncates per line, so the explanation of why ``cmd.exe`` is not
+#: silently used was cut at `…must be…` — the one sentence that answers "why
+#: not just run it anyway" — and it is now wrapped rather than shortened. The
+#: remedy is DOUBLE-quoted because ``cmd.exe`` — the default Windows shell, and
+#: the shell whose missing bash this message is about — does not treat ``'`` as
+#: a quote character at all: pasting the single-quoted form there splits the
+#: path at its space, and the user is answered with
+#: `unrecognized arguments: Files\Git\bin\bash.exe'` instead of a stored setting.
+#: The double quote is the one form both cmd.exe and PowerShell honour.
 WINDOWS_NO_BASH_MESSAGE = (
     "no bash on this Windows host, and Windows has no /bin/sh.\n"
     "Install Git for Windows (it ships bash.exe),\n"
     "or point this tool at one you have:\n"
-    r"lop config edit bash.shell 'C:\Program Files\Git\bin\bash.exe'"
-    "\nThis tool runs `<interpreter> -c <command>`, so the interpreter must be "
-    "a real bash;\ncmd.exe and PowerShell take different flags and a different "
-    "language,\nand this tool will not silently run your command in one of them."
+    r'lop config edit bash.shell "C:\Program Files\Git\bin\bash.exe"'
+    "\nThis tool runs `<interpreter> -c <command>`,\n"
+    "so the interpreter must be a real bash;\n"
+    "cmd.exe and PowerShell take different flags and a different language,\n"
+    "and this tool will not silently run your command in one of them."
 )
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
@@ -2693,7 +2706,12 @@ async def execute_bash(
             "bash",
             f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}).\n"
             "Point it at a real interpreter: lop config edit bash.shell <path>\n"
-            "Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ''",
+            # DOUBLE quotes, for the same reason the Windows refusal uses them
+            # (design round 1, D3): `""` is an empty argument in cmd.exe,
+            # PowerShell and every POSIX shell, while `''` reaches a Windows
+            # process as the two-character value `''` — which this row's own
+            # validator would store as a path instead of clearing the key.
+            'Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ""',
         )
 
     # Record this group in the owner's process-group ledger so a HARD death of

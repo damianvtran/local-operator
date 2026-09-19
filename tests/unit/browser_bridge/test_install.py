@@ -622,6 +622,32 @@ def test_status_names_the_supervisor_and_root_it_reports_on(
 # --------------------------------------------------------------------------
 
 
+def test_the_reported_supervisor_follows_the_capability_not_the_platform(
+    monkeypatch: pytest.MonkeyPatch, isolated_root: Path
+) -> None:
+    """A8: the ``status`` field keyed on ``sys.platform`` while the rest of the
+    module asks the binary — so a darwin with no ``launchctl`` reported a launchd
+    label and a systemd-less Linux reported a unit, both registrations that
+    cannot exist.
+
+    Driven through ``status()``, the consumer, and not through the helper: a
+    test of the helper alone stays green when the payload keeps its own
+    platform branch, which is the defect.
+    """
+    monkeypatch.setattr(install, "health", lambda *a, **k: None)
+
+    monkeypatch.setattr(install, "_supervisor", lambda: None)
+    assert (
+        install.status()["supervisor"] == "none"
+    ), "a launchd label was named for a host with no launchctl"
+
+    monkeypatch.setattr(install, "_supervisor", lambda: install.supervisors.SCHTASKS)
+    assert install.status()["supervisor"] == install.task_name()
+
+    monkeypatch.setattr(install, "_supervisor", lambda: install.supervisors.SYSTEMCTL)
+    assert install.status()["supervisor"] == install.systemd_unit()
+
+
 def test_uninstall_carries_an_error_string_for_the_cli_to_print(
     linux_without_systemd: None,
 ) -> None:

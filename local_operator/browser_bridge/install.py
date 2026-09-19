@@ -27,7 +27,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from local_operator import launchd, procname, supervisors
+from local_operator import launchd, procname, procstate, supervisors
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import (
     DEFAULT_PORT,
@@ -396,6 +396,18 @@ def log_location() -> str:
 
 
 def _domain() -> str:
+    """``gui/<uid>`` — the launchd domain every caller feeds to ``launchctl``.
+
+    The platform guard lives INSIDE this function rather than at its call
+    sites, each of which is behind ``if kind == supervisors.LAUNCHCTL``. Two
+    reasons: ``os.getuid`` does not exist off POSIX, so this was an
+    ``AttributeError`` waiting for any caller whose arm was not checked; and a
+    guard that lives at the call site is invisible — to a reader, and to the
+    static scan that grades this branch — which cannot see that the ARM is
+    unreachable. Here the function is safe to call anywhere on its own merits.
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
     return f"gui/{os.getuid()}"
 
 
@@ -420,6 +432,26 @@ def task_name() -> str:
     """The Windows task name for this config root; the plain name for the default."""
     suffix = _root_suffix()
     return TASK_NAME if not suffix else f"{TASK_NAME}{suffix}"
+
+
+def _registration_name() -> str:
+    """How the supervisor answering here names this daemon's registration.
+
+    The ``status`` payload's ``supervisor`` field, and the one place the three
+    spellings are chosen. Keyed on :func:`_supervisor` — the capability — rather
+    than on ``sys.platform``, which is the convention every other branch in this
+    module already follows: the platform-only version named a launchd label on a
+    darwin without ``launchctl`` and a systemd unit on a Linux without systemd,
+    i.e. a registration that cannot exist.
+    """
+    kind = _supervisor()
+    if kind == supervisors.LAUNCHCTL:
+        return label()
+    if kind == supervisors.SYSTEMCTL:
+        return systemd_unit()
+    if kind == supervisors.SCHTASKS:
+        return task_name()
+    return "none"
 
 
 def task_record_path() -> Path:
@@ -1267,18 +1299,16 @@ def status(port: int | None = None) -> dict[str, object]:
         # The location the output is ACTUALLY readable from, which on a systemd
         # too old for `append:` is the journal, not a file that never exists.
         "log": log_location(),
-        # Which config root's supervisor registration this is reporting on.
-        # Without it two isolated daemons produce identical status output and
-        # there is no way to tell which instance you are talking to.
         # Which supervisor REGISTRATION this is reporting on, spelled the way
         # that supervisor names it: two isolated daemons otherwise produce
         # identical status output with no way to tell which instance you are
-        # talking to.
-        "supervisor": (
-            label()
-            if sys.platform == "darwin"
-            else (systemd_unit() if sys.platform.startswith("linux") else task_name())
-        ),
+        # talking to. Chosen by the CAPABILITY (``_supervisor()``), not by
+        # ``sys.platform``: a darwin without ``launchctl`` has no label and a
+        # systemd-less Linux has no unit, and naming one anyway reported a
+        # registration that cannot exist. ``none`` is the honest answer for a
+        # host with no supervisor at all — which is a state this module's other
+        # branches already handle rather than assume away.
+        "supervisor": _registration_name(),
         "config_root": str(config_dir()),
         # Named, not merely folded into `installed`: this is the one thing that
         # explains why a daemon is running under a name the CLI would not

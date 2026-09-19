@@ -106,11 +106,31 @@ def _after_fork_child() -> None:
         writer._invalidate_inherited_child()
 
 
-os.register_at_fork(
-    before=_before_fork,
-    after_in_parent=_after_fork_parent,
-    after_in_child=_after_fork_child,
-)
+#: The at-fork registry, installed only where fork exists.
+#:
+#: ``os.register_at_fork`` is POSIX-only, and a bare call to it here made this
+#: MODULE unimportable on Windows (``AttributeError: module 'os' has no attribute
+#: 'register_at_fork'``) — which is strictly worse than an unguarded call inside a
+#: function, because it fires before :meth:`EvidenceWriter._supported` can say
+#: anything, and it propagates through ``evaluation.runner.episode`` to make the
+#: whole evaluation runner unimportable. Measured on the Windows Server 2025
+#: runner (this PR's ``xplat-probe-windows`` job), which is what the capability
+#: test records.
+#:
+#: The capability test, not ``os.name``: what matters is whether THIS interpreter
+#: can fork, and on Windows there is no fork for the snapshot/reopen dance below
+#: to protect, so there is nothing to register rather than something being lost.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_parent,
+        after_in_child=_after_fork_child,
+    )
+
+# Every flag below is getattr-guarded for the same reason as the at-fork call
+# above: ``O_CLOEXEC``/``O_NOFOLLOW``/``O_NONBLOCK`` are POSIX-only, and a bare
+# attribute reference is evaluated at IMPORT time whether or not the platform
+# would ever reach the call that uses it.
 _WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = (
     os.O_RDONLY

@@ -4122,6 +4122,56 @@ def _wake_rows() -> "list[dict[str, Any]]":
     return rows
 
 
+def _supervisor_parentheticals() -> tuple[str, str]:
+    """The two ``supervisor:`` parentheticals in THIS host's supervisor's words.
+
+    The two lines they belong to — "loaded but NOT running" and "not loaded" —
+    were unreachable off macOS before this branch: the wake installer was the
+    probe-documented ``FAIL wake.install`` ("no supervisor installer for this
+    platform") on Linux and Windows, so no unit could exist to be reported on.
+    Both platforms now have a real installer, which makes these the NORMAL
+    states there after ``lop wake install`` — and a Linux user was being told
+    "launchd has the job" and shown "a plist exists", neither of which names
+    anything on their machine (design round 1, D4). ``plist_path()`` was already
+    platform-shaped (it answers with the systemd unit path or the Task Scheduler
+    definition file); the sentence around it is now too, because a status line
+    that names another platform's supervisor reads as a bug in the install.
+
+    THE macOS ENTRY IS BYTE-IDENTICAL to what it replaced, deliberately: this
+    branch exists to make Windows and Linux work, not to rewrite the copy of the
+    one platform that already worked.
+
+    Returns ``(loaded_but_stopped, file_but_not_loaded)``. A function rather
+    than a module constant so the ``supervisors`` import stays inside it — the
+    CLI is the package's hottest import path and only this subcommand needs it.
+    """
+    from local_operator import supervisors
+
+    kind = supervisors.supervisor()
+    if kind == supervisors.SYSTEMCTL:
+        return (
+            "systemd has the unit; it has exited",
+            "a unit file exists but systemd has not loaded it",
+        )
+    if kind == supervisors.SCHTASKS:
+        return (
+            "Task Scheduler has the task; it has exited",
+            "a task definition exists but Task Scheduler has not registered it",
+        )
+    if kind == supervisors.LAUNCHCTL:
+        return (
+            "launchd has the job; it has exited",
+            "a plist exists but launchd has no job",
+        )
+    # ``supervisor()`` answered ``None``: no supervisor exists on this host, so
+    # neither line below can print (``is_supported()`` gates both). Answer in
+    # nouns that name no platform rather than guessing one.
+    return (
+        "a supervisor has the job; it has exited",
+        "a job definition exists but no supervisor has it",
+    )
+
+
 def wake_command(args: argparse.Namespace) -> int:
     """``lop wake status|list|serve`` — scheduled wakes and their supervisor.
 
@@ -4718,17 +4768,16 @@ def wake_command(args: argparse.Namespace) -> int:
             detail += f", up {_format_duration(uptime_s)}"
         print(_wrap_status(detail, "supervisor:"))
     elif state and state.loaded:
-        # The exact state that produced the permanent misses: launchd knows
-        # the job, `launchctl print` returns 0, and nothing is running. The
-        # parenthetical carries the LAUNCHD fact rather than repeating the
-        # state word it was meant to disambiguate (round 1, D9).
-        print(
-            _wrap_status(
-                "loaded but NOT running (launchd has the job; it has exited)", "supervisor:"
-            )
-        )
+        # The exact state that produced the permanent misses: the supervisor
+        # knows the job, its own query returns 0, and nothing is running. The
+        # parenthetical carries the SUPERVISOR'S OWN fact rather than repeating
+        # the state word it was meant to disambiguate (round 1, D9), and it is
+        # spelled for the supervisor answering here (round 1, D4).
+        _loaded_but_stopped, _ = _supervisor_parentheticals()
+        print(_wrap_status(f"loaded but NOT running ({_loaded_but_stopped})", "supervisor:"))
     elif plist_present:
-        print(_wrap_status("not loaded (a plist exists but launchd has no job)", "supervisor:"))
+        _, _file_but_unloaded = _supervisor_parentheticals()
+        print(_wrap_status(f"not loaded ({_file_but_unloaded})", "supervisor:"))
     else:
         print(_wrap_status("not installed", "supervisor:"))
     # ONE remedy line, not two (round 1, Q3/D7). Both the per-state hint and

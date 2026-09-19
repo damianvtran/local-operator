@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator import buildwatch as _buildwatch
+from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_OVERDUE_CAUSE,
@@ -2479,9 +2480,18 @@ async def amain() -> int:
     )
     # `SIGUSR1` is POSIX-only, so the debug dump is installed only where the
     # constant exists — an unguarded `signal.SIGUSR1` is an AttributeError that
-    # would take the whole boot down over an opt-in diagnostic.
+    # would take the whole boot down over an opt-in diagnostic. `is_windows()`
+    # is named alongside it because `loop.add_signal_handler` is UNIX-ONLY too
+    # (the Windows default Proactor loop takes `BaseEventLoop`'s stub, which
+    # raises `NotImplementedError`), so the two absences are one condition: this
+    # block is safe to reach on any platform rather than merely skipped because
+    # the constant happens to be missing.
     debug_stacks = getattr(signal, "SIGUSR1", None)
-    if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1" and debug_stacks is not None:
+    if (
+        not procstate.is_windows()
+        and os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1"
+        and debug_stacks is not None
+    ):
         # SIGUSR1 prints every asyncio task's stack to the child log. The
         # child has no terminal and no attached debugger, and a wedged turn
         # (round 2, U6) is exactly the state whose cause is "which await is

@@ -65,7 +65,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_operator import launchd, procname, supervisors
+from local_operator import launchd, procname, procstate, supervisors
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.paths import config_dir as ambient_config_dir
 
@@ -85,8 +85,20 @@ SYSTEMD_TIMER = "local-operator-wakes.timer"
 #: Task Scheduler task name (Windows), same reasoning.
 TASK_NAME = "Local Operator wake supervisor"
 
-#: Reported when the platform has no installer this hook knows.
-UNSUPPORTED_REASON = "no supervisor installer for this platform"
+#: Reported when this host has no user service supervisor this hook can install
+#: into.
+#:
+#: Names them, and stops claiming there is no installer at all: ``"no supervisor
+#: installer for this platform"`` was the pre-PR fact, and after this branch all
+#: three platforms have one — what is missing is a SUPERVISOR on this host. The
+#: three sibling daemons state it this way (:func:`supervisors.no_supervisor_error`)
+#: and a user who reads four refusals should not get two different stories. The
+#: remedy clause stays where it was, in the line the CLI prints beneath this one
+#: ("wakes fire only while a session is open").
+UNSUPPORTED_REASON = (
+    "no supported user service supervisor found (launchctl on macOS, "
+    "systemctl --user on Linux, Task Scheduler via schtasks on Windows)"
+)
 
 
 def plist_path() -> Path:
@@ -182,9 +194,16 @@ def render_systemd(config_dir: Path) -> str:
     image = procname.supervised_image() or Path(sys.executable)
     return supervisors.render_systemd_unit(
         description="Local Operator wake supervisor",
-        exec_start=f"{image} -m local_operator.wakes.supervisor",
+        # Both halves are QUOTED, and for the same measured reason (see
+        # ``supervisors.quoted``): an interpreter under a path with a space made
+        # the unit unstartable ("Command /home/a is not executable"), and an
+        # unquoted ``Environment=`` assignment truncates the store at its first
+        # word — silently, so the supervisor would watch a different store than
+        # the one the wake was armed in. The quoting rule lives in
+        # ``supervisors`` because the tunnel arm was already spelling it.
+        exec_start=f"{supervisors.quoted(str(image))} -m local_operator.wakes.supervisor",
         post_lines=[
-            f"Environment=LOCAL_OPERATOR_CONFIG_DIR={config_dir}",
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir}')}",
             *supervisors.output_redirect_lines(log_path(config_dir)),
         ],
     )
@@ -322,6 +341,18 @@ def render_plist(config_dir: Path) -> dict[str, object]:
 
 
 def _domain() -> str:
+    """``gui/<uid>`` — the launchd domain every caller feeds to ``launchctl``.
+
+    The platform guard is INSIDE this function rather than at its call sites,
+    each of which is behind ``if kind == supervisors.LAUNCHCTL``: ``os.getuid``
+    does not exist off POSIX, so an unguarded call was an ``AttributeError``
+    waiting for any arm that forgot the check, and a guard at the call site is
+    invisible to a reader — and to the static scan that grades this branch —
+    which cannot see that the arm is unreachable. Guarded here, the function is
+    safe to call anywhere on its own merits.
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
     return f"gui/{os.getuid()}"
 
 
@@ -532,7 +563,19 @@ def _task_supervisor_state(config_dir: Path) -> SupervisorState:
     registered, running, detail = supervisors.task_state(TASK_NAME)
     if not registered:
         return SupervisorState(loaded=False, running=False, detail=detail or "not loaded")
-    return SupervisorState(loaded=True, running=running, pid=None, detail=detail or "ready")
+    # ``running is True`` and not ``running``: a localized Windows cannot be
+    # asked to spell "Running", so the parse answers ``None`` for a status word
+    # it does not recognise, and calling that "not running" is the definite
+    # falsehood ``supervisors.task_state`` exists to avoid. ``verifiable`` is
+    # the field this module already carries for exactly that state, so the
+    # CLI's "cannot be verified" line covers it.
+    return SupervisorState(
+        loaded=True,
+        running=running is True,
+        verifiable=running is not None,
+        pid=None,
+        detail=detail or "ready",
+    )
 
 
 @dataclass(frozen=True)
@@ -708,9 +751,25 @@ def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
         timer = supervisors.systemd_unit_path(SYSTEMD_TIMER)
         unit.parent.mkdir(parents=True, exist_ok=True)
         log_path(config_dir).parent.mkdir(parents=True, exist_ok=True)
-        addressable = supervisors.systemd_unit_is_addressable(
-            SYSTEMD_UNIT
-        ) and _config_lives_in_real_home(config_dir)
+        # ``addressable`` is the HOME-IDENTITY test alone, exactly as the plist
+        # arm's ``_launchd_is_addressable()`` is (see its docstring): "would a
+        # supervisor call here address the REAL user manager?". It must NOT be
+        # ANDed with the store test — the refusal a few lines down exists to
+        # catch the case where the unit path IS the real one but the store is
+        # not, and folding the store test in here makes that refusal
+        # unreachable (``addressable and not _config_lives_in_real_home``
+        # becomes unsatisfiable).
+        #
+        # The AND was a machine-damage defect, not a live one: with a real HOME
+        # and a store outside it, ``addressable`` went False, control fell
+        # through this refusal, and the installer overwrote the operator's real
+        # ``~/.config/systemd/user/local-operator-wakes.service`` with one whose
+        # ``Environment=`` pointed at a sandbox store — silently, since the
+        # outcome still read "unit written; the user manager is not addressable
+        # from here". A redirected HOME still writes only into its own
+        # ``$HOME/.config/systemd/user``, where ``addressable`` is False because
+        # the identity test fails, so the sandbox case stays covered.
+        addressable = supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT)
         current = None
         if unit.exists():
             try:
@@ -832,7 +891,13 @@ def _ensure_task_installed(config_dir: Path) -> InstallOutcome:
                 current = None
         if current == wanted:
             registered, running, detail = supervisors.task_state(TASK_NAME)
-            if registered and running:
+            # ``running is True``: see ``_task_supervisor_state``. An
+            # unverifiable status deliberately takes the same path as a stopped
+            # one — the ``/Run`` below is harmless on a task that is already
+            # up (Task Scheduler answers with its own words and the install
+            # reports what it got), whereas claiming "already installed" from a
+            # status we could not read would leave a dead supervisor in place.
+            if registered and running is True:
                 return InstallOutcome(installed=True, reason="already installed")
             if registered:
                 started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
@@ -959,6 +1024,13 @@ def uninstall() -> InstallOutcome:
             return InstallOutcome(installed=False, reason=f"could not remove the unit: {exc}")
         return InstallOutcome(installed=False, reason="uninstalled")
     if kind == supervisors.SCHTASKS:
+        # ``/End`` before ``/Delete``: the delete deregisters the task but does
+        # NOT interrupt the program it runs (Microsoft's own wording for the
+        # verb), so without this a wake uninstall left a supervisor still firing
+        # wakes from a store the caller believes it removed. The other two
+        # platforms stop the job as part of the uninstall — ``bootout`` on
+        # macOS, ``disable --now`` on Linux — and this is the Windows spelling.
+        supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
         ok, detail = supervisors.delete_task(TASK_NAME)
         if not ok:
             return InstallOutcome(installed=False, reason=f"could not remove the task: {detail}")

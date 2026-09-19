@@ -521,9 +521,12 @@ jobs:
       needs.changes.outputs.xplat != 'false'
     runs-on: ubuntu-latest
     # The battery bounds each probe itself (60-600 s, a timed-out probe is a
-    # reported FAIL, not a hang), so this is only the backstop for install and
-    # queue time. A wedged install must not hold a concurrency slot for the
-    # 360-minute default.
+    # reported FAIL, not a hang) and is then bounded AGAIN, in aggregate, by the
+    # `--budget` below -- so this ceiling only has to cover install and queue
+    # time above that budget. It has to be ABOVE the budget: the per-probe
+    # timeouts sum to ~64 minutes, and a battery that runs out of budget returns
+    # a partial matrix with the unreached probes marked `SKIP not run`, while a
+    # job killed at its own ceiling prints no matrix and uploads nothing at all.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -546,11 +549,21 @@ jobs:
         # present but no installed shim is still measurable (the same reason the
         # battery's own `_cli_argv` exists), and this line is the reading the
         # `--json` artifact records.
-        run: python scripts/xplat_probe.py --json xplat-ubuntu.json
+        #
+        # `--budget 1200`: the battery stops STARTING probes once 20 minutes of
+        # wall clock are gone, marks the rest `SKIP not run`, and still writes
+        # the matrix -- 5 minutes under the job ceiling for install and setup.
+        # Without it the per-probe timeouts sum to ~64 minutes, so three probes
+        # hanging to their own documented bound would spend the whole ceiling
+        # and produce no evidence at all.
+        run: python scripts/xplat_probe.py --json xplat-ubuntu.json --budget 1200
 
       - name: Upload the probe matrix
-        # `always()`: the JSON is most worth having on the run that FAILed, and
-        # a battery that dies mid-way still writes the probes that completed.
+        # `always()`: the JSON is most worth having on the run that FAILed. The
+        # reason it is actually there is `_write_matrix`'s call site -- the
+        # battery rewrites the artifact after EVERY probe, so a run that is
+        # killed part-way (a job timeout, a crash out of the loop) still uploads
+        # the reads that completed rather than an empty set.
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -571,8 +584,7 @@ jobs:
     # cannot answer any of them.
     runs-on: windows-latest
     # Longer than the Linux leg on purpose: the same battery on a slower runner
-    # with slower installs, and one probe may legitimately spend its 600 s
-    # importing every module in the package before reporting.
+    # with slower installs, and --budget 2400 (40 minutes) against this ceiling.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -598,11 +610,17 @@ jobs:
           # measuring the machine, not the code. `USERPROFILE` is not decoration
           # -- it, not `HOME`, is what `os.path.expanduser` consults on Windows,
           # so a sandbox that sets only `HOME` leaves the real profile live.
+          #
+          # `--budget 2400` is the aggregate bound this leg's ceiling sits above:
+          # the per-probe timeouts sum to ~64 minutes, and this runner is the
+          # slow one, so the battery returns a partial matrix (unreached probes
+          # `SKIP not run`) rather than letting the job die at 45 minutes with
+          # nothing uploaded. See the Linux leg for the same reasoning.
           $env:HOME = Join-Path $env:RUNNER_TEMP "lop-xplat-home"
           $env:USERPROFILE = $env:HOME
           $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python scripts/xplat_probe.py --json xplat-windows.json
+          python scripts/xplat_probe.py --json xplat-windows.json --budget 2400
 
       - name: Upload the probe matrix
         if: always()

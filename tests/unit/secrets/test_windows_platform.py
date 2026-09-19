@@ -122,6 +122,146 @@ def test_the_client_imports_where_fcntl_does_not_exist(tmp_path: Path) -> None:
     assert "imported local_operator.secrets.client" in result.stdout
 
 
+#: A fresh interpreter whose ``socket`` module has no ``AF_UNIX``, which is what
+#: a Windows process sees. The attribute is DELETED rather than shadowed, because
+#: that is how the real failure arrives: ``socket.socket(socket.AF_UNIX, ...)``
+#: resolves the module global at call time, so the platform raises
+#: ``AttributeError: module 'socket' has no attribute 'AF_UNIX'`` — measured on
+#: the Windows runner as ``secret.roundtrip``'s failure, taking ``lop secret
+#: status``, ``get`` and ``set`` down with it.
+#:
+#: The peer-identity probe is switched off in the same preamble, because the two
+#: absences travel together on the platform being simulated
+#: (``peer.PEER_AUTHENTICATION_SUPPORTED`` is derived from ``sys.platform``, and
+#: nothing off darwin/linux has ``AF_UNIX``). Setting only ``AF_UNIX`` would make
+#: this host reach ``ensure_broker``'s SPAWN arm and start a REAL broker daemon
+#: inside the test, which is a side effect rather than a simulation.
+_STRIP_AF_UNIX = """
+import socket
+
+assert hasattr(socket, "AF_UNIX"), "harness premise: this host has AF_UNIX"
+del socket.AF_UNIX
+assert not hasattr(socket, "AF_UNIX"), "harness failed to remove socket.AF_UNIX"
+
+from local_operator.secrets import broker as _broker
+from local_operator.secrets import client as _client
+from local_operator.secrets import peer as _peer
+
+for _module in (_peer, _client, _broker):
+    _module.PEER_AUTHENTICATION_SUPPORTED = False
+"""
+
+
+def _run_without_af_unix(
+    tmp_path: Path,
+    statement: str,
+    *,
+    argv: list[str] | None = None,
+    stdin: str = "",
+) -> subprocess.CompletedProcess[str]:
+    """Run ``statement`` in a fresh interpreter with no ``socket.AF_UNIX``."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+    environment.update(
+        HOME=str(tmp_path / "home"),
+        LOCAL_OPERATOR_CONFIG_DIR=str(tmp_path / "config"),
+        PYTHONPATH=str(REPO_ROOT),
+    )
+    (tmp_path / "home").mkdir(exist_ok=True)
+    (tmp_path / "config").mkdir(exist_ok=True)
+    return subprocess.run(
+        [sys.executable, "-c", _STRIP_AF_UNIX + statement, *(argv or [])],
+        capture_output=True,
+        text=True,
+        input=stdin,
+        env=environment,
+        timeout=180,
+    )
+
+
+def _cli_without_af_unix(
+    tmp_path: Path, *argv: str, stdin: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """One ``lop secret ...`` invocation on a host with no ``socket.AF_UNIX``.
+
+    The real dispatch chain (``build_cli_parser`` → the ``secret`` subcommand's
+    own ``main``), not a handle on the handlers: the probe that found this defect
+    drove the CLI, and the surface a user meets is the one that has to work.
+    """
+    return _run_without_af_unix(
+        tmp_path,
+        "import sys\n"
+        "from local_operator.cli import build_cli_parser\n"
+        "from local_operator.secrets.cli import main as secret_main\n"
+        "sys.exit(secret_main(build_cli_parser().parse_args(sys.argv[1:])))\n",
+        argv=list(argv),
+        stdin=stdin,
+    )
+
+
+def test_every_platform_layer_answers_no_broker_without_af_unix(tmp_path: Path) -> None:
+    """The graded answers, not an ``AttributeError`` out of a liveness probe.
+
+    Each of these three is documented as returning a VALUE when there is no
+    broker — ``is_running`` a bool, ``broker_status`` ``None``,
+    ``ensure_broker`` ``False`` — and the tree's keyfile fallback is wired to
+    exactly those values. The ``AttributeError`` escaped all three, so the
+    fallback was never reached and the store was simply dead on Windows.
+    """
+    result = _run_without_af_unix(
+        tmp_path,
+        "import socket\n"
+        "from local_operator.secrets import client\n"
+        "assert not hasattr(socket, 'AF_UNIX')\n"
+        "assert client.is_running() is False, 'is_running must answer False, not raise'\n"
+        "assert client.broker_status() is None, 'broker_status must answer None, not raise'\n"
+        "assert client.ensure_broker() is False, 'no broker may be spawned here'\n"
+        "assert client._AF_UNIX_AVAILABLE is False\n"
+        "print('graded')\n",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "graded" in result.stdout
+
+
+def test_the_store_round_trips_without_af_unix(tmp_path: Path) -> None:
+    """``status``/``set``/``get`` end to end, which is what the probe measures.
+
+    The keyfile tier needs no broker, so every one of these must work on a
+    platform with no ``AF_UNIX`` — and ``get``'s stdout is asserted byte-exact,
+    because a value on that stream crosses into a child's argv and a corrupted
+    credential fails as a confusing 401 rather than as an error here.
+    """
+    before = _cli_without_af_unix(tmp_path, "secret", "status")
+    assert before.returncode == 0, before.stderr
+    assert "keyfile" in before.stdout, before.stdout
+    assert "AF_UNIX" not in (before.stdout + before.stderr)
+
+    stored = _cli_without_af_unix(tmp_path, "secret", "set", "xplat_probe", stdin="probe-value")
+    assert stored.returncode == 0, stored.stderr
+
+    fetched = _cli_without_af_unix(tmp_path, "secret", "get", "xplat_probe")
+    assert fetched.returncode == 0, fetched.stderr
+    # ``get``'s stdout is byte-exact: a value on that stream crosses into a child's
+    # argv, and one stray byte fails as a confusing 401 rather than here.
+    assert fetched.stdout == "probe-value", fetched.stdout
+
+    after = _cli_without_af_unix(tmp_path, "secret", "status")
+    assert after.returncode == 0, after.stderr
+    assert "1" in after.stdout, "the store did not report the record just written"
+
+
+def test_the_posix_connect_path_is_unchanged(tmp_path: Path) -> None:
+    """The open half: the new guard must not touch a platform that has AF_UNIX.
+
+    Asserted on the failure the call always produced — a ``BrokerUnavailable``
+    naming the socket path — so a guard that swallowed the connect on POSIX
+    (or replaced the real error with the platform one) fails here.
+    """
+    assert client_module._AF_UNIX_AVAILABLE is True
+    missing = tmp_path / "no-broker-here.sock"
+    with pytest.raises(client_module.BrokerUnavailable, match="could not reach the secret broker"):
+        client_module._connect(missing)
+
+
 def test_the_lazy_start_lock_is_only_reached_where_fcntl_exists(
     config_root: Path, monkeypatch: pytest.MonkeyPatch, windows_peer_authentication: None
 ) -> None:
@@ -169,7 +309,7 @@ def test_the_broker_refuses_to_bind_where_it_could_not_authenticate(
     an operator has started a daemon, watched it listen, and watched it say no.
     """
     broker = broker_module.SecretBroker(config_root)
-    with pytest.raises(BrokerError, match=re.escape(sys.platform)) as refusal:
+    with pytest.raises(BrokerError, match=re.escape(peer_module._PLATFORM_LABEL)) as refusal:
         broker.start()
     assert "keyfile" in str(refusal.value), "the refusal must name the tier that does work"
 
@@ -179,8 +319,30 @@ def test_the_platform_refusal_names_the_os_and_the_alternative(
 ) -> None:
     reason = peer_module.broker_unsupported_reason()
     assert reason is not None
-    assert sys.platform in reason
+    assert peer_module._PLATFORM_LABEL in reason
     assert "keyfile" in reason
+
+
+def test_the_platform_refusal_never_shows_the_user_a_cpython_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D5: the refusal interpolated ``sys.platform``, so a Windows user read
+    "cannot run on win32" — a spelling that appears nowhere else they can see.
+
+    ``_PLATFORM_LABEL`` is patched rather than ``os.name``: ``pathlib`` reads
+    ``os.name`` at call time, so setting it to ``nt`` makes the next ``Path(...)``
+    in this process a ``WindowsPath`` and the test dies on an
+    ``UnsupportedOperation`` that looks like a product bug (the convention this
+    file's docstring records).
+    """
+    monkeypatch.setattr(peer_module, "PEER_AUTHENTICATION_SUPPORTED", False)
+    monkeypatch.setattr(peer_module, "_PLATFORM_LABEL", "Windows")
+
+    reason = peer_module.broker_unsupported_reason()
+
+    assert reason is not None
+    assert "on Windows" in reason
+    assert "win32" not in reason, "the raw sys.platform value reached the operator"
 
 
 def test_the_platform_refusal_is_absent_where_a_broker_can_run() -> None:

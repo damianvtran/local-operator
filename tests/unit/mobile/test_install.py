@@ -322,6 +322,133 @@ def test_the_windows_arm_registers_a_task_and_reports_refusals(
     assert "Access is denied." in _error(refused)
 
 
+def test_the_linux_unit_quotes_the_interpreter_path(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """A5: an interpreter under a path with a space made the unit unstartable.
+
+    Measured on systemd 255 with the text this renderer emitted unquoted:
+    ``Command /home/a is not executable: No such file or directory``.
+    """
+    import sys as _sys
+
+    from local_operator import procname
+
+    monkeypatch.setattr(procname, "supervised_image", lambda: None)
+    monkeypatch.setattr(_sys, "executable", "/home/a b/python3")
+
+    text = install.render_systemd(4098)
+
+    assert 'ExecStart="/home/a b/python3" -m local_operator.mobile.service --port 4098' in text
+
+
+def test_the_node_refusal_names_node_and_where_to_get_it(monkeypatch) -> None:  # noqa: ANN001
+    """Q6: the container reading said what was missing, not what to do.
+
+    The old detail ("node is not installed; the bundle needs a one-time `pnpm
+    build`") named a command that cannot be run without the thing that is
+    missing, so the Ubuntu and Mint readings could not tell an operator how to
+    get past it.
+    """
+    monkeypatch.setattr(install.shutil, "which", lambda _name: None)
+
+    detail = install._build_bundle()
+
+    assert detail is not None
+    assert "node is not installed" in detail
+    assert "nodejs.org" in detail or "install node" in detail.lower()
+
+
+def test_a_missing_bundle_refuses_before_the_store_is_touched(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """Q6: the bundle check used to run AFTER the password was written.
+
+    So an install that could not succeed on a source checkout without Node had
+    already created ``mobile/password`` — the mutated-store shape the container
+    readings showed, where the FAIL detail was the password progress line.
+    Asserted on the write, not on the message.
+    """
+    from local_operator import supervisors
+
+    written: list[str] = []
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "systemctl")
+    monkeypatch.setattr(install, "load_password", lambda: None)
+    monkeypatch.setattr(install, "store_password", lambda value: written.append(value))
+    monkeypatch.setattr(
+        install, "ensure_bundle", lambda build=True: (False, "node is not installed")
+    )
+
+    result = install.install(port=4098)
+
+    assert result["ok"] is False, result
+    assert "node is not installed" in _error(result)
+    assert written == [], "the store was mutated by an install that then refused"
+
+
+def test_the_windows_uninstall_ends_the_task_before_deleting_it(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """A2: ``/Delete`` deregisters without interrupting the program it runs.
+
+    Microsoft's own wording for the verb is "This command doesn't delete the
+    program that the task runs or interrupt a running program", so an uninstall
+    that only deleted left the portal daemon serving on its port with the
+    password still loaded — while the other two platforms stop the job as part
+    of the uninstall (``bootout``, ``disable --now``). No test covered this path
+    at all before this one.
+    """
+    from local_operator import supervisors
+
+    calls: list[tuple[str, ...]] = []
+    record = tmp_path / "mobile-task.xml"
+    record.write_text("<Task/>", encoding="utf-8")
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(install, "task_record_path", lambda: record)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: calls.append(args)
+        or subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+    monkeypatch.setattr(
+        supervisors,
+        "delete_task",
+        lambda name: calls.append(("/Delete", "/TN", name)) or (True, "deleted"),
+    )
+
+    result = install.uninstall()
+
+    assert result["ok"] is True, result
+    assert [call[0] for call in calls] == ["/End", "/Delete"], calls
+    assert calls[0] == tuple(supervisors.task_end_args(install.TASK_NAME))
+    assert not record.exists()
+
+
+def test_a_refused_windows_uninstall_is_reported_as_a_failure(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """The refusal only reached a ``steps`` line, and ``ok`` still said True."""
+    from local_operator import supervisors
+
+    record = tmp_path / "mobile-task.xml"
+    record.write_text("<Task/>", encoding="utf-8")
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(install, "task_record_path", lambda: record)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+    monkeypatch.setattr(
+        supervisors, "delete_task", lambda _name: (False, "ERROR: Access is denied.")
+    )
+
+    result = install.uninstall()
+
+    assert result["ok"] is False, result
+    assert "Access is denied." in _error(result)
+    assert record.exists(), "the record was deleted for a task that is still registered"
+
+
 def test_the_plist_repair_reports_unsupported_off_macos(monkeypatch) -> None:  # noqa: ANN001
     """The repair's gate is the supervisor's IDENTITY, not ``is_supported()``.
 

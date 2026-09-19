@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 import socket
 import struct
 import sys
@@ -109,6 +110,17 @@ _IS_LINUX = sys.platform.startswith("linux")
 #: copy of this test is how they would drift apart.
 PEER_AUTHENTICATION_SUPPORTED = _IS_DARWIN or _IS_LINUX
 
+#: How this platform is spelled in a message a USER reads.
+#:
+#: ``sys.platform`` is ``win32`` there — a CPython identifier that appears
+#: nowhere else an operator can see — so the refusal below would tell them the
+#: broker "cannot run on win32". The mapping is ``update.py``'s, applied to its
+#: own refusal; kept as a module constant rather than spelled inline because
+#: ``os.name`` cannot be patched in a test (``pathlib`` reads it at call time, so
+#: setting it to ``nt`` makes the next ``Path(...)`` a ``WindowsPath``), which is
+#: the same reason the two platform constants above are constants.
+_PLATFORM_LABEL = "Windows" if os.name == "nt" else sys.platform
+
 
 def broker_unsupported_reason() -> str | None:
     """Why no broker can serve here, or ``None`` where one can.
@@ -128,7 +140,7 @@ def broker_unsupported_reason() -> str | None:
     if PEER_AUTHENTICATION_SUPPORTED:
         return None
     return (
-        f"the secret broker cannot run on {sys.platform}: peer authentication is not "
+        f"the secret broker cannot run on {_PLATFORM_LABEL}: peer authentication is not "
         "implemented there, so the broker could not tell one caller from another and "
         "would refuse every request. The default keyfile tier needs no broker — "
         "`lop secret get` reads the key file directly."

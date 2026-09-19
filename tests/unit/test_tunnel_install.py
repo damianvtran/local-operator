@@ -233,18 +233,49 @@ def test_a_refused_registration_is_reported_verbatim(
     assert "Access is denied." in str(caught.value)
 
 
+def test_the_linux_unit_quotes_a_store_with_a_space(tmp_path: Path) -> None:
+    """A5: the tunnel arm's quoting is now the shared rule, and still applied.
+
+    systemd 255 reads an unquoted ``Environment=`` assignment up to the first
+    space and ignores the rest ("Invalid environment assignment, ignoring:
+    b/store"), so the connector would watch a different store than the one it
+    was installed for.
+    """
+    base = tmp_path / "a b" / "store"
+
+    text = tunnel_install.render_systemd(base)
+
+    assert f'Environment="LOCAL_OPERATOR_CONFIG_DIR={base}"' in text
+    assert 'ExecStart="' in text
+
+
 def test_uninstall_deregisters_the_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    deleted: list[str] = []
+    """``/End`` BEFORE ``/Delete``: the delete deregisters without stopping.
+
+    ``schtasks /Delete`` does not interrupt the program the task runs, so an
+    uninstall that only deletes left the connector serving after reporting it
+    removed. The order is the assertion — a delete that happened first would
+    leave nothing for the end to stop.
+    """
+    calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
     monkeypatch.setattr(tunnel_install.config, "directory", lambda base=None: tmp_path)
     monkeypatch.setattr(
-        supervisors, "delete_task", lambda name: deleted.append(name) or (True, "deleted")
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: calls.append(args) or _completed(list(args), 0, "", ""),
+    )
+    monkeypatch.setattr(
+        supervisors,
+        "delete_task",
+        lambda name: calls.append(("/Delete", "/TN", name)) or (True, "deleted"),
     )
     (tmp_path / "service-task.xml").write_text("<Task/>", encoding="utf-8")
 
     tunnel_install.uninstall()
 
-    assert deleted == [tunnel_install.TASK_NAME]
+    assert [call[0] for call in calls] == ["/End", "/Delete"], calls
+    assert calls[0] == tuple(supervisors.task_end_args(tunnel_install.TASK_NAME))
     assert not (tmp_path / "service-task.xml").exists()
 
 
