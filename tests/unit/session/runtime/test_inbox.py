@@ -471,3 +471,67 @@ def test_a_recall_never_touches_a_peer_row_with_the_same_id(tmp_path: Path) -> N
 
     assert withdraw_inbox(tmp_path, "p" * 8) is False
     assert [line.text for line in drain_inbox(tmp_path)] == ["peer words"]
+
+
+def test_a_marker_appended_while_the_drain_reads_still_withholds_its_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q-1 (round 3): the recall must be honoured by the batch being drained.
+
+    The receipt says the message was taken back, so the drain that is *reading*
+    the batch while the marker lands must not deliver it. ``_parse`` is hooked to
+    append the marker on its first call, which is exactly that interleave made
+    deterministic: without the drain's late re-read the row is in the list it had
+    already built, and the user is told a recall worked while their message runs.
+    Measured by QA at 4/120 trials naturally, 0/120 after this re-read.
+    """
+    import local_operator.session.runtime.inbox as inbox_mod
+
+    assert append_inbox(tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="q" * 8))
+
+    real_parse = inbox_mod._parse
+    calls = {"n": 0}
+
+    def parse_then_recall(raw: bytes):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The concurrent recall: its marker is written after this batch's
+            # first read and before the decision.
+            assert withdraw_inbox(tmp_path, "q" * 8) is True
+        return real_parse(raw)
+
+    monkeypatch.setattr(inbox_mod, "_parse", parse_then_recall)
+    delivered = drain_inbox(tmp_path)
+
+    assert delivered == [], [line.text for line in delivered]
+    assert peek_inbox(tmp_path) == []
+
+
+def test_a_recall_that_loses_the_race_answers_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verify is what makes "taken back" true — and what refuses to say it.
+
+    When the drain's batch has the row by the time the marker lands, the append
+    is too late and the answer must be ``False`` — the caller renders "the next
+    runtime already has that message", which is then the truth. ``_read_all`` is
+    hooked so the VERIFY sees the batch already consumed, which is the interleave
+    the lock cannot always exclude (a third holder).
+    """
+    import local_operator.session.runtime.inbox as inbox_mod
+
+    assert append_inbox(tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="w" * 8))
+
+    real_read_all = inbox_mod._read_all
+    state = {"calls": 0}
+
+    def read_all(fd: int) -> bytes:
+        state["calls"] += 1
+        if state["calls"] == 2:
+            # Between the peek and the verify, a drain consumed the batch.
+            os.ftruncate(fd, 0)
+        return real_read_all(fd)
+
+    monkeypatch.setattr(inbox_mod, "_read_all", read_all)
+
+    assert withdraw_inbox(tmp_path, "w" * 8) is False

@@ -18336,8 +18336,9 @@ class OperatorApp(App[None]):
             # messages its own queue names: the announcement cannot answer it on
             # the handover's normal arm, because the boot drain admits the spooled
             # row before the socket that would carry the event exists (UX round 2,
-            # U2). Idempotent and cheap when there is no queue: it reads nothing
-            # and takes nothing down.
+            # U2). Idempotent, and with an empty queue it reads NOTHING — no
+            # transcript replay, no spool read — which is what keeps a bind cheap
+            # on the join path (agent review round 3, MAJOR-3).
             interaction = self._interaction
             if interaction is not None:
                 self._settle_handed_over_queues(interaction)
@@ -41457,7 +41458,16 @@ class OperatorApp(App[None]):
         Read from disk, best effort: an unreadable or absent transcript answers
         "nothing admitted", which keeps the marker up rather than clearing a
         state nobody has established has ended.
+
+        RETURNING BEFORE THE READ IS LOAD-BEARING, not an optimisation. This runs
+        after EVERY successful bind, and ``Transcript(directory)`` replays the
+        whole journal eagerly: measured on this store's own 252.7 MB / 22,334-row
+        journal that is 3,916 ms synchronously on the event loop — on the join
+        path the operator's requirement is about, paid for a queue that is
+        usually empty (agent review round 3, MAJOR-3).
         """
+        if not source.turn.queued_prompts:
+            return set()
         directory = self._session_directory(source)
         if directory is None:
             return set()

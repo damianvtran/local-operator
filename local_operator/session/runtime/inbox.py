@@ -366,48 +366,99 @@ def _deliverable(lines: list[InboxLine]) -> list[InboxLine]:
     ]
 
 
+def _holds_owner_row(raw: bytes, command_id: str) -> bool:
+    """Does this batch still hold the owner row carrying ``command_id``?
+
+    The row a recall addresses is only ever removed by a drain, so "no longer
+    here" means "the successor's batch has it" — the one fact the recall's answer
+    turns on.
+    """
+    return any(line.source == SOURCE_USER and line.command_id == command_id for line in _parse(raw))
+
+
 def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
     """Record that the owner took a spooled message back. True if recorded.
 
     APPEND-ONLY, and that is a measured decision rather than a style one. The
     obvious implementation — rewrite the spool without that row — has to replace
-    or truncate a file that a concurrent ``append_inbox`` may be writing to, and
-    this module's appenders do NOT hold the lock they cannot take (deliberately:
-    a producer's message must not be dropped for a lock). Measured with three
-    racing appenders and 48 recalls: an in-place truncate lost acked rows in one
-    shape (the reviewer measured 1/241 and 8/488), and a STAGED replace — the
-    discipline :func:`_replace_remainder` uses for the drain — lost 14 of 42
-    acked rows, because an appender's already-open ``O_APPEND`` descriptor points
-    at the inode the replace orphans. So the recall adds a MARKER row
-    (``SOURCE_RECALL``) instead: nothing is rewritten, no appender can lose a
-    row, and both readers drop the marker and the row it names.
+    or truncate a file a concurrent ``append_inbox`` may be writing to, and this
+    module's appenders never block for a lock (deliberately: a producer's message
+    must not be dropped for one). Measured with three racing appenders and 48
+    recalls: an in-place truncate destroyed acked rows in the reviewer's runs
+    (1/241, 8/488; 0/300 and 0/180 in later ones, so that comparison is not a
+    controlled A/B — what IS established is that the staged shape destroys acked
+    rows: 10/27, 10/45, 14/42 in mine, because an appender's already-open
+    ``O_APPEND`` descriptor points at the inode the replace orphans), while this
+    marker lost NONE of 99, 181 and 354 acked rows. So the recall adds a MARKER
+    row (``SOURCE_RECALL``) and rewrites nothing: no appender can lose a row, and
+    both readers drop the marker and the row it names.
+
+    ONE CRITICAL SECTION, WHICH IS WHAT MAKES THE ANSWER TRUE. The peek, the
+    append and a verify all happen under the same non-blocking lock the drain
+    takes for its read-and-consume, and the drain decides what to deliver from a
+    read taken under that lock:
+
+      * this call gets the lock first — the marker is in the file before the
+        drain's decision, so the row is withheld and the receipt is true;
+      * the drain gets it first — its batch is already gone by the time the
+        append lands, and the VERIFY below sees that and answers ``False``, so
+        the user is told the message will run rather than that it was recalled.
+
+    The verify is what retires the lie QA reproduced at 4/120 trials: the marker
+    alone cannot tell the difference, because a marker appended after the drain's
+    read is a marker the drain never sees. The residue is the window between this
+    call's append and its verify when the lock is contended by a THIRD holder
+    (two recalls at once, or a stalled drain) — stated rather than claimed to be
+    closed, and strictly narrower than the shape it replaces.
 
     ``False`` means the row was not in the spool when this was called, and the
     overwhelmingly likely reason is that the successor drained it — the message
     WILL run, and the caller must say that rather than let the user believe a
-    recall worked. Best-effort by construction: a drain that has read the batch
-    and not yet emptied the file holds that row in memory and will deliver it.
-    There is no third answer and no retry; the caller's copy carries the
-    distinction (``app.QUEUED_PROMPT_MISSED_NOTICE``).
+    recall worked.
 
     Keyed by the OWNER's own ``command_id``, which only a ``SOURCE_USER`` row
     carries (``serving._spool_for_successor`` writes it for that source alone),
     so a peer's message can never be recalled by this call even if ids were to
-    collide. A spool at its ``MAX_INBOX_ROWS`` cap cannot record the marker: the
-    append fails, this returns False, and the caller says "too late" — the safe
-    direction, and a corner (the file is emptied by the next drain).
+    collide.
+
+    THE MARKER IS NOT CAPPED, unlike a message: ``append_inbox`` drops a row
+    beyond ``MAX_INBOX_ROWS`` because the bound exists to stop a runaway
+    PRODUCER, and a recall is a user action bounded by the UI — one row per
+    press, gone with the next drain. Capping it instead would make the spool
+    full answer ``False`` for a message that is still sitting in it, i.e. the
+    recall would say "the next runtime already has that message" while nothing
+    has it (agent review round 3, NIT-3).
     """
     if not command_id:
         return False
-    if not any(
-        line.source == SOURCE_USER and line.command_id == command_id
-        for line in peek_inbox(session_dir)
-    ):
+    path = inbox_path(session_dir)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_APPEND)
+    except FileNotFoundError:
         return False
-    return append_inbox(
-        session_dir,
-        InboxLine(text="", sender={}, source=SOURCE_RECALL, command_id=command_id),
-    )
+    except OSError:
+        logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
+        return False
+    try:
+        with _NonBlockingLock(fd):
+            raw = _read_all(fd)
+            if not _holds_owner_row(raw, command_id):
+                return False
+            marker = InboxLine(text="", sender={}, source=SOURCE_RECALL, command_id=command_id)
+            payload = json.dumps(marker.to_json(), separators=(",", ":")).encode() + b"\n"
+            os.write(fd, payload)
+            if not _holds_owner_row(_read_all(fd), command_id):
+                logger.info(
+                    "inbox recall for %s lost the race with a drain; the message will run",
+                    command_id,
+                )
+                return False
+            return True
+    except OSError:
+        logger.warning("inbox withdrawal failed for %s", session_dir.name, exc_info=True)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _replace_remainder(path: Path, consumed: bytes) -> None:
@@ -464,6 +515,20 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
             lines = _parse(raw)
             if not lines:
                 return []
+            # WHAT GETS DELIVERED IS DECIDED FROM THE LATEST BYTES, not from the
+            # read above. A recall appends its marker without the lock (this
+            # module's appenders never block for one) and the operator's receipt
+            # says the message was taken back — so a marker that lands while this
+            # call is reading must still withhold its row, or the drain delivers
+            # a message the user was told would not run. Measured by QA at 4/120
+            # trials before this re-read, 0/120 after (QA Q-1, round 3).
+            latest = _read_all(fd)
+            if latest != raw:
+                lines = _parse(latest)
+                if not lines:
+                    # Another drain emptied the batch between the two reads.
+                    # Nothing to deliver and nothing to consume.
+                    return []
             # The markers are consumed with the rows they name: the whole file
             # goes, and a recall has done its job once the batch it applied to is
             # gone.
@@ -476,7 +541,11 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
                 # rename is atomic, and the worst case is that a racing
                 # appender's row lands in a file we just replaced, which the
                 # NEXT open drains.
-                _replace_remainder(path, raw)
+                #
+                # ``latest``, not ``raw``: rows that arrived between the two
+                # reads are part of this batch, so they must not survive as a
+                # remainder to be delivered twice.
+                _replace_remainder(path, latest)
             return deliverable
     except OSError:
         logger.warning("inbox drain failed for %s", session_dir.name, exc_info=True)
