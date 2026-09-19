@@ -295,10 +295,12 @@ class AgentEventBridge:
         # Bound BEFORE the per-string cap below, and deliberately before it: an
         # ``agent_end`` carries the whole turn, and this transport caps STRINGS
         # at 16 KiB, so a turn of ordinary rows (no single string over the
-        # limit) passes through it untouched — measured at 373,215 bytes for a
-        # frame that is 523,280 unbounded. The bound spends tool-row content
-        # through an honest marker instead of clipping five rows' worth of
-        # strings, so a reader sees ONE truncation story rather than two.
+        # limit) passes through it untouched — measured on the 104-message
+        # fixture, whose largest single string is well under the cap: an SSE
+        # frame of 373,214 bytes and an NDJSON line of 523,280 bytes, both far
+        # over the budget the bound below applies. The bound spends tool-row
+        # content through an honest marker instead of clipping five rows' worth
+        # of strings, so a reader sees ONE truncation story rather than two.
         #
         # The ordering is a preference, not a guarantee, and what actually
         # happens at the seam is worth stating: a row's share can leave ONE

@@ -331,6 +331,13 @@ def test_the_row_counters_report_every_row_that_lost_content() -> None:
     wide = json.loads(_ndjson_line(_conversation_event(rows=wire.AGENT_END_PREVIEW_ROWS_MAX + 20)))
     assert wide["elided_tool_rows"] == 20
     assert wide["clipped_tool_rows"] == wire.AGENT_END_PREVIEW_ROWS_MAX
+    # The counter is defined by what the reader sees, so it must agree with the
+    # markers in the rows themselves: every clipped row ends in the clip marker.
+    tool_rows = [m for m in wide["messages"] if m.get("role") == "tool"]
+    ending_in_clip = sum(
+        1 for m in tool_rows if "".join(b.get("text", "") for b in m["content"]).endswith("…")
+    )
+    assert ending_in_clip == wide["clipped_tool_rows"]
 
 
 def test_the_sse_string_cap_supersedes_the_bound_for_one_long_string() -> None:
@@ -343,14 +350,21 @@ def test_the_sse_string_cap_supersedes_the_bound_for_one_long_string() -> None:
     from local_operator.server.utils.operator import STREAM_TRUNCATION_MARKER
 
     event = _many_row_turn(rows=1, per_row=300_000, details_chars=0)
-    sse_text = _tool_texts(_sse_payload(event))[0]
+    payload = _sse_payload(event)
+    sse_text = _tool_texts(payload)[0]
     socket_text = _tool_texts(_socket_payload(event))[0]
 
     assert sse_text.endswith(STREAM_TRUNCATION_MARKER)
     assert len(sse_text) < 20_000, "the per-string cap is what the SSE reader meets"
     assert len(socket_text) > len(sse_text) * 10
-    # The bound's own number explains a fraction of what the SSE reader lost.
-    assert _sse_payload(event)["elided_bytes"] < 300_000 - len(sse_text)
+    # The bound's own number explains a fraction of what the SSE reader lost —
+    # asserted on the value, with the key's presence named, so a mutation that
+    # stops the bound running fails on the seam rather than on a KeyError.
+    elided = payload.get("elided_bytes")
+    assert elided is not None, "the bound did not run: no elided_bytes on the SSE payload"
+    assert elided < 300_000 - len(
+        sse_text
+    ), f"elided_bytes ({elided}) claims to cover what the SSE reader lost"
 
 
 def test_a_row_with_no_entry_id_says_so_instead_of_naming_a_fake_entry() -> None:
