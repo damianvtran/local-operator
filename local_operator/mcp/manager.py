@@ -1768,8 +1768,10 @@ class McpManager:
         # against a fresh read, so a peer's re-auth landing during the attempt
         # is not mistaken for the grant the attempt used — which made the block
         # unfalsifiable and the server permanently dead on a healthy credential.
-        # Written by ``_note_attempt_marker`` at each connect site and consumed
-        # (popped) by the block, so a stale entry can never outlive its attempt.
+        # Written by ``_connect_server`` at the one seam between its own OAuth
+        # refresh and opening the transport, and consumed (popped) by the block,
+        # so a stale entry can never outlive its attempt. That position is
+        # load-bearing in BOTH directions — see the comment at the write.
         self._attempt_grant_marker: dict[str, tuple[float, bool] | None] = {}
         # Backoff ladder position is separate from the breaker window (MCP-07):
         # a successful reconnect resets the ladder but keeps the window intact,
@@ -2108,12 +2110,10 @@ class McpManager:
                 # is never the network's fault.
                 self._note_startup_failure(name, message)
                 continue
-            # BEFORE the task is created, so the marker describes the grant this
-            # attempt will use. Both of this round's auth arms — the gate arm
-            # below and the deferred continuation in ``_finish_pending`` —
-            # consume it, which is why it is recorded once here rather than in
-            # each of them.
-            self._note_attempt_marker(name)
+            # The attempt marker is recorded INSIDE ``_connect_server``, after
+            # its own proactive refresh rotates the grant — see the comment at
+            # that seam. Recording it here instead would describe a grant the
+            # dial never presents and storm refresh tokens on every poll.
             tasks[name] = asyncio.get_running_loop().create_task(self._connect_server(name, cfg))
 
         if not tasks:
@@ -2442,6 +2442,24 @@ class McpManager:
             self.register_secret_redaction(value)
         timeout_s = resolve_mcp_timeout_s(transport_cfg)
         await self._ensure_oauth_fresh(name, transport_cfg)
+        # THE ATTEMPT MARKER IS TAKEN HERE, and the position is the whole point.
+        #
+        # It must be read AFTER our own proactive refresh, because that refresh
+        # ROTATES the grant and moves ``tokens_obtained_at``. A marker read
+        # before it describes a grant this dial never presents, so the row is
+        # newer than the marker the moment the connect fails — and every
+        # subsequent poll reads that as "a peer re-authed", spending a refresh
+        # token per tick, in every process, forever. That is the self-write
+        # retry storm ``GRANT_DEAD_AT_KEY`` and ``_grant_marker`` exist to
+        # prevent, reached through the pre-attempt read instead of through a
+        # naive ``updated_at``; an agent review measured it at 30 connects over
+        # 30 polls before the read was moved here (round 1, blocker-1).
+        #
+        # …and BEFORE the transport opens, so a peer's ``/mcp reauth`` landing
+        # while we are dialling is still not mistaken for the grant we used,
+        # which is the defect this whole change fixes. Between the two is the
+        # only window where both hold.
+        self._attempt_grant_marker[name] = self._grant_marker(name)
         stack = AsyncExitStack()
         # One collector per connect ATTEMPT, so a retry never quotes the
         # previous attempt's stderr as this one's reason. Made unconditionally:
@@ -3994,21 +4012,6 @@ class McpManager:
             logger.debug("MCP grant marker read failed for %r", name, exc_info=True)
             return None
 
-    def _note_attempt_marker(self, name: str) -> None:
-        """Record the grant a connect attempt is ABOUT to use, before it runs.
-
-        Paired with :meth:`_take_attempt_marker` at the failure arms. Every
-        site that calls ``_connect_server`` on a path that can block on auth
-        calls this first, so the block records what was TRIED rather than what
-        happens to be on disk once the attempt has failed. See
-        :meth:`_block_on_auth` for why the difference is load-bearing.
-
-        A read failure stores ``None`` — unknown, never a value — which
-        ``_block_on_auth`` then treats exactly as an unreadable store at block
-        time, preserving any good marker already held.
-        """
-        self._attempt_grant_marker[name] = self._grant_marker(name)
-
     def _take_attempt_marker(self, name: str) -> tuple[float, bool] | None:
         """The marker recorded for the attempt that just failed, and forget it.
 
@@ -4160,11 +4163,16 @@ class McpManager:
                     future.set_exception(exc)
                     future.exception()  # mark retrieved; waiters still see the raise
                 self._connect_futures.pop(name, None)
-                # ``marker`` is what this tick read and is retrying, so it is
-                # the attempted grant by construction — no separate record
-                # needed, and re-reading here would reintroduce the same
-                # after-the-fact window the other arms close.
-                self._block_on_auth(name, marker)
+                # The seam inside ``_connect_server`` recorded what this retry
+                # actually presented, AFTER its own refresh rotated the grant.
+                # ``marker`` — the value this tick healed on — is deliberately
+                # NOT used: it is the pre-rotation grant, so blocking against it
+                # would leave the row permanently newer than the block and storm
+                # a refresh token every tick. Falls back to ``marker`` only if
+                # the connect failed before reaching that seam, in which case no
+                # rotation happened and the two are the same grant anyway.
+                attempted = self._take_attempt_marker(name)
+                self._block_on_auth(name, attempted if attempted is not None else marker)
                 continue
             # Re-check ownership AFTER the await, as every other reconnect path
             # does: a dispose()/reload() during the connect bumps the epoch, and
@@ -4313,8 +4321,6 @@ class McpManager:
         if future is None or future.done():
             future = asyncio.get_running_loop().create_future()
             self._connect_futures[name] = future
-        # The grant this attempt is about to use, read before the await.
-        attempted = self._grant_marker(name)
         try:
             conn = await self._connect_server(name, cfg)
         except (McpAuthRequiredError, McpAuthChallengeError) as exc:
@@ -4359,7 +4365,7 @@ class McpManager:
             # ``/mcp reauth`` healed nothing here. ``_block_on_auth`` records the
             # grant we failed on, and ``revalidate_auth_blocked`` lifts the block
             # when that grant is replaced, by this process or any other.
-            self._block_on_auth(name, attempted)
+            self._block_on_auth(name, self._take_attempt_marker(name))
             self._abandon_reconnect(name, str(exc))
             return
         except Exception as exc:
@@ -4397,8 +4403,6 @@ class McpManager:
             return None
         epoch = self._epoch
         await self._teardown_connection(name)
-        # The grant this attempt is about to use, read before the await.
-        attempted = self._grant_marker(name)
         try:
             conn = await self._connect_server(name, cfg)
         except (McpAuthRequiredError, McpAuthChallengeError) as exc:
@@ -4407,7 +4411,7 @@ class McpManager:
             # This arm previously recorded NOTHING, so the next tool call tried
             # the same dead grant again. Blocking here both stops that and makes
             # the server eligible for revalidation when the grant is replaced.
-            self._block_on_auth(name, attempted)
+            self._block_on_auth(name, self._take_attempt_marker(name))
             return None
         except Exception as exc:
             logger.warning("MCP call-site reconnect failed for %r: %s", name, exc)

@@ -3892,6 +3892,13 @@ class TestAuthBlockRevalidation:
             # The peer's re-auth lands DURING the connect, before it fails —
             # so the post-failure read would see the NEW grant and block on it.
             async def failing_after_a_peer_reauth(name: str, cfg: Any, **_: Any):
+                # Stand in for the real ``_connect_server``: it records the
+                # attempt marker between its own OAuth refresh and opening the
+                # transport, so a stub that skips that seam would not exercise
+                # the path under test. No refresh happens here, so the marker
+                # is simply the grant on disk at dial time.
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                # …and NOW the peer's re-auth lands, mid-dial.
                 await self._write_fresh_grant(store)
                 raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
 
@@ -3934,6 +3941,13 @@ class TestAuthBlockRevalidation:
             from local_operator.mcp.auth import McpAuthRequiredError
 
             async def failing_after_a_peer_reauth(name: str, cfg: Any, **_: Any):
+                # Stand in for the real ``_connect_server``: it records the
+                # attempt marker between its own OAuth refresh and opening the
+                # transport, so a stub that skips that seam would not exercise
+                # the path under test. No refresh happens here, so the marker
+                # is simply the grant on disk at dial time.
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                # …and NOW the peer's re-auth lands, mid-dial.
                 await self._write_fresh_grant(store)
                 raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
 
@@ -3955,6 +3969,81 @@ class TestAuthBlockRevalidation:
             for _ in range(5):
                 assert await manager.revalidate_auth_blocked() == []
             assert attempts == ["dd"], "a re-block must not retry on an unchanged grant"
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_our_own_in_connect_refresh_is_not_a_peer_reauth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE self-write storm guard for the attempt marker. Do not weaken.
+
+        ``_connect_server`` proactively refreshes an OAuth grant BEFORE dialling
+        (``_ensure_oauth_fresh``), and a successful rotation moves
+        ``tokens_obtained_at``. So an attempt marker read before that refresh
+        describes a grant the dial never presented, and the row is newer than
+        the block the instant the connect fails — which every later poll reads
+        as "a peer re-authed", spending a refresh token per tick in every
+        running process. Against a provider running reuse detection that
+        revokes the whole token family: the exact storm ``_grant_marker``'s
+        ``updated_at`` discussion exists to prevent, reached through a
+        pre-refresh read instead.
+
+        Caught by agent review round 1 (blocker-1) on the first revision of this
+        feature and measured there at 30 connects over 30 polls, against 0 on
+        ``main``. The marker is therefore taken INSIDE ``_connect_server``,
+        after its own refresh and before the transport opens.
+
+        The shape below is the documented real one: our refresh rotates the
+        grant successfully, and the resource server still refuses the rotated
+        access token with a 401.
+        """
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.mcp.auth import McpAuthChallengeError, McpTokenStorage
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            storage = McpTokenStorage(TestAuthBlockRevalidation.URL, store)
+            attempts: list[int] = []
+
+            async def refresh_then_401(name: str, cfg: Any, **_: Any):
+                attempts.append(len(attempts) + 1)
+                i = len(attempts)
+                # Exactly what ``_refresh_oauth_token_locked`` persists on a
+                # successful rotation…
+                storage.store_refresh_result(
+                    OAuthToken(
+                        access_token=f"A{i}",
+                        refresh_token=f"R{i + 1}",
+                        token_type="Bearer",
+                        expires_in=28800,
+                    ),
+                    presented_refresh_token=f"R{i}",
+                )
+                # …then the marker seam, in the real code's order: after the
+                # refresh, before the transport.
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                raise McpAuthChallengeError(
+                    TestAuthBlockRevalidation.URL,
+                    status_code=401,
+                    oauth_available=True,
+                    has_stored_grant=True,
+                )
+
+            monkeypatch.setattr(manager, "_connect_server", refresh_then_401)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager.auth_blocked("dd") is True
+            after_block = len(attempts)
+
+            for _ in range(30):
+                await manager.revalidate_auth_blocked()
+            assert len(attempts) == after_block, (
+                "our own refresh was mistaken for a peer's re-auth: "
+                f"{len(attempts) - after_block} extra connects over 30 polls"
+            )
         finally:
             await manager.disconnect_all()
             store.close()
