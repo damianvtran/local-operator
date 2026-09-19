@@ -574,16 +574,22 @@ jobs:
         # still writes the XML, with `failures="1"` and per-test times for
         # everything that ran, which is a run whose weights want correcting.
         #
-        # It does NOT cover the case this job actually cares about. A shard
+        # It does NOT cover the case this job actually cares about: a shard
         # killed by the `faulthandler` watchdog (tests/e2e/watchdog.py exits
-        # with `os._exit(1)`) or cancelled at the cap never reaches pytest's
-        # `sessionfinish`, and that is where the JUnit file is written -- so
-        # there is no file to upload, and `if-no-files-found: ignore` means the
-        # step reports success with an empty artifact. Verified both ways on
-        # 2026-09-19: a failing test leaves `failures="1"` in the XML, while a
-        # test that calls `os._exit(1)` (what the watchdog does) leaves no XML
-        # at all. A hung shard's timings are therefore NOT recoverable from
-        # this artifact; the weights for such a run come from a healthy one.
+        # with `os._exit(1)`) never reaches pytest's `sessionfinish`, and that
+        # is where the JUnit file is written -- so there is no file to upload,
+        # and `if-no-files-found: ignore` means the step reports success with
+        # an empty artifact. Measured both ways on 2026-09-19: a failing test
+        # leaves `failures="1"` in the XML, while a test that calls
+        # `os._exit(1)` (what the watchdog does) leaves no XML at all.
+        #
+        # Cancellation is deliberately NOT claimed either way. It is a third
+        # exit path this change did not measure, and the two signals differ: a
+        # round-2 review measured that SIGINT (which is how GitHub's
+        # documented cancellation begins) leaves the XML, while SIGTERM does
+        # not. The two cases above are what this rationale rests on.
+        # A hung shard's timings are therefore NOT recoverable from this
+        # artifact; the weights for such a run come from a healthy one.
         if: always()
         uses: actions/upload-artifact@v7
         with:

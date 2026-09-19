@@ -129,7 +129,7 @@ Two decisions came out of that, both from measurement:
 What a regeneration CANNOT fix is worth as much as what it can:
 
 - **The partitioner is exact on the weights it is given, and that is a weak
-  claim.** The stale manifest's split scored 1.275x-1.399x across three runs;
+  claim.** The stale manifest's split scored 1.264x-1.399x across three runs;
   the current one scores 1.189x / 1.200x / 1.310x on the same three. Most of
   the wall spread people will see is NOT weight error: two runs of ONE manifest
   over a near-identical tree gave shard walls 634-785 s (1.24x) and 461-846 s
