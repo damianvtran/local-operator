@@ -11067,11 +11067,16 @@ async def _browser_download(
     over_cap = candidates[limits.download_max_files :]
     for name in over_cap:
         removed = _unlink_quietly(directory / name)
-        # Same rule as the containment branch: the sentence says which of the two
-        # outcomes happened, never "deleted" over a file still on disk.
-        outcome = "refused and deleted" if removed else "refused, NOT deleted"
-        reason = f"over the {limits.download_max_files} files per call limit"
-        refused.append(f"{name}: {outcome} — {reason}")
+        # The sentence and the audit row both come from `_delete_outcome`, so the
+        # over-cap refusal says what happened to the entry in the same words as
+        # the containment rule and the content refusals (review round 2, N7 — the
+        # row used to carry the cap and not the outcome, so a reader could not
+        # tell an entry that was removed from one still in the session
+        # directory, and this path can FAIL to delete when the directory is not
+        # writable).
+        word, trail = _delete_outcome(removed)
+        rule = f"over the {limits.download_max_files} files per call limit"
+        refused.append(f"{name}: {word} — {rule}")
         _download_audit(
             call_id=call_id,
             session_id=session_id,
@@ -11082,7 +11087,7 @@ async def _browser_download(
             path="",
             size=landed.get(name, 0),
             verdict="deny",
-            reason=reason,
+            reason=f"{rule}; {trail}",
             redact=True,
         )
     for name in candidates[: limits.download_max_files]:
@@ -11108,8 +11113,8 @@ async def _browser_download(
             # symlink dies, its target does not. The message and the audit row
             # say what actually happened, including a delete that failed.
             removed = _unlink_quietly(path)
-            outcome = "refused and deleted" if removed else "refused, NOT deleted"
-            refused.append(f"{name}: {outcome} — it resolved outside the download directory")
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — it resolved outside the download directory")
             _download_audit(
                 call_id=call_id,
                 session_id=session_id,
@@ -11119,11 +11124,7 @@ async def _browser_download(
                 name=name,
                 path="",
                 verdict="deny",
-                reason=(
-                    "outside the quarantine root; the entry was removed"
-                    if removed
-                    else "outside the quarantine root; the entry could NOT be removed"
-                ),
+                reason=f"outside the quarantine root; {trail}",
                 redact=True,
             )
             continue
@@ -11133,11 +11134,12 @@ async def _browser_download(
             # inside the root must not be able to make Python delete the file it
             # points at and leave the link behind.
             removed = _unlink_quietly(path)
-            # `verdict.reason` already says "refused and deleted", so a delete
-            # that did NOT happen is corrected here rather than left implied
-            # (review round 1, R1's class: the sentence claims only what happened).
-            tail = "" if removed else " (NOT deleted: the entry is still on disk)"
-            refused.append(f"{name}: {verdict.reason}{tail}")
+            # One construction for every deny reason (review round 2, N7): the
+            # verdict and the entry's fate come from what actually happened, and
+            # `verdict.reason` is the rule alone — no reason can claim a delete it
+            # did not do, and none can delete the artifact silently.
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — {verdict.reason}")
             _download_audit(
                 call_id=call_id,
                 session_id=session_id,
@@ -11148,7 +11150,7 @@ async def _browser_download(
                 path="",
                 size=landed.get(name, 0),
                 verdict="deny",
-                reason=f"{verdict.reason}{tail}",
+                reason=f"{verdict.reason}; {trail}",
                 declared_mime=declared,
                 sniffed=verdict.sniffed,
                 redact=True,
@@ -11287,13 +11289,22 @@ async def _browser_upload(
     # read-back did not": the facts come from Python's own re-stat + digest, and
     # the call is reported as an UNVERIFIED attach rather than as a failure,
     # because a failure here reads as "nothing was sent" and invites the
-    # double-send it is trying to prevent (review round 1, Q-1). The marker is
-    # the HOST's word about its own read — it cannot be checked from here, and
-    # the host is our own code; the size comparison below is what a page that
-    # ignored the attach is caught by, and a read that came back still runs it.
-    # The host reports it for ANY failed read, not only a navigation (a stall on
-    # the read is the same situation, and the read is what failed either way).
-    readback = str(result.get("readback") or "")
+    # double-send it is trying to prevent (review round 1, Q-1). The host
+    # reports it for ANY failed read, not only a navigation (a stall on the read
+    # is the same situation, and the read is what failed either way).
+    #
+    # It is a HOST-supplied string, so it is sanitised and capped like the declared
+    # type is before it reaches the transcript or the audit row (review round 2,
+    # R7): a marker containing a newline used to grow the tool result by a line
+    # the host chose. Its PRESENCE and its TEXT are kept apart, because sanitising
+    # can empty a marker that was really sent — and a marker that sanitises down
+    # to nothing must still mark the attach unverified rather than read as a
+    # verified one.
+    readback_reported = bool(result.get("readback"))
+    readback = files.readback_label(str(result.get("readback") or ""))
+    # One spelling for "the host said its read failed but left nothing printable",
+    # which is also the fallback the extension uses for an empty error detail.
+    readback_note = readback or "no detail"
     facts: list[dict[str, Any]] = []
     for path in resolved:
         fact = files.stat_fact(files.safe_name(path.name), path)
@@ -11306,7 +11317,13 @@ async def _browser_upload(
                 "the file input did not take the attach: nothing came back for "
                 f"{path}, and the file on disk is {fact['bytes']} bytes. Nothing was sent.",
             )
-        if not readback:
+        count = int(seen.get("bytes", -1))
+        # Gated on the SENTINEL, never on the marker (review round 2, R6). The
+        # marker is the host's word about its own read and means "I could not read
+        # it back"; treating it as "do not check" let one field that the host
+        # controls suppress the only check a real mismatch is caught by — a host
+        # reporting both a count and a marker lost the comparison entirely.
+        if count >= 0:
             # The byte count is what Python compares (the extension compares the
             # NAMES, in the read-back it does itself), so the check is
             # name-plus-size rather than contents: a same-name, same-size
@@ -11314,7 +11331,7 @@ async def _browser_upload(
             # residual limit of the read-back, stated rather than implied
             # (review round 1, N5) — which is why the digest is Python's own and
             # the bytes are re-statted from disk rather than taken from the host.
-            if int(seen.get("bytes", -1)) != int(fact["bytes"]):
+            if count != int(fact["bytes"]):
                 # The DOM holds something else. Reported as an error naming both
                 # sides rather than as a success: a file input that ignored the
                 # attach is exactly the failure a page would like us to call filled.
@@ -11322,10 +11339,28 @@ async def _browser_upload(
                     tool_call_id,
                     "browser",
                     "the file input did not take the attach: it holds "
-                    f"{seen.get('bytes')} bytes for {path}, and the file "
+                    f"{count} bytes for {path}, and the file "
                     f"on disk is {fact['bytes']} bytes. Nothing was sent.",
                 )
-        facts.append(fact)
+        elif not readback_reported:
+            # No count AND no marker: the host claims a read that reported nothing
+            # it measured, and there is no unverified note to carry either, so the
+            # call is refused rather than reported as a verified attach. The marker
+            # is what makes the unreported case legitimate — not the absence of a
+            # comparison.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported no byte "
+                f"count for {path}, and the file on disk is {fact['bytes']} bytes. "
+                "Nothing was sent.",
+            )
+        # A fact is VERIFIED only when the host's own read completed and agreed
+        # with Python's stat: an unverified attach must be discriminable by a
+        # consumer reading `details` and not only by one reading the prose
+        # (review round 2, N6) — the caveat below is what the key mirrors.
+        verified = count >= 0 and not readback_reported
+        facts.append({**fact, "verified": verified})
         _download_audit(
             call_id=call_id,
             session_id=session_id,
@@ -11338,7 +11373,7 @@ async def _browser_upload(
             verdict="allow",
             # Empty in the ordinary case; the unverified marker otherwise, so the
             # trail carries the same caveat the model was given.
-            reason=readback,
+            reason=readback_note if readback_reported else "",
             sha256=str(fact["sha256"]),
         )
     accept = str(result.get("accept") or "")
@@ -11352,15 +11387,30 @@ async def _browser_upload(
         # REPORTED, never obeyed: a site's `accept` filter protects nothing and
         # honouring it would let the page steer which local files we try.
         lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
-    if readback:
+    if readback_reported:
         # Never silent: an unverified attach that reads like a confirmed one is
         # how a model ends up re-sending files that already left.
         lines.append(
-            f"note: the attach could not be read back ({readback}). The bytes above are what "
-            "is on disk and were handed to the page; whether the page kept or sent them is "
-            "not something this call can confirm — check before re-sending."
+            f"note: the attach could not be read back ({readback_note}). The bytes above are "
+            "what is on disk and were handed to the page; whether the page kept or sent them "
+            "is not something this call can confirm — check before re-sending."
         )
     return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
+
+
+def _delete_outcome(removed: bool) -> tuple[str, str]:
+    """What happened to a refused ENTRY: the verdict word and the row's clause.
+
+    Both halves are built from the RETURN of the delete rather than from the
+    assumption that it worked (review round 1, R1) and from ONE function rather
+    than one spelling per branch (review round 2, N7): the containment rule, the
+    per-call cap and the content refusals all delete the entry, and a reader of
+    the trail reconstructs what a session kept from these rows — two vocabularies
+    for one fact is a row that cannot be compared with its neighbour.
+    """
+    if removed:
+        return "refused and deleted", "the entry was removed"
+    return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
 
 
 def _unlink_quietly(path: Path) -> bool:

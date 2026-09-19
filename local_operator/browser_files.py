@@ -623,6 +623,13 @@ _GENERIC_MIMES = frozenset(
 #: The declared type lands in model-facing text AND in an audit row, so it is
 #: capped like a name is; 80 bytes is far past any real `Content-Type`.
 MAX_MIME_BYTES = 80
+#: The host's read-back marker is a SENTENCE rather than a type — our own longest
+#: one is 93 bytes — so this ceiling sits deliberately above the 120-character cap
+#: the extension puts on the error text it embeds. A cap that clipped the honest
+#: marker would cost the diagnosis the marker exists to give; its job is to bound
+#: a hostile host, and the harness cannot assume which build is on the other end
+#: (review round 2, R7).
+MAX_READBACK_BYTES = 120
 
 
 def redact_name(name: str) -> str:
@@ -635,6 +642,21 @@ def redact_name(name: str) -> str:
     return f"{name[:1]}\u2026" if name else ""
 
 
+def _outside_text(raw: str) -> str:
+    """A string from OUTSIDE, with the characters that would let it lie removed.
+
+    One door for every host-supplied label that is interpolated into
+    model-facing text and into an audit row, so there is a single answer to "is
+    this safe to print": C0/C1 controls (a terminal escape, and a `\r\n` that
+    grows the tool result by a line the host chose) and the bidi/zero-width
+    overrides (`evil.exe` written with an RTL override DISPLAYS as
+    `evilexe.pdf`). Removed rather than replaced by a space: these are not
+    whitespace to preserve, and a substitution would insert a separator the host
+    never sent.
+    """
+    return _BIDI_ZERO_WIDTH_RE.sub("", _CONTROL_RE.sub("", str(raw or ""))).strip()
+
+
 def declared_mime_label(raw: str) -> str:
     """The host's declared `Content-Type`, sanitised, or "" when it says nothing.
 
@@ -645,10 +667,23 @@ def declared_mime_label(raw: str) -> str:
     `redact_name` redact — and dropped when it is generic, so the copy can never
     imply a signal the server did not send.
     """
-    label = _BIDI_ZERO_WIDTH_RE.sub("", _CONTROL_RE.sub("", str(raw or ""))).strip()
+    label = _outside_text(raw)
     if label.lower() in _GENERIC_MIMES:
         return ""
     return _truncate_bytes(label, MAX_MIME_BYTES)
+
+
+def readback_label(raw: str) -> str:
+    """The host's read-back marker, sanitised and capped, or "" when absent.
+
+    The same discipline as :func:`declared_mime_label`, for the same reason: it
+    is a string from outside that is interpolated into the model-facing note and
+    into the audit row's `reason`, and it is the one field of the upload result a
+    HOST chooses the length and content of. The extension caps its own marker,
+    but the harness is the boundary that must not take that on trust (review
+    round 2, R7).
+    """
+    return _truncate_bytes(_outside_text(raw), MAX_READBACK_BYTES)
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +722,14 @@ def classify_bytes(
     re-derived by the generator without writing files (§10.4) — and so the
     classifier is exercised on exact bytes rather than on whatever a temp
     filesystem produced.
+
+    A deny REASON is the rule and nothing else — no "refused and deleted:"
+    prefix and no claim about the entry (review round 2, N7). Only the caller
+    knows whether the entry was actually removed (it is the one that deletes), so
+    only the caller states the verdict and the outcome, in the same words for
+    every refusal reason (`builtin._delete_outcome`). A reason that pre-empted it
+    could only be right half the time, which is what made the tail of the refusal
+    sentence asymmetric between the rules.
     """
     # An unreadable or empty artifact is not a deliverable, and a zero-byte file
     # would otherwise fall through every content check to `unknown`, i.e. be
@@ -694,8 +737,8 @@ def classify_bytes(
     if not head:
         return Verdict(
             "deny",
-            f"refused and deleted: {safe_name(raw_name)} is empty (0 bytes) — an empty "
-            "download is not a file you can use",
+            f"{safe_name(raw_name)} is empty (0 bytes) — an empty download is not a file "
+            "you can use",
             "",
             safe_name(raw_name),
         )
@@ -704,8 +747,8 @@ def classify_bytes(
     if content_class is not None and content_class in DENY_CLASSES:
         return Verdict(
             "deny",
-            f"refused and deleted: the file at {safe_name(raw_name)} is "
-            f"{content_class.label}. Nothing executable is ever kept.",
+            f"the file at {safe_name(raw_name)} is {content_class.label}; nothing "
+            "executable is ever kept",
             content_class.name,
             safe_name(raw_name),
         )
@@ -718,8 +761,8 @@ def classify_bytes(
         # promises an installer.
         return Verdict(
             "deny",
-            f"refused: {safe_name(raw_name)} is an executable or script type "
-            f"('{name_ext}'); nothing was saved",
+            f"{safe_name(raw_name)} is an executable or script type ('{name_ext}'); "
+            "nothing was saved",
             content_class.name if content_class is not None else "",
             safe_name(raw_name),
         )
@@ -784,14 +827,14 @@ def classify_download(path: Path, *, declared_mime: str = "", policy: Policy = D
     except OSError as exc:
         return Verdict(
             "deny",
-            f"refused and deleted: {safe_name(path.name)} could not be read ({exc.strerror})",
+            f"{safe_name(path.name)} could not be read ({exc.strerror})",
             "",
             safe_name(path.name),
         )
     if size > policy.download_max_bytes:
         return Verdict(
             "deny",
-            f"refused: {safe_name(path.name)} is {size} bytes, over the "
+            f"{safe_name(path.name)} is {size} bytes, over the "
             f"{policy.download_max_bytes} byte limit",
             "",
             safe_name(path.name),
@@ -807,7 +850,7 @@ def classify_download(path: Path, *, declared_mime: str = "", policy: Policy = D
     except OSError as exc:
         return Verdict(
             "deny",
-            f"refused and deleted: {safe_name(path.name)} could not be read ({exc.strerror})",
+            f"{safe_name(path.name)} could not be read ({exc.strerror})",
             "",
             safe_name(path.name),
         )
@@ -968,7 +1011,26 @@ def chmod_private(path: Path) -> bool:
     depth rather than the only thing standing between a page's download and
     another local user; it is still done, because the design states it and a
     claim the code does not enforce is the defect class review round 1 caught.
+
+    The mode change must land on the ENTRY this call reports, which is why a
+    symlink entry takes ``lchmod`` and is skipped where the platform has none
+    (review round 2, N8): ``os.chmod`` FOLLOWS the link, so on an in-root symlink
+    artifact it tightened the target — a file this call neither landed nor names,
+    and one the page chose. The containment check bounds the target to the
+    session root, so this was never an escape; it is the same "the artifact it is
+    about to report" rule R1 applies to the delete.
     """
+    if path.is_symlink():
+        lchmod = getattr(os, "lchmod", None)
+        if lchmod is None:
+            # Linux has no lchmod. Skipping leaves this one entry at the mode the
+            # host wrote; firing `chmod` here would tighten whatever it points at.
+            return False
+        try:
+            lchmod(path, PRIVATE_FILE_MODE)
+            return True
+        except OSError:
+            return False
     try:
         os.chmod(path, PRIVATE_FILE_MODE)
         return True

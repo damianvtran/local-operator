@@ -128,7 +128,12 @@ a failure that would read as "nothing was sent" and invite a double-send. A page
 that IGNORED the attach is the different case the read-back exists for, and it
 still fails the call. The comparison itself is name-plus-size, not contents: a
 same-name, same-size replacement between the two reads would pass, which is why
-the digest is always the harness's own.
+the digest is always the harness's own. The comparison runs whenever the host
+REPORTED a byte count: a marker saying the read could not be taken makes only an
+*unreported* count unverifiable, and can never suppress the check of a count that
+came back. The marker is a string from outside, so it is sanitised (control and
+bidi characters out) and length-capped before it reaches the transcript or the
+audit row, and each fact carries a `verified` flag alongside it.
 
 **Which host can do what, and why they differ.** `upload` is served by both
 non-cmux hosts: the extension attaches files with `DOM.setFileInputFiles` over the
