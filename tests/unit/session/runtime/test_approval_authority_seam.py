@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import json
-import os
 import re
 import subprocess
 import sys
@@ -41,8 +41,12 @@ from local_operator.config import ConfigManager
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
     OPERATOR_CAP_REQUIRED_NOTICE,
+    handshake_proof_ok,
     mint_operator_cap,
     operator_cap_for,
+    operator_nonce,
+    remember_operator_cap,
+    request_proof,
     reset_operator_caps_for_tests,
 )
 from local_operator.paths import config_dir
@@ -56,7 +60,7 @@ _TESTS_ROOT = Path(__file__).resolve().parents[4]
 
 #: The sentence's opening, matched as a substring so the assertion is about the
 #: refusal rather than about the exact wrapping of one constant.
-_REFUSAL = "loosens a running gate and has to come from the session's console"
+_REFUSAL = "tool approvals stay at ask"
 
 
 # ---------------------------------------------------------------------------
@@ -112,19 +116,74 @@ async def _serve(tmp_path: Path, *, operator_cap: bytes | None) -> _Live:
     raise AssertionError("the runtime never published a live record")
 
 
-async def _dial(record: Any, **fields: Any) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """One authenticated connection; the welcome frame is consumed."""
+class _Conn:
+    """One authenticated connection, plus the handshake material it settled on.
+
+    ``nonce`` is what this client offered and ``salt`` is what the runtime
+    answered with; together they are what a proof is bound to, so a test that
+    wants to present one needs both. ``salt`` is EMPTY when no handshake
+    completed — which is the state every non-console connection is in, and the
+    state the refusal tests drive.
+    """
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.reader = reader
+        self.writer = writer
+        self.nonce = ""
+        self.salt = ""
+
+    def proof(self, cap: bytes) -> str:
+        """This connection's proof for an authority-increasing frame."""
+        assert self.nonce and self.salt, "no handshake completed on this connection"
+        return request_proof(cap, client_nonce=self.nonce, server_salt=self.salt)
+
+    def close(self) -> None:
+        self.writer.close()
+
+
+async def _dial(record: Any, *, cap: bytes | None = None, **fields: Any) -> _Conn:
+    """One authenticated connection; the welcome frame is consumed and verified.
+
+    ``cap`` is what THIS process holds for the runtime behind ``record``: given
+    it, the dial offers a nonce and VERIFIES the runtime's proof — the same two
+    steps ``AttachClient.connect`` takes — so a test that then presents a proof
+    is driving the production handshake rather than a shortcut around it.
+    """
     reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
-    writer.write(json.dumps({"key": record.control_key, **fields}).encode() + b"\n")
+    conn = _Conn(reader, writer)
+    auth: dict[str, Any] = {"key": record.control_key, **fields}
+    if cap is not None:
+        conn.nonce = operator_nonce()
+        auth["operator_nonce"] = conn.nonce
+    writer.write(json.dumps(auth).encode() + b"\n")
     await writer.drain()
-    welcome = await asyncio.wait_for(reader.readline(), timeout=10)
-    assert json.loads(welcome)["op"] == "projection"
-    return reader, writer
+    welcome = json.loads(await asyncio.wait_for(reader.readline(), timeout=10))
+    assert welcome["op"] == "projection", welcome
+    if cap is not None:
+        conn.salt = str(welcome.get("operator_salt") or "")
+        assert handshake_proof_ok(
+            supplied=welcome.get("operator_proof"),
+            held=cap,
+            client_nonce=conn.nonce,
+            server_salt=conn.salt,
+        ), "the runtime did not prove it holds the capability we dialled for"
+        assert cap.hex() not in json.dumps(welcome)
+    return conn
 
 
 async def _send(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, frame: dict[str, Any]
+    reader: asyncio.StreamReader | _Conn, writer: asyncio.StreamWriter | None, frame: dict[str, Any]
 ) -> dict[str, Any]:
+    """Send one request frame and return its reply.
+
+    Accepts a ``_Conn`` for the new call shape and the old ``(reader, writer)``
+    pair, so the tests that never hand-shook (every refusal control) read the
+    same as they did.
+    """
+    if isinstance(reader, _Conn):
+        conn = reader
+        reader, writer = conn.reader, conn.writer
+    assert writer is not None
     writer.write(json.dumps({"req": 1, **frame}).encode() + b"\n")
     await writer.drain()
     for _ in range(40):
@@ -279,16 +338,16 @@ async def test_a_phone_shaped_dial_cannot_loosen_the_gate(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     live = await _serve(tmp_path, operator_cap=mint_operator_cap())
     try:
-        reader, writer = await _dial(live.record, client="attach", locality="remote")
+        conn = await _dial(live.record, client="attach", locality="remote")
         reply = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {"op": "slash_result", "command": "approvals", "args": "auto", "images": []},
         )
         assert reply["op"] == "error", reply
         assert _REFUSAL.split(" — ")[0] in reply["message"], reply
         assert live.handle._auto_approve is False
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -309,16 +368,16 @@ async def test_the_desktop_command_op_is_refused_without_the_capability(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     live = await _serve(tmp_path, operator_cap=mint_operator_cap())
     try:
-        reader, writer = await _dial(live.record, client="attach", surface="desktop")
+        conn = await _dial(live.record, client="attach", surface="desktop")
         reply = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {"op": "slash_result", "command": "approvals", "args": "auto", "images": []},
         )
         assert reply["op"] == "error", reply
         assert _REFUSAL.split(" — ")[0] in reply["message"], reply
         assert live.handle._auto_approve is False
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -339,21 +398,26 @@ async def test_a_runtime_with_no_capability_refuses_even_a_well_formed_one(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     live = await _serve(tmp_path, operator_cap=None)
     try:
-        reader, writer = await _dial(live.record, client="daemon")
+        conn = await _dial(live.record, client="daemon")
         reply = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {
                 "op": "slash_result",
                 "command": "approvals",
                 "args": "auto",
                 "images": [],
-                "operator_cap": mint_operator_cap().hex(),
+                # A well-formed proof of a capability this runtime does not
+                # hold, on a connection that never even offered a nonce: the
+                # refusal is about possession, not about shape.
+                "operator_cap": request_proof(
+                    mint_operator_cap(), client_nonce=operator_nonce(), server_salt=operator_nonce()
+                ),
             },
         )
         assert reply["op"] == "error", reply
         assert live.handle._auto_approve is False
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -376,24 +440,24 @@ async def test_an_unapproved_card_answer_is_refused_but_a_deny_is_not(
         pending = live.handle._fold.projection.pending
         assert pending is not None
         request_id = pending.request_id
-        reader, writer = await _dial(live.record, client="attach")
+        conn = await _dial(live.record, client="attach")
         refused = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {"op": "approval_answer", "request_id": request_id, "approved": True},
         )
         assert refused["op"] == "error", refused
         assert live.handle._fold.projection.pending is not None, "the card was resolved anyway"
 
         allowed = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {"op": "approval_answer", "request_id": request_id, "approved": False},
         )
         assert allowed["op"] == "ack", allowed
         assert await parked is False
         assert live.handle._fold.projection.pending is None
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -412,20 +476,20 @@ async def test_tightening_still_works_from_a_non_capable_connection(
     live = await _serve(tmp_path, operator_cap=mint_operator_cap())
     try:
         live.handle._auto_approve = True
-        reader, writer = await _dial(live.record, client="attach", locality="remote")
+        conn = await _dial(live.record, client="attach", locality="remote")
         reply = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {"op": "slash_result", "command": "approvals", "args": "ask", "images": []},
         )
         assert reply["op"] == "result", reply
         assert live.handle._auto_approve is False, "a tightening was refused"
         # ...and the report is ordinary too, for the same reason.
         report = await _send(
-            reader, writer, {"op": "slash_result", "command": "approvals", "args": "", "images": []}
+            conn, None, {"op": "slash_result", "command": "approvals", "args": "", "images": []}
         )
         assert report["op"] == "result", report
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -450,16 +514,18 @@ async def test_the_console_holding_the_capability_loosens_the_gate(
     cap = mint_operator_cap()
     live = await _serve(tmp_path, operator_cap=cap)
     try:
-        reader, writer = await _dial(live.record, client="daemon")
+        # Dialled WITH the capability, so the handshake completes and this
+        # connection is what the runtime considers its console.
+        conn = await _dial(live.record, client="daemon", cap=cap)
         reply = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {
                 "op": "slash_result",
                 "command": "approvals",
                 "args": "auto",
                 "images": [],
-                "operator_cap": cap.hex(),
+                "operator_cap": conn.proof(cap),
             },
         )
         assert reply["op"] == "result", reply
@@ -468,7 +534,7 @@ async def test_the_console_holding_the_capability_loosens_the_gate(
         # inline and parks nothing.
         assert await live.handle._approval_gate("bash", "rm -rf build/") is True
         assert live.handle._fold.projection.pending is None
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -486,21 +552,21 @@ async def test_the_console_holding_the_capability_resolves_the_card(
         pending = live.handle._fold.projection.pending
         assert pending is not None
         request_id = pending.request_id
-        reader, writer = await _dial(live.record, client="attach")
+        conn = await _dial(live.record, client="attach", cap=cap)
         reply = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {
                 "op": "approval_answer",
                 "request_id": request_id,
                 "approved": True,
-                "operator_cap": cap.hex(),
+                "operator_cap": conn.proof(cap),
             },
         )
         assert reply["op"] == "ack", reply
         assert await parked is True
         assert live.handle._fold.projection.pending is None
-        writer.close()
+        conn.close()
     finally:
         await live.close(tmp_path)
 
@@ -537,8 +603,14 @@ async def test_the_attach_client_presents_the_capability_for_a_runtime_it_starte
     client._writer = cast(Any, writer)
 
     # A runtime THIS process started: ``operator_cap_for(record.pid)`` answers,
-    # which is what ``connect`` resolves against.
+    # which is what ``connect`` resolves against — and whose handshake this test
+    # stands in for, because the point here is what the PRESENTATION adds to a
+    # frame, not how the handshake that gates it is verified (that has its own
+    # test, and the real dial in ``_dial`` drives it for every other case).
     client._operator_cap = operator_cap
+    client._operator_nonce = operator_nonce()
+    client._operator_salt = operator_nonce()
+    client._authority_bearing = True
     writer.sent.clear()
     try:
         await asyncio.wait_for(
@@ -550,11 +622,19 @@ async def test_the_attach_client_presents_the_capability_for_a_runtime_it_starte
     except (TimeoutError, asyncio.TimeoutError):
         pass
     assert writer.sent[-1]["op"] == "slash_result", writer.sent
-    assert writer.sent[-1]["operator_cap"] == operator_cap.hex(), writer.sent[-1]
+    assert writer.sent[-1]["operator_cap"] == request_proof(
+        operator_cap, client_nonce=client._operator_nonce, server_salt=client._operator_salt
+    ), writer.sent[-1]
+    # THE SECRET IS NOT ON THE WIRE (agent review round 1, R1-1): the field is a
+    # proof over this connection, so a same-uid impostor that rewrote
+    # ``control_port`` in the record and read this frame learns nothing it can
+    # replay at the real runtime.
+    assert operator_cap.hex() not in json.dumps(writer.sent[-1]), writer.sent[-1]
 
     # The SAME client on a runtime another process started presents nothing.
     writer.sent.clear()
     client._operator_cap = None
+    client._authority_bearing = False
     try:
         await asyncio.wait_for(
             client._request_frame(
@@ -571,6 +651,7 @@ async def test_the_attach_client_presents_the_capability_for_a_runtime_it_starte
     # bump and an old runtime keeps serving every other request unchanged.
     writer.sent.clear()
     client._operator_cap = operator_cap
+    client._authority_bearing = True
     try:
         await asyncio.wait_for(
             client._request_frame("ping", deadline_s=0.05),
@@ -777,15 +858,32 @@ def test_the_refusal_copy_names_the_remedies_and_not_a_rule() -> None:
     load-bearing: where to type it, how to make it true for new sessions, and
     that tightening still works here.
     """
-    assert "type it in the terminal (or app) that started this session" in (
-        OPERATOR_CAP_REQUIRED_NOTICE
-    )
-    assert "/approvals default auto" in OPERATOR_CAP_REQUIRED_NOTICE
-    assert "--yolo" in OPERATOR_CAP_REQUIRED_NOTICE
-    assert "/approvals ask works from here" in OPERATOR_CAP_REQUIRED_NOTICE
-    assert re.search(r"safe|secure|protected|cannot be read", OPERATOR_CAP_REQUIRED_NOTICE) is None
-    assert reset_operator_caps_for_tests() is None
-    assert os.name  # the platform probe above is only meaningful with a platform
+    copy = OPERATOR_CAP_REQUIRED_NOTICE
+    # Where to type it, in words the operator can resolve (design round 1 D4:
+    # "the session's console" was vocabulary to nobody).
+    assert "the terminal or app window that started this session" in copy
+    # The mechanism that works when there IS no such window: let the runtime go
+    # idle and re-open the session here, which makes THIS window the one that
+    # starts the next runtime (UX round 1 U2).
+    assert "go idle" in copy and "open the session again in this window" in copy
+    # The remedies that are true for the NEXT session, and where they live.
+    assert "--yolo" in copy
+    assert "tool_approval_mode: auto" in copy
+    # What still works from here.
+    assert "/approvals ask" in copy
+    # NOT `/approvals default ...`: the runtime refuses that command from the
+    # very pane this notice is printed in (UX round 1 U1), so a remedy that
+    # cannot work where it is read must not be in it.
+    assert "/approvals default" not in copy
+    # No promise of a boundary this host may not have (see the design doc's
+    # residual section — the copy must not overclaim).
+    assert re.search(r"safe|secure|protected|cannot be read", copy) is None
+    # Not a visual twin of #1291's notice, which is about a config write
+    # arriving from outside this session rather than a command typed where the
+    # gate is not owned (design round 1 D4).
+    from local_operator.harness.approval import LOOSENING_REFUSED_NOTICE
+
+    assert copy.split(":")[0] != LOOSENING_REFUSED_NOTICE.split(":")[0]
 
 
 # ---------------------------------------------------------------------------
@@ -877,20 +975,20 @@ async def test_a_real_detached_runtime_gets_the_capability_and_refuses_a_peer(
         held = operator_cap_for(record.pid)
         assert held is not None, "the spawn did not register the capability it minted"
         assert len(held) == 32
-        reader, writer = await _dial(record, client="daemon")
+        conn = await _dial(record, client="daemon", cap=held)
         loosened = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {
                 "op": "slash_result",
                 "command": "approvals",
                 "args": "auto",
                 "images": [],
-                "operator_cap": held.hex(),
+                "operator_cap": conn.proof(held),
             },
         )
         assert loosened["op"] == "result", loosened
-        writer.close()
+        conn.close()
 
         # (2) A PEER WITH ONLY THE RECORD CANNOT. The same attempt program the
         # in-process control uses, against the real child.
@@ -908,14 +1006,14 @@ async def test_a_real_detached_runtime_gets_the_capability_and_refuses_a_peer(
         # The gate is `auto` now (claim 1), so tighten it back first: the point
         # below is that the peer cannot LOOSEN, and a frame that changed nothing
         # would prove nothing.
-        reader, writer = await _dial(record, client="daemon")
+        conn = await _dial(record, client="daemon")
         tightened = await _send(
-            reader,
-            writer,
+            conn,
+            None,
             {"op": "slash_result", "command": "approvals", "args": "ask", "images": []},
         )
         assert tightened["op"] == "result", tightened
-        writer.close()
+        conn.close()
 
         attempt = await asyncio.to_thread(
             subprocess.run,
@@ -929,13 +1027,13 @@ async def test_a_real_detached_runtime_gets_the_capability_and_refuses_a_peer(
         assert _REFUSAL in out, out
         # Read back through the socket that the gate really is still `ask`: the
         # report is an ordinary op, so this is the same channel a user would use.
-        reader, writer = await _dial(record, client="daemon")
+        conn = await _dial(record, client="daemon")
         report = await _send(
-            reader, writer, {"op": "slash_result", "command": "approvals", "args": "", "images": []}
+            conn, None, {"op": "slash_result", "command": "approvals", "args": "", "images": []}
         )
         assert report["op"] == "result", report
         assert "tool approvals: ask" in json.dumps(report), report
-        writer.close()
+        conn.close()
 
         # (3) THE GUARANTEE IS REPORTED IN THE CHILD'S OWN LOG.
         text = detachment._log_text(config_dir)
@@ -1030,8 +1128,17 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
     remote = None
     try:
         remote = await _follower(tmp_path, live.record)
-        with pytest.raises(RuntimeError, match=_REFUSAL.split(" — ")[0]):
+        # THE TYPED CATEGORY, not a bare RuntimeError: the desktop route (and the
+        # relay, and the attach screen) carry this by its ``code`` and render its
+        # copy, which is what stops the desktop answering 503
+        # "runtime_unreachable" for a deliberate refusal (agent review round 1,
+        # R1-2 = design D1 = UX U4 = QA Q1).
+        from local_operator.session.errors import OperatorAuthorityRequired
+
+        with pytest.raises(OperatorAuthorityRequired) as refused:
             await remote.route_shared_slash("approvals", "auto")
+        assert refused.value.code == "operator_authority_required"
+        assert OPERATOR_CAP_REQUIRED_NOTICE in str(refused.value)
         assert live.handle._auto_approve is False
     finally:
         if remote is not None:
@@ -1168,7 +1275,148 @@ async def test_a_real_runtime_writes_the_capability_nowhere_it_could_be_read(
         capture = getattr(child, "lop_capture_path", None)
         if capture is not None and Path(capture).exists():
             assert needle not in Path(capture).read_text(encoding="utf-8", errors="replace")
+
+        # THE ENVIRONMENT, PROBED RATHER THAN ASSERTED (agent review round 1,
+        # MINOR). ``ps -E`` shows a same-uid process its own child's environment
+        # on macOS, so this reads the REAL child's rather than reasoning about
+        # what the spawn passed. Skipped where the platform cannot answer, with
+        # the reason named instead of a silent pass.
+        if sys.platform == "darwin":
+            shown = subprocess.run(
+                ["ps", "-Eww", "-o", "command=", "-p", str(child.pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert shown.returncode == 0, shown.stderr
+            assert (
+                needle not in shown.stdout
+            ), "the capability is visible in the child's environment"
     finally:
         if child is not None:
             detachment._reap(child, config_dir)
         reset_operator_caps_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# The record-rewriting attack
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_impostor_endpoint_learns_nothing_it_can_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE HARVEST, driven end to end with the production clients (R1-1).
+
+    The discovery record is 0600 — and WRITABLE by anything running under this
+    uid, which is the model-run tool the gate exists to constrain. So
+    ``control_port`` is not a trusted pointer: an attacker rewrites it to its
+    own listener and waits for the console to dial. The console here is a real
+    ``AttachClient`` holding a real capability for the runtime at that pid, and
+    the property under test is that a same-uid endpoint answering in the
+    runtime's place learns NOTHING it can use:
+
+    * the frame it receives carries no credential — not the capability, and (as
+      the assertion on the raw frames shows) not even a proof, because the
+      client withholds both from an endpoint that did not prove itself;
+    * what the impostor answers flips nothing: replayed at the REAL runtime, the
+      gate stays at ``ask``.
+
+    The regression this pins was measured before the fix: with the value sent as
+    the frame's field, the same rig printed ``harvested the capability: True``
+    and the replay set ``_auto_approve`` to True.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from dataclasses import replace
+
+    from local_operator.mobile.attach_client import AttachClient
+
+    cap = mint_operator_cap()
+    live = await _serve(tmp_path, operator_cap=cap)
+    try:
+        # What the SPAWN would have done in this process for the runtime it
+        # started, so the console legitimately holds a capability for this pid.
+        remember_operator_cap(live.record.pid, cap)
+
+        seen: list[dict[str, Any]] = []
+
+        async def impostor(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            """Answer the auth, look as much like a runtime as it can, collect."""
+            await reader.readline()
+            writer.write(
+                json.dumps(
+                    {
+                        "op": "projection",
+                        "data": {
+                            "session_id": live.record.session_id,
+                            "pid": live.record.pid,
+                            "kind": "tui",
+                        },
+                    }
+                ).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                try:
+                    frame = json.loads(line)
+                except ValueError:
+                    continue
+                seen.append(frame)
+                writer.write(
+                    json.dumps(
+                        {"op": "result", "req": frame.get("req"), "data": {"kind": "notice"}}
+                    ).encode()
+                    + b"\n"
+                )
+                await writer.drain()
+
+        server = await asyncio.start_server(impostor, "127.0.0.1", 0)
+        fake_port = server.sockets[0].getsockname()[1]
+        try:
+            forged = replace(live.record, control_port=fake_port)
+            client = AttachClient(lambda _projection: None, lambda _reason: None, locality="local")
+            await client.connect(forged, live.record.session_id)
+            try:
+                with contextlib.suppress(Exception):
+                    await client._request_payload(
+                        "slash_result", command="approvals", args="auto", images=[]
+                    )
+                # The handshake never completed, so this connection may not
+                # present anything — the whole of the defence, in one flag.
+                assert client._authority_bearing is False
+            finally:
+                client.close()
+        finally:
+            server.close()
+
+        assert seen, "the impostor was never dialled; the rig proves nothing"
+        wire = json.dumps(seen)
+        assert cap.hex() not in wire, "the capability VALUE crossed to an impostor endpoint"
+        assert (
+            "operator_cap" not in wire
+        ), "a proof was presented to an endpoint that proved nothing"
+
+        # Whatever the impostor collected, replayed at the REAL runtime, changes
+        # nothing: the gate is still armed and still parks.
+        replay = await _dial(live.record, client="attach")
+        reply = await _send(
+            replay,
+            None,
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_cap": cap.hex(),
+            },
+        )
+        assert reply["op"] == "error", reply
+        assert live.handle._auto_approve is False
+        replay.close()
+    finally:
+        await live.close(tmp_path)

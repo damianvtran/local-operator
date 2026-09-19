@@ -49,7 +49,7 @@ from typing import Any, Literal
 # stack — daemon, web layer, attach client, peer send — keeps importing them
 # from the path it always has. See local_operator/session/runtime/types.py for
 # why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
-from local_operator.harness.approval import OPERATOR_CAP_BYTES
+from local_operator.harness.approval import OPERATOR_CAP_BYTES, is_wire_hex
 from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
@@ -61,12 +61,13 @@ from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     SessionRecord,
 )
 
-#: The wire form of the operator capability: ``mint_operator_cap``'s 32 bytes,
-#: hex-encoded (issue #1310). Derived from the byte count rather than spelled as
-#: 64, so the validator cannot accept a length the mint cannot produce.
+#: The wire form of a handshake nonce, salt or proof (issue #1310): 32 bytes,
+#: hex-encoded, which is what ``operator_nonce`` mints and what an HMAC-SHA256
+#: proof renders as. Derived from the byte count rather than spelled as 64, so
+#: the validator cannot accept a length the mint cannot produce. The SHAPE check
+#: itself is ``harness.approval.is_wire_hex`` — one definition, shared with the
+#: runtime's auth reader and the attach client's handshake verification.
 OPERATOR_CAP_HEX_CHARS = OPERATOR_CAP_BYTES * 2
-
-_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -177,11 +178,14 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # (``token_bytes(32).hex()``, always 64 lowercase hex characters). A
         # value that fails this is refused as malformed rather than as
         # unauthorised, so the two cases stay distinguishable in the logs.
-        capability = frame.get("operator_cap")
-        if not isinstance(capability, str) or len(capability) != OPERATOR_CAP_HEX_CHARS:
+        if not is_wire_hex(frame.get("operator_cap")):
             raise ValueError("operator_cap must be a hex string")
-        if any(character not in _HEX_DIGITS for character in capability.lower()):
-            raise ValueError("operator_cap must be a hex string")
+    if "operator_nonce" in frame and not is_wire_hex(frame.get("operator_nonce")):
+        # The handshake's first half, validated on the same rule as the proof it
+        # will be answered with: a client that sends a malformed nonce is refused
+        # here rather than being silently demoted to "no handshake", so the two
+        # ends cannot disagree about whether a handshake was attempted.
+        raise ValueError("operator_nonce must be a hex string")
     if op in ("prompt", "steer"):
         text = frame.get("text")
         if not isinstance(text, str) or (

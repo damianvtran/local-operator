@@ -21638,9 +21638,35 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"config.yml says {saved} — /approvals {saved} adopts it in this session",
+            f"config.yml says {saved} — {self._adopt_remedy(saved)}",
             "warning" if self._approve_all else "info",
         )
+
+    def _adopt_remedy(self, saved: str) -> str:
+        """The command that matches ``config.yml``, and WHERE it has to be typed.
+
+        Every remedy printed has to work where it is printed (design round 1 D3,
+        UX round 1 U1/U2). ``config.yml`` is read by every window, but the two
+        directions do not have the same reach: a TIGHTENING word takes effect
+        from anywhere, while a loosening word is refused unless the window
+        typing it started this session's runtime (``harness.approval``,
+        issue #1310) — so naming ``/approvals auto`` without saying that sent a
+        user to a command that would answer with a refusal, from the very report
+        that recommended it.
+
+        The classification is the SAME predicate the refusals and the seam use,
+        read through one call rather than a second word list.
+        """
+        from local_operator.harness.approval import transition_authority
+
+        remedy = f"/approvals {saved} adopts it in this session"
+        loosens = transition_authority("approvals", saved) == "authority-increasing"
+        if loosens and not self._may_loosen_gate_here():
+            return (
+                f"/approvals {saved} adopts it, typed in the terminal or app window that "
+                "started this session"
+            )
+        return remedy
 
     def _configured_approvals_mode(self) -> str | None:
         """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
@@ -36107,6 +36133,45 @@ class OperatorApp(App[None]):
             for name, description in self._ANALYTICS_VIEWS.items()
         ]
 
+    def _slash_routes_to_owner(self, command: str) -> bool:
+        """Whether ``command`` typed here would be carried to the owner's runtime.
+
+        Mirrors the advertisement read in ``_run_slash_command``'s routing
+        branch (which is the authority for the decision): a remote route exists
+        only when this session HAS ``route_shared_slash`` and the owner's
+        frontend state advertises the command as shared. Kept beside the option
+        list rather than inline because the LIST needs the same answer before
+        the keystroke that would make the decision (design round 1 D2, UX round
+        1 U5).
+        """
+        if not callable(getattr(self._session, "route_shared_slash", None)):
+            return False
+        advertised = {
+            f"/{cap.command}"
+            for cap in getattr(
+                getattr(self._session, "frontend_state", None), "slash_capabilities", []
+            )
+        }
+        return command in advertised
+
+    def _may_loosen_gate_here(self) -> bool:
+        """Whether ``/approvals auto`` typed HERE will be accepted (issue #1310).
+
+        The pane resolves the capability per dial, so it can answer this before
+        offering the choice rather than after refusing it. Three cases:
+
+        * the command is handled in this process (the app owns the gate, or the
+          session is cold and the local worker drives it) — yes;
+        * it routes to a remote owner whose connection PROVED it holds the
+          session's capability (this pane started that runtime) — yes;
+        * it routes to a remote owner that proved nothing — no, and the copy
+          says where it has to be typed instead.
+        """
+        if not self._slash_routes_to_owner("/approvals"):
+            return True
+        client = getattr(self._session, "_client", None)
+        return bool(getattr(client, "_authority_bearing", False))
+
     def _approval_choices(self) -> list[ArgumentChoice]:
         """The four rows ``/approvals`` offers: two modes × two scopes.
 
@@ -36133,6 +36198,14 @@ class OperatorApp(App[None]):
         saved_auto = self._approvals_default_auto
         session_mark = " · current"
         saved_mark = " · saved"
+        # A ROW THAT WILL BE REFUSED SAYS SO (design round 1 D2, UX round 1 U5).
+        # The loosening half of this list removes a gate, and only the window
+        # that started the session's runtime may do that — so on any other
+        # surface the rows were offered, chosen, and refused afterwards, with
+        # the explanation arriving where the user had already committed. The
+        # marking is a suffix on the row's own description because the list is
+        # the last surface before the keystroke.
+        elsewhere = "" if self._may_loosen_gate_here() else " — needs the window that started it"
         return [
             ArgumentChoice(
                 "ask",
@@ -36144,7 +36217,7 @@ class OperatorApp(App[None]):
                 "auto",
                 "Run every tool without asking",
                 aliases=("off", "yolo"),
-                detail="this session" + (session_mark if live_auto else ""),
+                detail="this session" + (session_mark if live_auto else "") + elsewhere,
             ),
             ArgumentChoice(
                 "default ask",
@@ -39062,7 +39135,7 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"config.yml says {saved} — /approvals {saved} adopts it in this session",
+                f"config.yml says {saved} — {self._adopt_remedy(saved)}",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:

@@ -35,13 +35,18 @@ from local_operator.harness.approval import (
     OPERATOR_CAP_BYTES,
     OPERATOR_FD_FLAG,
     frame_authority,
+    handshake_proof,
+    handshake_proof_ok,
+    is_wire_hex,
     mint_operator_cap,
     open_operator_cap_handoff,
     operator_cap_for,
     operator_cap_guarantee,
-    operator_cap_ok,
+    operator_nonce,
     read_operator_cap_from_argv,
     remember_operator_cap,
+    request_proof,
+    request_proof_ok,
     reset_operator_caps_for_tests,
     transition_authority,
 )
@@ -129,34 +134,122 @@ def test_the_capability_is_a_full_entropy_hex_string() -> None:
 
 
 @pytest.mark.parametrize(
-    ("supplied", "held", "expected"),
+    ("supplied", "held", "client_nonce", "server_salt", "expected"),
     [
-        (None, None, False),
-        (None, b"x" * OPERATOR_CAP_BYTES, False),
-        ("", b"x" * OPERATOR_CAP_BYTES, False),
-        ("ab" * OPERATOR_CAP_BYTES, None, False),
-        ("ab" * OPERATOR_CAP_BYTES, b"x" * OPERATOR_CAP_BYTES, False),
-        # A short/long held value is a bug on this side, and refusing is the only
-        # safe reading of a credential that is not the one we minted.
-        (b"x".hex(), b"x", False),
-        (12345, b"x" * OPERATOR_CAP_BYTES, False),
+        # The honest case, in both directions the two ends compute.
+        ("__proof__", b"c" * OPERATOR_CAP_BYTES, "n" * 64, "s" * 64, True),
+        # Nothing held on this side: a runtime nobody handed a capability to
+        # refuses even a well-formed proof.
+        ("__proof__", None, "n" * 64, "s" * 64, False),
+        # A credential that is not the one we minted is a programming error on
+        # this side, and refusing is the only safe reading of it.
+        ("__proof__", b"short", "n" * 64, "s" * 64, False),
+        # No nonce, or no salt: a client that never asked for a handshake has no
+        # connection-bound value it could legitimately hold.
+        ("__proof__", b"c" * OPERATOR_CAP_BYTES, "", "s" * 64, False),
+        ("__proof__", b"c" * OPERATOR_CAP_BYTES, "n" * 64, "", False),
+        # Forged or absent candidates, including the types a JSON frame can
+        # carry.
+        (None, b"c" * OPERATOR_CAP_BYTES, "n" * 64, "s" * 64, False),
+        ("", b"c" * OPERATOR_CAP_BYTES, "n" * 64, "s" * 64, False),
+        (12345, b"c" * OPERATOR_CAP_BYTES, "n" * 64, "s" * 64, False),
+        (b"x" * 32, b"c" * OPERATOR_CAP_BYTES, "n" * 64, "s" * 64, False),
         # Non-ASCII must REFUSE rather than raise: `hmac.compare_digest` on the
         # str form raises TypeError, which would turn a forged frame into a 500.
-        ("é" * OPERATOR_CAP_BYTES, b"x" * OPERATOR_CAP_BYTES, False),
+        ("é" * 64, b"c" * OPERATOR_CAP_BYTES, "n" * 64, "s" * 64, False),
     ],
 )
-def test_operator_cap_ok_refuses_every_degenerate_case(
-    supplied: object, held: bytes | None, expected: bool
+def test_request_proof_ok_refuses_every_degenerate_case(
+    supplied: object,
+    held: bytes | None,
+    client_nonce: str,
+    server_salt: str,
+    expected: bool,
 ) -> None:
-    assert operator_cap_ok(supplied=supplied, held=held) is expected
+    if supplied == "__proof__" and isinstance(held, bytes) and len(held) == OPERATOR_CAP_BYTES:
+        ready: object = request_proof(held, client_nonce=client_nonce, server_salt=server_salt)
+    else:
+        ready = supplied
+    assert (
+        request_proof_ok(
+            supplied=ready, held=held, client_nonce=client_nonce, server_salt=server_salt
+        )
+        is expected
+    )
 
 
-def test_operator_cap_ok_accepts_exactly_the_hex_of_what_it_holds() -> None:
+def test_a_proof_is_not_the_capability_and_is_bound_to_one_connection() -> None:
+    """The properties the record-rewriting attack (agent review round 1, R1-1) needs.
+
+    Read as one claim: what crosses the wire is a value that (a) is not the
+    capability, (b) does not repeat across connections, and (c) cannot be moved
+    between the two directions. Without (a) a same-uid impostor that rewrites
+    ``control_port`` in the record simply reads the credential out of the console
+    and replays it at the real runtime, which is what the reviewer reproduced
+    end to end with production clients.
+    """
     cap = mint_operator_cap()
-    assert operator_cap_ok(supplied=cap.hex(), held=cap) is True
-    # Uppercase hex is a DIFFERENT string, and the mint produces lowercase: the
-    # comparison is over the exact bytes, not over a numeric value.
-    assert operator_cap_ok(supplied=cap.hex().upper(), held=cap) is False
+    first = operator_nonce()
+    second = operator_nonce()
+    salt = operator_nonce()
+
+    handshake = handshake_proof(cap, client_nonce=first, server_salt=salt)
+    request = request_proof(cap, client_nonce=first, server_salt=salt)
+
+    # (a) Not the secret, and not a fixed value derived from it alone.
+    assert handshake != cap.hex()
+    assert request != cap.hex()
+    assert cap.hex() not in handshake
+    # (b) Bound to the connection's nonces: the same capability produces a
+    # different proof elsewhere, so a harvested value is worthless there.
+    assert request_proof(cap, client_nonce=second, server_salt=salt) != request
+    assert request_proof(cap, client_nonce=first, server_salt=second) != request
+    # (c) Domain separated: a transcript's worth of one direction is not a
+    # credential for the other.
+    assert handshake != request
+    assert (
+        request_proof_ok(supplied=handshake, held=cap, client_nonce=first, server_salt=salt)
+        is False
+    )
+    assert (
+        handshake_proof_ok(supplied=request, held=cap, client_nonce=first, server_salt=salt)
+        is False
+    )
+    # ...and each direction verifies against its own construction.
+    assert (
+        handshake_proof_ok(supplied=handshake, held=cap, client_nonce=first, server_salt=salt)
+        is True
+    )
+    assert (
+        request_proof_ok(supplied=request, held=cap, client_nonce=first, server_salt=salt) is True
+    )
+    # A DIFFERENT capability cannot satisfy either, which is what makes the
+    # proof a proof rather than a token.
+    other = mint_operator_cap()
+    assert (
+        request_proof_ok(supplied=request, held=other, client_nonce=first, server_salt=salt)
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (operator_nonce(), True),
+        ("a" * 64, True),
+        ("A" * 64, True),
+        (None, False),
+        ("", False),
+        ("a" * 63, False),
+        ("a" * 65, False),
+        ("z" * 64, False),
+        (12345, False),
+        (b"a" * 32, False),
+    ],
+)
+def test_is_wire_hex_accepts_exactly_a_thirty_two_byte_hex(value: object, expected: bool) -> None:
+    """One shape check, shared by the runtime's auth reader and the client's."""
+    assert is_wire_hex(value) is expected
 
 
 def test_the_registry_answers_only_for_pids_this_process_remembers() -> None:
@@ -402,6 +495,12 @@ def _fd_is_open(descriptor: int) -> bool:
     [
         ("local_operator/session/runtime/serving.py", "_approvals_slash"),
         ("local_operator/tui/app.py", "_approvals_slash_result"),
+        # The TUI's OWN handler, and the reason it belongs in this pin: a
+        # TUI-hosted registrant routes ``op: slash`` to ``TuiSessionHandle`` and
+        # from there into this handler's flag, so a word it accepts but
+        # ``transition_authority`` does not know would be a loosening that reads
+        # as ordinary at the seam (agent review round 1, MINOR).
+        ("local_operator/tui/app.py", "_cmd_approvals"),
     ],
 )
 def test_the_loosening_word_set_matches_both_approvals_handlers(module: str, function: str) -> None:
