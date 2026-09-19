@@ -495,15 +495,29 @@ def test_the_leaving_column_fits_the_shipped_phrase() -> None:
     wrong for this one — the phrase is a constant this project authors, so any
     excess means the two drifted and the new clause is being sliced off the row
     an operator reads (UX round 2, U9).
+
+    WALKING EVERY PUBLISHED PHRASE, not one of them (design round 1, D3). The pin
+    named ``LEAVING_ON_SIGNAL``, so a phrase added 3 cells wider than it went
+    through: ``leaving for the build on disk; work stalled for 15 min`` rendered as
+    ``…work stalled for 15 `` — the unit cut off the end of the one clause the
+    phrase exists to state, on the last column of the row, with no marker to say
+    the cell had been trimmed.
     """
     from rich.cells import cell_len
 
     from local_operator import cli
+    from local_operator.session.runtime.types import PUBLISHED_LEAVING_PHRASES
 
-    assert cli.LEAVING_COLUMN_WIDTH == cell_len(LEAVING_ON_SIGNAL), (
-        f"LEAVING_COLUMN_WIDTH={cli.LEAVING_COLUMN_WIDTH} but the phrase is "
-        f"{cell_len(LEAVING_ON_SIGNAL)} cells: {LEAVING_ON_SIGNAL!r}"
+    widest = max(PUBLISHED_LEAVING_PHRASES, key=cell_len)
+    assert cli.LEAVING_COLUMN_WIDTH == cell_len(widest), (
+        f"LEAVING_COLUMN_WIDTH={cli.LEAVING_COLUMN_WIDTH} but the widest published "
+        f"phrase is {cell_len(widest)} cells: {widest!r}"
     )
+    for phrase in PUBLISHED_LEAVING_PHRASES:
+        assert cell_len(phrase) <= cli.LEAVING_COLUMN_WIDTH, (
+            f"{phrase!r} is {cell_len(phrase)} cells against a column of "
+            f"{cli.LEAVING_COLUMN_WIDTH}: the cell is cut without a marker"
+        )
 
 
 def test_the_leaving_column_is_absent_when_nobody_is_leaving(monkeypatch: Any, capsys: Any) -> None:

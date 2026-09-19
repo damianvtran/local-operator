@@ -362,10 +362,44 @@ DELIBERATE_CUT_OFF_CAUSE = "user-stop"
 #: (review round 1, NIT-1).
 DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE})
 
+
+#: The sentence for :data:`CUT_OFF_CAUSES`' ``runtime-overdue`` rung, and the one
+#: place the bound's number is spelled for a reader — RENDERED from the constant
+#: that enforces it, never typed here: this sentence is repeated by every surface
+#: that repeats a cut-off (the live notice, the durable outcome, the sidebar), and a
+#: second copy of "15 min" is a copy that drifts.
+#:
+#: The import is FUNCTION-LOCAL, not module scope: this table is a leaf every
+#: runtime module may import, and the runtime's own vocabulary module is the wrong
+#: thing for a leaf to depend on at import time (``incidents`` is imported by
+#: ``session/runtime/journal.py``, which the child loads before it has a session).
+#: A dict entry may call a function; a dict entry may not defer an import.
+#: COORDINATE NOTE: PR #1297 also touches this module (its install-marker work);
+#: this is one new key and one new helper, no existing entry reworded.
+def _overdue_cause_sentence() -> str:
+    from local_operator.session.runtime.types import BUILD_DRAIN_PROGRESS_S, bound_text
+
+    return (
+        "the runtime left for the newer build after "
+        f"{bound_text(BUILD_DRAIN_PROGRESS_S)} of no movement reported from the work in flight"
+    )
+
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
+    # The BOUNDED handover: a build drain that stopped waiting for its own work
+    # (``process._leave_overdue``). It is deliberately its own token rather than
+    # ``runtime-retired``, which is what it used to be recorded as: the retirement
+    # sentence is true of it, but it is ALSO the sentence every ordinary build
+    # handover leaves, so a turn that had to be FORCED out was indistinguishable
+    # from one that waited its turn out in the only durable account of it — and by
+    # the time an operator looks, that account is all there is (``lop sessions``
+    # loses the record ~97 ms after the escalation). QA round 1 (Q-2) measured
+    # exactly that: a successor narrated the generic retirement sentence, never the
+    # bound.
+    "runtime-overdue": _overdue_cause_sentence(),
     "runtime-killed": (
         # The trailing clause is the POST-MARKER meaning of this token, and it
         # is decidable now in a way it was not before the durable marker

@@ -785,9 +785,20 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        ``runtime-shutdown``. This is a stop sweep that reached its target: the
        runtime was asked to leave, wrote the signal down, and was killed before
        its turn ended. First-hand evidence, so it outranks everything below.
-    2. **an install that moved since the row's build** → ``install-mid-update``
+    2. **the row's own recorded exit cause, when it is a token this taxonomy
+       knows** → that token. The runtime wrote it on its way out
+       (``Session.note_cut_off`` -> ``TurnJournal.note_exit``), which makes it
+       first-hand in the same way rung 1 is, and it is the ONLY rung that can
+       carry a bound: the bounded handover records ``runtime-overdue``
+       (:data:`types.BUILD_DRAIN_OVERDUE_CAUSE`) and the sentence that names its
+       bound, where the inferences below can only speak about the install or about
+       a death nobody recorded. It outranks rung 3 because "the install moved since
+       this build" is an inference from the DISK, while this is a statement about
+       itself — and for a drained runtime the install has usually moved, so the
+       inference used to win by default (QA round 1, Q-2).
+    3. **an install that moved since the row's build** → ``install-mid-update``
        — the install-window tear.
-    3. **nothing else** → ``runtime-killed``, now carried by positive evidence
+    4. **nothing else** → ``runtime-killed``, now carried by positive evidence
        (this turn was in flight and never ended) instead of by the absence of a
        record.
 
@@ -797,7 +808,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     left no row at all, which is what "keep the legacy path working when the
     evidence is absent" means.
     """
-    from local_operator.incidents import render_cut_off_reason
+    from local_operator.incidents import CUT_OFF_CAUSES, render_cut_off_reason
 
     signal = signal_exit_token(row.exit_cause)
     if signal:
@@ -807,6 +818,17 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
             render_cut_off_reason(
                 "runtime-shutdown", detail=row_detail(row, lead=f"{signal} received")
             ),
+        )
+    recorded = str(row.exit_cause or "")
+    if recorded in CUT_OFF_CAUSES:
+        # The runtime's own last word, and a token only if it is one: every other
+        # caller of ``note_exit`` passes a sentence ("retiring for 0.59.9"), and a
+        # sentence is not a rung of this taxonomy — it would render as itself, which
+        # is how the bound used to be invisible to a successor.
+        return (
+            "error",
+            recorded,
+            render_cut_off_reason(recorded, detail=row_detail(row)),
         )
     if install_moved(row):
         detail = f" ({row.build_label()} → {_current_build_label()})"
