@@ -1582,10 +1582,19 @@ async def _drain_inbox_into(handle: object) -> int:
     silently not running" shape this drain exists to avoid (review round 1,
     MINOR 3). Rows written before the field existed read as notes, unchanged.
 
+    THE ROW'S ``source`` DECIDES WHO IS SPEAKING, and the two are delivered by
+    different paths on purpose. A ``SOURCE_USER`` row is the OWNER's own prompt,
+    which a draining runtime spooled instead of refusing: it is run through
+    ``handle.prompt`` — the ordinary admission, on the build that is taking
+    over — because the alternative (``receive_peer_message``) wraps the user's
+    own words in a peer-session provenance envelope for the model and paints a
+    ``peer`` card for a message the user typed in this session. Every other row
+    is a peer's, exactly as before.
+
     Best-effort per message: one malformed or rejected row must not stop the
     rest, and none of it may prevent the runtime from starting.
     """
-    from local_operator.session.runtime.inbox import drain_inbox
+    from local_operator.session.runtime.inbox import SOURCE_USER, drain_inbox
 
     session = getattr(handle, "_session", None)
     directory = getattr(getattr(session, "transcript", None), "directory", None)
@@ -1622,24 +1631,66 @@ async def _drain_inbox_into(handle: object) -> int:
         logger.warning("inbox drain failed", exc_info=True)
         return 0
     probed = getattr(handle, "receive_peer_message", None)
-    if not lines or not callable(probed):
+    if not lines:
         return 0
     receive = cast(Callable[..., Awaitable[str]], probed)
     delivered = 0
     for line in lines:
         try:
-            await receive(
-                line.text,
-                mode="mailbox",
-                wake=bool(getattr(line, "wake", False)),
-                sender=line.sender,
-            )
+            if getattr(line, "source", "") == SOURCE_USER:
+                await _run_owner_prompt(handle, line)
+            elif callable(probed):
+                await receive(
+                    line.text,
+                    mode="mailbox",
+                    wake=bool(getattr(line, "wake", False)),
+                    sender=line.sender,
+                )
+            else:
+                raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
         except Exception:  # noqa: BLE001 — one bad row is not the others' problem
             logger.warning("spooled message could not be delivered", exc_info=True)
     if delivered:
         logger.info("delivered %d spooled message(s) at open", delivered)
     return delivered
+
+
+async def _run_owner_prompt(handle: object, line: object) -> None:
+    """Run one spooled OWNER prompt on this runtime, at most once.
+
+    The continuation of the drain's own promise: a runtime that latched a
+    stale-build drain spools the owner's message rather than refusing it
+    (``serving.ServingSessionHandle.prompt``), and this is where the successor
+    makes good on that — the ordinary admission, through the same ``prompt``
+    every front end uses, so the row it writes is the user row it would have
+    been and carries the command id the viewer painted it under.
+
+    IDEMPOTENT BY THE DURABLE INDEX, not by this file. ``inbox.jsonl`` is
+    emptied by a read, but the SAME message can legitimately be spooled twice
+    (a client retried the refused op, a crash landed between the append and its
+    receipt) and the identity it carries is the append-only one — so
+    ``has_admitted_command`` answers here exactly as it does for a retried wire
+    prompt on ``server._already_admitted``. Without this the second row
+    appended a second user turn.
+
+    Raises rather than swallowing: the caller's per-row handler logs and moves
+    on, which is the same best-effort contract the peer rows get.
+    """
+    prompt = getattr(handle, "prompt", None)
+    if not callable(prompt):
+        raise RuntimeError("this handle cannot run a spooled prompt")
+    command_id = str(getattr(line, "command_id", "") or "")
+    admitted = getattr(handle, "has_admitted_command", None)
+    if command_id and callable(admitted) and admitted(command_id):
+        logger.info("spooled prompt already in the transcript; not running it twice")
+        return
+    if not command_id:
+        # No identity to deduplicate on, which only an old writer can produce.
+        # It still runs: the message is the user's and dropping it is worse.
+        await cast(Callable[..., Awaitable[str]], prompt)(line.text)  # type: ignore[attr-defined]
+        return
+    await cast(Callable[..., Awaitable[str]], prompt)(line.text, command_id=command_id)  # type: ignore[attr-defined]
 
 
 def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:

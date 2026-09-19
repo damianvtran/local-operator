@@ -638,3 +638,121 @@ async def test_the_boot_drain_runs_a_spooled_wake(tmp_path: Path) -> None:
 
     assert await child_mod._drain_inbox_into(Handle()) == 2
     assert seen == [("run the report", "mailbox", True), ("fyi", "mailbox", False)]
+
+
+@pytest.mark.asyncio
+async def test_the_boot_drain_runs_a_spooled_owner_prompt_as_the_users_own(
+    tmp_path: Path,
+) -> None:
+    """The successor's half of the handover, for the OWNER's message.
+
+    A draining runtime spools the user's prompt rather than refusing it
+    (``serving.ServingSessionHandle.prompt``); this is where the successor makes
+    good on that. It is delivered by ``handle.prompt`` — the ordinary admission,
+    on the build that took over — and NOT by ``receive_peer_message``, because
+    the peer path wraps the text in a ``<peer-session-message>`` envelope for the
+    model and paints a ``peer`` card for a message the user typed in this very
+    session (``inbox.SOURCE_USER`` documents the split). The command id rides
+    along so the viewer that painted a row under it has that row matched rather
+    than duplicated.
+
+    The row that is already in the transcript is NOT run again: the same message
+    can be spooled twice (a retried op, a crash between the append and the
+    receipt) and the durability that protects a retried wire prompt is the
+    transcript's append-only index, asked here through the same accessor
+    ``server._already_admitted`` uses.
+    """
+    from local_operator.session.runtime.inbox import SOURCE_USER, InboxLine, append_inbox
+
+    append_inbox(
+        tmp_path,
+        InboxLine(
+            text="deploy the fix",
+            sender={},
+            mode="mailbox",
+            wake=True,
+            source=SOURCE_USER,
+            command_id="p" * 8,
+        ),
+    )
+    append_inbox(tmp_path, InboxLine(text="fyi from a peer", sender={}, mode="mailbox", wake=True))
+    # A spooled message belongs to a session that has run a turn; without one the
+    # drain keeps the file for the first turn instead (see test_inbox.py).
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    prompts: list[tuple[str, str]] = []
+    peers: list[tuple[str, str, bool]] = []
+
+    class Handle:
+        _session = SimpleNamespace(
+            transcript=SimpleNamespace(directory=tmp_path),
+            session_id="s1",
+        )
+
+        def has_admitted_command(self, command_id: str) -> bool:
+            return False
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            prompts.append((text, command_id or ""))
+            return "prompt admitted"
+
+        async def receive_peer_message(self, text, *, mode="mailbox", wake=False, sender=None):
+            peers.append((text, mode, wake))
+            return "recorded"
+
+    assert await child_mod._drain_inbox_into(Handle()) == 2
+    assert prompts == [("deploy the fix", "p" * 8)], "the owner's row did not run as a prompt"
+    assert peers == [("fyi from a peer", "mailbox", True)], "the peer row changed shape"
+
+
+@pytest.mark.asyncio
+async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
+    """The durable index is what dedupes a handover, not the spool file.
+
+    ``drain_inbox`` empties the file, but the same message legitimately reaches
+    it twice: an attach client retries the refused op under the SAME
+    ``command_id`` (``send_command`` keeps one identity across reconnects), and
+    the successor's own boot drain can be preceded by a first-turn drain in
+    another lifetime. Both rows carry the append-only identity, so the answer is
+    the same one a retried wire prompt gets — skip the second.
+    """
+    from local_operator.session.runtime.inbox import SOURCE_USER, InboxLine, append_inbox
+
+    for _ in range(2):
+        append_inbox(
+            tmp_path,
+            InboxLine(
+                text="deploy the fix",
+                sender={},
+                mode="mailbox",
+                wake=True,
+                source=SOURCE_USER,
+                command_id="p" * 8,
+            ),
+        )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+    admitted = {"p" * 8: False}
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path))
+
+        def has_admitted_command(self, command_id: str) -> bool:
+            # The FIRST delivery is what durably admits it; the second row is
+            # answered from the index, which is the whole point.
+            return admitted.get(command_id, False)
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            prompts.append(text)
+            admitted[command_id] = True
+            return "prompt admitted"
+
+    assert await child_mod._drain_inbox_into(Handle()) == 2
+    assert prompts == ["deploy the fix"], f"the message ran {len(prompts)} times"
