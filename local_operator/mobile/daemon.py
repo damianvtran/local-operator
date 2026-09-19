@@ -963,11 +963,25 @@ def _adopt_operator_handshake(entry: SessionEntry, frame: dict[str, Any]) -> Non
     presented to it — the harness/approval ``_proof`` rationale, applied to the
     relay's own socket rather than only to the attach client's.
     """
+    salt = frame.get("operator_salt")
+    proof = frame.get("operator_proof")
+    if not is_wire_hex(salt):
+        # AN ORDINARY REPAINT, and it must leave this connection's authority
+        # exactly as it is: only the WELCOME carries the handshake material
+        # (``RuntimeServer._push_to``), while every projection push goes through
+        # this loop. Clearing on each one destroyed the handshake 49-275 ms after
+        # it was established, so the phone's next command was refused with the
+        # authority copy — verified against a real socket, one ``_push()``
+        # between the welcome and the request (agent review round 2 R2-2 = UX U6).
+        #
+        # A frame that carries a SALT but no usable proof is a failed handshake
+        # and does clear: that is the impostor's shape, not a repaint's.
+        if proof is None:
+            return
     entry.operator_salt = ""
     entry.authority_bearing = False
     if entry.operator_cap is None or not entry.operator_nonce:
         return
-    salt = frame.get("operator_salt")
     if is_wire_hex(salt) and handshake_proof_ok(
         supplied=frame.get("operator_proof"),
         held=entry.operator_cap,

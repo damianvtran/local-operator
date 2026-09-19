@@ -19,6 +19,7 @@ this facade without clearing the painted transcript.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import time
@@ -86,7 +87,7 @@ from local_operator.session.cold_model import (
     resolve_context_metadata,
     synthesise_cold_state,
 )
-from local_operator.session.errors import MoveIndeterminate
+from local_operator.session.errors import MoveIndeterminate, OperatorAuthorityRequired
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -1128,6 +1129,9 @@ class AttachedSession:
         self._buffered_events: list[AgentEvent[Any]] = []
         self._ready_for_events = False
         self._approval_handler: ApprovalGate | None = None
+        #: Where a REFUSED gate reply goes when the host has a surface for it
+        #: (see ``set_gate_refusal_handler``): unset means "log it".
+        self._gate_refusal_handler: Callable[[BaseException], None] | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
@@ -5636,6 +5640,20 @@ class AttachedSession:
             self.preserve_viewer_gate_reply()
             await client.approval_answer(pending.request_id, approved)
             self._gate_answered_key = self._gate_identity(pending)
+        except OperatorAuthorityRequired as error:
+            # THE THIRD DOOR (design round 2, D9). This is NOT the
+            # first-valid-answer-wins race the arm below describes: the owner
+            # answered promptly and deliberately, refusing THIS pane's approval
+            # because the pane is not the window that started the session
+            # (issue #1310). Swallowing it as a race left the card parked with no
+            # message anywhere — measured with a real client on a real socket, no
+            # exception, no notice, the tool call still blocked. Surfaced through
+            # the host's own surface when it has one.
+            logger.warning("gate reply refused by the owner: %s", error)
+            notify = self._gate_refusal_handler
+            if notify is not None:
+                with contextlib.suppress(Exception):
+                    notify(error)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
@@ -8074,6 +8092,19 @@ class AttachedSession:
         the picker must offer the owner's rows (D3, review round 2).
         """
         return [dict(row) for row in self.frontend_state.model_catalogue]
+
+    def set_gate_refusal_handler(self, handler: Callable[[BaseException], None] | None) -> None:
+        """Where a REFUSED gate reply goes, for a host that has somewhere to say it.
+
+        Separate from the approval handler because it answers a question that
+        arises AFTER that handler returned: the pane pressed the key, and the
+        owner refused the answer. Without a channel the refusal was swallowed by
+        the race arm below and the operator watched a card do nothing (design
+        round 2, D9 — the third door round 1's D1 named, verified with a real
+        client on a real socket). A host with no surface for it leaves this unset
+        and the refusal is logged.
+        """
+        self._gate_refusal_handler = handler
 
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler

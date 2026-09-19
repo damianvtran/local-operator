@@ -505,13 +505,39 @@ def request_proof_ok(
 #: re-open the session, and the window that starts the runtime owns its gate);
 #: and, last, how to make a NEW session start loosened, which is the only place
 #: ``--yolo`` and the config key apply.
+#: The refusal a COMMAND gets, and the one a CARD gets, both kept under the
+#: 400-character error-frame cap (``server.py``'s ``str(exc)[:400]``) so they
+#: travel whole on their own channel — a truncated remedy is not a remedy (QA
+#: round 2, Q3) — and both short enough that the reason and the primary remedy
+#: survive an 11-row viewport at 44 columns (design round 2, D8: the previous
+#: copy was 537 characters, 18 rows there).
+#:
+#: Where the full truth about the background case lives: this copy names the
+#: EVENT (the runtime retires) and the LEVER the reader has (reopen the session
+#: here), because no unconditional command retires a live runtime — retirement
+#: is readiness-judged by design (``cli.refresh_command``) and ``lop refresh``
+#: only moves runtimes whose install changed. ``docs/design/approval-authority.md``
+#: §4 lists the levers with their conditions rather than pretending one is
+#: total (UX round 2, U9 / design round 2, D13).
 OPERATOR_CAP_REQUIRED_NOTICE = (
-    "tool approvals stay at ask: /approvals auto removes this session's approval gate, and only "
-    "the terminal or app window that started this session can do that. /approvals ask still "
-    "tightens it from here, and a bare /approvals still reports it. If no window owns this "
-    "session — it was started in the background — wait for its runtime to finish and go idle, "
-    "then open the session again in this window: the window that starts a runtime owns its gate. "
-    "New sessions can start loosened with --yolo, or with tool_approval_mode: auto in config.yml."
+    "this session's gate is still at ask: /approvals auto removes it, and only the window "
+    "that started this session can do that. /approvals ask still tightens it here. If no "
+    "window owns this session, let its runtime retire and reopen it here — the window that "
+    "opens a runtime owns its gate. --yolo or tool_approval_mode: auto loosen the next "
+    "session."
+)
+
+#: The same refusal for the CARD, which is a different situation for the person
+#: reading it: they never typed ``/approvals auto``, they pressed a key on a
+#: parked question, and what they need to know is whether the question survived.
+#: Answering it with the command's sentence was measured as a real defect (UX
+#: round 2, U8): a phone user was told to "type it in the terminal or app window
+#: that started this session" — advice they cannot take — and nothing said the
+#: card was still waiting. The one action that DOES work from there is named,
+#: because a deny is ordinary and settles the card in the safe direction.
+CARD_APPROVAL_REFUSED_NOTICE = (
+    "this approval is still waiting: only the window that started this session can allow it, "
+    "and the tool stays blocked until someone does. Denying it works from here."
 )
 
 #: Runtime pid -> capability, for the runtimes THIS process spawned.
@@ -854,6 +880,7 @@ __all__ = [
     "LOOSENING_KEPT_BY_ASK_NOTICE",
     "LOOSENING_REFUSED_NOTICE",
     "OPERATOR_CAP_BYTES",
+    "CARD_APPROVAL_REFUSED_NOTICE",
     "OPERATOR_CAP_REQUIRED_NOTICE",
     "OPERATOR_FD_FLAG",
     "OperatorCapHandoff",

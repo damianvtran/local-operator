@@ -47,6 +47,7 @@ from local_operator.harness.approval import (
 from local_operator.harness.approval import (
     loosening_is_authorised as _loosening_is_authorised,
 )
+from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 from local_operator.harness.wire import bound_agent_end_for_wire
@@ -3749,6 +3750,7 @@ class ServingSessionHandle(SessionHandle):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
+        may_loosen: bool = True,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -3783,7 +3785,7 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session.frontend_state import SlashResult
 
-        result = await self._slash_result(command, args, SlashResult, locality)
+        result = await self._slash_result(command, args, SlashResult, locality, may_loosen)
         result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -3947,7 +3949,12 @@ class ServingSessionHandle(SessionHandle):
         task.add_done_callback(_log_detached_admission)
 
     async def _slash_result(
-        self, command: str, args: str, SlashResult: Any, locality: str = "local"
+        self,
+        command: str,
+        args: str,
+        SlashResult: Any,
+        locality: str = "local",
+        may_loosen: bool = True,
     ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
@@ -4026,7 +4033,13 @@ class ServingSessionHandle(SessionHandle):
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
         if command == "approvals":
-            return self._approvals_slash(session, args, SlashResult)
+            # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
+            # whether THIS connection could carry `/approvals auto`, as the seam
+            # itself judges it. The reports below name remedies, and a report that
+            # offers a command the same connection is refused is the defect this
+            # round is fixing — so the report is TOLD rather than guessing, and a
+            # handle that serves every connection alike cannot guess.
+            return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
         if command == "compact":
             return self._compact_slash(session, SlashResult)
         if command == "wake":
@@ -5079,7 +5092,7 @@ class ServingSessionHandle(SessionHandle):
         return SlashResult(kind="notice", text=text, style="info")
 
     @staticmethod
-    def _adopt_remedy(saved: str) -> str:
+    def _adopt_remedy(saved: str, *, may_loosen: bool = True) -> str:
         """The command that matches ``config.yml``, and where it has to be typed.
 
         The same sentence the TUI's report builds (``OperatorApp._adopt_remedy``)
@@ -5092,14 +5105,16 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.harness.approval import transition_authority
 
         remedy = f"/approvals {saved} adopts it in this session"
-        if transition_authority("approvals", saved) == "authority-increasing":
+        if transition_authority("approvals", saved) == "authority-increasing" and not may_loosen:
             return (
                 f"/approvals {saved} adopts it, typed in the terminal or app window that "
                 "started this session"
             )
         return remedy
 
-    def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+    def _approvals_slash(
+        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool = True
+    ) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
 
         `self._auto_approve` is the real gate here (see `_install_gates`), so
@@ -5123,10 +5138,28 @@ class ServingSessionHandle(SessionHandle):
                 style="warning" if argument else "info",
             )
         if argument == "default" or argument.startswith("default "):
+            # TWO TRUTHS, ONE SENTENCE (design round 2, D10 = UX round 2, U7).
+            # This half persists to the local machine's config file and is
+            # refused from ANY control connection — a runtime cannot edit the
+            # machine that launched it — so "run it on a terminal" was advice for
+            # someone who is not at one, and the second half promised `auto`
+            # "now" on a connection that may not loosen this session at all. What
+            # is offered now is what the reader can actually do from where they
+            # are: the config write, or the tightening direction.
+            switch = (
+                "/approvals ask|auto switches this session now"
+                if may_loosen
+                else (
+                    "/approvals ask switches this session now; /approvals auto has to come "
+                    "from the window that started it"
+                )
+            )
             return SlashResult(
                 kind="notice",
-                text="/approvals default persists to the local machine's config — run it "
-                "on a terminal; /approvals ask|auto switches this session now",
+                text=(
+                    "/approvals default writes this machine's config.yml — that is a file or "
+                    f"the desktop app's settings, not a session command. {switch}"
+                ),
                 style="warning",
             )
         if not argument:
@@ -5158,11 +5191,27 @@ class ServingSessionHandle(SessionHandle):
                 # window that started this session (issue #1310; design round 1
                 # D3, UX round 1 U1/U2 — the old wording sent a follower pane to
                 # `/approvals auto` and the same pane answered with a refusal).
+                remedy = self._adopt_remedy(on_disk, may_loosen=may_loosen)
+                if (
+                    transition_authority("approvals", on_disk) == "authority-increasing"
+                    and not may_loosen
+                ):
+                    # THE ROUTE THAT WORKS IS NAMED HERE TOO (UX round 2, U9):
+                    # the refusal copy carries it, but the REPORT is the sentence
+                    # an operator reads *before* acting, and a report that only
+                    # says "type it in the window that started this session" left
+                    # them to discover the re-engage route by being refused first
+                    # — on the background-started case where no such window
+                    # exists at all.
+                    remedy += (
+                        "; or let this session's runtime retire and reopen the session here — "
+                        "the window that opens a runtime owns its gate"
+                    )
                 return SlashResult(
                     kind="notice",
                     text=(
                         f"tool approvals: {live} (this session) — {effect}; "
-                        f"config.yml says {on_disk} — {self._adopt_remedy(on_disk)}"
+                        f"config.yml says {on_disk} — {remedy}"
                     ),
                     style="warning" if self._auto_approve else "info",
                 )

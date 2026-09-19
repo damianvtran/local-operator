@@ -60,7 +60,7 @@ _TESTS_ROOT = Path(__file__).resolve().parents[4]
 
 #: The sentence's opening, matched as a substring so the assertion is about the
 #: refusal rather than about the exact wrapping of one constant.
-_REFUSAL = "tool approvals stay at ask"
+_REFUSAL = "this session's gate is still at ask"
 
 
 # ---------------------------------------------------------------------------
@@ -301,8 +301,15 @@ async def test_a_model_authored_subprocess_cannot_loosen_the_gate(
         assert "welcome projection" in out, out
         assert "saw-request True" in out, out
         # Both increasing requests refused, each with the remedy named — not an
-        # EOF, not a crash, and not a silent no-op.
-        assert out.count(_REFUSAL) == 2, out
+        # EOF, not a crash, and not a silent no-op. The two refusals are NOT the
+        # same sentence and that is deliberate: the command's copy names the
+        # remedies for a gate, and the CARD's tells the reader the question is
+        # still parked and that a deny works from where they are (UX round 2,
+        # U8 — a phone user was handed advice they could not take).
+        from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+
+        assert out.count(_REFUSAL) == 1, out
+        assert out.count(CARD_APPROVAL_REFUSED_NOTICE) == 1, out
         assert "slash_result error" in out, out
         assert "approval_answer error" in out, out
 
@@ -861,11 +868,15 @@ def test_the_refusal_copy_names_the_remedies_and_not_a_rule() -> None:
     copy = OPERATOR_CAP_REQUIRED_NOTICE
     # Where to type it, in words the operator can resolve (design round 1 D4:
     # "the session's console" was vocabulary to nobody).
-    assert "the terminal or app window that started this session" in copy
-    # The mechanism that works when there IS no such window: let the runtime go
-    # idle and re-open the session here, which makes THIS window the one that
-    # starts the next runtime (UX round 1 U2).
-    assert "go idle" in copy and "open the session again in this window" in copy
+    assert "the window that started this session" in copy
+    # The mechanism that works when there IS no such window: let the runtime
+    # retire and re-open the session here, which makes THIS window the one that
+    # starts the next runtime (UX round 1 U2; the wording names the EVENT and the
+    # LEVER the reader has — no unconditional command retires a live runtime, and
+    # design round 2's D13 is answered in the design doc's §4 rather than by a
+    # promise here).
+    assert "let its runtime retire and reopen it here" in copy
+    assert "the window that opens a runtime owns its gate" in copy
     # The remedies that are true for the NEXT session, and where they live.
     assert "--yolo" in copy
     assert "tool_approval_mode: auto" in copy
@@ -884,6 +895,59 @@ def test_the_refusal_copy_names_the_remedies_and_not_a_rule() -> None:
     from local_operator.harness.approval import LOOSENING_REFUSED_NOTICE
 
     assert copy.split(":")[0] != LOOSENING_REFUSED_NOTICE.split(":")[0]
+
+    # IT HAS TO TRAVEL WHOLE, and it has to survive the narrowest frame the
+    # product has. The runtime slices a raised exception's text to 400 characters
+    # (``server.py``) before it answers, so a longer copy reaches a raw client as
+    # a sentence that stops mid-remedy (QA round 2, Q3); and 44 columns with an
+    # 11-row viewport is the smallest surface the response is rendered on, where
+    # the previous 537-character copy pushed the reason and the remedy off the
+    # top of the view (design round 2, D8). Both are pinned as NUMBERS because
+    # both were regressions of exactly that kind.
+    assert len(copy) <= 400, len(copy)
+    import textwrap
+
+    assert len(textwrap.wrap(copy, 44)) <= 9, len(textwrap.wrap(copy, 44))
+
+
+def test_the_card_refusal_is_its_own_sentence() -> None:
+    """A refused CARD is not a refused command (UX round 2, U8).
+
+    The card's reader never typed ``/approvals auto``: they pressed a key on a
+    parked question. Answering them with the command's copy told a phone user to
+    "type it in the terminal or app window that started this session" — advice
+    they cannot take — and never said whether the question survived. So the op
+    the seam refused picks the sentence, the token travels (never the prose), and
+    the far side rebuilds the same one locally.
+    """
+    from local_operator.harness.approval import (
+        CARD_APPROVAL_REFUSED_NOTICE,
+        OPERATOR_CAP_REQUIRED_NOTICE,
+    )
+    from local_operator.session.errors import OperatorAuthorityRequired, admission_error
+
+    assert CARD_APPROVAL_REFUSED_NOTICE != OPERATOR_CAP_REQUIRED_NOTICE
+    # The card's reader is told the question SURVIVED and that a deny works from
+    # where they are — the one action that does.
+    assert "still waiting" in CARD_APPROVAL_REFUSED_NOTICE
+    assert "Denying it works from here" in CARD_APPROVAL_REFUSED_NOTICE
+    # It names no command they never typed.
+    assert "/approvals auto" not in CARD_APPROVAL_REFUSED_NOTICE
+    assert len(CARD_APPROVAL_REFUSED_NOTICE) <= 400
+
+    # The seam's refusal carries the op as a TOKEN, and the decoder turns a token
+    # back into the sentence — no prose crosses the wire.
+    raised = OperatorAuthorityRequired(trigger="approval_answer")
+    assert str(raised) == CARD_APPROVAL_REFUSED_NOTICE
+    assert raised.trigger == "approval_answer"
+    rebuilt = admission_error("operator_authority_required", None, "approval_answer")
+    assert isinstance(rebuilt, OperatorAuthorityRequired)
+    assert str(rebuilt) == CARD_APPROVAL_REFUSED_NOTICE
+    # An unknown token is not prose either: it falls back to the command's copy.
+    assert str(OperatorAuthorityRequired(trigger="../../etc/passwd")) == (
+        OPERATOR_CAP_REQUIRED_NOTICE
+    )
+    assert str(admission_error("operator_authority_required")) == OPERATOR_CAP_REQUIRED_NOTICE
 
 
 # ---------------------------------------------------------------------------
@@ -1419,4 +1483,160 @@ async def test_an_impostor_endpoint_learns_nothing_it_can_replay(
         assert live.handle._auto_approve is False
         replay.close()
     finally:
+        await live.close(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The relay, over its own socket: the handshake has to OUTLIVE the repaint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_relay_keeps_its_handshake_across_a_repaint(tmp_path: Path) -> None:
+    """The phone's authority survives ordinary traffic (agent R2-2 = UX U6).
+
+    The relay adopts the handshake from the frames it reads, and the ONLY frame
+    that carries the material is the welcome: every projection push — a token
+    count, a roster change, a card parking — carries ``operator_salt`` nowhere.
+    The first version cleared the connection's state before re-verifying from
+    the frame in hand, so the relay's authority was destroyed 49-275 ms after it
+    was established and the next command was refused with the copy. The rig that
+    measured it is one ``_push()`` between the handshake and the request, which
+    is what this test does twice.
+    """
+    from local_operator.harness.approval import (
+        mint_operator_cap,
+        remember_operator_cap,
+        reset_operator_caps_for_tests,
+    )
+    from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial
+
+    reset_operator_caps_for_tests()
+    cap = mint_operator_cap()
+    live = await _serve(tmp_path, operator_cap=cap)
+    try:
+        record = live.record
+        daemon = MobileDaemon(port=0, password="pw")
+        entry = SessionEntry(record)
+        daemon.table.entries[record.pid] = entry
+        # The relay IS this spawner, which is the case the surface table
+        # promises works from the phone.
+        remember_operator_cap(record.pid, cap)
+        dial = asyncio.ensure_future(_dial(daemon, entry))
+        try:
+            for _ in range(200):
+                if entry.authority_bearing:
+                    break
+                await asyncio.sleep(0.05)
+            assert entry.authority_bearing, "the relay never completed its handshake"
+
+            # ONE ordinary repaint, then a second: no proof in either.
+            for round_number in (1, 2):
+                await live.runtime._push()
+                await asyncio.sleep(0.3)
+                assert entry.authority_bearing, (
+                    f"repaint {round_number} dropped the relay's handshake — this is the "
+                    "window the phone used to work in and nothing else"
+                )
+                assert entry.operator_salt, f"repaint {round_number} cleared the salt"
+
+            reply = await daemon.request(
+                record.pid, "slash_result", command="approvals", args="auto", images=[]
+            )
+            assert reply["op"] == "result", reply
+            assert live.handle._auto_approve is True
+        finally:
+            dial.cancel()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
+    """The third door, closed (design round 2, D9).
+
+    A pane that may not answer a card used to press APPROVE and watch nothing
+    happen: the refusal arrives AFTER its approval handler has returned, and the
+    arm that treats "the owner answered first" as an ordinary race swallowed it —
+    no exception, no message, the card still parked and the tool call still
+    blocked. Measured once with a real client on a real socket; pinned here by
+    driving that arm against the same real client and the real runtime, because
+    the arm is the unit that was wrong.
+
+    The delivery half (a parked card reaching a follower's projection) is
+    exercised by the desktop-route tests in this module and by
+    ``tests/unit/server/test_desktop_sessions.py``; what those could not see is
+    that the reply's refusal vanished, which is what this asserts — including
+    that the sentence the operator gets is the CARD's, not a command's (UX U8).
+    """
+    from local_operator.harness.approval import (
+        mint_operator_cap,
+        reset_operator_caps_for_tests,
+    )
+    from local_operator.mobile.types import PendingRequest
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    reset_operator_caps_for_tests()  # nobody here spawned this runtime
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap())
+    remote = None
+    try:
+        remote = await _follower(tmp_path, live.record)
+        asked = asyncio.Event()
+        surfaced: list[BaseException] = []
+
+        async def approve(tool_name: str, description: str, job_id: str | None = None) -> bool:
+            asked.set()
+            return True
+
+        remote.set_approval_handler(approve)
+        remote.set_gate_refusal_handler(surfaced.append)
+        card = await _park_a_card(live.handle)
+        parked = live.handle._fold.projection.pending
+        assert parked is not None and parked.kind == "approval"
+        pending = PendingRequest(
+            request_id=parked.request_id,
+            kind="approval",
+            title=parked.title,
+            detail=parked.detail,
+        )
+        # The state a delivered gate leaves behind: this pane owns the reply, and
+        # the task answering it is the one under test.
+        remote._gate_key = remote._gate_identity(pending)
+        remote._gate_task = asyncio.current_task()
+        await asyncio.wait_for(remote._run_approval(pending), 10)
+        assert asked.is_set(), "the pane's handler was never reached — the pin is vacuous"
+        assert surfaced, "the refusal vanished: the pane pressed APPROVE and saw nothing"
+        refusal = surfaced[0]
+        assert isinstance(refusal, OperatorAuthorityRequired)
+        assert "still waiting" in str(refusal)
+        assert "Denying it works from here" in str(refusal)
+        # The sentence is not a consolation: the card really is still parked.
+        assert live.handle._fold.projection.pending is not None
+        assert not card.done()
+
+        # THE POSITIVE CONTROL (agent review round 2, R2-4; #1291's lesson that
+        # a refusal nobody can turn into an acceptance proves nothing). Same
+        # client, same arm, same card — the ONLY difference is that this process
+        # now holds the capability for the runtime, i.e. it is the process that
+        # started it. The reply goes through and the card resolves.
+        from local_operator.harness.approval import remember_operator_cap
+
+        await remote.dispose()
+        held = live.runtime._operator_cap
+        assert held is not None
+        remember_operator_cap(live.record.pid, held)
+        remote = await _follower(tmp_path, live.record)
+        assert remote._client._authority_bearing, "the console did not present its capability"
+        surfaced.clear()
+        remote.set_approval_handler(approve)
+        remote.set_gate_refusal_handler(surfaced.append)
+        remote._gate_key = remote._gate_identity(pending)
+        remote._gate_task = asyncio.current_task()
+        await asyncio.wait_for(remote._run_approval(pending), 10)
+        assert not surfaced, surfaced
+        assert live.handle._fold.projection.pending is None, "the card was not answered"
+        assert card.done()
+    finally:
+        if remote is not None:
+            await remote.dispose()
         await live.close(tmp_path)
