@@ -460,20 +460,29 @@ subtree is selected instead, which is the scope pytest itself gives it.
 
 **A glob is a reader, and reads have the same edge.**
 `tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
-and asserts an ordering invariant on each file it reads, so a one-token change to
-any of the 197 covered `scripts/*.py` has to select it — before the scan edge it
-selected NOTHING and the local run printed `all selected gates passed` while CI's
-`test` job failed (QA round 2, Q-1). `glob`/`rglob`/`iterdir`/`listdir`/`scandir`/`walk`
-are therefore read edges: the scanned directory is the first string constant in
-the scan's expression that is a real directory here, else — for a `__file__`-relative
-receiver — the scanning file's own, and the targets are the covered files that
-match. Two scans resolve in this tree; measured, the rule costs no coverage at all
-(55 of the 60 outside-closure modules still scope, referrer targets 263 → 755).
-A scan whose directory is neither is NOT an edge and, when it spells `.py`, is
-printed in the selection limit rather than dropped quietly — where a bare `*`
-scan (a runtime directory, a test's tmpdir) is not, because treating that set as
-program-wide readers selects 654 of 724 tests for ANY change and takes the whole
-scoping win to zero.
+and `tests/unit/tui/test_visual_capture.py` the same directory through a
+variable, so a one-token change to any of the 197 covered `scripts/*.py` has to
+select both — before the scan edge it selected NOTHING and the local run printed
+`all selected gates passed` while CI's `test` job failed (QA round 2, Q-1; the
+variable-held reader was round 3's blocker, printed but not armed).
+`glob`/`rglob`/`iterdir`/`listdir`/`scandir`/`walk` are therefore read edges.
+The scanned directory is the one the receiver's expression denotes — path
+literals, `__file__`, `.parent`, `.parents[N]`, `.resolve()`, and up to four
+`name = <expr>` hops, so `SCRIPTS = ROOT / "scripts"` places — and the pattern is
+matched against the repo-relative path, so `*/*.py` is exactly one level and
+`**/*.py` any depth. Placement is all-or-nothing: a receiver whose WHOLE literal
+chain is not a directory (`scripts/diag`, never its `scripts` ancestor) is
+unplaced rather than resolved to the wrong directory, because a wrong edge is
+silent.
+**Unplaced is armed, not merely printed.** A scan whose directory the graph
+cannot place, and whose pattern spells `.py`, is treated as reading every covered
+Python file — measured on this tree that keeps 55 of the 60 outside-closure
+modules scoping and pushes zero selections over a fraction arm (10 armed sites,
+referrer targets 263 → 1535). A LOOSE unplaced scan (a bare `*`, `iterdir()`, a
+test's tmpdir) is not armed, because that set is what costs: arming it selects 724
+of 724 tests for ANY change and takes the whole scoping win to zero. Loose ones
+are counted and named in the printed selection limit, which also says how many
+files it is not showing.
 
 **Two honest limits, both printed on a scoped run.** First, a name the graph
 cannot place — `importlib.import_module(name)` with a computed name, or a

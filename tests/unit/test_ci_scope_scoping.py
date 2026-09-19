@@ -741,20 +741,28 @@ def test_a_repo_python_file_a_test_names_is_always_selected():
     # name. `tests/unit/tui/test_visual_gallery.py` globs `scripts/*.py` and asserts
     # an ordering invariant on each, so a one-token change to any of them must
     # select it — that is QA round 2's Q-1, and the fix it asks for.
-    scanner = "tests/unit/tui/test_visual_gallery.py"
-    assert scanner in universe, "the scanning test moved; update this guard"
-    # Directly under `scripts/`: the scan is `.glob("*.py")`, which is NOT recursive,
+    # BOTH live readers, because they spell the same directory differently: the
+    # gallery builds it inline, the capture test holds it in a variable — and the
+    # second was round 3's BLOCKER, printed but not armed, so CI went red while the
+    # local run printed green.
+    scanners = (
+        "tests/unit/tui/test_visual_gallery.py",
+        "tests/unit/tui/test_visual_capture.py",
+    )
+    # Directly under `scripts/`: the scans are `.glob("*.py")`, which is NOT recursive,
     # so a nested script like `scripts/cold_engage_site/sitecustomize.py` is
-    # correctly NOT read by it.
+    # correctly NOT read by them.
     scanned = sorted(
         f
         for f in graph.files
         if f.startswith("scripts/") and f.endswith(".py") and "/" not in f[len("scripts/") :]
     )
     assert scanned, "no covered scripts/*.py to scan"
-    for target in scanned:
-        selected = set(ci_scope._select_tests(graph, [target], universe)[0])
-        assert scanner in selected, f"{scanner} reads {target} by glob and must be selected"
+    for scanner in scanners:
+        assert scanner in universe, f"{scanner} moved; update this guard"
+        for target in scanned:
+            selected = set(ci_scope._select_tests(graph, [target], universe)[0])
+            assert scanner in selected, f"{scanner} reads {target} by glob and must be selected"
 
 
 # ---------------------------------------------------------------------------
@@ -1000,5 +1008,223 @@ def test_a_scan_this_graph_cannot_place_is_printed_not_silently_dropped(tmp_path
 
     plan = ci_scope.scope_plan(["test"], ["local_operator/alpha.py"], root)
 
-    assert any("directory scan" in site for site in plan.unnamed), plan.unnamed
-    assert "selection limit" in "\n".join(plan.report())
+    # ARMED, not merely printed: round 3 measured that the print-only policy was a
+    # live false green, because the limit line's ellipsis hid the reader that
+    # mattered. `unnamed` is now the LOOSE set; a `.py` scan lands here.
+    assert any("directory scan" in site for site in plan.armed_scans), plan.armed_scans
+    assert "armed reads" in "\n".join(plan.report())
+
+
+# ---------------------------------------------------------------------------
+# Scan placement: the SHAPES a receiver can take
+# ---------------------------------------------------------------------------
+#
+# Round 3 measured ten shapes and found three that resolved to the WRONG
+# directory silently (a nested literal receiver, a `__file__` + subdirectory, and
+# a pattern with its own directory components), plus `os.walk(path)` never
+# placing at all, plus a variable-held receiver that was printed but not armed —
+# a live false green. One table, so the next narrowing fails here.
+
+_SCAN_PROLOGUE = """
+import glob
+import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+"""
+
+#: id -> (lines after the prologue, extra files, changed path, must-select, must-not)
+_SCAN_SHAPES: dict[str, tuple[str, dict[str, str], str, tuple[str, ...], tuple[str, ...]]] = {
+    "literal": (
+        'for path in (ROOT / "scripts").glob("*.py"):\n    path.read_text()\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "variable-held": (
+        'SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"\n'
+        'for path in SCRIPTS.glob("*.py"):\n    path.read_text()\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "nested-literal": (
+        'for path in (ROOT / "scripts" / "diag").glob("*.py"):\n    path.read_text()\n',
+        {"scripts/diag/probe.py": "PROBE = 1\n"},
+        "scripts/diag/probe.py",
+        ("tests/unit/test_scan_shape.py",),
+        # The `scripts` ANCESTOR must not be the directory: that is the wrong edge.
+        ("scripts/tool.py",),
+    ),
+    "pattern-directories": (
+        'for path in (ROOT / "scripts").glob("*/*.py"):\n    path.read_text()\n',
+        {"scripts/diag/probe.py": "PROBE = 1\n"},
+        "scripts/diag/probe.py",
+        ("tests/unit/test_scan_shape.py",),
+        ("scripts/tool.py",),
+    ),
+    "rglob": (
+        'for path in (ROOT / "scripts").rglob("*.py"):\n    path.read_text()\n',
+        {"scripts/diag/probe.py": "PROBE = 1\n"},
+        "scripts/diag/probe.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "file-parent": (
+        'target = ROOT / "scripts" / "tool.py"\n'
+        'for path in target.parent.glob("*.py"):\n    path.read_text()\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "own-directory": (
+        'for path in Path(__file__).parent.glob("*.py"):\n    path.read_text()\n',
+        {"tests/unit/helpers.py": "HELPER = 1\n"},
+        "tests/unit/helpers.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "file-plus-subdir": (
+        'for path in (Path(__file__).parent / "fixtures").glob("*.py"):\n    path.read_text()\n',
+        {"tests/unit/fixtures/data.py": "DATA = 1\n"},
+        "tests/unit/fixtures/data.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "walk": (
+        'for _dirpath, _dirs, names in os.walk(ROOT / "scripts"):\n    list(names)\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    # The CALL forms QA round 3 measured: the `os.*`/`glob.*` spellings put their
+    # directory in the arguments, and one of them puts it inside the pattern.
+    "os-listdir": (
+        'for name in os.listdir("scripts"):\n    (ROOT / "scripts" / name).read_text()\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "os-scandir": (
+        'for entry in os.scandir("scripts"):\n    entry.name\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "os-walk-argument": (
+        'for _dirpath, _dirs, names in os.walk("scripts"):\n    list(names)\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "glob-module": (
+        'for name in glob.glob("scripts/*.py"):\n    Path(name).read_text()\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "glob-join": (
+        'for name in glob.glob(os.path.join("scripts", "*.py")):\n    Path(name).read_text()\n',
+        {},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+    "unplaceable-py": (
+        'for path in Path(os.environ.get("SCAN_DIR", "tmp")).glob("*.py"):\n    path.read_text()\n',
+        {},
+        # Nothing places this directory, so it must be ARMED: any covered Python
+        # file is treated as read by it (round 3 asked for exactly this).
+        "local_operator/alpha.py",
+        ("tests/unit/test_scan_shape.py",),
+        (),
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SCAN_SHAPES))
+def test_a_scan_shape_places_the_directory_it_reads(tmp_path, shape):
+    """Each receiver shape the graph must place — and the two it must arm."""
+    lines, extra, changed, must, must_not = _SCAN_SHAPES[shape]
+    root = _fixture_repo(tmp_path)
+    for rel, source in extra.items():
+        _write(root, rel, source)
+
+    _write(root, "tests/unit/test_scan_shape.py", _SCAN_PROLOGUE + lines + _CANNED_TEST)
+    plan = ci_scope.scope_plan(["test"], [changed], root)
+    decision = plan.decisions["test"]
+
+    assert not decision.whole_tree, decision.notes
+    selected = set(decision.targets)
+    for expected in must:
+        assert expected in selected, f"{shape}: {expected} not selected ({decision.notes})"
+    for forbidden in must_not:
+        # The ancestor-directory edge is a WRONG edge, not a conservative one: it
+        # says this reader observes a file it never opens. Arming must not be what
+        # makes this pass either, so it is checked through the reader's own plan.
+        wrong = ci_scope.scope_plan(["test"], [forbidden], root).decisions["test"]
+        assert (
+            "tests/unit/test_scan_shape.py" not in wrong.targets
+        ), f"{shape}: {forbidden} must not be an input of the reader"
+    if shape == "unplaceable-py":
+        assert plan.armed_scans, "an unplaceable .py scan must be armed"
+    else:
+        # …and a scan that IS placed must not also be armed: arming every shape
+        # would hide a placement regression behind a program-wide read.
+        assert not plan.armed_scans, f"{shape}: placed, so nothing may be armed"
+
+
+_CANNED_TEST = """\
+
+def test_the_scan_runs():
+    assert True
+"""
+
+
+def test_an_unplaceable_python_scan_is_armed_and_says_so(tmp_path):
+    """Armed is not the same as disclosed, and the report distinguishes them."""
+    root = _fixture_repo(tmp_path)
+    _write(
+        root,
+        "tests/unit/test_armed.py",
+        _SCAN_PROLOGUE
+        + 'for path in Path(os.environ.get("SCAN_DIR", "tmp")).glob("*.py"):\n'
+        + "    path.read_text()\n"
+        + _CANNED_TEST,
+    )
+
+    plan = ci_scope.scope_plan(["test"], ["local_operator/alpha.py"], root)
+    report = "\n".join(plan.report())
+
+    assert any("armed" in site for site in plan.armed_scans), plan.armed_scans
+    assert "armed reads" in report
+    # The fixture's `alpha.py` has real importers too, so the assertion is that the
+    # armed reader is among the selected — not that it is alone.
+    assert "tests/unit/test_armed.py" in plan.decisions["test"].targets
+
+
+def test_the_limit_line_says_how_many_files_it_is_not_showing(tmp_path):
+    """Round 3: the reader that mattered hid behind a bare ellipsis."""
+    root = _fixture_repo(tmp_path)
+    for index in range(8):
+        _write(
+            root,
+            f"tests/unit/test_loose_{index}.py",
+            "import os\nfrom pathlib import Path\n\n"
+            f"def test_loose_{index}(tmp_path):\n"
+            '    assert list(tmp_path.glob("*")) == []\n',
+        )
+
+    plan = ci_scope.scope_plan(["test"], ["local_operator/alpha.py"], root)
+    report = "\n".join(plan.report())
+
+    assert len(plan.unnamed) >= 8
+    assert "more not shown" in report, report

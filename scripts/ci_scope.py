@@ -77,7 +77,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import fnmatch
 import json
 import os
 import re
@@ -1007,6 +1006,14 @@ DOTTED_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
 #: was printed to say so (#1322 round 2, MAJOR 1). `_name_target` is what decides
 #: whether a collected name lands on a real file; the two must admit the same
 #: spellings, or the collection gate silently drops the case before resolution.
+#:
+#: A WINDOWS-style spelling (`"scripts" + "\\x.py"`) is deliberately NOT admitted:
+#: the separator class is POSIX-only, so such a literal is collected by neither
+#: branch and no edge is built for it. The gates here are POSIX, the repo has no
+#: backslash paths, and admitting `\\` would also resolve a string that merely
+#: CONTAINS one (a regex, a Windows-only fixture) as a repo path. Stated rather
+#: than fixed (round 3, NIT): a Windows CI leg would want it fixed together with
+#: the path normalisation that has to accompany it.
 PY_PATH_RE = re.compile(r"[/.~]*[A-Za-z_][\w./\-]*\.py[io]?\Z")
 
 #: Dynamic-import callables: `importlib.import_module(...)`, `__import__(...)`.
@@ -1153,36 +1160,69 @@ class _Scan:
     only through that scan selected NOTHING, so the local gate went green while
     CI's `test` job was red: the round-1 blocker shape, by a third road.
 
-    `hints` are the string constants in the scanned-directory EXPRESSION
-    (`"scripts"` above), tried as repository-relative directories by the resolver;
-    `from_file` records a `__file__`-relative receiver, whose directory is the
-    scanning file's own.
+    `receiver` is the scanned directory's EXPRESSION, evaluated later by
+    `_scan_directory` (path literals, `__file__`, `.parent`/`.parents[N]`,
+    `.resolve()`, and ONE assignment hop, so `SCRIPTS = ROOT / "scripts"` places
+    too). A receiver the graph cannot evaluate is UNPLACED, and an unplaced scan
+    that spells `.py` is then **armed**: it is treated as reading every covered
+    Python file. Round 3 measured why that is the right split — the population
+    that costs anything is the LOOSE one (`*`, `iterdir()`, a test's tmpdir):
+    arming the `.py` set keeps 55 of 60 outside-closure modules scoping and pushes
+    zero selections over a fraction arm, while arming the loose set (439 sites
+    here) selects 724 of 724 and takes the scoping win to zero.
     """
 
-    hints: tuple[str, ...]
-    from_file: bool
+    receiver: ast.expr | None
     pattern: str
-    recursive: bool
-    lineno: int
+    #: Literal directory components taken from the call's ARGUMENTS or from the
+    #: leading components of the pattern — `glob.glob("scripts/*.py")` and
+    #: `glob.glob(os.path.join("scripts", "*.py"))` both spell their directory
+    #: there, and reading hints off the receiver alone made the `os.*`/`glob.*`
+    #: forms resolve to nothing at all (run 4, QA Q-3).
+    dir_literals: tuple[str, ...] = ()
+    #: True when the receiver is the module itself (`glob.glob`, `os.walk`), which
+    #: is what makes `dir_literals` repo-relative rather than relative to a
+    #: receiver directory the evaluator could not place.
+    module_form: bool = False
+    lineno: int = 0
 
 
-#: Directory-scan APIs: name -> (takes a glob pattern, walks a subtree).
-_SCAN_APIS: Mapping[str, tuple[bool, bool]] = {
-    "glob": (True, False),
-    "rglob": (True, True),
-    "iterdir": (False, False),
-    "listdir": (False, False),
-    "scandir": (False, False),
-    "walk": (False, True),
+#: Directory-scan APIs: name -> (takes a glob pattern, prefix that makes it depth-aware).
+#: The prefix matters: `rglob(p)` and `os.walk(d)` read a SUBTREE while `glob(p)`
+#: reads one level, so the pattern carries the depth and the matcher honours it.
+_SCAN_APIS: Mapping[str, tuple[bool, str]] = {
+    "glob": (True, ""),
+    "iglob": (True, ""),
+    "rglob": (True, "**/"),
+    "iterdir": (False, "*"),
+    "listdir": (False, "*"),
+    "scandir": (False, "*"),
+    "walk": (False, "**/*"),
 }
 
+#: How many `name = <expr>` hops the scan resolver will follow. Four is the
+#: measured need (the live blocker is one; a `A = B / "x"` chain is two) plus room,
+#: and the bound is what keeps a cyclic assignment from looping.
+_MAX_ASSIGNMENT_HOPS = 4
 
-def _directory_scan(node: ast.Call) -> _Scan | None:
+#: A receiver that is one of these is the MODULE, not a directory: `glob.glob(p)`
+#: and `os.walk(p)` spell their path in the arguments, and treating `glob`/`os` as
+#: a directory expression is how both forms went unplaced (run 4, QA Q-3).
+_MODULE_RECEIVERS = frozenset({"os", "glob"})
+
+#: These take their directory as the FIRST ARGUMENT, whether they are spelled
+#: `os.walk(p)` or bare `walk(p)`; reading hints off the receiver (`os`, or the
+#: `os` in `os.walk`) is how a scan of a covered tree went unplaced and unprinted
+#: (round 3, MINOR 1).
+_PATH_ARG_SCANS = frozenset({"iterdir", "listdir", "scandir", "walk"})
+
+
+def _directory_scan(node: ast.Call, assignments: Mapping[str, ast.expr]) -> _Scan | None:
     """A directory scan this call performs, or None when it is not one.
 
     Only the shape is read here; whether the directory is a COVERED tree is
     decided at resolve time against the real filesystem, which is also where an
-    unresolvable scan becomes a printed limit rather than a guess.
+    unplaceable scan becomes an armed read or a printed limit rather than a guess.
     """
     func = node.func
     if isinstance(func, ast.Attribute):
@@ -1190,88 +1230,290 @@ def _directory_scan(node: ast.Call) -> _Scan | None:
         receiver: ast.expr | None = func.value
     elif isinstance(func, ast.Name):
         name = func.id
-        receiver = node.args[0] if node.args else None
+        receiver = None
     else:
         return None
-    if name not in _SCAN_APIS or receiver is None:
+    if name not in _SCAN_APIS:
         return None
-    takes_pattern, walks = _SCAN_APIS[name]
-    pattern = "*"
+    takes_pattern, prefix = _SCAN_APIS[name]
+    module_form = False
+    if name in _PATH_ARG_SCANS:
+        receiver = node.args[0] if node.args else None
+    elif isinstance(receiver, ast.Name) and receiver.id in _MODULE_RECEIVERS:
+        # `glob.glob(p)` / `os.walk(p)`: the RECEIVER is the module, so both the
+        # directory and the pattern live in the arguments.
+        module_form = True
+        receiver = None
+    if receiver is None and not module_form:
+        return None
+    if isinstance(receiver, ast.Name) and receiver.id in assignments:
+        # ONE hop, and only for a plain name: `SCRIPTS = ROOT / "scripts"` is how
+        # the reader that drove round 3's blocker spelled its directory, and one
+        # hop places it plus six more of the nineteen `.py` sites on this tree.
+        receiver = assignments[receiver.id]
+    raw_pattern = "*"
+    pattern_hints: tuple[str, ...] = ()
     if takes_pattern and node.args:
         first = node.args[0]
-        # A computed pattern is not a reason to skip the scan: `*` over-approximates
-        # what it can read, which is the fail-closed direction.
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            pattern = first.value
-    hints = tuple(
-        sub.value
-        for sub in ast.walk(receiver)
-        if isinstance(sub, ast.Constant)
-        and isinstance(sub.value, str)
-        and not sub.value.endswith(".py")
-    )[:4]
-    from_file = any(
-        isinstance(sub, ast.Name) and sub.id == "__file__" for sub in ast.walk(receiver)
-    )
+            raw_pattern = first.value
+        else:
+            # A computed pattern is not a reason to skip the scan, and the pieces
+            # are often literals beside each other: `os.path.join("scripts",
+            # "*.py")` names both the directory and the extension (QA Q-3).
+            parts = [
+                sub.value
+                for sub in ast.walk(first)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            ]
+            python_parts = [part for part in parts if _looks_like_a_python_scan(part)]
+            if python_parts:
+                raw_pattern = python_parts[-1]
+                pattern_hints = tuple(parts[: parts.index(python_parts[-1])])
+            else:
+                pattern_hints = tuple(parts)
+    # A pattern may spell its own directory: `glob.glob("scripts/*.py")` names
+    # `scripts` in the component the matcher would otherwise treat as a wildcard
+    # search. Literal leading components are consumed into the directory and the
+    # rest stays the pattern.
+    path_parts = [part for part in raw_pattern.split("/") if part not in ("", ".")]
+    literal_leading: list[str] = []
+    while path_parts and not any(char in path_parts[0] for char in "*?["):
+        literal_leading.append(path_parts.pop(0))
     return _Scan(
-        hints=hints,
-        from_file=from_file,
-        pattern=pattern,
-        recursive=walks or "**" in pattern,
+        receiver=receiver,
+        pattern=f"{prefix}{'/'.join(path_parts) or '*'}",
+        dir_literals=tuple(pattern_hints) + tuple(literal_leading),
+        module_form=module_form,
         lineno=node.lineno,
     )
 
 
-def _looks_like_a_python_scan(pattern: str) -> bool:
-    """Whether a scan's pattern explicitly asks for Python files.
+def _path_value(
+    node: ast.expr,
+    rel: str,
+    root: Path,
+    assignments: Mapping[str, ast.expr],
+    *,
+    hops: int,
+) -> Path | None:
+    """The `Path` an expression denotes, or None when the graph cannot say.
 
-    The discriminator for the printed limit: a bare `*`/`iterdir()` scan is how
-    every runtime directory is listed (agent homes, session stores, a test's own
-    tmpdir) and reading the whole program into it would be a false alarm, while a
-    scan that spells `.py` is asking for source. 57 scans in this tree match the
-    looser shape and 18 spell `.py`; measured, treating the loose set as
-    program-wide readers selects 654 of 724 tests for ANY change and takes the
-    scoping win to zero.
+    Deliberately tiny and total: a string literal, `__file__`, `Path(...)`,
+    `/`-joins, `.parent`, `.parents[N]`, `.resolve()`/`.absolute()`, and ONE
+    assignment hop. Anything else — an environment lookup, a helper call, an
+    f-string, a `chdir`-relative guess — returns None, which the caller turns into
+    an armed read or a printed limit rather than a guess about which directory a
+    scan touches. A WRONG directory is the one outcome worse than either, because
+    it is silent (round 3, MAJOR 1).
     """
-    return pattern.split("/")[-1].endswith(".py")
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value)
+    if isinstance(node, ast.Name):
+        if node.id == "__file__":
+            return root / rel
+        if hops and node.id in assignments:
+            return _path_value(assignments[node.id], rel, root, assignments, hops=hops - 1)
+        return None
+    if isinstance(node, ast.Attribute):
+        if node.attr == "parent":
+            base = _path_value(node.value, rel, root, assignments, hops=hops)
+            return None if base is None else base.parent
+        return None
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+        # `.parents[N]` is a SUBSCRIPT, not a call — and it is how the reader that
+        # drove round 3's blocker spelled the repository root
+        # (`Path(__file__).resolve().parents[3] / "scripts"`). Missing this form
+        # left that scan armed rather than placed, which is safe but costs the
+        # precision the one-hop exists for.
+        if node.value.attr == "parents":
+            index = node.slice
+            base = _path_value(node.value.value, rel, root, assignments, hops=hops)
+            if (
+                base is not None
+                and isinstance(index, ast.Constant)
+                and isinstance(index.value, int)
+                and 0 <= index.value < len(base.parents)
+            ):
+                return base.parents[index.value]
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _path_value(node.left, rel, root, assignments, hops=hops)
+        right = _path_value(node.right, rel, root, assignments, hops=hops)
+        return None if left is None or right is None else left / right
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in ("Path", "PosixPath"):
+            if not node.args:
+                return None
+            return _path_value(node.args[0], rel, root, assignments, hops=hops)
+        if isinstance(func, ast.Attribute) and func.attr == "join" and node.args:
+            # `os.path.join("scripts", "*.py")`: joining is how a path is built
+            # without an f-string, and it is evaluable when every part is.
+            parts = [
+                _path_value(argument, rel, root, assignments, hops=hops) for argument in node.args
+            ]
+            if any(part is None for part in parts):
+                return None
+            joined = parts[0]
+            for extra in parts[1:]:
+                joined = joined / extra  # type: ignore[operator]
+            return joined
+        if isinstance(func, ast.Attribute):
+            if func.attr in ("resolve", "absolute") and not node.args:
+                return _path_value(func.value, rel, root, assignments, hops=hops)
+            if func.attr == "parents" and node.args:
+                index = node.args[0]
+                if isinstance(index, ast.Constant) and isinstance(index.value, int):
+                    base = _path_value(func.value, rel, root, assignments, hops=hops)
+                    return None if base is None else base.parents[index.value]
+        return None
+    return None
+
+
+def _scan_directory(
+    expression: ast.expr | None,
+    rel: str,
+    root: Path,
+    assignments: Mapping[str, ast.expr],
+) -> str | None:
+    """The covered directory a scan reads, or None when it cannot be placed.
+
+    A relative literal is read as repo-relative, which can only OVER-include: the
+    files it then names are real covered files, and a scan that really read a
+    runtime directory reads none of them.
+    """
+    if expression is None:
+        return None
+    # A BUDGET of hops, not one: `DIAG = SCRIPTS / "diag"` over
+    # `SCRIPTS = ROOT / "scripts"` is ordinary code, and the live blocker's own
+    # receiver (`SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"`) sits
+    # one hop down. The budget bounds the work and any `A = B; B = A` cycle; a
+    # chain longer than this is unplaced, which arms rather than guesses.
+    value = _path_value(expression, rel, root, assignments, hops=_MAX_ASSIGNMENT_HOPS)
+    if value is None:
+        return None
+    if not value.is_absolute():
+        value = root / value
+    try:
+        relative = value.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    if relative in ("", "."):
+        relative = "."
+    elif not (root / relative).is_dir():
+        return None
+    return relative
+
+
+def _segment_regex(segment: str) -> str:
+    """One glob segment as a regex, where `*`/`?` do NOT cross a separator."""
+    out: list[str] = []
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        if char == "*":
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        elif char == "[":
+            close = segment.find("]", index + 1)
+            if close == -1:
+                out.append(re.escape(char))
+            else:
+                body = segment[index + 1 : close]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                out.append(f"[{body}]")
+                index = close
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return "".join(out)
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """A glob pattern as a regex over a repo-relative path.
+
+    Directory components in the pattern are honoured — `*/*.py` is exactly one
+    level, `**/*.py` is any depth — because dropping them (and matching on the
+    basename alone) made a scan resolve to the wrong set silently (round 3,
+    MAJOR 1). Depth is the reason this is not `fnmatch`, whose `*` crosses `/`.
+    """
+    segments = [segment for segment in pattern.split("/") if segment not in ("", ".")]
+    pieces: list[str] = []
+    separate = False
+    for index, segment in enumerate(segments):
+        if segment == "**":
+            # `**` matches whole directory NAMES, so it carries its own trailing
+            # separator when something follows it and needs no separator before it.
+            if index == len(segments) - 1:
+                pieces.append("/" if separate else "")
+                pieces.append(".*")
+            else:
+                pieces.append("(?:[^/]+/)*")
+            separate = False
+            continue
+        if separate:
+            pieces.append("/")
+        pieces.append(_segment_regex(segment))
+        separate = True
+    return re.compile("".join(pieces) + r"\Z")
 
 
 def _scan_targets(
-    scan: _Scan, rel: str, root: Path, files: Sequence[str]
+    scan: _Scan,
+    rel: str,
+    root: Path,
+    files: Sequence[str],
+    assignments: Mapping[str, ast.expr],
 ) -> tuple[tuple[str, ...], bool]:
-    """Covered files a scan reads, and whether the scan could not be placed.
+    """(covered files the scan reads, whether the scan could not be placed).
 
-    The directory is the first `hint` that is a real directory here, else the
-    scanning file's own when the receiver was built from `__file__`. A scan whose
-    directory is neither is not an edge at all — but if it spells `.py` it is
-    returned as unplaced, so the run prints it instead of staying quiet.
+    Placement is all-or-nothing: the receiver's WHOLE literal chain has to be the
+    directory (`scripts/diag`, never the `scripts` ancestor of it), and a pattern
+    with directory components is matched against the path, not the basename.
     """
-    directory = next(
-        (
-            hint.strip("/")
-            for hint in scan.hints
-            if hint.strip("/") and (root / hint.strip("/")).is_dir()
-        ),
-        None,
-    )
-    if directory is None and scan.from_file:
-        parent = Path(rel).parent.as_posix()
-        directory = parent
-    name_pattern = scan.pattern.split("/")[-1]
+    directory = _scan_directory(scan.receiver, rel, root, assignments)
+    if directory is not None and scan.dir_literals:
+        # Components the PATTERN spelled compose onto the receiver directory:
+        # `(ROOT / "scripts").glob("sub/*.py")` is `scripts/sub`, and it is
+        # unplaced rather than silently widened if that is not a directory.
+        candidate = "/".join((directory, *scan.dir_literals))
+        directory = candidate if (root / candidate).is_dir() else None
+    elif directory is None and scan.module_form and scan.dir_literals:
+        # `glob.glob("scripts/*.py")`: no receiver directory exists, so the
+        # literal components are repository-relative.
+        candidate = "/".join(scan.dir_literals)
+        directory = candidate if (root / candidate).is_dir() else None
     if directory is None:
-        return (), _looks_like_a_python_scan(scan.pattern)
+        return (), True
     base = "" if directory == "." else f"{directory}/"
+    matcher = _glob_regex(scan.pattern)
     return (
         tuple(
             candidate
             for candidate in files
             if candidate != rel
             and candidate.startswith(base)
-            and (scan.recursive or "/" not in candidate[len(base) :])
-            and fnmatch.fnmatch(Path(candidate).name, name_pattern)
+            and matcher.match(candidate[len(base) :]) is not None
         ),
         False,
     )
+
+
+def _looks_like_a_python_scan(pattern: str) -> bool:
+    """Whether a scan's pattern explicitly asks for Python files.
+
+    The discriminator for ARMING an unplaceable scan, and it is the same one that
+    used to justify only printing it: a scan that spells `.py` is asking for
+    source, while a bare `*`/`iterdir()` scan is how every runtime directory is
+    listed (agent homes, session stores, a test's own tmpdir). Measured on this
+    tree: arming the `.py` set keeps 55 of 60 outside-closure modules scoping and
+    pushes zero selections over a fraction arm; arming the loose set selects 724
+    of 724 for ANY change.
+    """
+    return pattern.split("/")[-1].endswith(".py")
 
 
 def _dynamic_call_target(node: ast.Call) -> tuple[str, str] | None:
@@ -1319,6 +1561,27 @@ class _References:
     unnamed: tuple[str, ...]
     literals: frozenset[str]
     scans: tuple[_Scan, ...]
+    #: `name = <expr>` for the resolver's ONE assignment hop: a scan receiver that
+    #: is a plain name is replaced by its assignment, and the assigned expression
+    #: (`ROOT / "scripts"`) still has to resolve, which needs this map again.
+    assignments: Mapping[str, ast.expr]
+
+
+def _assignments(tree: ast.AST) -> Mapping[str, ast.expr]:
+    """Simple `name = <expr>` targets, for the ONE hop a scan receiver may take."""
+    found: dict[str, ast.expr] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                found.setdefault(target.id, node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            found.setdefault(node.target.id, node.value)
+    return found
 
 
 def _references(rel: str, source: str) -> _References:
@@ -1342,6 +1605,7 @@ def _references(rel: str, source: str) -> _References:
     fail-closed direction here.
     """
     tree = ast.parse(source, filename=rel)
+    assignments = _assignments(tree)
     package = _package_parts(rel)
     modules: set[str] = set()
     submodules: set[tuple[str, str]] = set()
@@ -1374,7 +1638,7 @@ def _references(rel: str, source: str) -> _References:
             if DOTTED_NAME_RE.match(node.value) or PY_PATH_RE.match(node.value):
                 literals.add(node.value)
         elif isinstance(node, ast.Call):
-            scan = _directory_scan(node)
+            scan = _directory_scan(node, assignments)
             if scan is not None:
                 scans.append(scan)
             dynamic = _dynamic_call_target(node)
@@ -1394,6 +1658,7 @@ def _references(rel: str, source: str) -> _References:
         unnamed=tuple(sorted(unnamed)),
         literals=frozenset(literals),
         scans=tuple(scans),
+        assignments=assignments,
     )
 
 
@@ -1424,6 +1689,8 @@ class ImportGraph:
     prefixes: Mapping[str, tuple[str, ...]]
     referrers: Mapping[str, frozenset[str]]
     literals: Mapping[str, frozenset[str]]
+    #: Unplaceable scans that spell `.py`, armed as readers of every covered file.
+    armed_scans: tuple[str, ...]
     unnamed: tuple[str, ...]
     unreadable: tuple[str, ...]
 
@@ -1502,6 +1769,7 @@ def build_import_graph(root: Path) -> ImportGraph:
     prefixes: dict[str, set[str]] = {}
     literals_by_file: dict[str, frozenset[str]] = {}
     scans_by_file: dict[str, tuple[_Scan, ...]] = {}
+    assignments_by_file: dict[str, Mapping[str, ast.expr]] = {}
     unnamed: list[str] = []
     for rel in files:
         try:
@@ -1537,6 +1805,7 @@ def build_import_graph(root: Path) -> ImportGraph:
         imports[rel] = targets
         literals_by_file[rel] = refs.literals
         scans_by_file[rel] = refs.scans
+        assignments_by_file[rel] = refs.assignments
         for prefix in refs.prefixes:
             prefixes.setdefault(prefix, set()).add(rel)
         unnamed.extend(refs.unnamed)
@@ -1562,16 +1831,29 @@ def build_import_graph(root: Path) -> ImportGraph:
     # `.py` it joins the printed limit list, because the alternative (treating every
     # unplaceable scan as a reader of the whole program) was measured to select 654
     # of 724 tests for ANY change and take the scoping win to zero.
+    armed_scans: list[str] = []
     for rel, scans in scans_by_file.items():
+        assignments = assignments_by_file.get(rel, {})
         for scan in scans:
-            targets, unplaced = _scan_targets(scan, rel, root, files)
+            targets, unplaced = _scan_targets(scan, rel, root, files, assignments)
             for target in targets:
                 referrers.setdefault(target, set()).add(rel)
-            if unplaced:
-                unnamed.append(
-                    f"{rel}:{scan.lineno}: a `{scan.pattern}` directory scan whose "
-                    "directory the graph cannot resolve"
-                )
+            if not unplaced:
+                continue
+            site = f"{rel}:{scan.lineno}: a `{scan.pattern}` directory scan"
+            if _looks_like_a_python_scan(scan.pattern):
+                # ARMED, not merely printed: a scan for `.py` that the graph cannot
+                # place is treated as reading every covered Python file, which is
+                # the fail-closed reading and — measured on this tree — the one that
+                # costs nothing. Round 3's blocker was a `.py` scan held behind this
+                # line's ellipsis while a one-hunk change made CI red and the local
+                # run green.
+                for target in files:
+                    if target != rel:
+                        referrers.setdefault(target, set()).add(rel)
+                armed_scans.append(site)
+            else:
+                unnamed.append(f"{site} whose directory the graph cannot resolve")
     return ImportGraph(
         files=frozenset(files),
         imports={rel: frozenset(targets) for rel, targets in sorted(imports.items())},
@@ -1579,6 +1861,7 @@ def build_import_graph(root: Path) -> ImportGraph:
         prefixes={prefix: tuple(sorted(hubs)) for prefix, hubs in sorted(prefixes.items())},
         referrers={rel: frozenset(sources) for rel, sources in sorted(referrers.items())},
         literals={rel: literals for rel, literals in sorted(literals_by_file.items())},
+        armed_scans=tuple(armed_scans),
         unnamed=tuple(sorted(unnamed)),
         unreadable=tuple(sorted(unreadable)),
     )
@@ -1810,8 +2093,9 @@ def _select_tests(
             reachable_seeds.update(named_by)
             listed = ", ".join(named_by[:3]) + (" …" if len(named_by) > 3 else "")
             notes.append(
-                f"{rel} is also named by path or module string in {len(named_by)} "
-                f"file(s) ({listed}), so those are selected too"
+                f"{rel} is also named by path or module string, or read by a "
+                f"scan, in {len(named_by)} file(s) ({listed}), so those are "
+                "selected too"
             )
             # A conftest that names the file is a namer pytest will RUN, but it is
             # not in the test universe and nothing imports it, so seeding on it
@@ -1849,6 +2133,7 @@ class ScopePlan:
 
     decisions: Mapping[str, ScopeDecision]
     unnamed: tuple[str, ...] = ()
+    armed_scans: tuple[str, ...] = ()
     graph_files: int = 0
     graph_seconds: float = 0.0
 
@@ -1879,13 +2164,27 @@ class ScopePlan:
             # section exists to avoid, so it is printed whenever a TEST
             # selection was narrowed on the strength of the graph. Summarised by
             # FILE: the sites are a dozen-plus and the file list is what a
-            # reader checks against the change they are making.
+            # reader checks against the change they are making. The count of
+            # files NOT shown is printed too — the round-3 blocker hid the reader
+            # that mattered behind a bare ellipsis (round 3, MINOR 2).
             files = sorted({site.split(":", 1)[0] for site in self.unnamed})
-            shown = ", ".join(files[:6]) + (", …" if len(files) > 6 else "")
+            shown = ", ".join(files[:6])
+            hidden = f", +{len(files) - 6} more not shown" if len(files) > 6 else ""
             lines.append(
                 f"- selection limit: {len(self.unnamed)} site(s) across "
                 f"{len(files)} file(s) load or read their target at run time, so the "
-                f"graph cannot see it: {shown}"
+                f"graph cannot see it: {shown}{hidden}"
+            )
+        if narrowed_tests and self.armed_scans:
+            # ARMED is not the same as disclosed, and the reader is entitled to
+            # know which of the two they are looking at.
+            files = sorted({site.split(":", 1)[0] for site in self.armed_scans})
+            shown = ", ".join(files[:6])
+            hidden = f", +{len(files) - 6} more not shown" if len(files) > 6 else ""
+            lines.append(
+                f"- armed reads: {len(self.armed_scans)} scan(s) across {len(files)} "
+                f"file(s) spell `.py` and name no directory the graph can place, so "
+                f"every covered Python file is treated as read by them: {shown}{hidden}"
             )
         return lines
 
@@ -2046,9 +2345,11 @@ def scope_plan(jobs: Sequence[str], paths: Sequence[str], root: Path) -> ScopePl
             (f"{len(selected)} of {len(universe)} test files{share}", *notes),
         )
     unnamed = graph.unnamed if graph is not None and not graph_reasons else ()
+    armed = graph.armed_scans if graph is not None and not graph_reasons else ()
     return ScopePlan(
         decisions=decisions,
         unnamed=unnamed,
+        armed_scans=armed,
         graph_files=len(graph.files) if graph is not None else 0,
         graph_seconds=graph_seconds,
     )
