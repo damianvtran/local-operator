@@ -1,4 +1,5 @@
-"""A command an agent ran may not open a session of its own.
+"""A command an agent ran may not open a session of its own — unless the session
+that ran it may delegate.
 
 The incident this answers (2026-09-18): a `coder` subagent owed a review round
 on PR #1281, held no `task` tool — a role that does not delegate runs one level
@@ -13,26 +14,43 @@ every test the store applies — an ordinary conversation directory with no
 badge, as a chat they had opened. These tests pin both halves of the fix: the
 refusal and the routes it names, and the origin stamp that keeps the documented
 escape hatch for real-CLI testing from being a silent one.
+
+They also pin the 2026-09-19 relaxation, which is a DIFFERENCE between the two
+entry points and would otherwise read as an oversight: a DELEGATING shell (one
+whose live inventory holds `task`) may open `exec` sessions, because that is how
+an agent told to fully delegate work reaches the shape a `task` child cannot be
+— a separate, long-lived top-level session; the interactive path stays refused
+for EVERY agent shell, because an agent has no terminal and that path opens a
+front end on the operator's screen rather than a session. An allowed `exec` is
+stamped exactly as an escaped one is, and that stamp is now the ONLY thing
+keeping it out of the picker, the sidebar and the phone list.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from local_operator.agent_shell import (
     AGENT_SHELL_ENV,
     ALLOW_NESTED_SESSION_ENV,
+    MAY_DELEGATE_ENV,
+    exec_session_refusal,
     in_agent_shell,
+    interactive_session_refusal,
+    may_delegate_from_shell,
     nested_session_allowed,
-    nested_session_refusal,
     refusal_message,
-    stamp_escaped_session,
+    stamp_agent_shell_session,
 )
 from local_operator.cli import main as cli_main
+from local_operator.harness.types import AbortSignal, ToolContext, ToolResult
 from local_operator.resume import (
     ORIGIN_AGENT_SHELL,
     ORIGIN_NAME,
@@ -40,6 +58,7 @@ from local_operator.resume import (
     session_origin,
 )
 from local_operator.session.session import Session
+from local_operator.tools import builtin
 
 
 @pytest.fixture
@@ -54,13 +73,28 @@ def escaped(monkeypatch: pytest.MonkeyPatch, in_agent: None) -> None:
     monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
 
 
+@pytest.fixture
+def delegating(monkeypatch: pytest.MonkeyPatch, in_agent: None) -> None:
+    """An agent shell whose session HOLDS `task` — the other allowed shape.
+
+    Set the way the `bash` tool sets it (from the session's live inventory), so a
+    guard test reaches the allowance without standing up a real manager session.
+    The derivation itself is pinned separately, against a real child.
+    """
+    monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
+
+
 # --- the predicate and the message -------------------------------------------
 
 
 def test_without_the_marker_a_session_may_be_opened() -> None:
     """The operator's own terminal is the normal case and is untouched."""
     assert in_agent_shell() is False
-    assert nested_session_refusal() is None
+    # BOTH entry points: with no marker there is nothing for the allowance or the
+    # asymmetry to act on, which is why this pair is the baseline the rest is
+    # measured against.
+    assert exec_session_refusal() is None
+    assert interactive_session_refusal() is None
 
 
 def test_the_marker_refuses_and_names_what_to_do_instead(in_agent: None) -> None:
@@ -74,8 +108,15 @@ def test_the_marker_refuses_and_names_what_to_do_instead(in_agent: None) -> None
     which holds it (review rounds 1 and 2, F3 and R2-2). The escape hatch is the
     one thing the text must NOT name — see the next test.
     """
-    message = nested_session_refusal()
+    message = exec_session_refusal()
     assert message is not None
+    # ONE message for both readers. The sentence was reworded for the
+    # relaxation's sake from "a `lop` invocation" to "this `lop` invocation":
+    # a delegating session reaching the INTERACTIVE path now reads a text that
+    # must not claim the CLI is closed to it, when `exec` is in fact open to it.
+    # Pinning the equality is what stops the two entry points drifting into two
+    # texts (the same defect, one level up).
+    assert message == interactive_session_refusal()
     assert "top-level" in message
     assert "`task`" in message
     assert "`hub`" in message
@@ -114,21 +155,47 @@ def test_the_exec_doc_quotes_the_refusal_byte_for_byte() -> None:
 
 
 def test_the_refusal_does_not_teach_the_bypass(in_agent: None) -> None:
-    """The escape is for the human and for a documented QA run, not the model.
+    """NEITHER marker is named: the escape is for the human, not the model.
 
     The text exists to route the reader to `task`/`hub`/`wake`; naming the
     variable that switches the rule off would hand the reader it was written
-    for the one thing it must not do.
+    for the one thing it must not do. The delegation allowance is in the same
+    class for a sharper reason — a reader told how the second route is spelled
+    could go looking for a shell that carries it, which is the guard talking
+    itself out of the job twice over.
     """
-    message = nested_session_refusal()
+    message = exec_session_refusal()
     assert message is not None
     assert ALLOW_NESTED_SESSION_ENV not in message
+    assert MAY_DELEGATE_ENV not in message
 
 
 def test_the_escape_allows_the_run(in_agent: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ONE thing that waives both entry points, for a pty QA harness."""
     monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
     assert nested_session_allowed() is True
-    assert nested_session_refusal() is None
+    assert exec_session_refusal() is None
+    assert interactive_session_refusal() is None
+
+
+def test_the_allowance_is_read_from_the_marker_alone(
+    in_agent: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent means NO, and the rest of the spellings match the marker's.
+
+    Absent is the case that carries the weight: it is what a child built by an
+    older runtime, a command that scrubbed its own environment, and a tool double
+    with no context all look like, and every one of them must be refused rather
+    than admitted.
+    """
+    monkeypatch.delenv(MAY_DELEGATE_ENV, raising=False)
+    assert may_delegate_from_shell() is False
+    for value in ("1", "true", "yes", "on", "TRUE"):
+        monkeypatch.setenv(MAY_DELEGATE_ENV, value)
+        assert may_delegate_from_shell() is True
+    for value in ("", "0", "off", "no", "maybe"):
+        monkeypatch.setenv(MAY_DELEGATE_ENV, value)
+        assert may_delegate_from_shell() is False
 
 
 # --- the CLI: exec ------------------------------------------------------------
@@ -158,6 +225,41 @@ def test_exec_from_an_agent_shell_never_reaches_the_runner(
     err = capsys.readouterr().err
     assert "exec failed:" in err
     assert "`task`" in err
+
+
+@pytest.mark.parametrize("extra", [["--background"], []])
+def test_exec_from_a_delegating_agent_shell_reaches_the_runner(
+    delegating: None, monkeypatch: pytest.MonkeyPatch, extra: list[str]
+) -> None:
+    """The 2026-09-19 relaxation: a session holding `task` may open sessions.
+
+    This is the case the operator asked for — an agent told to fully delegate
+    work, or to fan out a large number of long-lived workstreams, needs real
+    top-level sessions, and a `task` child (one prompt, then gone) is not that.
+
+    Asserted by observing the RUNNER, for the same reason the refusal case is:
+    an exit code alone cannot distinguish "allowed" from "refused after doing
+    nothing". The foreground arm additionally stubs the two preflight steps the
+    refusal case never reaches — which is worth noticing, because it means a
+    change that moved the preflight ABOVE the guard would leave the refusal test
+    green and only this one red.
+    """
+    seen: list[object] = []
+    monkeypatch.setattr(
+        "local_operator.exec_mode.run_exec", lambda command, args: seen.append(command) or 0
+    )
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry",
+        lambda args: ("test", "test-model"),
+    )
+    monkeypatch.setattr("local_operator.cli._preflight_api_key", lambda *a, **k: None)
+    monkeypatch.setattr("local_operator.cli.setup_cross_platform_environment", lambda: None)
+    monkeypatch.setattr(
+        "sys.argv", ["local-operator", "exec", *extra, "--profile", "reviewer", "review it"]
+    )
+
+    assert cli_main() == 0
+    assert seen == ["review it"], "the guard let the run through to the runner"
 
 
 def test_exec_status_is_not_a_session_and_still_reads(
@@ -207,6 +309,31 @@ def test_the_interactive_path_refuses_before_building_a_session(
     assert not (Path(os.environ["HOME"]) / ".local-operator").exists()
 
 
+def test_the_interactive_path_refuses_a_delegating_shell_too(
+    delegating: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The asymmetry, pinned where it would otherwise read as an oversight.
+
+    An agent has no terminal, so this path opens a front end on the OPERATOR's
+    screen — not the separate top-level session the relaxation is about. Both
+    markers are set here, which is the point: the allowance must not leak from
+    the entry point it was granted for. Driven against the factory, like the
+    non-delegating case, so "refused" means no session was built rather than no
+    exit code was printed.
+    """
+    built: list[object] = []
+    monkeypatch.setattr(
+        "local_operator.session_factory.create_session",
+        lambda *a, **k: built.append((a, k)) or _explode(),
+    )
+    monkeypatch.setattr("local_operator.cli.setup_cross_platform_environment", lambda: None)
+    monkeypatch.setattr("sys.argv", ["local-operator"])
+
+    assert cli_main() == 1
+    assert built == []
+    assert "`task`" in capsys.readouterr().err
+
+
 def _explode() -> None:
     raise AssertionError("a session was built where the guard should have refused")
 
@@ -240,19 +367,24 @@ def test_the_interactive_path_honours_the_escape(
 # --- the two environments around the marker ----------------------------------
 
 
-def test_a_front_end_opening_a_conversation_drops_the_marker(in_agent: None) -> None:
+def test_a_front_end_opening_a_conversation_drops_the_marker(delegating: None) -> None:
     """`/fork`, a notification click and a restart are the USER's gestures.
 
     They re-exec `lop --resume` with the session's own environment, so the child
     would inherit the answer to a question about its parent and the window would
     die on the refusal. Everything else in the environment rides along: this
-    helper drops one key, and a copy that also dropped PATH would break the
+    helper drops two keys, and a copy that also dropped PATH would break the
     spawn in a way no assertion here would notice.
+
+    BOTH markers, and the allowance is the half that matters now: the new window
+    is a SESSION, so it must not be handed its parent's permission — a child that
+    later ran `lop exec` would be admitted on an allowance nobody granted IT.
     """
     from local_operator.agent_shell import without_agent_shell_marker
 
     stamped = without_agent_shell_marker(os.environ)
     assert AGENT_SHELL_ENV not in stamped
+    assert MAY_DELEGATE_ENV not in stamped
     assert stamped.get("PATH") == os.environ.get("PATH")
 
 
@@ -277,7 +409,7 @@ def test_a_harness_declares_itself_to_its_children() -> None:
 
 
 def test_the_click_rungs_do_not_hand_a_child_the_marker(
-    in_agent: None, monkeypatch: pytest.MonkeyPatch
+    delegating: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The CALLERS, not just the helper (review round 2, F4).
 
@@ -333,7 +465,8 @@ def test_the_click_rungs_do_not_hand_a_child_the_marker(
     assert launched, "the desktop rung must have launched something"
     for env in (*backend.envs, *launched):
         assert AGENT_SHELL_ENV not in env
-        # The strip drops ONE key: a copy that also dropped PATH would break the
+        assert MAY_DELEGATE_ENV not in env
+        # The strip drops TWO keys: a copy that also dropped PATH would break the
         # spawn in a way no assertion here would otherwise notice.
         assert env.get("PATH") == os.environ.get("PATH")
 
@@ -478,7 +611,7 @@ def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Pa
     keeps it out of the picker, the sidebar and the phone's list.
     """
     directory = tmp_path / "sessions" / "abc123"
-    assert stamp_escaped_session(directory, created_here=True) is True
+    assert stamp_agent_shell_session(directory, created_here=True) is True
     assert session_origin(directory) == ORIGIN_AGENT_SHELL
     assert is_user_session(directory) is False
     # Distinct from a `task` child's stamp: this session carries no parent job
@@ -486,10 +619,31 @@ def test_an_escaped_run_is_marked_as_machine_started(escaped: None, tmp_path: Pa
     assert json.loads((directory / ORIGIN_NAME).read_text()) == {"origin": ORIGIN_AGENT_SHELL}
 
 
+def test_an_allowed_delegating_run_is_marked_as_machine_started(
+    delegating: None, tmp_path: Path
+) -> None:
+    """The relaxation's seatbelt, and the reason it is not a hole.
+
+    An allowed `lop exec` is not an exotic route any more — an agent reaches it
+    by following the guide — so if the stamp had stayed attached to the escape
+    hatch alone, a manager fanned out to five workstreams would refill the
+    operator's sidebar with five chats they never opened. That is the original
+    incident, reproduced through the route this change opens.
+
+    Same VALUE and the same predicate as the escaped case, on purpose: a reader
+    asking "did a command from an agent's shell open this?" must not have to
+    check which route did it.
+    """
+    directory = tmp_path / "sessions" / "abc124"
+    assert stamp_agent_shell_session(directory, created_here=True) is True
+    assert session_origin(directory) == ORIGIN_AGENT_SHELL
+    assert is_user_session(directory) is False
+
+
 def test_an_ordinary_run_is_not_marked(tmp_path: Path) -> None:
     """The operator's own `lop exec` keeps its plain user-session shape."""
     directory = tmp_path / "sessions" / "def456"
-    assert stamp_escaped_session(directory, created_here=True) is False
+    assert stamp_agent_shell_session(directory, created_here=True) is False
     assert not (directory / ORIGIN_NAME).exists()
     assert is_user_session(directory) is True
 
@@ -507,7 +661,28 @@ def test_a_directory_this_call_did_not_create_is_never_re_marked(
     existing.mkdir(parents=True)
     (existing / "transcript.jsonl").write_text("the operator's work\n")
 
-    assert stamp_escaped_session(existing, created_here=False) is False
+    assert stamp_agent_shell_session(existing, created_here=False) is False
+    assert not (existing / ORIGIN_NAME).exists()
+    assert is_user_session(existing) is True
+
+
+def test_a_resumed_conversation_is_never_re_marked_for_a_delegating_shell(
+    delegating: None, tmp_path: Path
+) -> None:
+    """`--resume` is the operator's conversation however the shell is allowed.
+
+    The delegating route makes this case LIKELIER than the escape did: a manager
+    told to fan work out may reasonably `--resume` a session it opened earlier,
+    and hiding a chat the operator has used because a manager touched it is the
+    mirror of the bug the stamp exists for. `created_here` is what carries that,
+    and it is asserted here for the route the relaxation added rather than
+    assumed to follow from the escaped one.
+    """
+    existing = tmp_path / "sessions" / "the-managers-session"
+    existing.mkdir(parents=True)
+    (existing / "transcript.jsonl").write_text("a conversation\n")
+
+    assert stamp_agent_shell_session(existing, created_here=False) is False
     assert not (existing / ORIGIN_NAME).exists()
     assert is_user_session(existing) is True
 
@@ -672,6 +847,274 @@ async def test_an_adopted_id_that_already_existed_is_left_to_its_owner(
         await session.dispose()
 
 
+# --- the allowance's source and its writer -----------------------------------
+
+
+def _tool_names(session: Session) -> set[str]:
+    """The live inventory, which is what "may this session delegate" means."""
+    return {tool.name for tool in session._tools}
+
+
+@pytest.mark.asyncio
+async def test_the_factory_stamps_the_session_an_allowed_delegating_run_opens(
+    delegating: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The relaxation's route through the real FACTORY, not through the helper.
+
+    The helper is pinned above; this is the wiring, and the two are different
+    failures — a stamp that stopped being CALLED on the delegating route would
+    leave the sidebar listing manager-spawned chats while every helper-level
+    assertion stayed green. Same shape as the escaped case one section up, which
+    exists for the same reason (round 2, F1).
+    """
+    session = await _factory_session(tmp_path, monkeypatch)
+    assert isinstance(session, Session)
+    try:
+        directory = session._transcript.directory
+        assert session_origin(directory) == ORIGIN_AGENT_SHELL
+        assert is_user_session(directory) is False
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_context_derives_may_delegate_from_the_live_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`task` present is the answer, and the LAUNCHER is not — asserted together.
+
+    Those two are easy to confuse and the confusion is expensive: the context
+    carries `subagent_launcher` on EVERY session, including a child whose role
+    had `task` pruned, so a guard that read the launcher would hand every
+    non-delegating reviewer and coder the permission this relaxation limits to
+    sessions holding `task`. Driven through `self._tools`, the one attribute both
+    `harness.subagent`'s prune and `Session._filter_declared` write, so this
+    fails if either the pruning or the derivation moves.
+    """
+    session = await _factory_session(tmp_path, monkeypatch)
+    assert isinstance(session, Session)
+    try:
+        assert "task" in _tool_names(session), "a root session holds `task` to delegate with"
+        assert session._build_tool_context().may_delegate is True
+        # The pruned shape, produced the way the prune produces it.
+        session._tools = [tool for tool in session._tools if tool.name != "task"]
+        context = session._build_tool_context()
+        assert context.may_delegate is False
+        assert (
+            context.subagent_launcher is not None
+        ), "the launcher survives the prune, which is exactly why it is not the signal"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_both_poles_of_the_allowance_through_the_real_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `coder` child reads False and a `manager` child reads True, for real.
+
+    `_build_child_session` is where a role's allowance becomes an inventory, so
+    it is the only place that can prove the two agree; a hand-edited `_tools`
+    list (the test above) pins the derivation, and this pins its SOURCE. Both the
+    field and the inventory are asserted, deliberately: a field that stopped
+    agreeing with the tools the model is actually offered would otherwise pass on
+    the strength of the other pole's assertion alone.
+
+    The PROFILE is resolved the way `run_subagent` resolves it and passed in,
+    because that is the contract `_construct_child_session` states — and the
+    difference is visible: with no profile the prune takes the role-less branch
+    and an inheriting child keeps whatever its parent held, so a probe that
+    forgot `profile=` here would report `True` for both roles and pin nothing.
+    """
+    from local_operator.harness.subagent import _build_child_session, _resolve_role
+
+    parent = await _factory_session(tmp_path, monkeypatch)
+    assert isinstance(parent, Session)
+    try:
+        for role, expected in (("coder", False), ("manager", True)):
+            profile = _resolve_role(role, parent)
+            assert profile is not None, f"the packaged {role} starter must resolve"
+            assert profile.may_delegate is expected, "the role is the premise of the prune"
+            child = await _build_child_session(
+                label=f"probe-{role}",
+                prompt="do a thing",
+                parent_session=parent,
+                model_spec=None,
+                job_id=f"probe-job-{role}",
+                agent=role,
+                profile=profile,
+            )
+            try:
+                assert (
+                    "task" in _tool_names(child)
+                ) is expected, f"the {role} role's inventory is the premise of the field"
+                assert child._build_tool_context().may_delegate is expected
+            finally:
+                await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+def _stdout_block(result: ToolResult) -> str:
+    """The stdout section of a tool result, without the wrapper or the exit line."""
+    assert not result.is_error, result.text
+    text = result.text
+    start = text.find("--- stdout ---")
+    end = text.find("--- stderr ---")
+    return text[start + len("--- stdout ---") : end if end > start else None]
+
+
+#: A command that asks the GUARD what it thinks, in the child itself. Reading the
+#: variable's raw value would answer a weaker question now that the writer signs
+#: it in three arms — an empty `= ` and an absent name are the same verdict, and
+#: only the reader can say so.
+_READER_PROBE = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
+    "from local_operator.agent_shell import may_delegate_from_shell as m; print(m())"
+)
+
+#: Three reads of the CHILD's own state, because they are three questions and the
+#: middle one is what R2-1 turned on:
+#:
+#: * ``RAW`` — the marker's raw value, ``<ABSENT>`` when the name is not in the
+#:   child's environment AT ALL. An empty value and an absent name are the same
+#:   VERDICT (see `_READER_PROBE`) and opposite DISCLOSURES, and only this read
+#:   answers the disclosure.
+#: * ``NO_ENV_CHILD`` — the same read taken from a GRANDCHILD spawned with no
+#:   ``env=``, which is the shape `exec_mode`'s detached ``--background`` worker
+#:   uses. It proves the chain the fix has to hold one hop further down: a
+#:   worker that inherits its parent's environment inherits the CLEARED answer,
+#:   not the allowance.
+#: * ``GUARD`` — the verdict `may_delegate_from_shell` reaches in that child, so
+#:   a test cannot pass on the injection dict while the policy between the dict
+#:   and the child disagrees with it.
+_ENV_PROBE_SOURCE = """
+import os, subprocess, sys
+from local_operator.agent_shell import MAY_DELEGATE_ENV as k, may_delegate_from_shell as m
+
+v = os.environ.get(k)
+print("RAW=" + ("<ABSENT>" if v is None else repr(v)))
+_nested = "import os;v=os.environ.get({k});print('<ABSENT>' if v is None else repr(v))"
+child = subprocess.run(
+    [sys.executable, "-c", _nested.format(k=repr(k))], capture_output=True, text=True
+)
+print("NO_ENV_CHILD=" + child.stdout.strip())
+print("GUARD=" + str(m()))
+"""
+_ENV_PROBE = f"{shlex.quote(sys.executable)} -c " + shlex.quote(_ENV_PROBE_SOURCE)
+
+
+async def _child_state(context: ToolContext | None) -> tuple[str, str, str]:
+    """(raw marker value, no-``env=`` grandchild's value, guard verdict) in the child."""
+    result = await builtin.execute_bash(
+        "bash-allow", {"command": _ENV_PROBE}, AbortSignal(), None, context
+    )
+    lines = dict(line.split("=", 1) for line in _stdout_block(result).strip().splitlines())
+    return lines["RAW"], lines["NO_ENV_CHILD"], lines["GUARD"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["inherit", "allowlist"])
+async def test_the_bash_tool_signs_the_allowance_where_the_guard_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """`execute_bash` is the ONE writer of the second marker, in THREE arms, in
+    both `shell_env` modes.
+
+    Each arm is a different bug, and the third is the one round 2 found a naive
+    writer creating:
+
+    * HELD — the session holds `task`. The child gets ``1``, and so the guard in
+      the `lop` it starts admits it: without this arm the fix would be a blanket
+      deny.
+    * INHERITED, NOT HELD (R1-1) — the ``bash`` child's environment starts as a
+      copy of this process's own in the default ``inherit`` mode, so a writer that
+      only SET the variable leaves a session reading ``True`` on an allowance
+      nobody granted it. Not hypothetical: an allowed `lop exec` runs `lop` — and,
+      for `--background`, a detached worker spawned with no ``env=`` — as a child
+      of the shell that carries the marker. Hence the assertion on BOTH the raw
+      value and the no-``env=`` grandchild: the clear has to be what a worker
+      inherits, not just what the immediate child sees.
+    * NEVER HAD IT, NOT HELD (R2-1) — the name must be ABSENT, not empty. The
+      marker's NAME is the mechanism, which is why `agent_shell.refusal_message`
+      never names it; writing the empty value unconditionally would export the
+      spelling into every ``bash`` child, and a `coder`-shaped session running
+      `env` is then one inference from `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop
+      exec`. An absent name is also a verdict the guard already reaches
+      (``_on(get(k, ""))``), so nothing is lost by omitting it — and this is the
+      arm a test written against the guard's verdict alone cannot see.
+
+    Both `shell_env` modes, because the policy sits between the injection dict
+    and the child: in `allowlist` the marker is named back in `inherit` on
+    purpose, which is the shape where the policy's own re-grant is what the
+    injection has to beat. Driven over the real handler and the real interpreter,
+    and every answer is read from the child itself.
+    """
+    from local_operator.tools import shell_env
+
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=mode, inherit=(MAY_DELEGATE_ENV,) if mode == shell_env.MODE_ALLOWLIST else ()
+    )
+    monkeypatch.setattr(shell_env, "load_policy", lambda: policy)
+
+    def context_allowing(allowed: bool) -> ToolContext:
+        return ToolContext(cwd=str(tmp_path), may_delegate=allowed)
+
+    # NEVER HAD IT: the name is absent from the child AND from the worker it
+    # spawns, and both read "no".
+    monkeypatch.delenv(MAY_DELEGATE_ENV, raising=False)
+    assert await _child_state(context_allowing(False)) == ("<ABSENT>", "<ABSENT>", "False")
+
+    # HELD: signed `1`, all the way down.
+    assert await _child_state(context_allowing(True)) == ("'1'", "'1'", "True")
+
+    # INHERITED, NOT HELD: cleared — a clear, not a blanket deny, so the same
+    # inherited value is still honoured when the context says the session holds
+    # `task`.
+    monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
+    assert await _child_state(context_allowing(False)) == (
+        "''",
+        "''",
+        "False",
+    ), "an inherited allowance must be CLEARED, not merely not re-set"
+    assert await _child_state(context_allowing(True)) == ("'1'", "'1'", "True")
+
+    # No context at all: the same call the loop makes when a host has no session.
+    # Fail closed in both directions — the (loop with no host) shape and the
+    # (inherited marker) shape read the same way, which is the point of clearing
+    # rather than merely not setting.
+    assert await _child_state(None) == ("''", "''", "False")
+    monkeypatch.delenv(MAY_DELEGATE_ENV, raising=False)
+    assert await _child_state(None) == ("<ABSENT>", "<ABSENT>", "False")
+
+
+@pytest.mark.asyncio
+async def test_a_context_without_the_field_does_not_raise(tmp_path: Path) -> None:
+    """Q1's shape, pinned: a duck-typed context is not `None`.
+
+    ``tests/e2e/test_inline_credential_e2e.py`` builds exactly this — an object
+    with the two attributes ``execute_bash`` needs and nothing else — and a bare
+    ``context.may_delegate`` made every `bash` call through it fail with an
+    ``AttributeError``, which broke two e2e tests on both CI platforms. The field
+    is read with ``getattr`` for that reason, and the FAIL-CLOSED contract covers
+    this shape as well as ``None``: no field means "may not delegate", and the
+    command still RUNS.
+    """
+
+    class _Ctx:
+        variables = None
+        cwd = str(tmp_path)
+
+    # `cast`, not a `# type: ignore`: the point of the double is that it is NOT a
+    # ToolContext, and the argument type is what the real caller passes. Casting
+    # says that out loud instead of suppressing the check that would otherwise
+    # have caught the bare attribute read for us.
+    double = cast(ToolContext, _Ctx())
+    result = await builtin.execute_bash(
+        "bash-duck", {"command": _READER_PROBE}, AbortSignal(), None, double
+    )
+    assert _stdout_block(result).strip() == "False"
+
+
 # --- a session restarting its own front end ----------------------------------
 
 
@@ -687,11 +1130,15 @@ def test_replace_self_drops_the_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, dict[str, str]] = {}
     monkeypatch.setattr(reexec, "_replace_posix", lambda argv, env: captured.update(env=env))
     monkeypatch.setenv(AGENT_SHELL_ENV, "1")
+    monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
     monkeypatch.setenv("KEEP_THIS", "yes")
 
     reexec.replace_self(reexec.make_plan(["lop"], resume_id="sess-1"))
 
     assert AGENT_SHELL_ENV not in captured["env"]
+    # Both, for the reason the helper's own docstring gives: a restarted session
+    # is a session, and the allowance it might carry is its PARENT's answer.
+    assert MAY_DELEGATE_ENV not in captured["env"]
     assert captured["env"]["KEEP_THIS"] == "yes"
 
 

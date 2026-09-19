@@ -201,3 +201,15 @@ def test_scratchpad_dir_is_none_for_an_agent_directory(tmp_path) -> None:
 
     assert session._build_tool_context().scratchpad_dir is None
     assert not (transcript_dir / "scratchpad").exists()
+
+
+# ---------------------------------------------------------------------------
+# may_delegate: DERIVED from the live tool inventory (``self._tools``), which is
+# why it is not in the table either. It is the field this module's shape of
+# failure would bite hardest — a delegating shell that reads False is REFUSED
+# with a message telling it to delegate with a tool it holds — so its derivation
+# is pinned in the guard's own suite (``tests/unit/test_agent_shell_guard.py``),
+# beside the predicate that consumes it, rather than a second time here. Recorded
+# in this file only so a reader auditing "what a host hands the Session" does not
+# have to work out whether ``may_delegate`` was missed: it is not handed at all.
+# ---------------------------------------------------------------------------

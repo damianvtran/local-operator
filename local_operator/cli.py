@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
-from local_operator.agent_shell import nested_session_refusal
+from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
@@ -8045,16 +8045,22 @@ def main() -> int:
                     return 1
                 print(json.dumps(state, ensure_ascii=False))
                 return 0
-            # A `lop` command an agent ran may not open a session of its own.
-            # What it would start is a TOP-LEVEL conversation: the operator's
-            # session list, desktop sidebar and phone history list it as a chat
-            # they opened, and it runs outside this session's job manager, so
-            # nothing here can see, steer, cancel or account for it (see
-            # `agent_shell.py` for the incident this answers). `--status`
-            # returned above, so the read-only form stays reachable, and the
-            # documented escape for QA runs is `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`
+            # A `lop` command an agent ran may not open a session of its own
+            # UNLESS the session that ran it may delegate — an agent whose
+            # inventory holds `task` is allowed to open separate top-level
+            # sessions when the user asked for them (the case this relaxation
+            # answers), while one that does not hold `task` is refused exactly
+            # as before. Deferred to `agent_shell.py` so both entry points read
+            # one rule. What such a run starts is a TOP-LEVEL conversation: the
+            # operator's session list, desktop sidebar and phone history would
+            # list it as a chat they opened, and it runs outside this session's
+            # job manager, so nothing here can see, steer, cancel or account
+            # for it — which is why an ALLOWED run is stamped `agent-shell` in
+            # `session_factory`. `--status` returned above, so the read-only
+            # form stays reachable for every shell, and the documented escape
+            # for QA runs is `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`
             # (docs/EXEC.md) — deliberately not named to the model in the text.
-            refusal = nested_session_refusal()
+            refusal = exec_session_refusal()
             if refusal is not None:
                 print(f"exec failed: {refusal}", file=sys.stderr)
                 return 1
@@ -8116,14 +8122,19 @@ def main() -> int:
         # every future interactive flag together, and it sits FIRST so a refused
         # run has written nothing: no config override, no registry row for an
         # autosave agent. It honours the SAME escape as the exec path (the rule
-        # is `nested_session_refusal`'s, in one place, on purpose), because a
-        # pty harness drives this front end exactly as a bench drives exec.
+        # is `agent_shell.py`'s, in one place, on purpose), because a pty
+        # harness drives this front end exactly as a bench drives exec — and it
+        # deliberately does NOT honour the delegation allowance that path gained
+        # (operator, 2026-09-19): an agent has no terminal, so this opens a front
+        # end on the OPERATOR's screen rather than the separate session a
+        # delegating agent was given permission to start. The refusal text is
+        # one message for both readers (see `refusal_message`).
         # What differs between the two paths is only who DROPS the marker: the
         # places a session opens a conversation for its user — the TUI restart,
         # `/fork`'s window, and both rungs of a notification click (the terminal
         # and the desktop app) — pass `agent_shell.without_agent_shell_marker`,
         # since those are the user's gestures and not an agent's command.
-        refusal = nested_session_refusal()
+        refusal = interactive_session_refusal()
         if refusal is not None:
             from local_operator.cli_style import ERROR, paint
 

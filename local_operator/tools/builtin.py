@@ -76,7 +76,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
-from local_operator.agent_shell import AGENT_SHELL_ENV
+from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
@@ -2522,6 +2522,70 @@ async def execute_bash(
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
+    # The DELEGATION ALLOWANCE rides the child environment for the same reason
+    # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
+    # that holds ``task`` is a legitimate way to open separate top-level sessions
+    # when the user asked for them, and the session guard
+    # (``local_operator/agent_shell.py``) runs in the CHILD process, so the only
+    # way it can tell that shell from one with no ``task`` to delegate with is
+    # for the answer to travel with the command. The name lives in
+    # ``agent_shell`` and this is the one writer — one name, two consumers, the
+    # same rule the marker above follows.
+    #
+    # THREE ARMS, and the third is not an oversight. ``1`` when the session
+    # holds ``task``; the EMPTY string only when the name is actually present in
+    # this process's environment and must not be inherited; otherwise the name is
+    # NOT WRITTEN AT ALL.
+    #
+    # Why the CLEAR exists: `shell_env.child_environment` starts from a copy of
+    # THIS process's environment in the default `inherit` mode, so a marker the
+    # child inherited from its own ancestors would survive a `may_delegate=False`
+    # context untouched and the session would be admitted on an allowance nobody
+    # granted it. That is not hypothetical — the allowed route creates exactly
+    # that state: an allowed `lop exec` runs `lop` (and, for `--background`, a
+    # detached worker spawned with no `env=`) as a child of the delegating shell,
+    # so the session it opens starts life with the marker set whatever its own
+    # role says. Injections are applied LAST, so this beats the inherited copy,
+    # and the guard reads the empty string as "no" (`_on("")` is False). The
+    # presence test is over ``os.environ`` rather than over the built child env on
+    # purpose: in `allowlist` mode the inherited copy is dropped by construction
+    # UNLESS the policy names the marker back in `inherit`, and when it does the
+    # name is in this process's environment too — so the test covers both modes,
+    # and a policy that re-grants an inherited value is still beaten by an
+    # injection applied last.
+    #
+    # Why the OMIT is deliberate: the marker's NAME is the whole mechanism. The
+    # guard reads its own process environment, so a shell that knows the spelling
+    # needs only `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec …` and the `lop` it
+    # starts is admitted — which is exactly why `agent_shell.refusal_message`
+    # does not name it ("a reader told how the second route is spelled could go
+    # looking for a shell that carries it"). Writing the empty value
+    # unconditionally would export the name into every ``bash`` child, including
+    # a session that may not delegate, and turn "go looking for a shell that
+    # carries it" into "read your own environment" — a self-grant one inference
+    # away from an `env` an agent runs routinely. A reader who was never told the
+    # name cannot be refused anything by an empty value that names it. This is the
+    # least-resistance check and NOT a security boundary — a model-authored
+    # command can assert the variable inline, as `docs/EXEC.md` says — so what the
+    # omit restores is the block against the accident and the path of least
+    # resistance, which is what the guard is for. Nothing is
+    # lost by omitting: an ABSENT marker and an empty one are the same verdict to
+    # `may_delegate_from_shell` (`_on(get(k, ""))`), which is the contract the
+    # name is documented with, and the arms are pinned in
+    # `tests/unit/test_agent_shell_guard.py`.
+    #
+    # FAIL CLOSED on both shapes of "no answer": `context is None` (the loop with
+    # no host) and a duck-typed context that simply lacks the field (the
+    # `tests/e2e` doubles — reading it with `getattr` rather than a bare access
+    # is what keeps a double working here at all, matching the
+    # `getattr(store, "credential_env", None)` two lines above). The refusal a
+    # missing answer produces is the cheap failure; the expensive one is a
+    # session in the operator's list that they never opened.
+    if context is not None and getattr(context, "may_delegate", False):
+        injections[MAY_DELEGATE_ENV] = "1"
+    elif MAY_DELEGATE_ENV in os.environ:
+        # Clear what this child would otherwise inherit — and only that.
+        injections[MAY_DELEGATE_ENV] = ""
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 
