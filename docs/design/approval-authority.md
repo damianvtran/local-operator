@@ -210,11 +210,19 @@ fails a test rather than a phone.
 Rows are a property of the RENDERER, not of the characters: the notice block
 wraps at its own content width — measured **40 cells** at a 44-column terminal,
 not 44 — where the command's copy renders as **12 rows** and the card's as **6**.
-The transcript's own content area at 44x20 is **11 rows** in a freshly booted app
-and **13** once the transcript fills, so the block fits at every height measured
-and nothing is clipped; the reason and the primary remedy lead the copy because
-those are the rows that survive at the narrowest of them. Both block heights are
-pinned as exact numbers in
+
+**The block does not fit at every height, and the copy's order is the reason it
+matters.** Measured at 44x20 on this head, the transcript's content area is
+**13 rows** in the pin's staging, **11 rows** in a conversation (`refusal-44x20`:
+`size [41,11] virtual [40,15]`, `scroll_y=4`, vertical bar — the 12-row block's
+first row is above the fold, so what the operator reads first is the remainder of
+the reason sentence, not its opening words), and **2 rows** with the re-armed card
+docked (`region [1,1,42,4] size [41,2] virtual [40,8] scroll_y=6`), where only a
+middle slice of the notice paints at all. So at 44 columns the operator gets the
+reason and the remedies — minus the first row — in a conversation, and gets **the
+notice's tail with the card up**, which is the frame where the card is the thing
+that has to be answered anyway and the notice's detail is recoverable once it is.
+Both block heights are pinned as exact numbers in
 `tests/unit/tui/test_approvals_ux.py::test_the_refused_card_notice_reaches_the_screen`
 (design round 3 D14 and agent R3-5 corrected a wrap-based pin that said "9 rows"
 and measured a wrapping the frame does not do; agent round 4 R4-2 corrected the

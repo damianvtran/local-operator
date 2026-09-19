@@ -476,6 +476,18 @@ def test_the_option_list_marks_without_moving_a_column(
     assert {choice.name: choice.alert for choice in owner}["auto"] is False
 
 
+def _block_shape(block: NoticeBlock) -> str:
+    """What a height outlier needs in one line (design round 4b, D20).
+
+    A height reading alone says nothing about WHICH text produced it: at 44
+    columns a 5-row block is the card's sentence without the ``not applied —``
+    correction, or an ordinary receipt — another block entirely, not a settle
+    race. The opening characters and the width distinguish those in one line
+    instead of costing the next reader a round of re-measurement.
+    """
+    return f"h={block.size.height} w={block.content_size.width} text[:32]={block._text[:32]!r}"
+
+
 @pytest.mark.asyncio
 async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> None:
     """D9's host half, on the screen, at the narrowest width the product has.
@@ -511,7 +523,7 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         # width). An exact bound rather than a comfortable one: a one-row growth
         # is the regression this pin exists for (agent review round 4, R4-2/R4-3
         # — the previous `<= 8` and `<= 13` let a row slip through).
-        assert block.size.height == 6, block.size.height
+        assert block.size.height == 6, _block_shape(block)
 
         # The command's copy is NOT what a card reader is told.
         from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
@@ -535,12 +547,15 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         ][-1]
         # 12, measured: the command's 345 characters at the same 40-cell content
         # width. The block is pinned; the AREA is not, because it is a property of
-        # what else is in the transcript — 11 rows in a freshly booted app, 13
-        # once the transcript fills (both measured at 44x20 with this notice on
-        # screen). Nothing is clipped at either height, which is why the copy
-        # leads with the reason and the primary remedy: those are the rows that
-        # survive at every height measured (agent review round 4, R4-2).
-        assert tall.size.height == 12, tall.size.height
+        # what else is in the transcript — and it does NOT always hold the block:
+        # 13 rows in this staging, 11 in a conversation (where the block's first
+        # row is above the fold), 2 with the re-armed card docked, showing only a
+        # middle slice of the notice (design round 4b, D19: the claim that it fits
+        # at every height was wider than the frames, which is the class of
+        # defect this PR exists to fix). The ORDER of the copy is what carries the
+        # narrow frames: the reason and the remedies are what a reader reaches
+        # first, and the detail is recoverable once the card is answered.
+        assert tall.size.height == 12, _block_shape(tall)
         assert OPERATOR_CAP_REQUIRED_NOTICE in tall._text
 
 
