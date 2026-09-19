@@ -71,7 +71,7 @@ def _reset_rotation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_first_attempt_actually_rotates_across_the_free_pool(
+async def test_free_pool_rotates_across_the_prefix_and_the_auto_free_band(
     tmp_path, monkeypatch
 ) -> None:
     """`round_robin` must spread the first attempt, not just the tail.
