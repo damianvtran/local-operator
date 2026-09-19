@@ -23,6 +23,13 @@ Usage:
     # Aggregate a whole run's shard artifacts into the unit manifest:
     python scripts/gen_test_durations.py --junit 'unit-xml/*.xml'
 
+    # Prefer TWO OR MORE runs. The manifest is an average when `--runs` says how
+    # many complete runs the inputs cover, and one run is not enough: a single
+    # run fitted perfectly in-sample and landed ~1.7x out of sample, while the
+    # average of two scored 1.20x on both (measured 2026-09-19).
+    python scripts/gen_test_durations.py --runs 2 \
+        --junit 'run-a/*.xml' 'run-b/*.xml'
+
 ``scripts/shard_tests.py`` consumes the output; read its module docstring for
 why the manifest is committed rather than computed at workflow time, and why a
 file missing from it still runs. The two scripts share ONE registry of the
@@ -66,16 +73,52 @@ projected minutes on every run), or after adding or removing a genuinely slow
 area of the suite.
 
 **Staleness does not stay marginal, and 2026-09-19 is the measurement that
-says so.** The unit manifest held 544 of the 721 files the shard job collects
-(177 unmeasured, 24.6%), and those unknowns were weighted at a guessed 22.4 s
+says so.** The unit manifest held 544 of the 722 files the shard job collects
+(178 unmeasured, 24.6%), and those unknowns were weighted at a guessed 22.4 s
 each -- 38% of every shard's projected load. The partition therefore reported a
-perfect 34.7 test-min for all five shards (34.7 == 34.7 == 34.7 == 34.7 ==
-34.7) while the real pytest times on run 35416005688 were 517 s / 650 s / 653 s
-/ 674 s / 1031 s: a 1.99x spread the projection could not see, because the
-guessed weight was applied to a quarter of the files and no measurement can
-correct a guess by being committed. That is the state this tool exists to fix,
-and the way to notice it is to compare the projected line against the pytest
-summary line in the same job log.
+perfect 34.8 test-min for all five shards while the real per-shard pytest times
+on run 35419790955 were 699 s / 785 s / 658 s / 780 s / 634 s. That is the
+state this tool exists to fix, and the way to notice it is to compare the
+projected line against the pytest summary line in the SAME job log.
+
+**Both manifests now come from CI, and how they were fitted is worth
+keeping.** `tests/durations.json` and `tests/durations-e2e.json` were
+regenerated from the `junit-timings-*` artifacts of two runs of the PR that
+added the second tree and the artifact -- run A `35419790955` and run B
+`35420676112` -- so the weights describe the hardware that runs the suite.
+Two decisions came out of that, both from measurement:
+
+- **The unit manifest is the AVERAGE of two runs** (`--runs 2`), because one
+  run is not enough. Fitting on A put 1.000x on A and **1.684x** on B; fitting
+  on B put **1.370x** on A and 1.000x on B; the average put 1.196x on A and
+  1.205x on B. The in-sample 1.000x is the dangerous number here -- it says the
+  partitioner did its job, not that the weights are good. The cause is that a
+  handful of files carry a quarter of the tree and they swing hard between
+  runs: `tests/unit/tui/test_settings_view.py` measured 1042.9 s in A and
+  620.4 s in B (0.59x), `test_ask_picker.py` 578.8 s then 901.6 s (1.56x),
+  against a median per-file ratio of 0.99 (p10 0.67, p90 1.30) over the 222
+  files above 5 s.
+- **The e2e manifest is a single run (A, ubuntu legs only)**, because that tree
+  does not have the problem: its per-file run-to-run ratios sit at 0.96-1.01
+  for every file above 20 s (its cost is fixed waits, not work), and the
+  two-run average actually scored WORSE on the macOS legs (1.17x against
+  1.08x). Ubuntu-only keeps the printed `~N projected test-min` comparable to
+  one leg's pytest summary line; macOS ranks the same files the same way.
+
+What a regeneration CANNOT fix is worth as much as what it can:
+
+- **The partitioner is exact on the weights it is given, and that is a weak
+  claim.** The stale manifest's split scored 1.086x on A; the current one
+  scores 1.196x / 1.205x. Most of the wall spread people will see is NOT
+  weight error: two runs of the same manifest over a near-identical tree gave
+  shard walls 634-785 s (1.24x) and 461-846 s (1.84x), with the slowest shard
+  of one the fastest of the other, and their totals within 0.4% of each other
+  (12451 s vs 12401 s). More shards divide that arithmetic without touching the
+  variance; more runs are what shrink it.
+- **Test COUNT is not a signal.** A shard with the most tests (5614) had one of
+  the shortest walls, so a per-test setup/teardown term -- the phase JUnit
+  omits -- would move weight to the wrong shard. Do not add that term without a
+  measurement showing it earns its place.
 """
 
 from __future__ import annotations
@@ -105,6 +148,15 @@ MANIFEST = TREES["unit"].manifest
 # unknown file is assumed slow so LPT places it early and scatters unknowns
 # across shards. shard_tests.py's docstring carries the numbers behind this.
 FALLBACK_QUANTILE = 0.90
+
+#: The smallest weight this tool will write, in seconds. A file whose tests all
+#: skipped measures 0.0 in JUnit, and a zero weight is WORSE than an absent
+#: one: absent files get `fallback_seconds`, whereas a zero tells the
+#: partitioner the file is free, so LPT hands it to whichever shard is up next
+#: and its import/collection cost lands somewhere untracked. The floor keeps
+#: every committed weight strictly positive, which
+#: `tests/unit/test_ci_hygiene.py` asserts rather than trusts.
+MIN_WEIGHT_SECONDS = 1.0
 
 
 def _classname_to_path(classname: str, repo: Path) -> str | None:
@@ -162,13 +214,23 @@ def build_manifest(per_file: dict[str, float]) -> dict[str, object]:
             "a file missing from this manifest still runs."
         ),
         "fallback_seconds": round(fallback, 3),
-        "durations": {k: round(v, 3) for k, v in sorted(per_file.items())},
+        "durations": {k: round(max(v, MIN_WEIGHT_SECONDS), 3) for k, v in sorted(per_file.items())},
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("--junit", nargs="+", required=True, help="JUnit XML file(s) or globs")
+    ap.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help=(
+            "how many complete runs the inputs cover; the summed per-file times "
+            "are divided by this, so the manifest stays in one run's seconds "
+            "while being an average across runs (default: %(default)s)"
+        ),
+    )
     ap.add_argument(
         "--tree",
         choices=sorted(TREES),
@@ -196,6 +258,17 @@ def main(argv: list[str] | None = None) -> int:
     if not per_file:
         ap.error("no testcases found in the supplied JUnit XML")
 
+    # Averaging across runs is the point of `--runs`: a single run's per-file
+    # numbers carry enough noise to make a partition look perfect in-sample and
+    # land ~1.7x out of sample (measured 2026-09-19 -- see WHEN TO REGENERATE),
+    # and the average of two runs scored 1.20x on BOTH. The division is what
+    # keeps the printed `~N projected test-min` comparable to one run's pytest
+    # summary line, which is the number a reader checks it against.
+    if args.runs < 1:
+        ap.error("--runs must be at least 1")
+    if args.runs > 1:
+        per_file = {k: v / args.runs for k, v in per_file.items()}
+
     # Refuse a mismatched XML rather than writing it. Every weight in a
     # manifest whose paths no file matches is dead weight: the partitioner
     # finds 0 of N files measured and schedules the whole tree at the fallback
@@ -216,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"wrote {out} for tree '{tree.name}': {len(per_file)} files, "
         f"{total / 60:.1f} test-min, fallback {manifest['fallback_seconds']}s"
+        + (f" (averaged over {args.runs} runs)" if args.runs > 1 else "")
     )
     return 0
 
