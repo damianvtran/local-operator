@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from local_operator.cli import build_cli_parser
 from local_operator.config import ConfigManager
 from local_operator.mcp import config as mcp_config
@@ -199,7 +201,53 @@ def test_search_list_states_the_chain_bands_and_the_new_vocabulary(
     # A provider that cannot serve and was never excluded is the `needs setup`
     # state: no readiness column repeats it any more (round-1 D6).
     assert "serpapi      needs setup" in table
-    # Every state word the table can print is defined in the legend under it, and
-    # there is no readiness column left to repeat the state word (round-1 D6/U5).
-    assert "States: enabled · enabled (paid) · auto free · auto best-effort" in table
+    # The legend carries the MEANINGS, not just the words (round-2 U2-5/D2-4), and
+    # there is no readiness column left to repeat the state word (round-1 D6).
+    assert "States: enabled = in your priority order" in table
+    assert "enabled (paid) = listed, and tried in the paid band after every free leg" in table
+    assert "needs setup = cannot serve yet; a listed one is still tried" in table
     assert "setup needed" not in table
+
+
+def test_order_receipt_states_where_each_named_provider_lands(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """Round-2 U2-1: "tried first" was false for a named PAID provider.
+
+    `search order` writes the priority prefix, and the resolver now hoists a paid
+    entry into the paid band -- so the receipt has to read the landing off the
+    resolver rather than promise the same thing for every id.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.credentials import CredentialManager
+
+    CredentialManager(config_dir()).set_credential("DEEPSEEK_API_KEY", "stored")
+
+    assert search_command(_args("order", "duckduckgo", "tavily")) == 0
+    free_only = capsys.readouterr().out
+    assert "Web search order: duckduckgo, tavily (tried first; any exclusion" in free_only
+    assert "paid" not in free_only
+
+    assert search_command(_args("order", "duckduckgo", "deepseek")) == 0
+    mixed = capsys.readouterr().out
+    assert "(tried first; deepseek is paid and runs after the free legs; any exclusion" in mixed
+
+    assert search_command(_args("order", "deepseek")) == 0
+    paid_only = capsys.readouterr().out
+    assert "(deepseek is paid and runs after the free legs; any exclusion" in paid_only
+    assert "tried first" not in paid_only
+
+    # And the receipt agrees with the chain the same command produced.
+    assert search_command(_args("list")) == 0
+    table = capsys.readouterr().out
+    assert "chain: " in table and "DeepSeek (paid)" in table
+
+
+def test_the_help_text_describes_both_bands(capsys) -> None:
+    """U8's help line must not promise "tried first" unconditionally either."""
+    with pytest.raises(SystemExit):
+        build_cli_parser().parse_args(["search", "--help"])
+    # argparse wraps the help line to the terminal width, so compare the sentence
+    # with its whitespace flattened rather than asserting a line break.
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Set the priority prefix (free legs tried first, paid legs run after them)" in help_text
