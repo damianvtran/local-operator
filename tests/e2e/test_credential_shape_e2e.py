@@ -37,6 +37,7 @@ import pytest
 from local_operator.harness.types import (
     AbortSignal,
     AgentToolUpdate,
+    NoticeEvent,
     TextContent,
     ToolContext,
 )
@@ -115,6 +116,8 @@ async def test_a_real_command_that_prints_a_dsn_never_reaches_the_model(
         ]
     )
     session = build_session(directory, stream, tools=[build_bash_tool()], cwd=workspace)
+    events: list[Any] = []
+    session.subscribe(events.append)
     await session.async_init()
     try:
         await session.prompt("print the environment")
@@ -127,6 +130,15 @@ async def test_a_real_command_that_prints_a_dsn_never_reaches_the_model(
 
     # 1. The request the provider was handed: no credential anywhere in it.
     assert SENTINEL_PW not in _provider_saw(stream)
+
+    # 1b. ...and the operator was TOLD, live. The incident row's whole purpose is
+    # the rotation ticket, and a row that reaches only the model is not one:
+    # measured before this wiring, the persisted row painted on no operator
+    # surface at all (design round 1, D1).
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert notices, "no live receipt for the masked credential"
+    assert notices[0].kind == "warning"
+    assert "dsn-password" in notices[0].text, notices[0].text
 
     # 2. The transcript on disk: the persistence surface, and the incident row.
     body = _transcript_text(directory)

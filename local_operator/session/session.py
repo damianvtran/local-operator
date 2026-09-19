@@ -9225,6 +9225,19 @@ class Session:
                 self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal a credential-shape incident", exc_info=True)
+            return
+        # THE LIVE RECEIPT, and the reason this method exists in the shape it
+        # does: a row written to the transcript and to the model's context is not
+        # a rotation ticket — the operator has to SEE it. Measured before this
+        # emit: the row reached the model, persisted, and painted on no operator
+        # surface at all, live or on replay.
+        #
+        # `warning` ink: a credential that reached a tool result is a state the
+        # operator has to act on, not a receipt they can skim past.
+        try:
+            await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
+        except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
+            logger.debug("could not emit the shape-incident receipt", exc_info=True)
 
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was broken is usable again.
