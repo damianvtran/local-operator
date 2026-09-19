@@ -15,6 +15,7 @@ import json
 import statistics
 import threading
 import time
+from collections.abc import Awaitable
 from typing import Any, Callable, Coroutine, cast
 
 import pytest
@@ -24,6 +25,7 @@ from local_operator.mobile.types import (
     SessionProjection,
     TranscriptEntry,
 )
+from local_operator.session.frontend_state import FrontendSubscription
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
@@ -77,7 +79,9 @@ class FakeHandle:
     def frontend_state_seed(self):  # noqa: ANN202
         return self._frontend.state
 
-    def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001, ANN202
+    def subscribe_frontend(  # noqa: ANN001, ANN202
+        self, on_update, *, display_window=False
+    ) -> FrontendSubscription | Awaitable[FrontendSubscription]:
         # `display_window` mirrors the real `Session.subscribe_frontend`, which
         # the server calls with it both at connect time and on the
         # `frontend_sync` RPC. This double accepted only the positional form, so
@@ -87,6 +91,12 @@ class FakeHandle:
         # accepted and ignored: the sync carries canonical state without a
         # display window, which is exactly the `window is None` branch
         # `_load_frontend_history` already handles.
+        #
+        # The AWAITABLE half of the return type is the server's own contract, not
+        # a loosening for tests: `_serve_frontend_sync` probes the result with
+        # `inspect.isawaitable` because a real handle may bind through a hop, and
+        # a double that needs to hold the bind open (see `_HeldBindHandle`) uses
+        # exactly that shape.
         return self._frontend.subscribe(on_update)
 
     def subscribe_events(self, on_event):  # noqa: ANN001, ANN202
@@ -3835,4 +3845,245 @@ async def test_viewer_watch_rejects_a_non_boolean_and_leaves_state_intact() -> N
         assert runtime.watching_surfaces() == frozenset({"attach"})
         writer.close()
     finally:
+        runtime.close()
+
+
+class _HeldBindHandle(FakeHandle):
+    """A handle whose canonical frontend bind waits until the test releases it.
+
+    ``FakeHandle.subscribe_frontend`` returns immediately, so the window in
+    which a real bind is genuinely IN FLIGHT — the window ``_serve_frontend_sync``
+    and the ``_SYNC_PRIORITY_OPS`` admission gate exist for — is zero, and a
+    test could say nothing about it. The gate is a ``threading.Event`` rather
+    than an ``asyncio.Event`` on purpose: the bind runs on the RUNTIME's own
+    loop thread, so releasing it from the test thread through a loop-bound
+    future would be exactly the cross-thread wakeup ``_send_to``'s guard exists
+    to refuse.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bind_gate = threading.Event()
+        self.bind_entered = threading.Event()
+
+    async def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001
+        self.bind_entered.set()
+        # Bounded, so a test that fails before releasing the gate reports an
+        # assertion rather than hanging the shard.
+        await asyncio.to_thread(self.bind_gate.wait, 10.0)
+        return self._frontend.subscribe(on_update)
+
+
+class _BoundButUnsentHandle(FakeHandle):
+    """Subscribes at once, then holds the sync frame — the delta window.
+
+    The frame-ordering invariant lives in the gap between "the subscription
+    exists" and "the frame that seeds it is on the wire". Holding the bind
+    itself cannot reach that gap — with no subscription yet, an update is simply
+    part of the capture — so this double holds AFTER subscribing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold_gate = threading.Event()
+        self.bound = threading.Event()
+
+    async def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001
+        subscription = self._frontend.subscribe(on_update)
+        self.bound.set()
+        await asyncio.to_thread(self.hold_gate.wait, 10.0)
+        return subscription
+
+
+async def _dial_frontend(
+    record: registry.SessionRecord,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Open + auth a full-TUI viewer; consume the welcome projection.
+
+    Deliberately does NOT read the ``frontend_sync``: the point of every test
+    below is what happens while that frame is still missing.
+    """
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
+    writer.write(
+        json.dumps(
+            {
+                "key": record.control_key,
+                "client": "attach",
+                "events": True,
+                "frontend_state": True,
+            }
+        ).encode()
+        + b"\n"
+    )
+    await writer.drain()
+    assert json.loads(await asyncio.wait_for(reader.readline(), timeout=5))["op"] == "projection"
+    return reader, writer
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_can_be_health_checked_and_controlled_while_its_bind_is_in_flight() -> None:
+    """The socket is usable BEFORE the sync lands — and for exactly four ops.
+
+    This is the operator's "prioritize health check and interface connection
+    requests", as a socket-level assertion. Before it, ``_on_connection`` ran
+    the frontend bind inline, so a viewer whose bind was in flight could not be
+    spoken to at all: no ``ping``, no ``steer``, no ``stop`` — and because that
+    bind takes a cross-thread hop into the app loop, a busy app loop left a live
+    idle session unreachable and its record reading ``wedged`` (measured
+    2026-09-18: no welcome within 20 s, heartbeat to 45.1 s).
+
+    The OTHER half matters as much as this one: a connection mid-bind is not yet
+    authoritative, so the heavy ops stay refused — through the ordinary error
+    frame, never by running them — and the refusal lifts the moment the bind
+    lands.
+    """
+    handle = _HeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        # HEALTH: the liveness probe every surface already speaks.
+        writer.write(json.dumps({"op": "ping", "req": 1}).encode() + b"\n")
+        await writer.drain()
+        assert (await _until(reader, "ack", 1))["detail"] == "pong"
+
+        # CONTROL: a steer is how a user corrects the turn they are watching, so
+        # it must not queue behind a snapshot.
+        writer.write(json.dumps({"op": "steer", "req": 2, "text": "correction"}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", 2)
+        assert ("steer", ("correction",), {}) in handle.calls
+
+        # A HEAVY OP IS REFUSED, not run: admitting it here would let a client
+        # act on a connection that has not been told what it is acting on.
+        writer.write(json.dumps({"op": "prompt", "req": 3, "text": "hello"}).encode() + b"\n")
+        await writer.drain()
+        refusal = await _until(reader, "error", 3)
+        assert "still connecting" in refusal["message"]
+        assert [
+            call for call in handle.calls if call[0] == "prompt"
+        ] == [], "a pre-sync prompt reached the session instead of being refused"
+
+        # AND THE REFUSAL IS NOT PERMANENT: the same op runs once the bind lands.
+        handle.bind_gate.set()
+        assert (await _until(reader, "frontend_sync"))["op"] == "frontend_sync"
+        writer.write(json.dumps({"op": "prompt", "req": 4, "text": "hello"}).encode() + b"\n")
+        await writer.drain()
+        await _until(reader, "ack", 4)
+        assert ("prompt", ("hello",), {}) in handle.calls
+    finally:
+        handle.bind_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_repaint_cannot_overtake_the_frontend_sync_that_precedes_it() -> None:
+    """A delta must never arrive before the snapshot it is a delta against.
+
+    Registration and snapshot capture were atomic on the authoritative loop
+    before this change and still are — but moving the sync into a task creates a
+    real window between "the subscription exists" and "the seeding frame is on
+    the wire", and a canonical update emitted in that window is exactly the
+    frame a follower's client refuses as a state gap (``attach_client`` raises
+    "frontend state gap" and goes cold). So the update waits in
+    ``frontend_pending`` and is flushed BEHIND the sync.
+    """
+    handle = _BoundButUnsentHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bound.wait, 5), "the bind never subscribed"
+
+        # Subscribed, snapshot captured, sync frame NOT yet on the wire: this is
+        # the window under test.
+        handle._frontend.mutate(
+            pending_gate=PendingRequest(
+                request_id="approval-1", kind="approval", title="bash", detail="echo hi"
+            ).to_json()
+        )
+        handle.hold_gate.set()
+
+        first = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+        assert first["op"] == "frontend_sync", "a repaint overtook the sync that seeds it"
+        # The waiting delta is not lost, and it arrives after the seed.
+        update = await _until(reader, "frontend_update")
+        assert update["data"]["changes"]["pending_gate"]["request_id"] == "approval-1"
+    finally:
+        handle.hold_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class _TeardownOnStopHandle(FakeHandle):
+    """A host whose ``stop`` hook closes its own runtime, like the TUI's does.
+
+    The TUI shape, in three lines: ``TuiSessionHandle.request_stop`` schedules
+    the app's teardown, the teardown closes the registrant, and the ack for the
+    ``stop`` op is still in flight on that same runtime. The ``sleep(0)`` is the
+    hop's own yield point (the TUI's is a worker thread, measured at ~1.0 s of
+    app-loop work); it is what gives the shutdown a chance to run BEFORE the ack
+    is written, which is the ordering the test below is about. Without it the
+    ack would be written in the same synchronous stretch as ``close()`` and the
+    test would pass on a tree that has no fence at all.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.runtime: RuntimeServer | None = None
+
+    async def request_stop(self) -> str:
+        assert self.runtime is not None, "the test wires the runtime in"
+        self.runtime.close()
+        # The shape of the real hop: the dispatch PARKS on work owned by another
+        # thread, so the loop gets turns in which the teardown can run to the
+        # point of dropping this connection. A bare ``asyncio.sleep(0)`` is not
+        # enough and would make this test pass on a tree with no fence at all —
+        # measured: with ``sleep(0)`` the loop ran the dispatch's resumption
+        # before the runner's teardown, so the ack went out either way.
+        await asyncio.to_thread(time.sleep, 0.05)
+        return "stopping"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_the_runtime_admitted_reaches_its_client_across_a_shutdown() -> None:
+    """A ``stop`` that tears its own runtime down must still get its ack out.
+
+    The failure this pins, measured 2026-09-19 with a trace of
+    ``_send_to``/``_shutdown_impl``/``_drop_client``: the shutdown ran at
+    +1.035 s and dropped the connection with reason ``runtime shutdown`` BEFORE
+    the ack was written, so the client read
+    ``ConnectionError('runtime closed the connection')`` and the stop ladder
+    escalated from a graceful stop that had in fact succeeded to the signal
+    rung. It only surfaced once the TUI hop stopped blocking the serving loop,
+    because that block had been (accidentally) serialising the dispatch ahead of
+    the teardown.
+    """
+    handle = _TeardownOnStopHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    handle.runtime = runtime
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        writer.write(json.dumps({"op": "stop", "req": 7}).encode() + b"\n")
+        await writer.drain()
+        reply = await _until(reader, "ack", 7)
+        assert reply["detail"] == "stopping"
+        # The hook really did tear the runtime down — the ack above is not
+        # evidence of a runtime that was never closed.
+        assert runtime._closed.is_set(), "the hook's close() must have run"
+    finally:
+        if writer is not None:
+            writer.close()
         runtime.close()
