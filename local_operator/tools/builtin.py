@@ -11545,7 +11545,7 @@ async def _browser_download(
     # later step (classification, the content-earned rename, the 0600 mode, the
     # audit rows) then treats an extension download exactly like an app-host one,
     # which is the point — the harness is the judge on both hosts.
-    intake = files.intake_landed(result.get("files") or [], directory)
+    intake = files.intake_landed(result.get("files") or [], directory, page_origin=origin)
     refused_intake: list[str] = []
     for entry in intake.refused:
         # The same two words every other refusal uses, from the same function: a

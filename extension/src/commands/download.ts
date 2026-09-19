@@ -73,6 +73,7 @@ interface ObservedItem {
   name: string;
   id: number;
   path: string;
+  referrer: string;
   bytes: number;
   totalBytes: number;
   state: string;
@@ -105,6 +106,14 @@ function reduce(item: chrome.downloads.DownloadItem, cancelled: string): Observe
     // segment, which is why `filename` can be passed whole.
     name: safeName(String(item.filename ?? "")),
     id: item.id,
+    // The page that caused this download, as Chrome reports it. Carried to the
+    // harness because the association is the one thing this API does not give us:
+    // a `DownloadItem` has no `tabId` (verified on Chrome 153.0.8010.53 — the field
+    // is simply absent from the item), so without this the harness cannot tell the
+    // transfer THIS call caused from one the user started by hand in another tab
+    // during the same window — and moving the user's own download into quarantine
+    // would be the exact outcome the approval card promised would not happen.
+    referrer: String(item.referrer ?? ""),
     path: String(item.filename ?? ""),
     bytes: Number(item.bytesReceived ?? 0),
     // -1 is this handler's own sentinel for "Chrome did not say", which the
@@ -272,14 +281,24 @@ export async function download(
 
     // A last look, so a cancellation that landed while the loop was exiting is
     // reported with the state Chrome settled on rather than the state observed
-    // before the cancel was asked for.
+    // before the cancel was asked for. BEST-EFFORT, and that is a measured
+    // correction: the first headless run had this call exceed its 5 s deadline on
+    // a loaded host and take down a command whose download had ALREADY landed — a
+    // refinement read failing must not turn a successful transfer into a reported
+    // failure, and the poll loop below has already seen everything the report
+    // needs. The fallback is the observed set, which is why the report can still
+    // name the path.
     const final = new Map<number, chrome.downloads.DownloadItem>();
-    for (const item of await deadline(
-      chrome.downloads.search({}),
-      CHROME_API_DEADLINE_MS,
-      "chrome.downloads.search(final)",
-    )) {
-      if (observed.has(item.id)) final.set(item.id, item);
+    try {
+      for (const item of await deadline(
+        chrome.downloads.search({}),
+        CHROME_API_DEADLINE_MS,
+        "chrome.downloads.search(final)",
+      )) {
+        if (observed.has(item.id)) final.set(item.id, item);
+      }
+    } catch {
+      // Nothing to add: `reduce` below falls back to the item the poll saw.
     }
 
     const files = [...observed.keys()].map((id) => {

@@ -1878,21 +1878,39 @@ from the extension at all, and both are stated where a reviewer will meet them.
 | Python: `tests/unit/browser_bridge`, `test_browser_files.py`, `tests/unit/tools/test_browser_file_*`, `tests/unit/ui_browser` | **709 pass**; the new coverage is 10 intake tests (move + original gone, cancelled partial deleted, uncorroborated NOT deleted, stale mtime, symlink entry unlinked and target kept, relative path, config-root path, duplicate name, already-in-directory, app-host item) and the three-state refusal copy plus the wire gate |
 | `gen_ts --check`, whole-tree `flake8`, `black --check`, `isort --check-only` | clean (`gen_ts --check` is what pins the regenerated `protocol.gen.ts` + `ui-vendor/` bundle) |
 | `pyright` | 0 errors on every file this PR touches; the whole-tree run reports 17 errors, all inside the `session/`+`tui/` area this worktree could not materialise (below) |
-| the headless-Chrome E2E (`/tmp/lo-dl-e2e/rig.py`, written and complete) | **BLOCKED — Chrome aborts at launch on this host.** `rc=134 (SIGABRT)` with no log, no `DevToolsActivePort` and no profile directory created, twice, with two flag sets (`--headless=new --use-mock-keychain --password-store=basic` and `--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --remote-debugging-port=9222`); `pgrep`/`pkill` themselves fail on this host (`sysmond service not found`), so the process list is not even readable. The rig is left in `/tmp` for QA to run: it isolates `HOME`/config, loads the BUILT extension with a throwaway identity and a rewritten `DEFAULT_PORT`, redirects downloads with a browser-level `Browser.setDownloadBehavior` before anything can download, and drives the real tool through the real bridge for the switch-off refusal, the switch-on download (quarantine + mode + audit + original gone), the executable-wearing-a-`.pdf` refusal, a stalled transfer, and the two switches proved independent — plus rendered PNGs of the options page in both states for the design round |
+| the headless-Chrome E2E (`/tmp/lo-dl-e2e/rig.py`: the real daemon, the real BUILT extension, Chrome 153.0.8010.53) | **RAN CLEAN, rc=0.** CASES: **(1) switches off** — the record carries `disabled_capabilities: ['download','upload']` with `switches_known: True`, `download`/`upload` are absent from `capabilities`, and both calls are refused with the switch copy (`'download' is switched off … the operator has not turned on "Allow downloads" … (No update is involved: this build can already serve it.)`), with nothing placed in the download directory; **(2) switch on** — the record gains `download`, and the page-initiated download lands: `downloaded 1 file(s) into <config>/browser/downloads/<stamp>-dl-e2e: …/receipt.pdf — 69 bytes, pdf`, the quarantine copy is `0o600`, the download directory is EMPTY afterwards (`download_dir_after: []`, so the original is gone), and the audit row reads `allow`; **(3) the executable wearing a `.pdf` name** — `nothing was saved. invoice.pdf: refused and deleted — the file at invoice.pdf is a Linux executable (ELF); nothing executable is ever kept`, download directory empty, audit row `deny`; **(4) a transfer the page never finishes** — the deadline cancels it and the report reads `the transfer was stopped (…) and the partial file is already gone`; **(5) the switches are independent** — with uploads on and downloads off the record reads `['download']`, the download is refused and the upload attaches. `leftover_chrome_processes: 0` |
+| two rig-only edits, reported in the run's own output | (i) a throwaway identity key, so this Chrome cannot share an identity with the operator's own unpacked build; (ii) `DEFAULT_PORT` rewritten to the rig's daemon, because the worker dials on startup and would otherwise reach the operator's real daemon on 4099; (iii) **`downloads` moved from `optional_permissions` to install-time `permissions`** — forced by a measurement, below: headless Chrome has no UI to answer an optional-permission prompt, so without it the ON path cannot be exercised at all. The switches themselves are still set the REAL way (`chrome.storage.local`, exactly what the options page writes), so what the edit removes is the browser's prompt, never the extension's consent gate |
 
-**What is deferred to QA, explicitly:** every E2E row above, the over-cap cancel (it
-needs a real >256 MiB stream, which is the heaviest case and the wrong thing to run on a
-host at load 200 with 43 GiB free), and the options-page design/UX rounds on rendered
-frames.
+**What is deferred to QA, explicitly:** the over-cap cancel (it needs a real >256 MiB
+stream, which is the heaviest case and the wrong thing to run on a fleet-loaded host),
+the options-page design/UX rounds on the rendered frames the rig produced
+(`/tmp/lo-dl-shots/options-{off,on}.png`), and the whole-tree Python gates: two of the
+files this change touches need `tests/unit/tools/test_browser_file_transfer.py` and
+`tests/unit/test_browser_files.py`, and on this host's memory pressure (as low as ~60 MB
+free with ~25 sessions running suites) pytest was SIGKILLed outright on every attempt,
+including single-file runs — the last end-to-end run of those files, before this
+amendment, was 709 passing, and the amendment's own logic is verified directly and by
+the E2E above.
 
 #### Still unverified
 
 * Whether Chrome's store review treats a new `optional_permissions` entry as a permission
   change for an already-published item (§12.4 E2x, answered as far as a local rig can).
-* Whether headless Chrome resolves `chrome.permissions.request` true from a real user
-  gesture — the rig would have measured it; Chrome would not start.
+* **`chrome.permissions.request` in headless Chrome: MEASURED, and it does not grant.**
+  Called from the service worker with `userGesture: true`, the promise resolves to an
+  object rather than to a boolean and `chrome.permissions.contains({permissions:
+  ['downloads']})` stays `false`; headless has no UI to answer the prompt. That is why
+  the rig grants the permission install-time (a disclosed rig-only edit) instead of
+  pretending the switch path can be driven headlessly. **The options page's own request
+  flow — the real gesture, the real prompt, and the refusal branch — is therefore NOT
+  covered by this rig** and is QA's/design's to exercise in a real browser.
 * The app host's half is untouched by this amendment: `local-operator-ui` PR B keeps its
   gate, and the switches are the EXTENSION's configuration, as the brief says.
-* The `~/Downloads` window (R7) as seen by a real user — the rig's download directory is
-  redirected, so the design's residual is stated from Chrome's documented behaviour and
-  §17.5's measurement rather than from a screen recording.
+* The `~/Downloads` window (R7) as a user sees it — the rig redirects the download
+  directory, so the residual is stated from Chrome's documented behaviour and §17.5's
+  measurement rather than from a screen recording. One artifact remains unattributed:
+  two runs found a `downloads.html (1).crdownload` file in the redirected download
+  directory that no part of the extension names (grep: no such string) and that never
+  appears in `chrome.downloads.search`, so the harness never saw or moved it. Recorded
+  because an unexplained file in a download directory is exactly the kind of thing this
+  feature must not cause — and the evidence says it is not ours.

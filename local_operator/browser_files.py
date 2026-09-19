@@ -54,6 +54,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, NamedTuple, Sequence
+from urllib.parse import urlsplit
 
 from local_operator.paths import config_dir
 
@@ -1008,6 +1009,21 @@ def _entry_stat(path: Path) -> os.stat_result | None:
         return None
 
 
+def _origin_of(url: str) -> str:
+    """``scheme://host:port`` for a URL, or ``""`` when it is not one.
+
+    Origin granularity, not the whole URL: the referrer Chrome reports is the page
+    the download was started from, and comparing full URLs would refuse a download
+    whose page moved between two paths of the same site — the comparison exists to
+    tell two DIFFERENT pages apart, and the origin is what does that here.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+
+
 def _unlink_entry(path: Path) -> bool:
     """Remove the ENTRY, never its target; ``False`` when it could not be done."""
     try:
@@ -1017,10 +1033,27 @@ def _unlink_entry(path: Path) -> bool:
         return False
 
 
+def _cancel_reason(cancelled: str, state: str) -> str:
+    """Why a transfer stopped, in the words the report and the audit row share.
+
+    One function because three call sites need the same sentence — the deleted
+    partial, the partial already gone, and the caller's own report — and a second
+    spelling is how the same fact starts reading two ways.
+    """
+    return {
+        "over_cap": f"it was cancelled after crossing the {DOWNLOAD_MAX_BYTES} byte limit",
+        "over_count": (
+            "it was cancelled after the " f"{DOWNLOAD_MAX_FILES_PER_CALL} files this call saves"
+        ),
+        "unfinished": "the transfer had not finished when the call's time ran out",
+    }.get(cancelled, f"the transfer did not complete (state {state or 'unknown'})")
+
+
 def intake_landed(
     items: Sequence[Mapping[str, Any]],
     directory: Path,
     *,
+    page_origin: str = "",
     now: float | None = None,
     window_s: float = DOWNLOAD_TIMEOUT_MAX_S + 60.0,
 ) -> IntakeOutcome:
@@ -1064,6 +1097,16 @@ def intake_landed(
     on the strength of the same corroboration. That is the half of "the original is
     gone afterwards" that no later step could do, because nothing later ever looks
     outside the quarantine root.
+
+    ``page_origin`` is the page this session is DRIVING, and it closes the one
+    association this host cannot state: a `DownloadItem` carries no `tabId`
+    (measured on Chrome 153.0.8010.53), so a download the user starts by hand in
+    another tab while a call is in flight looks exactly like the one the call
+    caused. An item whose reported referrer is a DIFFERENT origin is therefore
+    refused and left where it is — the user's own file is not ours to move, and
+    least of all to refuse. An ABSENT referrer is not a mismatch: several legitimate
+    shapes (a redirect chain, a page-initiated blob) report none, and refusing those
+    would break the feature to close a window this check can only narrow.
     """
     current = time.time() if now is None else now
     moved: list[str] = []
@@ -1103,6 +1146,22 @@ def intake_landed(
             continue
         entry = _entry_stat(source)
         if entry is None:
+            if cancelled or state != "complete":
+                # The transfer was stopped and the partial file is ALREADY gone:
+                # Chrome removes a cancelled download's `.crdownload` file itself.
+                # Measured in the first end-to-end run — the earlier copy called this
+                # "the file the host named is not there", which reads like a
+                # corroboration failure when in fact the outcome is exactly the one
+                # the operator asked for.
+                refused.append(
+                    IntakeRefusal(
+                        name,
+                        f"the transfer was stopped ({_cancel_reason(cancelled, state)}) "
+                        "and the partial file is already gone",
+                        False,
+                    )
+                )
+                continue
             refused.append(IntakeRefusal(name, "the file the host named is not there", False))
             continue
         if not stat.S_ISREG(entry.st_mode):
@@ -1133,16 +1192,23 @@ def intake_landed(
             # the per-call file count, or the deadline), so a partial file is sitting
             # in the user's download directory and this is the only step that will
             # ever look at it.
-            reason = {
-                "over_cap": f"it was cancelled after crossing the {DOWNLOAD_MAX_BYTES} byte limit",
-                "over_count": (
-                    "it was cancelled after the "
-                    f"{DOWNLOAD_MAX_FILES_PER_CALL} files this call saves"
-                ),
-                "unfinished": "the transfer had not finished when the call's time ran out",
-            }.get(cancelled, f"the transfer did not complete (state {state or 'unknown'})")
+            reason = _cancel_reason(cancelled, state)
             deleted = _unlink_entry(source)
             refused.append(IntakeRefusal(name, reason, deleted))
+            continue
+        referrer = str(raw.get("referrer") or "")
+        if page_origin and referrer and _origin_of(referrer) != _origin_of(page_origin):
+            # Not this call's download: the referrer names a page this session is not
+            # driving, so the file belongs to whoever started it. Refused WITHOUT
+            # deleting — see this function's own note on the association, and the
+            # `page_origin` parameter for why an absent referrer is not a mismatch.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the download was started by a page this session is not driving",
+                    False,
+                )
+            )
             continue
         destination = directory / name
         if destination.exists():
