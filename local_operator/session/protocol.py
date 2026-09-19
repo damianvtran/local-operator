@@ -384,9 +384,7 @@ class SessionProtocol(Protocol):
         ...
 
     # --- driving turns ----------------------------------------------------
-    async def prompt(
-        self, text: str, images: Sequence[ImageContent] | None = None
-    ) -> str | None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> str | None:
         """Run one user turn to completion (awaitable) or raise.
 
         ``images`` are attachments pasted into the prompt; they ride the same

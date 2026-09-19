@@ -749,9 +749,7 @@ async def engage_runtime(
                 # record is draining at scan time — the predecessor still holds
                 # the transcript claim, so the pass WAITS, and the spawn happens
                 # the moment that claim is released (``_lease_holder``, below).
-                logger.debug(
-                    "engage: %s is leaving (%s); a successor is owed", session_id, exc
-                )
+                logger.debug("engage: %s is leaving (%s); a successor is owed", session_id, exc)
             except (ConnectionError, TimeoutError) as exc:
                 # The runtime died between the scan and the dial. Re-loop: the
                 # record will be gone next pass and we spawn a fresh one.

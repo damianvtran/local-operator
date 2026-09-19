@@ -112,6 +112,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import drain_phrase_for_frame
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
@@ -7554,7 +7555,28 @@ class AttachedSession:
         try:
             # Loop iterations are queued prompt turns, never steering inferred
             # from a transient current-busy observation.
-            await client.send_command(command, streaming=False)
+            receipt = await client.send_command(command, streaming=False)
+            if receipt == SPOOL_RECEIPT_PROMPT:
+                # A DRAINING OWNER THAT QUEUED THE MESSAGE FOR ITS SUCCESSOR.
+                # The message is safe — the successor runs it (memo §4.2) — but
+                # THIS connection cannot observe that turn: the row it would
+                # correlate on is written by another process, after this one
+                # exits, and no ``MessageStartEvent`` for `command_id` will ever
+                # arrive here. Waiting for `completed` would park this caller
+                # until its own timeout on a turn that is not coming.
+                #
+                # So it gets the typed refusal, which is the honest answer for a
+                # caller whose contract is "the owner's actual terminal outcome":
+                # this runtime will not run it. Which departure to name comes from
+                # the phrase THIS connection already heard on the ``retiring``
+                # frame — the same evidence ``serving._retiring_refusal`` supplies
+                # on the wire, from the other side — so a build drain is told about
+                # the handover (its tail no longer sends the user to re-send the
+                # message the successor already holds) and an unplaceable one keeps
+                # the sentence that names no departure.
+                from local_operator.session.errors import RuntimeRetiring
+
+                raise RuntimeRetiring(leaving=str(getattr(client, "_drain_phrase", "") or ""))
             outcome = await completed
             if outcome.error:
                 raise RuntimeError(outcome.error)
