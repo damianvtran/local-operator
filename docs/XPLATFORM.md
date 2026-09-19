@@ -148,6 +148,25 @@ enabled and active.
   placement, DPAPI placement, the process-group reaper and the terminal driver
   are all "contract" or "gap" rows above for the same reason: there is no
   reading for them yet.
+* **Three byte-writing sites are the same shape as the `O_BINARY` fix and are
+  deliberately unpatched.** The `master.key is 33 bytes` failure had a cause --
+  on Windows `os.open` is the CRT's *text* mode unless `O_BINARY` is given, so a
+  `0x0A` handed to `os.write` lands as `0x0D 0x0A`. It is fixed at every site
+  whose payload must be byte-exact. Three are NOT: the frame writers under
+  `local_operator/evaluation/adapters/` (`supervisor.py`, `rpc.py`) build their
+  flags at the call site from a variable, and `clipboard.py`'s scratch probe
+  writes an ASCII constant with no newline in it. None of the three corrupts a
+  payload TODAY — the first two because the payloads they carry are
+  length-framed without a `0x0A` in the frame header, the third because
+  `b'blat'` cannot hold one — and none is proven safe on Windows either. They
+  are recorded here rather than patched in the same round as the measured bug,
+  so the fix that DID come from a real reading stays separable from the ones
+  that did not.
+* **`os.pipe()` is not in that list, and the difference is real rather than
+  lucky.** CPython opens pipe descriptors `_O_BINARY` itself, so the eval-worker
+  scrub channel and every other pipe in the tree are already bypassing the
+  translation that bit the file descriptors. A pipe is not a file here.
+
 
 ## Re-measuring
 
