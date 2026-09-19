@@ -360,7 +360,7 @@ def test_the_verdict_is_memoised_on_the_journal_stat(
     calls: list[Path] = []
     real = model_selection._read_test_hosting
 
-    def counted(path: Path) -> bool:
+    def counted(path: Path) -> Any:
         calls.append(path)
         return real(path)
 
@@ -416,6 +416,54 @@ def test_the_verdict_cache_is_bounded(tmp_path: Path, monkeypatch: pytest.Monkey
         assert session_uses_test_hosting(directory) is True
 
     assert len(model_selection._HOSTING_VERDICT_CACHE) == 2
+
+
+def test_a_walk_that_raised_is_not_memoised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: only an OPEN failure was exempt, and the operator's banner came back.
+
+    Reproduced as the reviewer found it. One injected ``OSError(24)`` (EMFILE —
+    a real condition under a loaded box) landed DURING the walk of a journal
+    whose newest row is ``test/test-model``; the exception was swallowed,
+    answered ``False`` and MEMOISED, so every later healthy read of the
+    byte-identical file returned that ``False`` — a mock session that stops
+    being recognised as one and banners, which is the defect this whole change
+    exists to close, served for the life of the file.
+
+    Asserted on the COUNT of real walks and on the cache's contents, not only on
+    the answer: an answer alone cannot tell a fresh walk from a stale memo, and
+    "was it cached" is exactly the property that broke.
+    """
+    from local_operator.session import model_selection
+
+    directory = _transcript_with_selection(tmp_path / "sessions" / "walkfail01", "test/test-model")
+    walks: list[Path] = []
+    real = model_selection._settled_selection
+    failing = {"armed": True}
+
+    def flaky(path: Path) -> Any:
+        walks.append(path)
+        if failing["armed"]:
+            raise OSError(24, "Too many open files")
+        return real(path)
+
+    monkeypatch.setattr(model_selection, "_settled_selection", flaky)
+    model_selection._HOSTING_VERDICT_CACHE.clear()
+
+    # The transient failure answers the tolerant direction...
+    assert session_uses_test_hosting(directory) is False
+    assert len(walks) == 1, walks
+    # ...and is NOT memoised, because it describes the moment rather than the
+    # file. This is the assertion the defect failed: the poisoned `False` was
+    # stored here and every later read was answered from it.
+    assert directory not in model_selection._HOSTING_VERDICT_CACHE
+
+    # The next healthy read WALKS AGAIN over the byte-identical journal and gets
+    # the real answer — the mock session is recognised.
+    failing["armed"] = False
+    assert session_uses_test_hosting(directory) is True
+    assert len(walks) == 2, walks
 
 
 def test_an_unreadable_or_selection_free_journal_fails_toward_notifying(tmp_path: Path) -> None:
