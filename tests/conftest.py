@@ -85,6 +85,13 @@ _AMBIENT_VARS = (
     # the allow path while looking like it tested the refusal, and a QA test
     # that meant to prove the refusal would prove nothing.
     "LOCAL_OPERATOR_ALLOW_NESTED_SESSION",
+    # The delegation allowance the guard reads beside them: set by the `bash`
+    # tool on commands run by a session that HOLDS `task`, and the second route
+    # by which an agent's shell may legitimately open a session. An inherited
+    # value is the ALLOW_NESTED_SESSION failure again — every guard test in the
+    # suite would take the allow path while looking like it tested the refusal.
+    # Tests that need it set it explicitly.
+    "LOCAL_OPERATOR_AGENT_MAY_DELEGATE",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",

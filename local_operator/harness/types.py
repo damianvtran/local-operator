@@ -1112,6 +1112,25 @@ class ToolContext(BaseModel):
     # (createIf) rather than advertised and always failing — the same
     # convention ``wake_scheduler`` uses.
     subagent_launcher: "SubagentLauncher | None" = None
+    # Whether THIS session's live tool inventory holds ``task`` — i.e. whether
+    # its role may delegate at all. DERIVED, never configured: the session sets
+    # it in ``Session._build_tool_context`` from ``self._tools``, and the
+    # ``bash`` tool turns it into ``agent_shell.MAY_DELEGATE_ENV`` for the child
+    # it spawns, which is the only way the session guard
+    # (``local_operator/agent_shell.py``) can tell a delegating shell from one
+    # with no ``task`` to delegate with. That guard reads the variable and not
+    # this field because the guard runs in a DIFFERENT process — the `lop` a
+    # command starts.
+    #
+    # ``subagent_launcher`` above is deliberately NOT the signal for that
+    # question, and the difference is the whole reason this field exists: the
+    # launcher is installed unconditionally, so a child whose ``task`` the
+    # prune removed still carries one and would be read as a delegating session
+    # if the presence of a launcher were the test. The inventory is the honest
+    # answer — a role that does not delegate has ``task`` pruned from
+    # ``self._tools`` (``harness.subagent``), and a declared inventory narrows
+    # the same list (``Session._filter_declared``).
+    may_delegate: bool = False
     # The user's persistent agent registry (``local_operator.agents``), behind
     # the ``agent`` tool and behind role resolution for ``task(agent=...)``.
     # Typed ``Any`` because that module is heavy (dill, yaml, the whole agent
