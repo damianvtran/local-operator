@@ -569,10 +569,21 @@ jobs:
         # regenerates the manifest from the run that actually suffered the
         # imbalance — no local full-suite run needed.
         #
-        # `if: always()` is deliberate: a shard that dies at the cap still has
-        # per-file timings for every test that DID complete, and that is
-        # exactly the run whose weights most need correcting. An empty or
-        # absent file is skipped by the downloader's glob.
+        # `if: always()` is deliberate, and its reach is narrower than it looks.
+        # It covers the FAILING case: an ordinary pytest failure exits 1 and
+        # still writes the XML, with `failures="1"` and per-test times for
+        # everything that ran, which is a run whose weights want correcting.
+        #
+        # It does NOT cover the case this job actually cares about. A shard
+        # killed by the `faulthandler` watchdog (tests/e2e/watchdog.py exits
+        # with `os._exit(1)`) or cancelled at the cap never reaches pytest's
+        # `sessionfinish`, and that is where the JUnit file is written -- so
+        # there is no file to upload, and `if-no-files-found: ignore` means the
+        # step reports success with an empty artifact. Verified both ways on
+        # 2026-09-19: a failing test leaves `failures="1"` in the XML, while a
+        # test that calls `os._exit(1)` (what the watchdog does) leaves no XML
+        # at all. A hung shard's timings are therefore NOT recoverable from
+        # this artifact; the weights for such a run come from a healthy one.
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -1016,9 +1027,15 @@ jobs:
             python -m pytest $(cat e2e_tests.txt | tr '\n' ' ') -m e2e -n0 -q \
               --junit-xml=junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
       - name: Upload e2e junit timings
-        # `if: always()` — a shard that tripped its watchdog still has timings
-        # for every test that completed before the hang, which is precisely the
-        # shard whose weights want correcting.
+        # `if: always()` for the FAILING case: a shard that fails an assertion
+        # exits 1 and still writes the XML, with times for every test that ran.
+        #
+        # NOT for a hang. A tripped watchdog calls `os._exit(1)`, so pytest
+        # never reaches `sessionfinish` and writes nothing -- and
+        # `if-no-files-found: ignore` then reports this step as a success with
+        # no artifact, which is how that limit would otherwise go unnoticed.
+        # Measured both ways on 2026-09-19 (see the sibling note on the unit
+        # job's upload step).
         if: always()
         uses: actions/upload-artifact@v7
         with:

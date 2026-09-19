@@ -14,10 +14,18 @@ Usage:
 
     # From JUnit XML you already have, possibly from CI -- its runs are on
     # dedicated hardware. This route needs the workflow to emit the XML, which
-    # the shard job now does (a `--junit-xml` + artifact upload per shard), so
-    # `gh run download <run> -n shard-junit-<py>-<shard>` is a legitimate
-    # source as of that step landing. Before it did, this docstring told the
-    # reader not to treat CI as an available option for exactly that reason.
+    # the shard jobs do (a `--junit-xml` + artifact upload per shard), so the
+    # artifacts are a legitimate source as of that step landing. Before it did,
+    # this docstring told the reader not to treat CI as an available option for
+    # exactly that reason.
+    #
+    # The artifact names are the ones the upload steps declare, and they are
+    # version-matrixed on the unit tree:
+    #   unit: junit-timings-<python>-<shard>      (junit-3.12-4.xml)
+    #   e2e:  junit-timings-e2e-<os>-<shard>      (junit-e2e-ubuntu-latest-2.xml)
+    # e.g.
+    #   for s in 0 1 2 3 4; do gh run download <run> -n junit-timings-3.12-$s -D u/; done
+    #   python scripts/gen_test_durations.py --tree unit --junit 'u/*.xml'
     python scripts/gen_test_durations.py --junit report.xml [more.xml ...]
 
     # Aggregate a whole run's shard artifacts into the unit manifest:
@@ -89,15 +97,28 @@ added the second tree and the artifact -- run A `35419790955` and run B
 Two decisions came out of that, both from measurement:
 
 - **The unit manifest is the AVERAGE of two runs** (`--runs 2`), because one
-  run is not enough. Fitting on A put 1.000x on A and **1.684x** on B; fitting
-  on B put **1.370x** on A and 1.000x on B; the average put 1.196x on A and
-  1.205x on B. The in-sample 1.000x is the dangerous number here -- it says the
-  partitioner did its job, not that the weights are good. The cause is that a
-  handful of files carry a quarter of the tree and they swing hard between
-  runs: `tests/unit/tui/test_settings_view.py` measured 1042.9 s in A and
-  620.4 s in B (0.59x), `test_ask_picker.py` 578.8 s then 901.6 s (1.56x),
-  against a median per-file ratio of 0.99 (p10 0.67, p90 1.30) over the 222
-  files above 5 s.
+  run is not enough. Scoring each candidate partition on the measured per-file
+  times of the same three runs (one tree, one method -- see the note below):
+  fitting on A put 1.000x on A and 1.677x on B; fitting on B put 1.377x on A
+  and 1.000x on B; the average puts 1.189x on A and 1.200x on B. The in-sample
+  1.000x is the dangerous number here -- it says the partitioner did its job,
+  not that the weights are good. The cause is that a handful of files carry a
+  quarter of the tree and they swing hard between runs:
+  `tests/unit/tui/test_settings_view.py` measured 1042.9 s in A and 620.4 s in
+  B (0.59x), `test_ask_picker.py` 578.8 s then 901.6 s (1.56x), against a
+  median per-file ratio of 0.99 (p10 0.67, p90 1.30) over the 222 files above
+  5 s.
+
+  **Score every row on the same tree, or the table means nothing.** An earlier
+  revision of this note quoted 1.086x / 1.521x for main's pre-PR manifest and
+  1.196x / 1.205x for the average: those came from different trees (before and
+  after a rebase onto a main that had added and removed test files), so they
+  were not comparable. Recomputed on one tree, main's pre-PR manifest scores
+  1.275x (A) / 1.399x (B) / 1.264x (C) and the average scores 1.189x / 1.200x /
+  1.310x -- the average is the best worst-case row, but the C column is inside
+  the noise, so the honest claim is that the regeneration buys MEASURED
+  COVERAGE (no file left at a guessed weight) and a truthful projection, not a
+  demonstrably smaller spread on any one run.
 - **The e2e manifest is a single run (A, ubuntu legs only)**, because that tree
   does not have the problem: its per-file run-to-run ratios sit at 0.96-1.01
   for every file above 20 s (its cost is fixed waits, not work), and the
@@ -108,13 +129,13 @@ Two decisions came out of that, both from measurement:
 What a regeneration CANNOT fix is worth as much as what it can:
 
 - **The partitioner is exact on the weights it is given, and that is a weak
-  claim.** The stale manifest's split scored 1.086x on A; the current one
-  scores 1.196x / 1.205x. Most of the wall spread people will see is NOT
-  weight error: two runs of the same manifest over a near-identical tree gave
-  shard walls 634-785 s (1.24x) and 461-846 s (1.84x), with the slowest shard
-  of one the fastest of the other, and their totals within 0.4% of each other
-  (12451 s vs 12401 s). More shards divide that arithmetic without touching the
-  variance; more runs are what shrink it.
+  claim.** The stale manifest's split scored 1.275x-1.399x across three runs;
+  the current one scores 1.189x / 1.200x / 1.310x on the same three. Most of
+  the wall spread people will see is NOT weight error: two runs of ONE manifest
+  over a near-identical tree gave shard walls 634-785 s (1.24x) and 461-846 s
+  (1.84x), with the slowest shard of one the fastest of the other, and their
+  totals within 0.4% of each other (12451 s vs 12401 s). More shards divide
+  that arithmetic without touching the variance; more runs are what shrink it.
 - **Test COUNT is not a signal.** A shard with the most tests (5614) had one of
   the shortest walls, so a per-test setup/teardown term -- the phase JUnit
   omits -- would move weight to the wrong shard. Do not add that term without a
@@ -206,6 +227,14 @@ def build_manifest(per_file: dict[str, float]) -> dict[str, object]:
         fallback = values[index]
     else:
         fallback = 50.0
+    # Floored exactly like the per-file weights, and for the same reason: JUnit
+    # reports 0.0 for a file whose tests all skipped, so a small or single-file
+    # input can put the p90 quantile AT zero. A zero fallback is worse than no
+    # fallback at all -- an unmeasured file then weighs nothing, LPT hands it to
+    # whichever shard is up next, and the unknowns pile onto one shard (the
+    # first) instead of being scattered. Latent with today's tree, wrong the
+    # moment a regeneration runs over a small or all-skipped input.
+    fallback = max(fallback, MIN_WEIGHT_SECONDS)
     return {
         "_comment": (
             "Per-file test durations in seconds, used ONLY as relative weights "

@@ -545,6 +545,27 @@ def _run_step(job: str) -> str:
     return steps[0]["run"]
 
 
+#: A shell command substitution: `$(cat e2e_tests.txt | tr '\n' ' ')`. Replaced
+#: by `_SUBSTITUTION_TOKEN` before the argv is split, because a naive split
+#: cannot see the shell text inside as separate arguments and `shlex` would
+#: raise on its quotes.
+_SUBSTITUTION = re.compile(r"\$\([^)]*\)")
+_SUBSTITUTION_TOKEN = "__substitution__"
+
+
+def _pytest_argv(run: str) -> list[str]:
+    """The arguments of a step's pytest invocation, substitutions included.
+
+    `pytest $(cat list.txt) tests/e2e -q` therefore yields
+    `['pytest', '__substitution__', 'tests/e2e', '-q']` -- the directory is
+    visible AS an argument. That is the whole point: an assertion that looks
+    for the substring `pytest tests/e2e` is evaded by appending the tree to a
+    correct command (`pytest $(cat list.txt) tests/e2e`), which collects the
+    list AND the whole tree, and by any reordering or extra whitespace.
+    """
+    return shlex.split(_SUBSTITUTION.sub(_SUBSTITUTION_TOKEN, run))
+
+
 def _shard_plan(job: str) -> tuple[str, int]:
     """`(tree, total)` as `job` declares them, read from ci.yml."""
     run = _shard_step_run(job)
@@ -582,6 +603,10 @@ def test_the_committed_manifest_belongs_to_the_tree_that_reads_it(job: str) -> N
     assert weights, (
         f"{tree}'s manifest is empty or unreadable; every shard would then be "
         f"balanced by the {fallback}s fallback, which measures nothing"
+    )
+    assert fallback > 0, (
+        f"{tree}'s manifest has a non-positive fallback ({fallback}); an "
+        "unmeasured file would be treated as free and pile onto the first shard"
     )
     dead = sorted(set(weights) - files)
     assert not dead, (
@@ -621,6 +646,31 @@ def test_gen_refuses_a_report_from_the_other_tree(tmp_path: Path) -> None:
 
     assert excinfo.value.code == 2, "argparse must report the mismatch as a usage error"
     assert not out.exists(), "the mismatched manifest was written anyway"
+
+
+def test_a_measured_zero_never_becomes_a_free_file_or_a_free_fallback() -> None:
+    """The floor applies to `fallback_seconds` too, not only to per-file weights.
+
+    JUnit reports 0.0 for a file whose tests all skipped, so a small input -- or
+    a regeneration over an unlucky one -- can put the p90 quantile AT zero. A
+    zero fallback is worse than no fallback: an unmeasured file then weighs
+    nothing, LPT hands it to whichever shard is next, and every unknown piles
+    onto the first shard instead of being scattered across all of them. Latent
+    with today's tree, wrong the moment a regeneration sees such an input.
+    """
+    from scripts import gen_test_durations
+
+    per_file = {"tests/unit/test_all_skipped.py": 0.0}
+    manifest = gen_test_durations.build_manifest(per_file)
+
+    # `build_manifest` is typed loosely (`dict[str, object]`), so narrow before
+    # comparing: the assertion is about the VALUES it writes, and pyright will
+    # not check a comparison against `object`.
+    fallback = manifest["fallback_seconds"]
+    durations = manifest["durations"]
+    assert isinstance(fallback, float) and fallback > 0, manifest
+    assert isinstance(durations, dict), manifest
+    assert durations["tests/unit/test_all_skipped.py"] > 0, manifest
 
 
 def test_every_shard_matrix_job_uses_a_known_tree() -> None:
@@ -820,23 +870,46 @@ def test_the_shard_job_runs_the_partitioned_list_not_the_whole_tree(job: str) ->
     because they are the properties AGENTS.md calls load-bearing for this
     stage, and a run step rewritten to consume the list is exactly when they
     get dropped.
+
+    The tree-root check is PATH-AWARE (it parses the pytest argv) rather than a
+    substring search, because a substring search asserts the absence of one
+    spelling rather than the absence of the behaviour: `pytest $(cat
+    e2e_tests.txt | tr '\n' ' ') tests/e2e -m e2e -n0 -q` contains the file
+    list, does not contain the literal `pytest tests/e2e`, and collects the
+    whole tree in addition to the shard. Mutation-tested both ways: appending
+    the root to a correct command fails this test, as does replacing the list
+    with the root.
     """
     run = _run_step(job)
     tree = SHARD_JOBS[job]
     root = shard_tests.TREES[tree].root
+    argv = _pytest_argv(run)
 
     assert (
-        "_tests.txt" in run
-    ), f"{job}'s run step does not consume the partition's file list: {run!r}"
-    # `pytest <root>` collects the whole tree and ignores the list entirely.
-    assert (
-        f"pytest {root}" not in run
-    ), f"{job} runs the whole {root} tree; the shard matrix is doing nothing"
+        _SUBSTITUTION_TOKEN in argv
+    ), f"{job}'s run step does not pass the partition's file list: {run!r}"
+    # The filename lives INSIDE the substitution, so it is checked there rather
+    # than against the parsed argv (`pytest $(cat wrong_list.txt)` would
+    # otherwise pass as "the list is passed").
+    substitutions = _SUBSTITUTION.findall(run)
+    assert any(
+        "_tests.txt" in sub for sub in substitutions
+    ), f"{job}'s run step reads something other than the partition's file list: {substitutions!r}"
+
+    # The tree root must not appear as an ARGUMENT at all. A directory argument
+    # (`pytest tests/e2e ...`) collects the whole tree and makes the partition
+    # pointless, and it can be appended to a correct command, so this compares
+    # parsed arguments rather than searching the raw text.
+    roots = [a for a in argv if a.rstrip("/") == root]
+    assert not roots, (
+        f"{job} passes the whole {root} tree as a pytest argument ({roots}); "
+        "the shard matrix would then multiply the run instead of cutting it"
+    )
     if tree == "e2e":
-        assert "-m e2e" in run, "the e2e shard run lost `-m e2e`"
-        assert "-n0" in run, (
-            "the e2e shard run lost `-n0`: under xdist a fired watchdog kills a "
-            "worker carrying unrelated tests (see AGENTS.md)"
+        assert re.search(r"-m\s*e2e\b", run), "the e2e shard run lost `-m e2e`"
+        assert re.search(r"(?<!\w)-n\s*0(?!\d)", run), (
+            "the e2e shard run lost serial execution (`-n0`): under xdist a fired "
+            "watchdog kills a worker carrying unrelated tests (see AGENTS.md)"
         )
         assert (
             "NO_COLOR" in run and "xterm-256color" in run
