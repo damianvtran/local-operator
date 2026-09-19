@@ -477,6 +477,63 @@ def test_the_option_list_marks_without_moving_a_column(
 
 
 @pytest.mark.asyncio
+async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> None:
+    """D9's host half, on the screen, at the narrowest width the product has.
+
+    Three findings meet here. The refusal has to REACH the operator at all
+    (design round 2 D9 left it swallowed, and the host half was rig-verified but
+    unpinned — agent round 3, R3-4); it has to carry the CARD's sentence rather
+    than the command's (UX U8); and the receipt the card's own keypress wrote
+    above it has to be corrected, because "✓ allowed" is the strongest "it
+    worked" affordance the transcript has and it is briefly wrong (UX U13).
+    """
+    from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(44, 20)) as pilot:
+        await _boot(pilot, app)
+        app._note_gate_refusal_on_app_loop(OperatorAuthorityRequired(trigger="approval_answer"))
+        await pilot.pause()
+
+        notices = _notices(app)
+        assert notices, "the refused card's notice never reached the transcript"
+        shown = notices[-1]
+        # The CARD's sentence, and the correction of the receipt above it.
+        assert CARD_APPROVAL_REFUSED_NOTICE in shown, shown
+        assert shown.startswith("not applied — "), shown
+
+        block = [
+            item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
+        ][-1]
+        # The card's own sentence is 6 rows here, and the block shows all of it.
+        assert block.size.height <= 8, block.size.height
+
+        # The command's copy is NOT what a card reader is told.
+        from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
+
+        assert OPERATOR_CAP_REQUIRED_NOTICE not in shown, shown
+
+        # AND THE LONG ONE, measured rather than computed (design round 3, D14;
+        # agent R3-5). The block wraps at its OWN content width — 40 cells at a
+        # 44-column terminal, not 44 — so this 345-character copy renders as 12
+        # rows, against a transcript area that is 11 rows in the tightest case:
+        # at most one row scrolls off in a conversation, and what stays on screen
+        # is the reason and the primary remedy, which is why the copy leads with
+        # them. A wrap-based pin said "9 rows" and measured a wrapping the frame
+        # does not do; this one measures the widget. The transcript is given a
+        # row of its own first so the two areas are the same shape.
+        app._system_notice("a row of its own", "info")
+        app._note_gate_refusal_on_app_loop(OperatorAuthorityRequired())
+        await pilot.pause()
+        tall = [
+            item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
+        ][-1]
+        assert tall.size.height <= 13, tall.size.height
+        assert OPERATOR_CAP_REQUIRED_NOTICE in tall._text
+
+
+@pytest.mark.asyncio
 async def test_choosing_a_row_runs_the_command_it_spells(config_dir: Path) -> None:
     """The list completes into the ARGUMENT and submits the same line a typist
     would have typed — one implementation of what `/approvals default auto`

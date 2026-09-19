@@ -5625,6 +5625,11 @@ class AttachedSession:
         )
 
     async def _run_approval(self, pending: PendingRequest) -> None:
+        #: Whether this answer was produced WITHOUT a person (the background
+        #: branch below). Read by the refusal arm, which must not re-arm in that
+        #: case: an answer nobody waits on would be re-produced immediately and
+        #: the gate would spin (issue #1310, UX review round 3, U12).
+        answered_without_a_person = True
         try:
             handler = self._approval_handler
             client = self._client
@@ -5633,6 +5638,7 @@ class AttachedSession:
             if self._gates_detached and self._background_approval:
                 approved = True
             elif handler is not None:
+                answered_without_a_person = False
                 approved = await call_approval_gate(handler, pending.title, pending.detail)
             else:
                 return
@@ -5655,6 +5661,26 @@ class AttachedSession:
             if notify is not None:
                 with contextlib.suppress(Exception):
                     notify(error)
+            # PUT THE CARD BACK, or the sentence that names a deny names an
+            # action this surface cannot take (UX review round 3, U12). The dock
+            # card resolves on the keypress, so a refused Allow left the pane
+            # with no card, inert keys and a blocked tool call — and no repaint
+            # could re-deliver it, because ``_apply_pending_gate`` returns early
+            # while ``_gate_key`` still equals the identity of the card it
+            # already knows about. Clearing the key and asking for the gate
+            # again is what makes "deny it from here" true rather than a
+            # consolation; the operator who presses Allow twice gets the same
+            # refusal and the same notice, which is the honest outcome on a pane
+            # that cannot allow.
+            if not answered_without_a_person:
+                self._gate_key = None
+                self._gate_task = None
+                self._keep_gate_reply = False
+                # The card that was REFUSED, not whatever the projection holds:
+                # the refusal is about this request, and a store that has not
+                # caught up (or a client whose pending gate never arrived) must
+                # not decide whether the operator can answer it.
+                self._maybe_start_gate(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an

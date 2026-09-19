@@ -597,7 +597,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 124 public members and a POSITIVE
+    than stylistic. This protocol carries 125 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -627,7 +627,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     viewer could not be read as an absent owner, 124 once a read had to report
     WHY it served cold — ``cold_reason`` and ``attaching``, one rung that adds
     two members because the wire tells a renderer both the fact and the
-    in-flight state), so recompute it rather
+    in-flight state, 125 once a refused gate reply needed a surface to reach the
+    pane that pressed APPROVE), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1356,6 +1357,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         one: a runtime that predates ``leaving`` still hands the signal phrase
         over for a signal drain, because its frame's ``reason``/``to`` decide
         (``types.drain_phrase_for_frame``; agent review round 5, MINOR-2).
+        """
+        ...
+
+    def set_gate_refusal_handler(self, handler: Callable[[BaseException], None] | None) -> None:
+        """Install the surface that reports a gate reply the OWNER refused.
+
+        Viewer-only by construction: an owner ``Session`` answers its own gates,
+        so there is nobody above it to refuse an answer. On a facade the refusal
+        arrives AFTER the approval handler has returned — the pane pressed
+        APPROVE and the runtime declined it because this connection is not the
+        window that started the session (issue #1310) — and before this hook the
+        refusal had nowhere to go and simply vanished (design review round 2,
+        D9; the host that reads it is ``tui/app.py``).
+
+        Declared here rather than probed with ``getattr`` like its two siblings
+        on this class because the app calls it on every attached session: an
+        undeclared duck-typed member is what
+        ``tests/unit/session/test_viewer_protocol.py`` exists to catch, and it
+        did catch this one (agent review round 3, Q5 — the head was red).
         """
         ...
 

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 from local_operator.harness.approval import (
     frame_authority,
+    handshake_proof,
     handshake_proof_ok,
     is_wire_hex,
     operator_cap_for,
@@ -963,9 +964,14 @@ def _adopt_operator_handshake(entry: SessionEntry, frame: dict[str, Any]) -> Non
     presented to it — the harness/approval ``_proof`` rationale, applied to the
     relay's own socket rather than only to the attach client's.
     """
-    salt = frame.get("operator_salt")
-    proof = frame.get("operator_proof")
-    if not is_wire_hex(salt):
+    # A REPAINT CARRIES NEITHER KEY; a handshake attempt carries at least one.
+    # That, and not the salt's SHAPE, is what separates them — and the difference
+    # is security-relevant rather than cosmetic: a frame with ``operator_salt``
+    # present but unusable is exactly the impostor's answer to our nonce, and
+    # treating it as a repaint would leave a previous handshake standing on a
+    # connection that just failed one (agent review round 3, R3-3: the comment
+    # claimed this while the guard checked ``is_wire_hex``).
+    if "operator_salt" not in frame and "operator_proof" not in frame:
         # AN ORDINARY REPAINT, and it must leave this connection's authority
         # exactly as it is: only the WELCOME carries the handshake material
         # (``RuntimeServer._push_to``), while every projection push goes through
@@ -973,11 +979,8 @@ def _adopt_operator_handshake(entry: SessionEntry, frame: dict[str, Any]) -> Non
         # it was established, so the phone's next command was refused with the
         # authority copy — verified against a real socket, one ``_push()``
         # between the welcome and the request (agent review round 2 R2-2 = UX U6).
-        #
-        # A frame that carries a SALT but no usable proof is a failed handshake
-        # and does clear: that is the impostor's shape, not a repaint's.
-        if proof is None:
-            return
+        return
+    salt = frame.get("operator_salt")
     entry.operator_salt = ""
     entry.authority_bearing = False
     if entry.operator_cap is None or not entry.operator_nonce:
@@ -1004,6 +1007,22 @@ def _operator_request_proof(entry: SessionEntry, op: str, fields: dict[str, Any]
     if frame_authority({"op": op, **fields}) != "authority-increasing":
         return None
     return request_proof(
+        entry.operator_cap, client_nonce=entry.operator_nonce, server_salt=entry.operator_salt
+    )
+
+
+def _operator_handshake(entry: SessionEntry, op: str) -> str | None:
+    """The handshake proof that lets a REPORT pick the true sentence.
+
+    ``None`` on every ordinary op — leaving the frame byte-identical to what an
+    older runtime served — and on every connection whose runtime never proved it
+    holds the same capability. Only ``slash_result`` asks for it, because that is
+    the op that builds a report whose wording depends on whether the READER may
+    loosen (agent review round 3, R3-1 = UX U10).
+    """
+    if op != "slash_result" or not entry.authority_bearing or entry.operator_cap is None:
+        return None
+    return handshake_proof(
         entry.operator_cap, client_nonce=entry.operator_nonce, server_salt=entry.operator_salt
     )
 
@@ -1983,6 +2002,9 @@ class MobileDaemon:
         proof = _operator_request_proof(entry, op, fields)
         if proof is not None:
             frame["operator_cap"] = proof
+        handshake = _operator_handshake(entry, op)
+        if handshake is not None:
+            frame["operator_handshake"] = handshake
         frame = await fit_request_frame(frame)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_reqs[(pid, req)] = future
@@ -1999,7 +2021,17 @@ class MobileDaemon:
             # other error keeps the bare message it always had.
             from local_operator.session.errors import admission_error
 
-            known = admission_error(str(reply.get("error_code", "")))
+            # THE TRIGGER TRAVELS TOO (UX round 3, U11): it is what picks WHICH
+            # refusal sentence is rebuilt, and without it the phone — the surface
+            # the card copy was written for — was answered with the COMMAND's
+            # sentence, about a command its user never typed, on a card that
+            # survived. ``attach_client`` has always forwarded it; this writer is
+            # the relay's own and simply did not.
+            known = admission_error(
+                str(reply.get("error_code", "")),
+                reply.get("error_count"),
+                reply.get("error_trigger"),
+            )
             if known is not None:
                 raise known
             raise RuntimeError(str(reply.get("message", "request failed")))

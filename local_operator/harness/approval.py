@@ -540,6 +540,30 @@ CARD_APPROVAL_REFUSED_NOTICE = (
     "and the tool stays blocked until someone does. Denying it works from here."
 )
 
+
+#: The `/approvals default …` receipt, in ONE wording for both hosts.
+#:
+#: Written here rather than twice in the two handles because the same clause had
+#: drifted into two forms, and because the reader can be a PHONE: "this
+#: machine's config.yml" reads as the phone's own filesystem from there, so the
+#: sentence names the machine the SESSION runs on instead (design round 3, D16).
+#: The second half is the caller's to choose — whether `/approvals auto` works
+#: from where the reader is — and ``None`` means the connection has not PROVED
+#: it may loosen, which takes the conservative form (agent review round 3, R3-1).
+def approvals_default_notice(*, may_loosen: bool | None) -> str:
+    switch = (
+        "/approvals ask|auto switches this session now"
+        if may_loosen
+        else "/approvals ask switches this session now; /approvals auto has to come "
+        "from the window that started it"
+    )
+
+    return (
+        "/approvals default writes the config file of the machine this session runs on — "
+        f"a file edit or the desktop app's settings, not a session command. {switch}"
+    )
+
+
 #: Runtime pid -> capability, for the runtimes THIS process spawned.
 #:
 #: This is "the console's memory" the design names, and a module-level dict
@@ -883,6 +907,7 @@ __all__ = [
     "CARD_APPROVAL_REFUSED_NOTICE",
     "OPERATOR_CAP_REQUIRED_NOTICE",
     "OPERATOR_FD_FLAG",
+    "approvals_default_notice",
     "OperatorCapHandoff",
     "ask_approval",
     "frame_authority",

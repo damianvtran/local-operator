@@ -4093,7 +4093,7 @@ class ServingSessionHandle(SessionHandle):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
-        may_loosen: bool = True,
+        may_loosen: bool | None = True,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -4297,7 +4297,7 @@ class ServingSessionHandle(SessionHandle):
         args: str,
         SlashResult: Any,
         locality: str = "local",
-        may_loosen: bool = True,
+        may_loosen: bool | None = True,
     ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
@@ -5435,7 +5435,7 @@ class ServingSessionHandle(SessionHandle):
         return SlashResult(kind="notice", text=text, style="info")
 
     @staticmethod
-    def _adopt_remedy(saved: str, *, may_loosen: bool = True) -> str:
+    def _adopt_remedy(saved: str, *, may_loosen: bool | None = True) -> str:
         """The command that matches ``config.yml``, and where it has to be typed.
 
         The same sentence the TUI's report builds (``OperatorApp._adopt_remedy``)
@@ -5456,7 +5456,7 @@ class ServingSessionHandle(SessionHandle):
         return remedy
 
     def _approvals_slash(
-        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool = True
+        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool | None = True
     ) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
 
@@ -5486,23 +5486,15 @@ class ServingSessionHandle(SessionHandle):
             # refused from ANY control connection — a runtime cannot edit the
             # machine that launched it — so "run it on a terminal" was advice for
             # someone who is not at one, and the second half promised `auto`
-            # "now" on a connection that may not loosen this session at all. What
-            # is offered now is what the reader can actually do from where they
-            # are: the config write, or the tightening direction.
-            switch = (
-                "/approvals ask|auto switches this session now"
-                if may_loosen
-                else (
-                    "/approvals ask switches this session now; /approvals auto has to come "
-                    "from the window that started it"
-                )
-            )
+            # "now" on a connection that may not loosen this session at all. The
+            # wording is now SHARED with the app's routed half, and it names the
+            # machine the SESSION runs on rather than "this machine", which reads
+            # as the reader's own filesystem from a phone (design round 3, D16).
+            from local_operator.harness.approval import approvals_default_notice
+
             return SlashResult(
                 kind="notice",
-                text=(
-                    "/approvals default writes this machine's config.yml — that is a file or "
-                    f"the desktop app's settings, not a session command. {switch}"
-                ),
+                text=approvals_default_notice(may_loosen=may_loosen),
                 style="warning",
             )
         if not argument:
