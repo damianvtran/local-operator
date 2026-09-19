@@ -174,8 +174,8 @@ async def test_vendor_status_cannot_see_an_oauth_only_radient_session(bare_manag
 
     A host whose only Radient credential is a signed-in OAuth session reports
     ``radient: False`` here, because seeing that row means opening the store.
-    ``resolve_vendor`` is the authority; this function exists for the notice and
-    diagnostics paths that must not await.
+    ``resolve_vendor`` is the authority; this function exists for the diagnostics
+    paths that must not await.
     """
     assert not (bare_manager.config_dir / "auth.db").exists()
     assert dict(vendor_status(bare_manager))["radient"] is False

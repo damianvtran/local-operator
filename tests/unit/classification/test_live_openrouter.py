@@ -196,7 +196,6 @@ async def test_the_service_recommends_the_matching_skill_end_to_end(tmp_path) ->
             "skipped": recommendation.skipped,
         },
     )
-    print("notice:", service.notice(recommendation))
 
     assert recommendation.skipped is None
     assert recommendation.vendor == "openrouter"

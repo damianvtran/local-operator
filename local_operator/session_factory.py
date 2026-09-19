@@ -1445,10 +1445,10 @@ class _KnowledgeHooks:
     #: the server id for a candidate and never its tools.
     mcp_server_names: tuple[str, ...] = ()
     #: The classification seam (docs/design/classification-layer.md §7): an
-    #: object exposing ``async recommend_resources(request) -> Recommendation``
-    #: and ``notice(recommendation) -> str | None``. ``None`` means the layer is
-    #: off, unavailable, or its package failed to import — and that the prompt is
-    #: exactly what it was before this seam existed.
+    #: object exposing ``async recommend_resources(request) -> Recommendation``.
+    #: ``None`` means the layer is off, unavailable, or its package failed to
+    #: import — and that the prompt is exactly what it was before this seam
+    #: existed.
     #:
     #: Built ONCE per session by ``_attach_classification`` when
     #: ``values.classification.auto`` is on, rather than at the first user
@@ -1456,12 +1456,6 @@ class _KnowledgeHooks:
     #: (``python -X importtime``), and a turn's prompt build must not pay for an
     #: import. Tests inject a double here and never touch the package.
     classifier: Any | None = None
-    #: Where the seam's one-line notice goes: the session's own notice event,
-    #: bound by ``create_session`` once the facade exists (see
-    #: :func:`attach_classification_notices`). ``None`` — a provider rendered
-    #: without a session, as the benchmark preflight does — drops the notice
-    #: rather than inventing a second notification channel.
-    notice_sink: Callable[[str, str], Any] | None = None
     #: The classification roster (one row per candidate resource) and the inputs
     #: it was derived from. Built ONCE per roster, never per user message: the
     #: walk and the row allocation are session-shaped work, and re-deriving them
@@ -1514,16 +1508,11 @@ class _KnowledgeHooks:
     #: answer belongs to the message being rendered decides where it is delivered:
     #: into THIS turn's next step, or onto the next user message.
     classification_outstanding: list[_OutstandingClassification] = field(default_factory=list)
-    #: The resource urls announced on the PREVIOUS message, so an unchanged set can
-    #: stay quiet rather than printing the same sentence again (design round 1, D7).
-    classification_last_announced: tuple[str, ...] | None = None
-    #: Recommendations that have not reached a prompt yet, oldest first, each paired
-    #: with whether it MISSED the message it was computed for. ``False`` means the
-    #: answer arrived while that message's turn was still running, so it is delivered
-    #: into this turn's next model step — which is what keeps a suggestion attached to
-    #: the question that produced it instead of arriving one message late. Consumed
-    #: exactly once.
-    classification_pending: list[tuple[Any, bool]] = field(default_factory=list)
+    #: Recommendations that have not reached a prompt yet, oldest first. An answer
+    #: lands here when its call finishes, and is consumed by the next render of block 3
+    #: — which is this turn's next model step when the turn is still running, and the
+    #: next user message when it is not. Consumed exactly once either way.
+    classification_pending: list[Any] = field(default_factory=list)
 
 
 #: The capability line a configured MCP server contributes when no release-owned
@@ -1865,8 +1854,8 @@ def _attach_classification(
         # this buys is in ``ClassificationService.warm_up``.
         #
         # ``getattr`` and a try of its own: warming is an OPTIMISATION, so a seam that
-        # does not publish it (the seam contract is ``recommend_resources`` +
-        # ``notice``, and the tests inject exactly that) keeps working, and a warm-up
+        # does not publish it (the seam contract is ``recommend_resources``, and the
+        # tests inject exactly that) keeps working, and a warm-up
         # that fails must not cost the layer — the shared handler below would turn
         # both into ``classifier = None``, i.e. a session with no classification
         # because a prewarm went wrong.
@@ -2279,10 +2268,9 @@ def _harvest_classification(hooks: _KnowledgeHooks, *, task_id: str | None = Non
         if recommendation is None or not getattr(recommendation, "resources", ()):
             continue
         # Belongs to the message being rendered, or to one already gone. ``task_id``
-        # is None for callers that never had a task (legacy paths), which keeps their
-        # behaviour: everything harvested is treated as late.
+        # is None for callers that never had a task (legacy paths).
         in_turn = task_id is not None and call.task_id is not None and call.task_id == task_id
-        hooks.classification_pending.append((recommendation, not in_turn))
+        hooks.classification_pending.append(recommendation)
         if in_turn:
             hooks.classification_answered_task_id = task_id
         arrived_in_turn = arrived_in_turn or in_turn
@@ -2442,9 +2430,9 @@ def _classification_block(
     the reason is outside this module: ``tests/unit/classification/test_block_parity.py``
     compares this function's return value against the package's ``render_block`` line
     for line, and that comparison is worth more than a tidier signature. The caller
-    owes the NOTICE an honest account of what was appended — the line it builds from
-    the recommendation names every resource the recommendation carried, which the
-    dedupe or the cap may have dropped — and this is how it learns the difference.
+    needs to know exactly which urls were APPENDED rather than which the
+    recommendation carried — the dedupe or the cap may have dropped some — because
+    that set is what the next answer of the same prompt is deduped against.
     """
     from local_operator.skills.protocol import resource_url
 
@@ -2481,44 +2469,6 @@ def _classification_block(
         _RECOMMENDATION_BLOCK_CLOSE,
     ]
     return "\n".join(lines)
-
-
-def _delivered_view(
-    recommendation: Any, resources: tuple[Any, ...], *, late_urls: tuple[str, ...]
-) -> Any:
-    """The recommendation AS DELIVERED: every resource this prompt gained, and its attribution.
-
-    Handed to the seam's ``notice()`` instead of the original, for two reasons and both
-    are honesty rather than polish:
-
-    - ``resources`` is the UNION of what every answer delivered into THIS prompt
-      contributed, in the order the sections were appended. The original carries only
-      one answer's set (``announced[-1]``), so a prompt that gained a late answer and
-      its own could only ever have been named by half of it (QA round 4, Q1);
-    - ``late_urls`` names the resources that came from an EARLIER message, which the
-      line has to say out loud or it reads as advice about the message it now sits
-      under (design round 1, D2) — and per RESOURCE, because a mixed union has no
-      single true label.
-
-    The base object supplies everything else the line or a caller may read (vendor,
-    cost, latency, and whatever a host's own type carries), so it stays ``announced[-1]``
-    — the newest answer, whose metadata describes the run that produced the fresher half.
-
-    Returned as the original object when this prompt added nothing to it (same resources,
-    nothing late), so a host's own classifier keeps its own type. A seam whose
-    recommendation is not a dataclass keeps the original too: the line may then be
-    optimistic or misattributed by a resource, which is a smaller lie than failing the
-    notice entirely.
-    """
-    if not resources:
-        return recommendation
-    own = tuple(getattr(recommendation, "resources", ()) or ())
-    if not late_urls and own == resources:
-        return recommendation
-    try:
-        return replace(recommendation, resources=resources, late_urls=late_urls)
-    except Exception:  # noqa: BLE001 — a foreign seam's result is not a dataclass
-        return recommendation
 
 
 def _log_classification_cost(recommendation: Any) -> None:
@@ -2575,64 +2525,6 @@ def _token_count(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, int):
         return "-"
     return str(value)
-
-
-async def _emit_classification_notice(hooks: _KnowledgeHooks, recommendation: Any) -> bool:
-    """Emit the seam's one-line notice through the session's own notice event.
-
-    Called once per admitted user message — the same cadence the frozen
-    knowledge block already has, so no separate "once per message" bookkeeping
-    is needed. The GATE is the seam's own: the shipped service applies
-    ``values.classification.notice`` inside ``notice()`` (it returns ``None``
-    when the key is off, or when there is nothing to announce), so the harness
-    does not read that key a second time and cannot disagree with it.
-
-    RETURNS whether a line was actually handed to the sink, and the caller uses
-    that to decide what to remember: the D7 repeat-suppression key may only be
-    updated for a line the user really saw, or a notice suppressed by its own
-    gate (``notice`` off, or a seam that renders nothing) would silence the next
-    message's identical set too — a small version of the failure the harness has
-    already paid for once, where a suppressed paint was recorded as delivered.
-
-    A MISSING SINK IS NOT A FALLBACK POINT: a provider rendered without a
-    session (the benchmark preflight) or a host that never bound one simply gets
-    no notice, which is better than inventing a second notification channel that
-    only some front ends paint.
-    """
-    seam = hooks.classifier
-    sink = hooks.notice_sink
-    notice = getattr(seam, "notice", None)
-    if sink is None or not callable(notice):
-        return False
-    try:
-        line = notice(recommendation)
-        if inspect.isawaitable(line):
-            line = await line
-    except Exception:  # noqa: BLE001 — a notice is never worth a turn
-        logger.debug("classification: notice rendering failed", exc_info=True)
-        return False
-    if not line:
-        return False
-    # The kind is "info", NOT "note". Design review round 1 (D1) measured `info`'s
-    # `dim` ink at 3.77:1 on the light theme (below the 4.5:1 AA floor, 13 of the 16
-    # light builtins under it) and offered two resolutions; the `note` route was taken
-    # first and had to be WITHDRAWN, because ``NoticeEvent.kind`` is
-    # ``Literal["info", "warning", "error"]`` — a real Session rejects the event with
-    # a pydantic ``ValidationError`` that this function's own guard swallows as a
-    # WARNING while still reporting the notice as delivered, so the line never painted
-    # on the TUI, CLI or server and the "last announced" key then suppressed the
-    # repeat (agent review round 2, blocker). Adding `note` to the event contract and
-    # to the server's kind allowlists is its own cross-surface change; the contrast is
-    # recorded as a documented exception in ``docs/design/classification-layer.md``
-    # §7 and §12 instead.
-    try:
-        delivered = sink(str(line), "info")
-        if inspect.isawaitable(delivered):
-            await delivered
-    except Exception:  # noqa: BLE001 — a notice is never worth a turn
-        logger.debug("classification: notice delivery failed", exc_info=True)
-        return False
-    return True
 
 
 async def _empty_selection() -> list[Skill]:
@@ -2774,22 +2666,17 @@ async def _select_knowledge_block(
     # would starve them for as long as the vendor keeps missing the wait. The
     # pending list is consumed here, so an answer reaches a prompt exactly once.
     #
-    # The BLOCKS are per answer (each is that answer's own text, capped and deduped
-    # in order), but the NOTICE is per MESSAGE: all the resources this prompt gained
-    # are announced on one line, which is what §7's "once per user message" says and
-    # what the previous shape broke — a message that delivered a late answer AND its
-    # own printed two lines (review round 2, MINOR 1). Late first, so the line reads
-    # in the order the sections appear.
+    # The BLOCK is the whole of what a delivery does: each answer contributes its
+    # own text, capped and deduped in order, and the OLDEST goes first for the reason
+    # above. Delivery is SILENT — the resources are context for the model that reads
+    # the prompt, never a report for the reader (see docs/design/classification-layer.md
+    # §7 step 4 for why the notice that used to announce them was removed).
     pending, hooks.classification_pending = hooks.classification_pending, []
-    answers: list[tuple[Any, bool]] = [(answer, late) for answer, late in pending]
+    answers: list[Any] = [*pending]
     if recommendation is not None:
-        answers.append((recommendation, False))
+        answers.append(recommendation)
     carried: set[str] = set()
-    announced: list[Any] = []
-    announced_urls: list[str] = []
-    announced_resources: list[Any] = []
-    announced_late_urls: list[str] = []
-    for answer, late in answers:
+    for answer in answers:
         urls: list[str] = []
         block = _classification_block(
             hooks,
@@ -2802,50 +2689,10 @@ async def _select_knowledge_block(
         )
         if not block:
             # Nothing survived the dedupe or the cap: the prompt already carries
-            # every resource this answer named, so there is nothing to append —
-            # and, one line down, nothing to announce either.
+            # every resource this answer named, so there is nothing to append.
             continue
         sections.append(block)
         carried.update(urls)
-        announced.append(answer)
-        announced_urls.extend(urls)
-        # THE UNION'S OWN RESOURCES, not the last answer's. The notice names what this
-        # prompt gained, and a prompt can gain an earlier message's answer AND its own —
-        # so the object handed to ``notice()`` has to carry both sets' resources, or the
-        # line can only describe one of them (QA round 4, Q1: it named the last answer's
-        # while labelling the whole thing from that answer).
-        #
-        # LATENESS is per RESOURCE for the same reason: one label over a mixed union is
-        # false of half of it, and the label used to come from whichever answer arrived
-        # last.
-        rendered = set(urls)
-        for candidate in getattr(answer, "resources", ()) or ():
-            if str(getattr(candidate, "resource_url", "") or "") in rendered:
-                announced_resources.append(candidate)
-                if late:
-                    announced_late_urls.append(str(candidate.resource_url))
-    if announced and not _already_announced(hooks, announced_urls):
-        # THE NOTICE RIDES DELIVERY, not the call: it is emitted here, once, for the
-        # resources this prompt actually gained. A call that missed the wait is not
-        # announced when it is abandoned (nothing was delivered then) or when it
-        # lands, but when a prompt carries it; and the seam's own gate
-        # (``values.classification.notice``) stays inside ``notice()``. The view is
-        # what keeps the line from naming a resource the dedupe or the cap dropped,
-        # and ``late`` is what stops it reading as an answer to the wrong question.
-        #
-        # Remembered only once the paint really happened: the D7 key means "the set
-        # the user last saw", and a line its own gate suppressed was not seen.
-        if await _emit_classification_notice(
-            hooks,
-            _delivered_view(
-                announced[-1],
-                tuple(announced_resources),
-                late_urls=tuple(announced_late_urls),
-            ),
-        ):
-            hooks.classification_last_announced = tuple(announced_urls)
-    elif announced:
-        logger.debug("classification: the same resources were just announced; staying quiet")
     hooks.frozen_block = "\n\n".join(sections)
     hooks.frozen_compaction_id = compaction_id
     hooks.frozen_task_id = task_id
@@ -2859,28 +2706,6 @@ async def _select_knowledge_block(
     hooks.knowledge_fingerprint = fingerprint
     hooks.superseded_block = ""
     return hooks.frozen_block
-
-
-def _already_announced(hooks: _KnowledgeHooks, urls: Sequence[str]) -> bool:
-    """Whether the SAME resource set was announced on the previous message.
-
-    Design round 1, D7: with the money tail gone, four consecutive messages that
-    recommend the same skill printed four byte-identical rows. A repeat of the
-    previous announcement says nothing new — the resource is in this prompt either
-    way, and the block above is what the model reads — so the line is suppressed,
-    not the delivery. Only the IMMEDIATELY preceding set counts: a resource that
-    comes back later in the session is worth its line again, because by then the
-    user has read other things.
-
-    A PREDICATE, and deliberately not the recorder: it answers the question and
-    leaves ``classification_last_announced`` alone, because what that field means is
-    "the set the user last SAW". The caller updates it after the paint succeeds
-    (review round 3, NIT 1) — recording here marked a line as shown even when the
-    seam's own gate or a failed delivery meant nothing was painted, which silenced
-    the next message's identical set as though it had been announced.
-    """
-    signature = tuple(urls)
-    return bool(signature) and signature == hooks.classification_last_announced
 
 
 def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | None]:
@@ -4354,46 +4179,6 @@ def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | No
     return _hook
 
 
-def attach_classification_notices(session: Session, hooks: "_KnowledgeHooks | None") -> None:
-    """Give the classification seam the session's own notice event.
-
-    The seam may speak only through a channel the front end already paints.
-    ``Session._stream_notice`` emits a ``NoticeEvent`` — the same event the
-    ``auto effort:`` line rides (``model/configure.py``, via the stream fn's
-    notice handler) — so the CLI, TUI, headless and phone sessions all render it
-    with no new surface and no per-host wiring. It is bound HERE, at the
-    composition root, because the facade owns the event stream and is built after
-    the hooks are.
-
-    Deliberately NOT the stream fn's ``set_notice_handler``, which is the same
-    event by a shorter path: that handler is last-writer-wins on a stream fn
-    SHARED with subagents (see the prompt-cache TTL note in ``Session.__init__``),
-    so a child session would take over its parent's notices. The hooks object is
-    per-session, and a child's ``system_blocks_provider`` never runs the
-    classification pass at all, so nothing rebinds a parent's sink.
-
-    ``_stream_notice`` is private, and that is the honest description of the
-    situation: this is the session's own notice path, there is no public
-    equivalent, and the factory already reaches into the facade for exactly this
-    kind of binding (``_transcript``, ``_frontend_state_store``). A missing sink
-    is not fatal — the layer simply gets no notice, which is the pre-layer
-    behaviour — so the lookup is guarded rather than typed onto the protocol.
-    """
-    if hooks is None:
-        return
-    # ``queue_notice`` FIRST, and this ordering is design round 1's D1: the notice
-    # describes the prompt this turn is BUILDING, so emitting it here painted it
-    # between the user's question and the reply — in the answer's slot, in the
-    # dimmest ink on screen, 2-4 rows depending on the width. ``queue_notice`` holds
-    # it until the turn's answer has landed, and the session flushes it there.
-    # ``_stream_notice`` stays the fallback for a facade-shaped double that has no
-    # queue (the TUI pilot's ``FakeSession``, a benchmark preflight, any host that
-    # supplies its own), so a missing queue costs placement rather than the line.
-    sink = getattr(session, "queue_notice", None) or getattr(session, "_stream_notice", None)
-    if callable(sink):
-        hooks.notice_sink = sink
-
-
 def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | None") -> None:
     """Fold the classification seam's ``aclose()`` into the session's dispose path.
 
@@ -4407,10 +4192,10 @@ def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | No
     same reason. Without it the pool and the memos are pinned once per SESSION,
     and the server and phone planes keep sessions alive for hours.
 
-    Registered as ``getattr`` rather than typed onto the seam, matching
-    ``attach_classification_notices``: a host's own classifier need not publish an
-    ``aclose``, and an injected test double typically does not. A seam without one
-    is not an error — it simply owns no resource this harness has to release.
+    Registered as ``getattr`` rather than typed onto the seam: a host's own
+    classifier need not publish an ``aclose``, and an injected test double
+    typically does not. A seam without one is not an error — it simply owns no
+    resource this harness has to release.
 
     ONE hook, in ONE order, and the order is the point. The calls this session left
     running are cancelled FIRST, before anything closes the client they are using:
@@ -4439,11 +4224,10 @@ def attach_classification_dispose(session: Session, hooks: "_KnowledgeHooks | No
                 call.task.cancel()
         hooks.classification_outstanding.clear()
         hooks.classification_pending.clear()
-        # ``getattr`` rather than a typed call, matching
-        # ``attach_classification_notices``: a host's own classifier need not publish
-        # an ``aclose``, and a seam without one simply owns no resource this harness
-        # has to release. The returned value is handed straight back to the dispose
-        # runner, which awaits what it gets (``Session.dispose``).
+        # ``getattr`` rather than a typed call: a host's own classifier need not
+        # publish an ``aclose``, and a seam without one simply owns no resource this
+        # harness has to release. The returned value is handed straight back to the
+        # dispose runner, which awaits what it gets (``Session.dispose``).
         close = getattr(hooks.classifier, "aclose", None)
         return close() if callable(close) else None
 
@@ -4753,10 +4537,6 @@ async def create_session(
     # session; fold its close into dispose so every front end releases the
     # file lock on the single ``session.dispose()`` call.
     attach_auth_dispose(session, plan.auth_store)
-    # Classification seam: the layer's one-line notice rides the session's own
-    # notice event (see ``attach_classification_notices``). Bound before the
-    # first turn can run, and a no-op when the layer is off.
-    attach_classification_notices(session, plan.knowledge_hooks)
     # Stream seam: release the session's shared httpx connection pool on
     # dispose (one leaked pool per turn on the server facade otherwise).
     # The classification seam's client and memos are per SESSION, so the

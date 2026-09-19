@@ -37,7 +37,7 @@ In scope:
 2. Skill, guide and MCP-server recommendations, rendered as a short advisory block, computed
    once per user message.
 3. An API-key-only login for the TypeSafe (Jev) provider, kept out of the chat model list.
-4. Configuration keys, notices, and metering.
+4. Configuration keys and metering.
 5. The Radient server-side `POST /v1/decisions` route that makes the first cascade leg real.
 
 Out of scope (deliberately, and recorded so nobody assumes otherwise): the embedder selection
@@ -163,7 +163,7 @@ async def resolve_vendor(
     """First available leg honouring `values.classification.vendor`; None when none is usable."""
 
 def vendor_status(manager: CredentialManager, settings: Mapping[str, Any] | None = None) -> list[tuple[str, bool]]:
-    """[(vendor_name, available)] for notices, tests and diagnostics. Never performs I/O."""
+    """[(vendor_name, available)] for tests and diagnostics. Never performs I/O."""
 ```
 
 Recommendation layer (same package, `recommend.py`):
@@ -195,11 +195,6 @@ class Recommendation:
     output_tokens: int | None = None   # or a 200 with no usage) -- never a fabricated 0
     latency_s: float = 0.0
     skipped: str | None = None      # "disabled" | "no-vendor" | "empty-roster" | "timeout" | "error" | "circuit-open"
-    late_urls: tuple[str, ...] = ()  # the resource_url values on this view that a CALLER's
-                                     # earlier message asked for: the answer is being delivered
-                                     # by a LATER message than it was computed for. Per RESOURCE
-                                     # because one prompt can carry a late answer and its own
-                                     # (see §7, notice)
 
 class ClassificationService:
     def __init__(self, *, manager: CredentialManager, settings: Mapping[str, Any] | None = None) -> None: ...
@@ -208,7 +203,6 @@ class ClassificationService:
     @property
     def vendor_name(self) -> str | None: ...          # resolved lazily, cached for the session
     async def recommend_resources(self, request: RecommendationRequest) -> Recommendation: ...
-    def notice(self, recommendation: Recommendation) -> str | None: ...   # one line, or None
 ```
 
 `recommend_resources` contract, precisely:
@@ -250,7 +244,7 @@ they are not the same case:
   cascade would do, cached per session, and NOT purely local: an expired Radient OAuth
   grant can be refreshed over the network (`cascade.resolve_vendor`) — so it is awaited
   INSIDE the `waitMs`-bounded task, never in front of it. An install that never logs into
-  a recommender therefore places no decision call, appends no block and emits no notice,
+  a recommender therefore places no decision call and appends no block,
   and its prompt is byte-identical to a build without the layer. The turn waits for the
   probe itself: nothing once resolution is warm, and at most the remainder of `waitMs`
   when a cold resolution outlives it.
@@ -455,46 +449,29 @@ Sequence per user message:
 3. render the recommendation block, dropping anything already selected by the router, and append
    it to the knowledge/tail block. A LATE answer is rendered the same way, oldest first, inside the
    same per-message cap, and is delivered exactly once;
-4. emit the notice ONCE per user message, at the moment an answer actually reaches the prompt —
-   never when a call times out (nothing was delivered then) and never a second time for an answer
-   an earlier turn already rendered. When one prompt gains a late answer AND its own, BOTH sets are
-   announced on one line: the contract sentence is once per MESSAGE. The line is attributed to the
-   message it answers — "for this message" when the answer arrived inside that message's turn (the
-   ordinary case now: the answer is delivered to the turn's next model step, see step 2), and "for
-   your previous message" only when the turn had already ended and the answer was carried — because
-   otherwise it reads as advice about the question it happens to sit under. A prompt that gains BOTH sets has no single true attribution,
-   so that one shape tags each resource — `Suggestion added: skill://a (your previous message),
-   guide://b (this message)` — rather than labelling the union from whichever answer arrived last,
-   which told the user a resource chosen for the question they had just asked came from the one
-   before it (QA round 4, Q1). The two uniform cases keep the short sentence, because the row is
-   the scarce thing (a receipt sentence has 71 measured cells at 100 columns). It names the resources and nothing else: the vendor, the
-   duration and the six-decimal spend came off in the design round (the money bypassed the repo's
-   one formatter and the tail is what pushed the line to a second row), and the spend lives at INFO
-   in the harness's cost log. It is delivered after the turn's answer, through the session's own
-   post-turn notice queue, so it does not occupy the answer slot. A resource set identical to the
-   previous message's is not announced again.
+4. deliver it SILENTLY. The block IS the delivery: a recommendation is context for the
+   model, not a report for the reader. Nothing about it reaches the transcript, the toast slot
+   or any other user-visible surface — the harness emits no notice for it at all.
 
-   TWO CONSEQUENCES OF THE LINE ALWAYS PAINTING (design review round 1, 2026-09-18). While the layer
-   shipped off, the notice's ink and height were only ever seen by operators who opted in; on by
-   default they are everybody's. (1) **Height**: the row count is a function of
-   `maxRecommendations` (3 by default, so 2 rows at 100 columns and 3 at 80), which is now a default
-   surface rather than an opt-in one — `maxRecommendations` is the lever for that, exposed beside
-   `maxCandidates` in `/settings`. (2) **Ink — a recorded EXCEPTION, and the fix is NOT in this
-   layer.** The line is delivered as `info`, which maps to the theme's `dim` token: measured 3.77:1
-   on the light theme, below the 4.5:1 AA floor, with 13 of the 16 light builtins under it. `note`
-   (`muted`: 7.18:1 on paper, 8.62:1 on the dark ground) is the right ink — it is what
-   `tui/session_presentation.py` already chose for a replayed marker — and delivering it that way
-   was implemented and then WITHDRAWN: ``NoticeEvent.kind`` is
-   ``Literal["info", "warning", "error"]``, so the violation lands at the session's notice FLUSH,
-   one hop after delivery is reported: ``Session.queue_notice`` accepts the tuple and
-   ``_emit_classification_notice`` returns True (which is how the "last announced" key came to
-   record a line nobody had seen), and the flush's own guard then catches the pydantic
-   ``ValidationError``, logs ``session queued notice failed to emit`` at WARNING and drops it — so
-   the line never painted on the TUI, CLI or server and the repeat was suppressed (agent review
-   round 2, blocker; the attribution corrected in round 4). Adding
-   `note` to the event contract, the server's kind allowlists and the session's annotations is its
-   own cross-surface change and does not belong inside a default flip; §12 carries it as an open
-   item, and the glyph (`·`) is shared by both kinds so the ink is the only difference.
+   WHY THERE IS NO NOTICE (2026-09-18, operator request). This layer shipped a one-line notice
+   — `Suggestion added for this message: skill://a` — from v0.57.0 through v0.59.8, painted
+   through the session's own notice event (and, from design round 1 D1, held in a post-turn
+   notice queue so it did not occupy the answer slot). The operator read one under a reply it
+   had not informed and ruled the surface out: "we shouldn't be emitting the suggestions into
+   the visible chat to the user, this is an internal detail and we don't need to pollute the
+   interface with it". A row announcing internal bookkeeping to every reader of every turn, in
+   the dimmest ink on screen and directly under the answer, was wrong as a DEFAULT surface even
+   though it was defensible as an opt-in diagnostic. It was REMOVED rather than gated behind
+   its setting: the renderer, the sink it painted through, the session's post-turn notice queue
+   (which had no other producer), the D7 repeat-suppression key that existed to keep it quiet,
+   and the `values.classification.notice` key are all gone, so there is no flag left to
+   re-enable and no second copy of the copy to drift. The diagnostic surface that remains is
+   the INFO cost log line, which carries MORE than the notice ever did:
+   `classification: vendor=… model=… tokens=…/… cost=$… latency=…s resources=N`.
+
+   The row-height and ink findings the notice produced (design review round 1, D1) die with it:
+   nothing paints, so there is no `info`-as-`dim` contrast exception to carry and no per-message
+   row budget to spend. §12 records the removal and the measurements it retires.
 
 Rendered block (this is the whole token cost — target ≤ 6 lines):
 
@@ -530,7 +507,6 @@ entry in `_consumer_defaults()` in `tests/unit/test_settings_io.py`:
 | `maxStateChars` | int | `6000` | hard cap on the serialized state |
 | `maxCandidates` | int | `12` | candidates sent per kind, chosen by local relevance when the catalogue is larger |
 | `maxRecommendations` | int | `3` | recommendations injected per message |
-| `notice` | bool | `true` | emit the one-line host notice |
 
 `values.effort.auto` is the precedent for the SHAPE (`model/effort_classifier.py:17-23`); its
 "off, because an upgrade must never silently change behaviour or spend" rule was followed until
@@ -657,12 +633,12 @@ New route beside the `tools/*` group, same middleware chain as the rest of `/v1`
   matrix mid-session is not affordable on a message path — so a brand-new skill is REACHABLE (the
   classifier offers it, and `skill://` resolves it through the miss-path rescan) but does not
   appear in the embedder's top-k until the session restarts.
-- **The notice line's ink on light themes** (design review round 1, D1): `info` → `dim` measures
-  3.77:1 on the light theme, below AA, and 13 of the 16 light builtins sit under it. Delivering it
-  as `note` (`muted`, 7.18:1) is the right fix and needs `note` added to ``NoticeEvent.kind``
-  (`harness/types.py`) plus the server's kind allowlists and the session's own annotations — a
-  cross-surface change of its own, deliberately not folded into a default flip (§7 records the
-  measurement, and the attempt that had to be withdrawn).
+- ~~**The notice line's ink on light themes** (design review round 1, D1)~~ **RESOLVED
+  2026-09-18: THE LINE IS GONE.** The finding was real — `info` → `dim` measured 3.77:1 on the
+  light theme, below AA, with 13 of the 16 light builtins under it — but the fix was to stop
+  painting rather than to re-ink: the whole surface was removed at the operator's request (§7).
+  The `note` kind this item wanted added to `NoticeEvent.kind` is therefore NOT needed for this
+  layer, and the cross-surface change it described is no longer on this slice's books.
 - §5's `context` half is UNBUILT on the caller side: the contract suggests "the newest compaction
   summary line or the last assistant message's first line", and the wiring always passes
   `context=None` (argued in `session_factory._RecommendationRequest`). Benign for an advisory

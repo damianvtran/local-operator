@@ -1,4 +1,4 @@
-"""The service: gates, cache, in-flight sharing, breaker, timeout, notices.
+"""The service: gates, cache, in-flight sharing, breaker, timeout.
 
 Every test here runs against stub legs (see the ``install_legs`` fixture), so the
 suite is hermetic and each failure mode can be produced on demand — which is the
@@ -8,22 +8,16 @@ only way several of these paths are reachable at all.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 
 import pytest
 
-from local_operator.classification.recommend import (
-    Recommendation,
-    RecommendationRequest,
-    render_block,
-)
+from local_operator.classification.recommend import RecommendationRequest, render_block
 from local_operator.classification.service import (
     CACHE_SIZE,
     CIRCUIT_FAILURE_THRESHOLD,
     DEFAULT_AUTO,
     DEFAULT_CASCADE_ATTEMPTS,
-    DEFAULT_NOTICE,
     DEFAULT_TIMEOUT_MS,
     ClassificationService,
 )
@@ -68,7 +62,6 @@ def service(manager, install_legs, settings_map=None, **leg_specs):
 async def test_the_defaults_are_the_contract_defaults() -> None:
     assert DEFAULT_AUTO is True
     assert DEFAULT_TIMEOUT_MS == 1500
-    assert DEFAULT_NOTICE is True
     assert CACHE_SIZE == 64
     assert CIRCUIT_FAILURE_THRESHOLD == 3
 
@@ -595,135 +588,6 @@ async def test_a_cancelled_turn_stays_cancelled(manager, install_legs) -> None:
         await task
     await asyncio.sleep(0.1)
     assert len(legs["radient"].calls) == 1
-
-
-# ---------------------------------------------------------------------------
-# Notices
-# ---------------------------------------------------------------------------
-
-
-async def test_the_notice_names_the_resources_and_leaves_the_money_out(
-    manager, install_legs
-) -> None:
-    """The design round's copy, pinned: resources and attribution, nothing else.
-
-    The vendor, the six-decimal spend and the duration were all on this line and all
-    came off (design round 1, D2/D3): ``$0.000020`` bypassed the repo's one money
-    formatter, the 18-character tail is what pushed the line onto a second row at 100
-    columns, a cache hit printed ``(0.00s)`` for a call that never happened, and
-    ``via <vendor>`` named an implementation leg at a user. The spend still reaches
-    the operator — at INFO, from the wiring's own cost log.
-    """
-    subject, _ = service(
-        manager,
-        install_legs,
-        radient={"script": [choice_response("recommend_skill", "minerva-deploy")]},
-    )
-    recommendation = await subject.recommend_resources(request())
-    line = subject.notice(recommendation)
-    assert line is not None
-    assert "\n" not in line
-    assert "skill://minerva-deploy" in line
-    # The three things the design round moved OFF the line.
-    assert "radient" not in line
-    assert "$" not in line
-    assert "s)" not in line
-    # Under 80 cells with one resource, which is the row budget D1 asked for.
-    assert len(line) <= 80, line
-
-
-async def test_a_late_answer_is_attributed_to_the_message_it_answers(manager, install_legs) -> None:
-    """``late`` is the difference between advice about THIS question and the last one.
-
-    On a real vendor a late answer is the ORDINARY case (a ~250 ms answer against a
-    50 ms wait), delivered by the next message — so a line that says "for this
-    message" about it is wrong by default, not in an edge case (design round 1, D2).
-    """
-    subject, _ = service(
-        manager,
-        install_legs,
-        radient={"script": [choice_response("recommend_skill", "minerva-deploy")]},
-    )
-    fresh = await subject.recommend_resources(request())
-    line = subject.notice(fresh)
-    assert line is not None and "for this message" in line
-
-    late = dataclasses.replace(fresh, late_urls=("skill://minerva-deploy",))
-    late_line = subject.notice(late)
-    assert late_line is not None
-    assert "for your previous message" in late_line
-    assert "for this message" not in late_line
-
-
-async def test_a_mixed_delivery_tags_each_resource_and_never_lies(manager, install_legs) -> None:
-    """One prompt, both sets: the union's only honest rendering is per resource.
-
-    The line used to be labelled from the answer that arrived LAST, so a delivery that
-    carried the previous message's answer and this message's own announced both "for
-    your previous message" — telling the user a resource chosen for the question they
-    just asked came from the one before it (QA round 4, Q1). Neither whole-line label is
-    true of the union, so each resource carries its own; the two uniform cases keep the
-    short sentence, which is what the row budget wants.
-    """
-    subject, _ = service(
-        manager,
-        install_legs,
-        radient={"script": [choice_response("recommend_skill", "minerva-deploy")]},
-    )
-    fresh = await subject.recommend_resources(request())
-    assert len(fresh.resources) == 1
-
-    other = dataclasses.replace(
-        fresh,
-        resources=(*fresh.resources, candidate("tunnel", kind="guide")),
-        late_urls=("skill://minerva-deploy",),
-    )
-    line = subject.notice(other)
-    assert line is not None
-    assert line == (
-        "Suggestion added: skill://minerva-deploy (your previous message), "
-        "guide://tunnel (this message)"
-    )
-    assert "for your previous message" not in line.replace("(your previous message)", "")
-
-
-async def test_the_notice_is_silent_when_switched_off(manager, install_legs) -> None:
-    subject, _ = service(
-        manager,
-        install_legs,
-        settings_map=settings(notice=False),
-        radient={"script": [choice_response("recommend_skill", "minerva-deploy")]},
-    )
-    assert subject.notice(await subject.recommend_resources(request())) is None
-
-
-@pytest.mark.parametrize(
-    "leg_spec",
-    [
-        {"script": [choice_response("recommend_skill", "none")]},
-        {"script": [DecisionVendorError("down", kind="transport")]},
-    ],
-    ids=["vendor-declined", "vendor-down"],
-)
-async def test_the_notice_says_nothing_when_there_is_nothing_to_announce(
-    manager, install_legs, leg_spec
-) -> None:
-    subject, _ = service(manager, install_legs, radient=leg_spec)
-    assert subject.notice(await subject.recommend_resources(request())) is None
-
-
-async def test_the_notice_never_names_a_vendor(manager, install_legs) -> None:
-    """Even when a leg DID answer: a vendor id is not a word a user chose.
-
-    The old line printed ``via unknown vendor`` when no leg answered, which is worse
-    — user-facing copy naming an implementation leg — and the fix was to take the
-    vendor off the sentence entirely rather than to spell its absence (D3).
-    """
-    subject, _ = service(manager, install_legs, radient={})
-    line = subject.notice(Recommendation(resources=(candidate("x"),), vendor=None))
-    assert line is not None and "vendor" not in line
-    named = subject.notice(Recommendation(resources=(candidate("x"),), vendor="radient"))
-    assert named is not None and "radient" not in named
 
 
 # ---------------------------------------------------------------------------
