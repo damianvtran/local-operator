@@ -117,15 +117,18 @@ secure-input span drops), and the dangling cross-references.
 
 **Revision 4 — this commit — answers the agent-review round 2, and no decision
 moved: four `file:line` corrections, the fifth citation the same sweep caught,
-and one field-ownership fix.** The four (§14.6's `_reconcile_web_tools`, §6.6's
+and one vocabulary fix.** The four (§14.6's `_reconcile_web_tools`, §6.6's
 CSP line, §9.1's grounds line, §9.3's contrast sentence) now resolve to the line
 that carries the thing they name, and Appendix A's `session.py` census follows
 the first of them from `:14001` to `:14012`; §2.10's `TOOL_ICONS` citation sat
 one line below the `const` it names and now reads `:54-72`. `exit_epoch` has one
-owner — §7.3's sidecar record, beside `exit_code` — and §10.2's `console_status`
-row returns it while §12.3 keys its dedupe on it; no section attributes the
-counter to a place that does not carry it. §0.5 and §17.1 are unchanged between
-revision 3 and this one.
+owner and one spelling: §7.3's sidecar record, beside `exit_code`, is what keeps
+the counter, §10.2's `console_status` row is what returns it, and §12.3 is what
+keys its dedupe on it. §10.2's table is the vocabulary PR A implements, so it is
+also the only spelling any prose may use — §11.1's `last_output_at` was the
+table's `last_activity`, and the idle interval is the agent's own derivation
+rather than a returned field. §0.5 and §17.1 are unchanged between revision 3
+and this one.
 
 | area | revision 1 | revision 2 |
 |---|---|---|
@@ -1657,11 +1660,13 @@ Three shell-side affordances make the admin path usable rather than aspirational
 **That last one is a heuristic and it is rejected as one.** There is no reliable
 in-band way for the pty layer to know a program is waiting for input; the
 honest facts are "the process is running" and "the last output arrived at T".
-`console_status` therefore reports `running`, `last_output_at`, and
-`idle_ms`, and the *agent* decides — with §14.3's description telling it that a
-TUI or a prompt waiting for input looks like an idle surface. Naming the
-heuristic as rejected is the point: this is exactly the class of control that
-looks helpful and produces a wrong answer with confidence.
+`console_status` therefore reports exactly those two facts — `running` and
+`last_activity`, §10.2's name for the second of them, the timestamp of the most
+recent output — and *nothing derived* is reported: the idle interval is the
+agent's to compute, and §14.3's description tells it that a TUI or a prompt
+waiting for input looks like an idle surface. Naming the heuristic as rejected is
+the point: this is exactly the class of control that looks helpful and produces a
+wrong answer with confidence.
 
 ### 11.2 R20 — the three ways a value can reach a terminal, and which are allowed
 
