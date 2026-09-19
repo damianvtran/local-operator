@@ -788,12 +788,17 @@ def format_shape_incident_message(tool: str, labels: "list[str]", summary: str =
     # TYPED INTO a call's arguments, and only the first of those is a result.
     # A notice that misnamed the surface would send an operator looking in the
     # wrong place.
+    # The FIRST row carries the action. The row is six lines in the card and the
+    # head is all most readers take: it used to open with the mechanism (``a
+    # credential in a shape the harness recognises (dsn-password)``), which put
+    # "rotate it" in the fourth line. The bracketed head stays — the harness's
+    # notice-row rules key on it, and a row that paints as the user's own words
+    # would be worse than a jargon-first one.
     return (
-        f"[credential redaction] a credential in a shape the harness recognises "
-        f"({shapes}) was about to reach you from {tool_name}, and was masked "
-        f"before you saw it.{where} The value is now contained for the rest of "
-        "this session — treat the credential as compromised and expect the "
-        "operator to rotate it; do not re-run the command to read the value."
+        f"[credential redaction] rotate it — a credential ({shapes}) reached "
+        f"{tool_name} and was masked before you saw it.{where} Treat it as "
+        "compromised: the operator has to rotate it. Do not re-run the command to "
+        "read the value; it is contained for the rest of this session."
     )
 
 

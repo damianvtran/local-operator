@@ -53,6 +53,61 @@ _SUMMARY_KEYS = ("command", "path", "file_path", "url", "query", "pattern", "exp
 _WHITESPACE = re.compile(r"\s+")
 
 
+#: The session's incident sink, published for the layers that mask BEFORE a
+#: result exists. Empty when no session is running, which is the honest answer
+#: for a bare tool call.
+_HIT_REPORTER: ContextVar[Any] = ContextVar("shape_hit_reporter", default=None)
+
+
+@contextmanager
+def shape_hit_reporting(report: Any) -> Iterator[None]:
+    """Publish ``report`` as the sink for shape hits observed during the block.
+
+    The pipe filter masks the bytes of a command that is still running — and for
+    the case this feature was written for (``kubectl exec … env``, where the
+    credential is in the OUTPUT and nowhere in the command) the mask happens
+    BEFORE the loop's result hook ever sees the text. By then the value is gone,
+    the shape pass finds nothing to match, and the incident that was supposed to
+    become a rotation ticket is never filed at all. Measured: 0 incidents and 0
+    live notices for the output-only shape.
+    """
+    token = _HIT_REPORTER.set(report)
+    try:
+        yield
+    finally:
+        _HIT_REPORTER.reset(token)
+
+
+def set_shape_hit_reporter(report: Any) -> Any:
+    """Install the sink for the CURRENT context, returning the reset token.
+
+    A context manager is the tidy shape and the wrong one at the call site: the
+    loop run is a long ``async for`` whose body would have to be re-indented to
+    sit inside a ``with``. The sink is the session's own bound method and lives
+    as long as the session does, so the token is kept only for symmetry with
+    :func:`reset_shape_hit_reporter` (used by tests).
+    """
+    return _HIT_REPORTER.set(report)
+
+
+def reset_shape_hit_reporter(token: Any) -> None:
+    """Undo :func:`set_shape_hit_reporter`."""
+    _HIT_REPORTER.reset(token)
+
+
+def report_shape_hits(labels: list[str]) -> None:
+    """Hand shape labels to the session's incident queue, if one is attached."""
+    if not labels:
+        return
+    reporter = _HIT_REPORTER.get()
+    if reporter is None:
+        return
+    try:
+        reporter(labels)
+    except Exception:  # noqa: BLE001 — a report must never break a mask
+        pass
+
+
 def current_tool_source() -> tuple[str, str]:
     """``(tool name, summary)`` for the call being redacted, or ``("", "")``."""
     return _SOURCE.get()
