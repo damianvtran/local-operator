@@ -1278,3 +1278,29 @@ def test_a_credential_shaped_run_is_masked_to_its_end() -> None:
     assert _PEM_BODY not in scrubbed
     assert scrubbed == '{"private_key": "[redacted]'
     assert not any(hit.complete for hit in hits)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["", "    ", "\t", "1| ", "2|     ", "\t3| "],
+)
+@pytest.mark.parametrize("suffix", ["", " ", ","])
+def test_a_body_line_is_masked_as_tools_print_it(prefix: str, suffix: str) -> None:
+    """R8-1: indentation, tabs, `N| ` line numbers and trailing padding are body lines.
+
+    The run used to be spelled at line start with no whitespace, so an indented or
+    line-numbered body ended it and every remaining line was published, silently — and a
+    `N| ` prefix is exactly how this product's own `read` tool renders a file, so an agent
+    reading a `.pem` hits it. Each variant must mask the whole body and leave the line
+    after the block byte-identical.
+    """
+    import local_operator.redaction_shapes as rs
+
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    text = (
+        '{"private_key": "' + header + "\n" + prefix + _PEM_BODY + suffix + "\nNORMAL, more text\n"
+    )
+    scrubbed, hits = rs.scrub_shapes_with_hits(text)
+    assert _PEM_BODY not in scrubbed, f"body published for prefix={prefix!r} suffix={suffix!r}"
+    assert scrubbed.endswith("NORMAL, more text\n"), scrubbed
+    assert not any(hit.complete for hit in hits)

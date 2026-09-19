@@ -1070,10 +1070,22 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # manager's round-7 direction said so: the remainder is not all credential, and
         # `…<BODY>\nNORMAL, more text\n` lost that whole line (M6-2 returned as an
         # over-mask). This rule masks the maximal run of CREDENTIAL-SHAPED lines and
-        # stops before the first line that is not one: a line is credential-shaped when,
-        # stripped, it is empty, a PEM header/footer, or solely `[A-Za-z0-9+/=]` plus at
-        # most one trailing comma. `NORMAL, more text`, `", "other": "value"}` and prose
-        # are not, so they survive byte-identical.
+        # stops before the first line that is not one. As the pattern writes it — not as
+        # "stripped", which it does not do — a line is credential-shaped when it is an
+        # optional `N| ` line-number prefix, then optional spaces/tabs, then either
+        # nothing, a PEM header/footer, or solely `[A-Za-z0-9+/=]` with at most one
+        # trailing comma, then optional trailing spaces/tabs. The prefix and the padding
+        # are load-bearing: without them a body line that is indented, tab-prefixed, or
+        # rendered by this product's own `read` tool as `2| MIIE…` ended the run and every
+        # line after it was published silently (R8-1 / QA's N7-1). `NORMAL, more text`,
+        # `", "other": "value"}` and prose are not credential-shaped and survive
+        # byte-identical.
+        #
+        # KNOWN EDGE, recorded rather than patched (R8-2): a line that is a single bare
+        # word — `done`, `INFO` — still reads as credential-shaped, so it is masked. Any
+        # length floor that excludes it also excludes a SHORT TRUNCATED FINAL LINE, which
+        # is the leak direction, and a leak is the worse of the two. Measured: `done` and
+        # `INFO` are consumed, `NORMAL,` is not.
         #
         # Not "stop at the first newline": that would publish the rest of a key whose
         # body is bare newline-separated base64, which is every real PEM.
@@ -1082,9 +1094,15 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}"
             r"(?:"
             r"(?:\\r\\n|\\n|\r\n|\n|\r)"
-            r"(?:[A-Za-z0-9+/=]+,?"
+            # A body line as TOOLS PRINT IT, not only as a file stores it: leading
+            # whitespace (an indented dump), a `N| ` LINE-NUMBER prefix — how this
+            # product's own `read` tool renders a file — a trailing comma and trailing
+            # whitespace all count as credential-shaped, because with them a run stopped
+            # early and published every remaining line silently (R8-1, and QA's N7-1 on
+            # the same shape).
+            r"[ \t]*(?:\d+\| )?[ \t]*(?:[A-Za-z0-9+/=]+,?"
             r"|-{1,4}[\x27\x22]?-{1,4}(?:BEGIN|END)[ A-Z0-9]*PRIVATE KEY"
-            r"-{1,4}[\x27\x22]?-{1,4})?"
+            r"-{1,4}[\x27\x22]?-{1,4})?[ \t]*"
             r"(?=\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$)"
             r")*)"
         ),
@@ -1694,7 +1712,7 @@ _INCOMPLETE_MASK_RE = re.compile(
     # closing quote and brace, and masking it damaged a body the client hands to a
     # human (measured on `test_error_body_redaction`). Only word characters and the
     # symbols a credential is spelled with may extend a mask.
-    r"\[redacted\](['\"])([\w.~+/=@%$!:-]+(?:['\"][\w.~+/=@%$!:-]+)*)"
+    r"\[redacted\](['\"])(?:,[\w.~+/=@%$!:-]+)?([\w.~+/=@%$!:-]+(?:['\"][\w.~+/=@%$!:-]+)*)"
     r"(?=['\"]?(?:[\s,;:)\]}&?=<>|]|$))"
 )
 
