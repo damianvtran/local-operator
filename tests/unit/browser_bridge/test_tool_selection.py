@@ -119,7 +119,20 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     # extension was the only alternative to cmux — false now that the desktop
     # app's browser host serves every one of them.
     assert builtin.CMUX_UNSUPPORTED_BROWSER_ACTIONS == frozenset(
-        {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
+        {
+            "scroll",
+            "logs",
+            "tabs",
+            "request_access",
+            "await_access",
+            "cancel_access",
+            # File transfer joined the set for a reason of its own: cmux drives a
+            # terminal browser panel and has no primitive for handing a file to a
+            # page or taking one from it, and the action list and the degrade check
+            # are the same set so they cannot drift apart.
+            "download",
+            "upload",
+        }
     )
 
 

@@ -30,13 +30,16 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from local_operator import browser_files
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
+    CAPABILITY_GATED_METHODS,
     COMMAND_TIMEOUTS,
     EXPECTED_EXTENSION_VERSION,
     MIN_SUPPORTED_PROTO,
     ORIGIN_PROMPT_WINDOW_S,
     PROTO_VERSION,
+    Capabilities,
     ErrorCode,
     ErrorDetail,
     Hello,
@@ -839,6 +842,14 @@ class ExtensionLink:
         # stale stamp from a dead socket must not drive a decision.
         self.peer_proto: int = PROTO_VERSION
         self.extension_version: str = ""
+        # What this peer ADVERTISED it serves, learned from its `capabilities`
+        # event and kept per-socket like every other stamp here: a stale list
+        # would authorise a method the peer that replaced it does not have. An
+        # older extension never sends the event, so this stays empty and the
+        # daemon refuses `download`/`upload` for it with a typed
+        # `capability_unsupported` rather than burning a 120 s budget on a
+        # method the worker answers with a bare `internal`.
+        self.capabilities: list[str] = []
         self.paired = False
         self.pending: dict[str, asyncio.Future[Response]] = {}
         # Request ids the extension has told us are blocked on a human origin
@@ -1152,6 +1163,10 @@ class ExtensionLink:
         # and the field's own contract is "the proto the peer would speak".
         self.peer_proto = PROTO_VERSION
         self.extension_version = ""
+        # Capabilities are per-socket too, for the same reason the version is:
+        # a list outliving its socket would let a method be sent to a peer that
+        # never advertised it.
+        self.capabilities = []
         for future in self.pending.values():
             if not future.done():
                 future.set_exception(RuntimeError("extension disconnected"))
@@ -1625,6 +1640,10 @@ class BridgeService:
         if self.link.proven:
             self.state.extension_version = self.link.extension_version
             self.state.extension_proto = self.link.peer_proto
+            # Sorted, because the consumer compares membership and the file is
+            # read by a human in `lop browser status`; blanked with the version
+            # above so a proven-only fact stays proven.
+            self.state.capabilities = sorted(self.link.capabilities)
             # The ONE advisory predicate, shared with `/health`: a KNOWN version
             # strictly below the one this runtime ships with. Unparseable is not
             # "older" and an extension AHEAD is not behind, so neither nags.
@@ -1634,6 +1653,10 @@ class BridgeService:
         else:
             self.state.extension_version = ""
             self.state.extension_proto = 0
+            # Nothing is served by a link that is not talking: the empty list is
+            # what makes the session-side capability check refuse rather than
+            # send into a socket nobody is reading.
+            self.state.capabilities = []
             self.state.extension_update_available = False
         state_store.publish(self.state, self.root)
 
@@ -2772,6 +2795,27 @@ class BridgeService:
                             timeout=LINK_SEND_TIMEOUT_S,
                         )
                     continue
+                if frame.get("event") == "capabilities":
+                    # Which methods this build serves (design §6.3). Validated
+                    # rather than trusted: a malformed frame is dropped, not
+                    # allowed to blank a working advertisement — the same
+                    # discipline the pairing and response branches use.
+                    #
+                    # ADDITIVE by construction: an already-released daemon
+                    # reaches the Response.model_validate below, fails, and
+                    # drops the frame (protocol.py's rule for what keeps
+                    # PROTO_VERSION where it is).
+                    try:
+                        advertised = Capabilities.model_validate(frame)
+                    except ValidationError:
+                        continue
+                    link.capabilities = [str(name) for name in advertised.methods]
+                    # Published straight away rather than waiting for the next
+                    # heartbeat: the session-side check reads the FILE, so a
+                    # capability that only reached it 30 s later would show the
+                    # new action as unavailable on a host that serves it.
+                    self.publish_safely()
+                    continue
                 if frame.get("event") == "awaiting_origin":
                     # The extension paused this request on a human origin
                     # decision. Record it so the RPC wait extends its deadline
@@ -3138,6 +3182,34 @@ class BridgeService:
             return self._error_response(
                 request.id, ErrorCode.INTERNAL, f"unknown method: {request.method}"
             )
+        # REFUSE TO SEND what the attached host did not advertise, and do it here
+        # rather than letting the peer fail it: the worker answers an unknown
+        # method with a bare `internal`, so an ungated `download` sent to a
+        # pre-feature extension would spend the whole command budget and then
+        # report nothing the caller can act on (design §6.3). The refusal names
+        # the method, the host and the host's own reported version — the two
+        # remedies it separates ("this build predates the feature" versus "this
+        # build is current and stopped answering") are otherwise
+        # indistinguishable, and sending the reader to the wrong one is the
+        # misdiagnosis `OWNERSHIP_MIN_EXTENSION_VERSION` exists to prevent.
+        #
+        # Only methods that ARE capability-gated are checked: every other method
+        # predates the advertisement, and refusing them on a pre-feature peer
+        # would break the whole tool for a host that works today.
+        if (
+            request.method in CAPABILITY_GATED_METHODS
+            and request.method not in self.link.capabilities
+        ):
+            return self._error_response(
+                request.id,
+                ErrorCode.CAPABILITY_UNSUPPORTED,
+                f"the attached host does not serve {request.method}",
+                {
+                    "method": request.method,
+                    "advertised": sorted(self.link.capabilities),
+                    "extension_version": self.link.extension_version,
+                },
+            )
         if request.id in self.link.pending:
             return self._error_response(request.id, ErrorCode.BUSY, "request id already in flight")
         # Serialize per tab so concurrent sessions cannot interleave commands on
@@ -3459,9 +3531,7 @@ class BridgeService:
         finds no future) together with that fence.
         """
         try:
-            response = await self._await_response(
-                request.id, future, COMMAND_TIMEOUTS[request.method]
-            )
+            response = await self._await_response(request.id, future, self._command_budget(request))
             return JSONResponse(response.model_dump(mode="json", exclude_none=True))
         except asyncio.TimeoutError:
             silent = self.link.silent_for()
@@ -3565,7 +3635,7 @@ class BridgeService:
                 request.id,
                 code,
                 f"{request.method} timed out",
-                {"timeout_s": COMMAND_TIMEOUTS[request.method]},
+                {"timeout_s": self._command_budget(request)},
             )
         except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
             # Same sibling case as the send arm: a severed link makes this a
@@ -3683,6 +3753,25 @@ class BridgeService:
             and not lock.locked()
         ):
             self._tab_locks.pop(tab_key, None)
+
+    def _command_budget(self, request: Request) -> float:
+        """The wall-clock budget for one admitted command (design 6.1).
+
+        Only `download` may ask for more than its table value: it waits on a PAGE
+        (a 200 MB file on a slow link legitimately takes minutes), and the caller's
+        `timeout_s` is clamped to the shared ceiling by the TOOL before it reaches
+        the wire. Every other method takes its table value, so no method can
+        extend its own budget by inventing a parameter. The session-side client
+        reads the same wire key (`client_timeout`), which is what keeps the two
+        ends of the timeout chain from disagreeing.
+        """
+        base = COMMAND_TIMEOUTS[request.method]
+        if request.method != "download":
+            return base
+        raw = request.params.get("timeout_s")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+            return base
+        return max(base, min(float(raw), browser_files.DOWNLOAD_TIMEOUT_MAX_S))
 
     async def _await_response(
         self, request_id: str, future: asyncio.Future[Response], base_timeout: float

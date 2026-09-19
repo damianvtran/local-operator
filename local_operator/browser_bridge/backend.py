@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from local_operator import browser_files
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
     COMMAND_TIMEOUTS,
@@ -20,6 +21,7 @@ from local_operator.browser_bridge.protocol import (
     ErrorDetail,
     Request,
     Response,
+    extension_older,
 )
 
 #: Slack on top of the daemon's worst-case budget so scheduling jitter and the
@@ -421,6 +423,11 @@ def format_error(
                 f"{peer}; this Local Operator speaks {PROTO_VERSION}. Update the "
                 "desktop app or Local Operator, then retry."
             )
+    if error.code == ErrorCode.CAPABILITY_UNSUPPORTED:
+        # Same reason as the two branches above: the sentence depends on the
+        # payload (which method, which build, whether any build could serve it),
+        # so a static table entry cannot carry it.
+        return _capability_message(error, host=host)
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
@@ -528,7 +535,128 @@ def format_error(
     return f"{label} error ({error.code.value}): {error.message}"
 
 
-def client_timeout(method: str) -> float:
+@dataclass(frozen=True)
+class HostCapabilities:
+    """What a host's discovery record says it serves, and which build said so.
+
+    Read from the FILE and never over a socket, deliberately: the whole point of
+    the advertisement is that the decision costs no round trip and works between
+    dials (design §6.3). The tool needs the answer BEFORE it dispatches, because
+    the alternative — sending the method and reading the peer's refusal — spends
+    the command budget on a method the worker answers with a bare `internal`.
+
+    An empty ``methods`` is the honest answer for a host that told us nothing,
+    and it is exactly what the refusal is for: a pre-feature extension never sent
+    the event, and a pre-feature app record has no key at all. ``version`` is
+    whichever stamp that host's record carries (``extension_version`` on the
+    bridge, ``app_version`` on the app host), so the copy can tell "predates the
+    feature" from "current but not advertising".
+    """
+
+    methods: tuple[str, ...] = ()
+    version: str = ""
+
+    def serves(self, method: str) -> bool:
+        return method in self.methods
+
+
+#: The remedy sentence for a capability refusal, per host. Two hosts, two
+#: processes, and the reader is sent to a different one — the same reason
+#: `_WEDGE_REMEDY` is a table rather than a branch.
+_CAPABILITY_HOST_REMEDY = {
+    HOST_EXTENSION: (
+        "update the browser extension in Chrome when a newer version is offered, then retry"
+    ),
+    HOST_UI: "update the desktop app, then retry",
+}
+
+
+def capability_refusal(
+    method: str,
+    *,
+    host: str = HOST_EXTENSION,
+    capabilities: HostCapabilities | None = None,
+) -> BridgeError:
+    """The typed refusal for a method this host did not advertise.
+
+    Built in ONE place so the two producers cannot word it differently: the tool
+    raises it when the discovery record already settles the question (no socket
+    call at all), and the daemon raises the same code over the wire when the
+    record was premature. :func:`format_error` renders both from the payload.
+    """
+    current = capabilities or HostCapabilities()
+    return BridgeError(
+        ErrorCode.CAPABILITY_UNSUPPORTED,
+        f"{method} is not served by this host",
+        {
+            "method": method,
+            "advertised": sorted(current.methods),
+            "extension_version": current.version,
+            "host": host,
+        },
+    )
+
+
+def _capability_message(error: BridgeError, *, host: str) -> str:
+    """The model-facing sentence for a `capability_unsupported`.
+
+    Three cases, and they must not be merged: a method NO build of this host can
+    serve (an extension cannot choose a download destination at all — see
+    ``EXTENSION_CANNOT_SERVE``), a host that predates the feature (its build can
+    be updated), and a current host that did not advertise it (which is a wedge,
+    not a version). Getting this wrong sends the user to a remedy that cannot
+    help, which is the defect `OWNERSHIP_MIN_EXTENSION_VERSION` exists to stop
+    repeating.
+    """
+    from local_operator.browser_bridge.protocol import (
+        CAPABILITY_MIN_EXTENSION_VERSION,
+        EXTENSION_CANNOT_SERVE,
+    )
+
+    method = str(error.data.get("method") or "that action")
+    peer = str(error.data.get("extension_version") or "")
+    remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])
+    if host == HOST_UI:
+        return (
+            f"the Local Operator desktop app's browser host does not provide '{method}' — "
+            f"the app that answered was built before this action existed. Please {remedy}; "
+            "every other browser action still works."
+        )
+    if method in EXTENSION_CANNOT_SERVE:
+        # Measured, and NOT a version problem: Chrome refuses the only two CDP
+        # primitives that could put a file where the harness chooses to a
+        # tab-scoped `chrome.debugger` session, so no extension build can serve
+        # this — telling the user to update would send them to a fix that does
+        # not exist. The desktop app's host can (Electron's `will-download` plus
+        # `setSavePath`), and `bash` + `curl` covers a URL the agent already has.
+        return (
+            f"the browser extension cannot serve '{method}': Chrome does not let an extension "
+            "choose where a download goes, so no extension build can offer it. Use the Local "
+            "Operator desktop app's browser tab instead (open a browser tab there and retry), "
+            "or fetch the file directly with bash + curl. Nothing else about this tab is "
+            "affected."
+        )
+    if not peer:
+        return (
+            f"no browser is attached, so '{method}' cannot run. Ask the user to open their "
+            "browser (the extension reconnects automatically) and retry; 'lop browser status' "
+            "shows the connection."
+        )
+    minimum = CAPABILITY_MIN_EXTENSION_VERSION.get(method)
+    if minimum and extension_older(peer, minimum):
+        return (
+            f"the attached browser extension (version {peer}) does not provide '{method}': the "
+            f"first version that does is {minimum}. Please {remedy}; nothing else about this "
+            "tab is affected."
+        )
+    return (
+        f"the attached browser extension reports version {peer} but did not advertise "
+        f"'{method}', so the command was not sent. Ask the user to toggle the Local Operator "
+        "extension OFF then ON in chrome://extensions (pairing is preserved), then retry."
+    )
+
+
+def client_timeout(method: str, requested_s: Any = None) -> float:
     """HTTP budget for one RPC: the daemon's worst case, plus margin.
 
     The timeout chain (finding A3) is extension deny 60 s < daemon prompt
@@ -550,6 +678,20 @@ def client_timeout(method: str) -> float:
     advice in exactly that overrun.
     """
     base = COMMAND_TIMEOUTS.get(method, max(COMMAND_TIMEOUTS.values()))
+    # A caller may ask for longer on the ONE method that waits on a page rather
+    # than on us (`download`: a 200 MB file on a slow link), and the DAEMON honours
+    # the same wire parameter — so the client has to outlive it or it fabricates an
+    # "unreachable" failure while the daemon is healthy and about to deliver the
+    # files (the same class of mismatch the origin-prompt window below exists for).
+    # Clamped to the shared ceiling and refused for a non-number, so no caller can
+    # extend its own budget by inventing a value.
+    if (
+        method == "download"
+        and isinstance(requested_s, (int, float))
+        and not isinstance(requested_s, bool)
+        and requested_s > 0
+    ):
+        base = max(base, min(float(requested_s), browser_files.DOWNLOAD_TIMEOUT_MAX_S))
     return base + ORIGIN_PROMPT_WINDOW_S + _CLIENT_TIMEOUT_MARGIN_S
 
 
@@ -583,6 +725,27 @@ class HostClient:
     def _read(self) -> Any:
         return self.store.read(self.root)
 
+    def capabilities(self) -> HostCapabilities:
+        """What this host's discovery record says it serves (design §6.3).
+
+        File-only, and never raising: this decides whether a command is sent at
+        all, and it must work between dials — the refusal is at stake, not the
+        transport. A record with no ``capabilities`` key reads as "this host told
+        us nothing", which is the refusal case rather than an error, and an
+        absent or unreadable record is the same answer for the same reason.
+        """
+        try:
+            current = self._read()
+        except Exception:  # noqa: BLE001 - discovery may never raise at a call site
+            return HostCapabilities()
+        if current is None:
+            return HostCapabilities()
+        methods = getattr(current, "capabilities", None) or []
+        version = str(
+            getattr(current, "extension_version", "") or getattr(current, "app_version", "")
+        )
+        return HostCapabilities(tuple(str(name) for name in methods), version)
+
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         copy = HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])
         current = self._read()
@@ -590,7 +753,7 @@ class HostClient:
             raise BridgeUnreachable(copy.no_state)
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
-        timeout = client_timeout(method)
+        timeout = client_timeout(method, params.get("timeout_s"))
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 http_response = await client.post(
