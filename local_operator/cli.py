@@ -1682,6 +1682,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         stored = settings_io.read_setting(config_manager, setting)
         echoed = matched_choice.label if matched_choice is not None else stored
         print(f"Successfully updated {args.key} to {echoed}")
+        if setting.key == "tool_approval_mode" and str(stored).strip().lower() == "auto":
+            # Qualified on purpose (UX round 1, U4). "Successfully updated
+            # tool_approval_mode to auto" reads as "my running agents are not
+            # gated any more", and since #1282 that is false for every session
+            # already running: a loosening is authorised only in the process
+            # that holds the gate (``harness.approval.loosening_is_authorised``),
+            # and this command's process holds none. The TIGHTENING direction
+            # says nothing extra: it really does reach every running session,
+            # and is the safe direction besides.
+            print(
+                "Running sessions are unchanged — a config write cannot loosen one; "
+                "type /approvals auto in each session you want ungated. "
+                "New sessions open at auto."
+            )
         return 0
     except settings_io.ConfigUnreadableError as e:
         # Distinct from the schema rejection below: the key and the value are

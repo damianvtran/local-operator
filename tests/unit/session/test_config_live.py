@@ -538,6 +538,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: TUI's ``_approve_all`` (``tests/unit/tui/test_config_change_notice.py``).
 #: The session only holds whatever gate closure the host installed.
 #:
+#: A file write reaches a running gate in the directions the HOST authorises,
+#: which since #1282 is not symmetric: a tightening always propagates, a
+#: loosening only when the write is the host's own through the settings facade
+#: (``harness.approval.loosening_is_authorised``). A probe in THIS file could
+#: only assert a transition the host refused, so the two hosts each pin their
+#: half where the gate lives, including the refusal.
+#:
 #: ``runtime`` is here for the same reason and a sharper one: its keys are
 #: read at COMMAND time by the surface that acts on them, so there is no
 #: session attribute for a probe to observe moving.

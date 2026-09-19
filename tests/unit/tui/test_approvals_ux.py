@@ -194,6 +194,36 @@ async def test_a_session_mode_changes_nothing_on_disk(config_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_session_switch_stops_offering_a_save_the_file_already_has(
+    config_dir: Path,
+) -> None:
+    """UX round 1, U5: the hint is dropped once it is not news.
+
+    A `/approvals auto` usually follows the refusal notice now — the file already
+    says `auto` and only this session is holding back — so "saves it for new
+    sessions" was instructing the user to do what was already done. The receipt
+    keeps the live half exactly as the runtime words it.
+    """
+    first = OperatorApp(lambda: _factory(GatedSession()))
+    async with first.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, first)
+        await _submit(pilot, first, "/approvals default auto")
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        assert _saved_mode(config_dir) == "auto", "premise: the file already says auto"
+        await _submit(pilot, app, "/approvals ask")
+        await _submit(pilot, app, "/approvals auto")
+
+        receipt = _notices(app)[-1]
+        assert receipt == (
+            "tool approvals: auto — every tool runs without asking (this session)"
+        ), receipt
+        assert app._approve_all is True
+
+
+@pytest.mark.asyncio
 async def test_the_default_form_writes_the_config_and_names_the_file(config_dir: Path) -> None:
     """`/approvals default auto` — the promotion, spelled `/model`'s way.
 
@@ -297,7 +327,10 @@ async def test_a_session_switched_away_from_its_default_says_both(config_dir: Pa
         report = _notices(app)[-1]
         assert "ask (this session)" in report
         assert "config.yml says auto" in report
-        assert "/approvals default ask" in report
+        # The remedy is named, and it is the one that MATCHES the file — not
+        # `/approvals default ask`, which would rewrite the machine-wide default
+        # to clear one session's surprise (UX round 1, U3).
+        assert "/approvals auto adopts it in this session" in report, report
 
 
 @pytest.mark.asyncio
