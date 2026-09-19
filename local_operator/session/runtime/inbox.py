@@ -608,3 +608,86 @@ def _read_all(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+# -- the update window's handover marker ---------------------------------------
+#
+# The inbox file above carries the MESSAGES a leaving runtime spooled. This
+# carries the FACT that a handover was in flight, and the two are separate files
+# because they have different lifetimes and different readers:
+#
+#   * the spool is read by the successor's own delivery path and is EMPTY until
+#     somebody sends something;
+#   * the marker is written by the window's OPEN and read (once) by the
+#     successor's BOOT, whether or not a single message was queued.
+#
+# WHY A FILE AND NOT A FIELD. The pair has to cross a process boundary in the
+# one direction the record cannot serve: the predecessor's record is gone by the
+# time the successor imports, and the successor's own record is written before
+# any of this could be consulted (``_bind_boot_instrumentation`` runs before the
+# inbox drain). The session directory is the only durable handover surface both
+# ends already share, and the predecessor ALREADY owns it.
+#
+# IT SURVIVES A FAILED WINDOW ON PURPOSE, in one direction only: the runtime that
+# opens a window clears this marker when it aborts (``end_update``), so a marker
+# that outlives its writer is evidence of a process that died mid-move. The
+# successor still reports the update as applied, which is the honest reading —
+# it IS running the newer build — and is exactly the case the operator could
+# never see before this existed.
+UPDATE_WINDOW_NAME = "update-window.json"
+
+
+def update_window_path(session_dir: Path) -> Path:
+    return session_dir / UPDATE_WINDOW_NAME
+
+
+def write_update_window(session_dir: Path, pair: str) -> bool:
+    """Record that an update window is moving to ``pair``. ``False`` on failure.
+
+    Written through a temporary in the same directory and renamed into place, so
+    a reader can never observe a half-written marker (the window opens
+    synchronously inside the idle decision, where there is no second rung to
+    retry from). Failure is NOT fatal to the window: the messages still spool and
+    the successor still runs them — what is lost is only the "updated" fact, which
+    is the cheaper half.
+    """
+    path = update_window_path(session_dir)
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"pair": pair, "pid": os.getpid()}), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        logger.warning(
+            "could not write the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False
+
+
+def read_update_window(session_dir: Path) -> str:
+    """The pair a handover was moving to, or ``""`` when no marker is present.
+
+    An unreadable or malformed marker reads as absent rather than raising: a boot
+    must not fail because a sidecar from an older or killed build is malformed,
+    and the cost of missing one is a fact that is merely nice to have.
+    """
+    try:
+        raw = json.loads(update_window_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    pair = raw.get("pair") if isinstance(raw, dict) else ""
+    return pair if isinstance(pair, str) else ""
+
+
+def clear_update_window(session_dir: Path) -> bool:
+    """Remove the marker, whether or not one is there. ``True`` if it was."""
+    try:
+        update_window_path(session_dir).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning(
+            "could not clear the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False
