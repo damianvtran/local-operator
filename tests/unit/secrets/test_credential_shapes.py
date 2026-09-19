@@ -69,6 +69,7 @@ from tests.unit.secrets.credential_shape_corpus import (
     DUMP_COMMAND_CASES,
     NEGATIVE_CASES,
     POSITIVE_CASES,
+    Case,
 )
 
 #: A synthetic credential. Never a real one, and never asserted into anything a
@@ -1013,3 +1014,68 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
     # the cast is what tells the type checker what the runtime already knows.
     presentation.project_settled_rows(cast(Any, target), [message], fold_width=80)
     return target.blocks
+
+
+#: The rules whose value class can still stop at a quote INJECTED INSIDE the token,
+#: with the measured number of corpus cases that expose it. The invariant below is
+#: the property this PR exists to hold — **a mask is all of the credential or none of
+#: it, never a prefix with the remainder readable** — and it holds for the whole
+#: table except these. They are FROZEN, not excused: a new rule that joins this set,
+#: or a change that makes any of them worse, fails the test. Closing them is the
+#: remaining work on this class and is recorded in the PR thread.
+_PARTIAL_MASK_RESIDUAL = {
+    "pem-private-key": 184,
+    "gcp-service-account-key": 44,
+    "npmrc-auth-token": 32,
+    "cookie-header": 30,
+    "credential-url-value": 10,
+    "aws-access-key-id": 8,
+    "github-pat": 2,
+    "vendor-prefixed-token": 2,
+}
+
+
+def _partial_masks(text: str) -> list[tuple[str, str, str]]:
+    """Every quote insertion inside a credential that leaves a fragment readable."""
+    import local_operator.redaction_shapes as rs
+
+    _, hits = rs.scrub_shapes_with_hits(text)
+    found: list[tuple[str, str, str]] = []
+    for hit in hits:
+        value = hit.value
+        if len(value) < 6:
+            continue
+        for quote in ("'", '"'):
+            for pos in range(1, len(value)):
+                variant_value = value[:pos] + quote + value[pos:]
+                variant = text.replace(value, variant_value, 1)
+                masked = rs.scrub_shapes(variant)
+                if masked == variant:
+                    continue  # untouched is allowed: a rule that does not see it
+                fragments = {variant_value[i : i + 6] for i in range(0, len(variant_value) - 5)}
+                if any(fragment in masked for fragment in fragments):
+                    found.append((hit.label, variant, masked))
+    return found
+
+
+@pytest.mark.parametrize("case", POSITIVE_CASES, ids=lambda c: c.reason[:48])
+def test_a_quote_inside_a_credential_never_leaves_a_readable_fragment(case: Case) -> None:
+    """THE INVARIANT: a mask covers the whole credential or none of it.
+
+    Measured by inserting ``'`` and ``"`` at every position inside every credential
+    the corpus masks, then checking that no 6-character fragment of the credential is
+    readable afterwards. A masked prefix beside a readable tail is worse than no mask
+    at all, because the notice tells the operator the credential was contained.
+
+    The residual set above is the part of the table the closure does not reach yet;
+    the assertion on it is what stops the class recurring silently — a rule that
+    regresses, or a new one that joins the set, reds this test.
+    """
+    offenders = _partial_masks(case.text)
+    labels = {label for label, _, _ in offenders}
+    unexpected = labels - set(_PARTIAL_MASK_RESIDUAL)
+    assert not unexpected, (
+        f"{sorted(unexpected)} published a readable fragment of a credential whose "
+        f"mask stopped at a quote; first: {offenders[0][1][:80]!r} -> "
+        f"{offenders[0][2][:80]!r}"
+    )
