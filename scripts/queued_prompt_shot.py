@@ -58,15 +58,10 @@ def _session(mode: str) -> FakeSession:
     """A session whose runtime answers exactly as the mode names."""
     session = FakeSession()
 
-    if mode == "queued":
-
-        async def prompt(text: str, images: Any = None, **kwargs: Any) -> str:
+    async def prompt(text: str, images: Any = None, **kwargs: Any) -> Any:
+        if mode == "queued":
             return SPOOL_RECEIPT_PROMPT
-
-    else:
-
-        async def prompt(text: str, images: Any = None, **kwargs: Any) -> None:
-            raise RuntimeRetiring(trigger=RuntimeRetiring.BUILD)
+        raise RuntimeRetiring(trigger=RuntimeRetiring.BUILD)
 
     session.prompt = prompt  # type: ignore[assignment]
     return session

@@ -747,7 +747,7 @@ async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     prompts: list[str] = []
-    admitted = {"p" * 8: False}
+    admitted: dict[str, bool] = {"p" * 8: False}
 
     class Handle:
         _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path))
@@ -757,7 +757,7 @@ async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
             # answered from the index, which is the whole point.
             return admitted.get(command_id, False)
 
-        async def prompt(self, text, images=None, command_id=None, **kwargs):
+        async def prompt(self, text, images=None, command_id="", **kwargs):
             prompts.append(text)
             admitted[command_id] = True
             return "prompt admitted"
