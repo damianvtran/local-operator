@@ -6987,8 +6987,47 @@ class OperatorApp(App[None]):
             source
         ):
             source.gate_draft = None
+        self._reconcile_gate_surface(source)
         if self._sidebar_source_releasable(source) and self.is_running:
             self.run_worker(self._release_sidebar_source(source))
+
+    def _reconcile_gate_surface(self, source: SessionInteraction) -> None:
+        """Re-arm the gate bridge when the visible session owes a card it lacks.
+
+        LEVEL-TRIGGERED, deliberately. Every edge that re-arms the bridge is a
+        navigation event, so a gate whose edge was missed \u2014 or whose only edges
+        were spent while the bridge was detached \u2014 has no further edge coming
+        and stays invisible with its turn blocked. This hook already fires for
+        the current source on the very delta that carries the gate, so it is the
+        one place that can notice \"pending gate, no card\" as a STATE rather than
+        as a transition.
+
+        `_is_current` FIRST: this runs on every frontend delta of every leased
+        source, and the N-1 hidden ones must pay one identity compare and
+        nothing more. A hidden source re-arming here would also break the rule
+        that a late gate from A must never mount while B is displayed.
+
+        `requested_id` excludes a navigation in flight, whose commit does its
+        own re-arm; re-arming underneath it would race the suspend it is about
+        to run. The answered-gate fence (`_gate_answered_key`, G3 in
+        `_maybe_start_gate`) still decides whether an ALREADY ANSWERED question
+        may re-mount \u2014 this raises how often that guard is consulted, it does
+        not weaken it.
+        """
+        if not self._is_current(source):
+            return
+        session = source.session
+        if not _is_viewer(session):
+            return
+        # The narrow accessor, never `frontend_state`: its clone was measured at
+        # ~30 ms of a 135 ms cold frame, and this runs on every delta.
+        if getattr(session, "pending_gate", None) is None:
+            return
+        if self._sidebar_navigation.requested_id:
+            return
+        if self._sidebar_gate_card_ready(source, lambda _widget: True):
+            return
+        session.resume_viewer_gates()
 
     def _restore_gate_draft(self, source: SessionInteraction, card: AskPickerScreen) -> None:
         saved = source.gate_draft
@@ -7106,12 +7145,37 @@ class OperatorApp(App[None]):
                 offset = min(source.draft.scroll_offset, max(0, anchor_region.height - 1))
                 if anchor_region.y + offset != content.y and 0 < view.scroll_y < view.max_scroll_y:
                     return False
+        # A `display_only` frame runs the SAME gate/card check as a live one.
+        # It used to answer "ready" only when NO card was mounted, which made a
+        # correctly-bound card on a `display_only` source answer False forever:
+        # `_await_sidebar_frame` then sat out its 15 s timer, raised
+        # `SurfaceNotReady`, and re-latched `display_only` with a "Reconnect
+        # failed" notice — the frame that was already painted correctly being
+        # declared unpaintable. The `is_cold`/`display_history_current`
+        # preconditions stay excluded for `display_only` (see the guard at the
+        # top of this method); only the card check is shared.
+        return self._sidebar_gate_card_ready(source, region)
+
+    def _sidebar_gate_card_ready(
+        self, source: SessionInteraction, region: Callable[[Widget], Any]
+    ) -> bool:
+        """Whether this source's pending gate (if any) is correctly on screen.
+
+        THE ONE SPELLING of "the mounted card belongs to this source's current
+        gate". `_sidebar_gate_surface_ready` asks it of a painted frame and
+        `_source_frontend_changed` asks it of the live widget tree; a second
+        copy of the identity comparison is exactly the class of defect that
+        stranded the gate card in the first place, so both go through here.
+
+        ``region`` reports where a widget was actually painted, which is what
+        distinguishes the two callers: the frame check passes the compositor map
+        of the display being judged, while a caller that only needs binding
+        identity passes a probe that does not assert paint.
+        """
         # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
         # the entire state (jobs, usage, trajectories) on every display, which
         # profiling measured as the largest single cost of the cold frame. A
         # reduced facade without the narrow accessor still falls back below.
-        if source.display_only:
-            return self._ask_screen is None and self._approval is None
         session = source.session
         gate = getattr(session, "pending_gate", None)
         if gate is None and not hasattr(session, "pending_gate"):
@@ -7443,7 +7507,16 @@ class OperatorApp(App[None]):
         if _is_viewer(current):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
-            elif not self._interaction.display_only:
+            else:
+                # The SECOND re-arm, reached from `_prepare_and_commit`'s
+                # `finally` (session_navigation.py:184-187) on every settled
+                # navigation — including a failed or superseded one. It is what
+                # heals a detached bridge after a burst of switches, and it was
+                # gated on `not display_only` for the same #808 reason as the
+                # commit site. Re-arming a gate bridge is not a submission (see
+                # `_commit_sidebar_session`), so the latch must not suppress it:
+                # while it did, a `display_only` source lost both of its routes
+                # back at once.
                 current.resume_viewer_gates()
         if session_id:
             self._begin_sidebar_transition()
@@ -8339,9 +8412,21 @@ class OperatorApp(App[None]):
                 self._system_notice(text, kind)
             source.notices.clear()
             self._resurface_attach_behind(source)
+            # These two were fused behind `not source.display_only` by
+            # e1f1603c3 (#808). They are not the same kind of act and must not
+            # share a condition. `_submit_boot_prompt` SUBMITS — it starts a
+            # turn — and firing it on a saved preview is what #808 correctly
+            # prevented, so it keeps the guard. `resume_viewer_gates` submits
+            # nothing: it clears the `_gates_detached` latch and re-runs the
+            # `_maybe_start_gate` ladder, which is idempotent (it returns early
+            # when `_gate_task is not None`) and has no answer path. Leaving it
+            # fused meant a source whose reconnect can never complete kept
+            # `display_only` latched forever, so the ONLY route back on screen
+            # for a pending gate was never taken and the card was lost
+            # permanently.
             if not source.display_only:
                 self._submit_boot_prompt(session)
-                session.resume_viewer_gates()
+            session.resume_viewer_gates()
             self._session_sidebar.current_id = session_id
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
