@@ -1871,6 +1871,86 @@ class _SlashHandle(FakeHandle):
         return await self._record("slash_result", command, args)
 
 
+def test_a_failed_handshake_clears_a_standing_one_and_a_repaint_does_not() -> None:
+    """The two halves of the relay's adopt rule, pinned as a FUNCTION.
+
+    Both halves are security-relevant and only one of them was covered: every
+    existing test drives the repaint half through a socket, so a mutation that
+    preserved the state on ANY proof-less frame — i.e. one that treats an
+    impostor's answer to our nonce as a repaint — left all 359 delta tests green
+    (agent review round 3, R3-2). The impostor's shape is a frame that answers
+    our nonce with a salt and no usable proof, and it has to CLEAR: a connection
+    that just failed a handshake must not keep the authority of one that
+    succeeded.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.harness.approval import (
+        handshake_proof,
+        mint_operator_cap,
+        operator_nonce,
+    )
+    from local_operator.mobile.daemon import SessionEntry, _adopt_operator_handshake
+
+    cap = mint_operator_cap()
+    nonce = operator_nonce()
+    salt = operator_nonce()
+
+    def handshaken() -> Any:
+        # ``Any`` rather than a real record: this test is about the ADOPT rule,
+        # which reads four fields the entry owns and never touches the record.
+        record: Any = SimpleNamespace(pid=4242, session_id="sess-1")
+        entry = SessionEntry(record)
+        entry.operator_cap = cap
+        entry.operator_nonce = nonce
+        entry.operator_salt = salt
+        entry.authority_bearing = True
+        return entry
+
+    # A REPAINT carries neither key, and must leave the handshake standing.
+    repaint = handshaken()
+    _adopt_operator_handshake(repaint, {"op": "projection", "data": {"epoch": "e-2"}})
+    assert repaint.authority_bearing is True
+    assert repaint.operator_salt == salt
+
+    # The WELCOME re-establishes it, from the proof this runtime can compute.
+    welcome = handshaken()
+    good_salt = operator_nonce()
+    _adopt_operator_handshake(
+        welcome,
+        {
+            "op": "projection",
+            "operator_salt": good_salt,
+            "operator_proof": handshake_proof(cap, client_nonce=nonce, server_salt=good_salt),
+        },
+    )
+    assert welcome.authority_bearing is True
+    assert welcome.operator_salt == good_salt
+
+    # A SALT WITH NO USABLE PROOF is the impostor, whatever its shape: no proof
+    # at all, a wrong-but-well-formed proof, and a salt that is not wire hex.
+    for frame in (
+        {"op": "projection", "operator_salt": operator_nonce()},
+        {
+            "op": "projection",
+            "operator_salt": operator_nonce(),
+            "operator_proof": handshake_proof(
+                mint_operator_cap(), client_nonce=nonce, server_salt=salt
+            ),
+        },
+        {"op": "projection", "operator_salt": "not-hex"},
+        # A proof WITHOUT a salt is a handshake attempt too, and cannot verify.
+        {
+            "op": "projection",
+            "operator_proof": handshake_proof(cap, client_nonce=nonce, server_salt=salt),
+        },
+    ):
+        failed = handshaken()
+        _adopt_operator_handshake(failed, frame)
+        assert failed.authority_bearing is False, frame
+        assert failed.operator_salt == "", frame
+
+
 @pytest.mark.asyncio
 async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
     operator_cap: bytes,
@@ -1895,7 +1975,10 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
     * an ORDINARY request still works on the refused connection, because the
       seam guards one class and nothing else.
     """
-    from local_operator.harness.approval import reset_operator_caps_for_tests
+    from local_operator.harness.approval import (
+        OPERATOR_CAP_REQUIRED_NOTICE,
+        reset_operator_caps_for_tests,
+    )
     from local_operator.session.errors import OperatorAuthorityRequired
 
     handle = _SlashHandle()
@@ -1947,10 +2030,27 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
                     break
                 await asyncio.sleep(0.1)
             assert entry2.authority_bearing is False
-            with pytest.raises(OperatorAuthorityRequired):
+            with pytest.raises(OperatorAuthorityRequired) as refusal:
                 await daemon.request(
                     record.pid, "slash_result", command="approvals", args="auto", images=[]
                 )
+            assert str(refusal.value) == OPERATOR_CAP_REQUIRED_NOTICE
+            # ...AND A REFUSED CARD IS REBUILT AS THE CARD'S SENTENCE (UX review
+            # round 3, U11). The runtime sends the op as a token; this writer
+            # dropped it, so the phone — the surface the card copy was written
+            # for — read about a command its user never typed, on a question that
+            # had survived. The trigger is forwarded now, and this is the
+            # assertion that keeps it.
+            from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+
+            with pytest.raises(OperatorAuthorityRequired) as card_refusal:
+                await daemon.request(
+                    record.pid,
+                    "approval_answer",
+                    request_id="deadbeefdeadbeef",
+                    approved=True,
+                )
+            assert str(card_refusal.value) == CARD_APPROVAL_REFUSED_NOTICE
             # An ORDINARY op is unaffected on the same connection: the seam
             # guards one class, and the phone keeps everything else.
             reply = await daemon.request(record.pid, "prompt", text="hello")

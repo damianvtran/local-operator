@@ -85,6 +85,13 @@ needs a different sentence from a person whose command was (UX round 2, U8). The
 op travels as a TOKEN and the sentence is rebuilt on the far side, exactly as the
 typed category is.
 
+**One sentence, both hosts, and the reader's machine.** `/approvals default …`
+is answered by whichever host was asked, and the two handles had drifted into
+two wordings of the same clause; it is now one shared builder
+(`harness/approval.approvals_default_notice`). It also stopped saying "this
+machine's `config.yml`": read from a phone, "this machine" is the phone (design
+round 3, D16).
+
 **The reports are told, not guessing.** A report (`/approvals` with a
 divergence, `/approvals default …`) names remedies, and the same connection's
 `/approvals auto` may be refused — so the seam passes `may_loosen`, judged by
@@ -181,17 +188,35 @@ are, and this table is the fuller statement — several of these are CONDITIONAL
 which is why the copy names the event and the lever rather than promising one
 total fix (design round 2, D11/D13; UX round 2, U9):
 
-| remedy | what it does | when it works |
-| --- | --- | --- |
-| type `/approvals auto` in the window that started the runtime | loosens THIS session, in one step | that window is still live and still attached |
-| let the runtime retire, then reopen the session here | makes this window the one that starts the next runtime, so it owns the gate | always, but only when the runtime leaves — retirement is readiness-judged (`cli.refresh_command`), never forced |
-| `lop refresh` | asks a live runtime to move to the install on disk and leave at its next boundary | the install on disk has MOVED (an update). Without a move a runtime answers "already current" and stays |
-| `/approvals ask` | tightens | everywhere, including a follower, the phone and the desktop |
-| `--yolo`, or `tool_approval_mode: auto` in `config.yml` | the NEXT session starts loosened | at launch; the config write is a file edit (or the desktop app's settings), not a session command — no control connection may write it |
-| `lop stop <session>`, then reopen | ends this session so this window can own the next one | always, and it ENDS the running turn: named here for completeness, never as a remedy |
+| remedy | what it does | when it works | in the refusal copy? |
+| --- | --- | --- | --- |
+| type `/approvals auto` in the window that started the runtime | loosens THIS session, in one step | that window is still live and still attached | yes, as the primary remedy |
+| let the runtime retire, then reopen the session here | makes this window the one that starts the next runtime, so it owns the gate | always, but only when the runtime leaves — retirement is readiness-judged (`cli.refresh_command`), never forced | yes, as the background case |
+| `lop refresh` | asks a live runtime to move to the install on disk and leave at its next boundary | the install on disk has MOVED (an update). Without a move a runtime answers "already current" and stays | **no** — conditional on a move, and the copy has no room to state the condition without pushing the reason off a narrow screen. It is here because a reader who HAS just updated should know it |
+| `/approvals ask` | tightens | everywhere, including a follower, the phone and the desktop | yes |
+| `--yolo`, or `tool_approval_mode: auto` in `config.yml` | the NEXT session starts loosened | at launch; the config write is a file edit (or the desktop app's settings), not a session command — no control connection may write it | yes |
+| `lop stop <session>`, then reopen | ends this session so this window can own the next one | always, and it ENDS the running turn: named here for completeness, never as a remedy | **no** — it is not a remedy this change is willing to recommend |
 
 Note the one the product does not have: an unconditional command that retires a
 live runtime so a viewer can take over.
+
+### 4.2 What the refusal looks like on a narrow screen
+
+The copy is 345 characters (the card's is 162) and both are under the runtime's
+400-character error-frame cap, which is asserted as a number
+(`test_the_refusal_copy_names_the_remedies_and_not_a_rule`) so a longer copy
+fails a test rather than a phone.
+
+Rows are a property of the RENDERER, not of the characters: the notice block
+wraps at its own content width — measured 40 cells at a 44-column terminal, not
+44 — so the command's copy renders as **12 rows** against a **11-row** content
+area at 44x20, and the card's as 6. In a conversation the first row of the
+command's block can therefore scroll off, and what stays on screen is the reason
+and the primary remedy, which is exactly why the copy leads with them. The
+rendered numbers are pinned in
+`tests/unit/tui/test_approvals_ux.py::test_the_refused_card_notice_reaches_the_screen`
+(design round 3, D14; agent review round 3, R3-5 — a wrap-based pin said "9 rows"
+and measured a wrapping the frame does not do).
 
 ## 4. The residual
 
@@ -225,7 +250,28 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   runtime the relay started, over a remote transport — Stage 3 replaces it with
   a device-bound credential;
 - **the desktop `claim` handshake and the serve record's `claim_key`** are a
-  different plane (governing a *daemon*, not a session gate) and are unchanged.
+  different plane (governing a *daemon*, not a session gate) and are unchanged;
+- **nothing identifies WHICH window owns a session when several are live.** The
+  copy says "the window that started this session" and that referent is
+  resolvable by the operator only by elimination: no `lop info` field, no band
+  marker names the owner. This was raised in round 2 (UX U9) and answered with a
+  route rather than an identity, and it is recorded here as still open;
+- **the phone's card component renders the refusal body raw.** The sentence it
+  now receives is the CARD's — the question survived, and a deny works from there
+  — but `pending-card.tsx`'s `humanizeError` has no arm for it, so the copy is
+  shown as sent rather than as a card-shaped message. That file is in another
+  repository (UX review round 3, U11's remainder);
+- **a relay dial that has ENDED leaves ``SessionEntry.authority_bearing`` set**
+  until the next dial replaces the connection. Pre-existing and outside this
+  delta, and no user-visible consequence has been produced from it — the next
+  request is written on the next dial, which resets both fields — but it cost a
+  reviewer one false reading, so it is recorded (QA review round 3, Q7);
+- **D5's per-row "why" is deferred.** `auto` is tinted because this connection
+  may not loosen THIS session and `default auto` because it is machine-locality
+  and is refused from every surface, including a console — two different reasons
+  behind one tint, distinguishable only by spending the keystroke. The refusal
+  explains each; the list has no room at 60 or 44 columns (UX review round 3,
+  U15).
 
 ## 5. Staged plan
 

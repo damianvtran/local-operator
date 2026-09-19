@@ -905,9 +905,13 @@ def test_the_refusal_copy_names_the_remedies_and_not_a_rule() -> None:
     # top of the view (design round 2, D8). Both are pinned as NUMBERS because
     # both were regressions of exactly that kind.
     assert len(copy) <= 400, len(copy)
-    import textwrap
-
-    assert len(textwrap.wrap(copy, 44)) <= 9, len(textwrap.wrap(copy, 44))
+    # HOW MANY ROWS IT TAKES TO READ IS NOT THIS FILE'S NUMBER. The notice block
+    # wraps at its own content width (40 cells at a 44-column terminal), so a
+    # wrap of the COPY at 44 said "9 rows" while the rendered block was 12 —
+    # a pin that measured a wrapping the frame does not do (design round 3, D14;
+    # agent R3-5). The rendered bound lives where the renderer is:
+    # ``tests/unit/tui/test_approvals_ux.py``
+    # ``::test_the_refused_card_notice_reaches_the_screen``.
 
 
 def test_the_card_refusal_is_its_own_sentence() -> None:
@@ -1585,6 +1589,12 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
         surfaced: list[BaseException] = []
 
         async def approve(tool_name: str, description: str, job_id: str | None = None) -> bool:
+            # ANSWERS ONCE, then waits — which is what a pane does: the operator
+            # presses Allow, and if the card comes back they are looking at it
+            # again rather than having pressed anything. A handler that answered
+            # immediately forever would spin the re-armed gate (UX round 3, U12).
+            if asked.is_set():
+                await asyncio.Event().wait()
             asked.set()
             return True
 
@@ -1614,6 +1624,21 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
         assert live.handle._fold.projection.pending is not None
         assert not card.done()
 
+        # AND THE PANE GETS ITS CARD BACK (UX review round 3, U12). The dock card
+        # resolves on the keypress, so a refused Allow used to leave the pane with
+        # no card, inert keys and a blocked tool call — while the copy told the
+        # operator to deny from there. The gate re-arms, which is what makes that
+        # sentence true rather than aspirational.
+        for _ in range(100):
+            if remote._gate_task is not None and not remote._gate_task.done():
+                break
+            await asyncio.sleep(0.02)
+        assert remote._gate_task is not None, "the refused pane never got its card back"
+        assert not remote._gate_task.done(), "the re-armed gate settled without an answer"
+        assert remote._gate_task is not asyncio.current_task()
+        await asyncio.sleep(0.05)
+        assert not remote._gate_task.done(), "the re-armed gate did not wait for the operator"
+
         # THE POSITIVE CONTROL (agent review round 2, R2-4; #1291's lesson that
         # a refusal nobody can turn into an acceptance proves nothing). Same
         # client, same arm, same card — the ONLY difference is that this process
@@ -1628,6 +1653,7 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
         remote = await _follower(tmp_path, live.record)
         assert remote._client._authority_bearing, "the console did not present its capability"
         surfaced.clear()
+        asked.clear()
         remote.set_approval_handler(approve)
         remote.set_gate_refusal_handler(surfaced.append)
         remote._gate_key = remote._gate_identity(pending)
@@ -1639,4 +1665,87 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
     finally:
         if remote is not None:
             await remote.dispose()
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_routed_report_speaks_for_the_connection_that_asks(tmp_path: Path) -> None:
+    """Who the report is FOR, driven through the runtime (agent R3-1 = U10 = Q6).
+
+    The first version of this asked the seam's own predicate about a frame the
+    seam built, so it read a proof off a frame that had none and answered a
+    constant "this connection may not loosen" — measured on production objects: a
+    console that had just been told ``/approvals auto`` succeeded was then told
+    by ``/approvals default auto`` that loosening "has to come from the window
+    that started it", and offered retirement as an alternative.
+
+    What the runtime can actually verify is the connection's HANDSHAKE proof, so
+    the two directions are driven here on real sockets: a console offers a nonce,
+    verifies the runtime's proof and presents its own; a follower does neither.
+    The sentence each one gets is the one that is true for it.
+    """
+    from local_operator.harness.approval import handshake_proof, mint_operator_cap
+
+    cap = mint_operator_cap()
+    live = await _serve(tmp_path, operator_cap=cap)
+    console = follower = None
+    try:
+        console = await _dial(live.record, cap=cap, client="attach")
+        assert console.salt, "the console's handshake did not complete"
+        capable = await _send(
+            console,
+            None,
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "default auto",
+                "images": [],
+                "operator_handshake": handshake_proof(
+                    cap, client_nonce=console.nonce, server_salt=console.salt
+                ),
+            },
+        )
+        capable_text = str(capable.get("data", {}).get("text", ""))
+        # The console IS the window that started this session, so the report may
+        # offer it both directions.
+        assert "/approvals ask|auto switches this session now" in capable_text, capable_text
+        assert "has to come from the window" not in capable_text, capable_text
+
+        follower = await _dial(live.record, client="attach")
+        unproved = await _send(
+            follower,
+            None,
+            {"op": "slash_result", "command": "approvals", "args": "default auto", "images": []},
+        )
+        unproved_text = str(unproved.get("data", {}).get("text", ""))
+        assert "has to come from the window that started it" in unproved_text, unproved_text
+        assert "/approvals ask switches this session now" in unproved_text, unproved_text
+
+        # A WRONG proof is not a proof: it names the same frame the receipt does,
+        # on a connection that did not hand-shake, and must stay conservative.
+        forged = await _dial(live.record, client="attach")
+        try:
+            reply = await _send(
+                forged,
+                None,
+                {
+                    "op": "slash_result",
+                    "command": "approvals",
+                    "args": "default auto",
+                    "images": [],
+                    "operator_handshake": handshake_proof(
+                        mint_operator_cap(),
+                        client_nonce=console.nonce,
+                        server_salt=console.salt,
+                    ),
+                },
+            )
+            forged_text = str(reply.get("data", {}).get("text", ""))
+            assert "has to come from the window that started it" in forged_text, forged_text
+        finally:
+            forged.close()
+    finally:
+        for conn in (console, follower):
+            if conn is not None:
+                conn.close()
         await live.close(tmp_path)

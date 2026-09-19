@@ -477,6 +477,31 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
             assert (
                 job_status(job_id)["status"] == "running"
             ), "a supervisor that did not start this run settled its gate by approval"
+            # AND THE OPERATOR IS TOLD, on this surface too (item 8 of the round-3
+            # remediation). "The job is still running" is also true of a refusal
+            # nobody ever saw — which is what the round-2 defect was, on the pane
+            # that pressed the key — so the notice is asserted rather than
+            # assumed, and it is the CARD's sentence rather than a command's.
+            from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+            from local_operator.tui.widgets.transcript import (
+                NoticeBlock,
+                TranscriptView,
+            )
+
+            notices: list[str] = []
+            for _ in range(60):
+                await pilot.pause()
+                notices = [
+                    block._text
+                    for block in app.query_one(TranscriptView).blocks()
+                    if isinstance(block, NoticeBlock)
+                ]
+                if any(CARD_APPROVAL_REFUSED_NOTICE in text for text in notices):
+                    break
+                await asyncio.sleep(0.05)
+            assert any(
+                CARD_APPROVAL_REFUSED_NOTICE in text for text in notices
+            ), f"the refusal never reached the operator: {notices}"
         else:
             assert job_status(job_id)["status"] == "succeeded"
         if destination:
