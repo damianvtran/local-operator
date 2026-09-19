@@ -167,6 +167,21 @@ def _sample_states(samples: list[tuple[str, float]], stop: threading.Event) -> N
         time.sleep(2.0)
 
 
+async def _let_the_server_settle() -> None:
+    """Yield until the SERVER's side of a dial has finished with its loop.
+
+    A reply frame is written BEFORE the connection task moves on to the rest of
+    the op's epilogue — ``refresh()`` and ``_push()`` — and both of those are
+    hops ONTO this loop. A client that closes as soon as it has its ack
+    therefore leaves the connection task legitimately parked here, and a
+    teardown that follows immediately reports it as "Task was destroyed but it
+    is pending". The block these tests run through is what parks it; this is the
+    yield that lets it land, and it is why the settle exists rather than an
+    assertion being relaxed.
+    """
+    await asyncio.sleep(0.5)
+
+
 async def _boot(tmp_path: Path, stream: Any, *, kind: str = "daemon") -> tuple[Any, Any, Any]:
     """A real session + real handle + thread-hosted runtime, published."""
     loop = asyncio.get_running_loop()
@@ -230,6 +245,7 @@ async def test_a_busy_session_never_reads_wedged_and_still_answers(
         assert welcome is not None and welcome.get("op") == "projection"
         assert welcome_s < 1.0, f"a fresh dial waited {welcome_s:.2f}s for its welcome"
         assert results["ping"].get("detail") == "pong"
+        await _let_the_server_settle()
     finally:
         runtime.close()
         await session.dispose()
@@ -284,6 +300,7 @@ async def test_a_prompt_over_the_control_socket_runs_on_the_sessions_loop(
 
         # And the session still disposes: bounded, so a mis-execution that wedged
         # teardown fails here instead of hanging the suite.
+        await _let_the_server_settle()
         await asyncio.wait_for(session.dispose(), timeout=20)
     finally:
         runtime.close()

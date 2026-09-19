@@ -243,6 +243,13 @@ async def start_exec_control(
     # documents the contract: continuing without the surface hands the
     # supervisor an agent it cannot stop while reporting success.
     if not await runtime.wait_until_published():
+        # CLOSE WHAT WE STARTED BEFORE RAISING. ``start()`` has already put a
+        # thread, a loop and (on the timeout path) a still-running boot prologue
+        # behind the caller who is about to fail this run; raising alone leaves
+        # all three behind a decision that says the surface is unusable, which is
+        # the opposite of what that answer means. ``close()`` is the same bounded
+        # synchronous join every other teardown path uses.
+        runtime.close()
         raise RuntimeError(
             "the exec control surface was asked for but the runtime never "
             "published its record; the run cannot be supervised"
