@@ -640,13 +640,21 @@ def get_provider_definition(provider_id: str) -> ProviderDefinition | None:
 def is_mock_provider(provider_id: str) -> bool:
     """Whether ``provider_id`` serves the deterministic TEST wire.
 
-    The ONE answer to "is this the test hosting", shared by the two places a
-    process adopts a model that must never notify:
-    ``providers/clients.py::client_for_spec`` (it already holds the definition,
-    so it reads ``wire`` directly) and ``model/configure.py::configure_model``
-    (which has only the provider id). Spelling the wire name in a second place
-    is how the two would drift, and drift here fails OPEN — a mock session that
-    banners the operator — which is the failure this whole rule exists to stop.
+    The ONE PREDICATE for "is this the test hosting", shared by the places that
+    ask the question from a provider ID — ``model/configure.py::configure_model``
+    (which has only the id) and the store-side reader
+    (``session.model_selection.session_uses_test_hosting``), plus the harness
+    callers that gate themselves. Spelling the wire name in a second place is how
+    two answers to one question drift, and drift here fails OPEN — a mock session
+    that banners the operator — which is the failure this whole rule exists to
+    stop.
+
+    ``providers/clients.py::client_for_spec`` does NOT call it, and that is not
+    drift: it already holds the resolved ``ProviderDefinition``, so asking this
+    function for the same object's ``wire`` would be a second lookup of a value
+    in hand. It tests ``definition.wire == "mock"`` on that object, and this
+    predicate reads the same field through :func:`get_provider_definition` — one
+    fact, two readers, each as direct as its starting point allows.
 
     Keyed on the WIRE rather than on the ``test`` id so a future mock provider
     is covered by construction; resolved through

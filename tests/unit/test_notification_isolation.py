@@ -342,6 +342,82 @@ def test_a_real_selection_is_not_test_hosted(tmp_path: Path) -> None:
     assert session_uses_test_hosting(directory) is False
 
 
+def test_the_verdict_is_memoised_on_the_journal_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2's steady state: a ``stat`` per ask, not a walk.
+
+    The callers ask once per CANDIDATE ROW PER TICK and the cold read is up to
+    ~745 ms on a large journal, so the memo is what keeps a poll cheap. Counted
+    at :func:`_read_test_hosting`, the one function that walks the file, and
+    the journal is then APPENDED to — which must move the key and force exactly
+    one re-read, because that is the case the key has to catch (a session that
+    switches hosting mid-life).
+    """
+    from local_operator.session import model_selection
+
+    directory = _transcript_with_selection(tmp_path / "sessions" / "memo0001", "test/test-model")
+    calls: list[Path] = []
+    real = model_selection._read_test_hosting
+
+    def counted(path: Path) -> bool:
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(model_selection, "_read_test_hosting", counted)
+    model_selection._HOSTING_VERDICT_CACHE.clear()
+
+    assert session_uses_test_hosting(directory) is True
+    assert session_uses_test_hosting(directory) is True
+    assert len(calls) == 1, calls
+
+    # The newest selection wins, and the append is what tells the reader the
+    # answer may have moved: a session that leaves the mock is real again.
+    row = json.loads(json.dumps(_SELECTION_ROW))
+    row["payload"]["details"]["selector"] = "openai/gpt-x"
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+    assert session_uses_test_hosting(directory) is False
+    assert len(calls) == 2, calls
+
+
+def test_a_missing_journal_is_answered_without_being_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absence is a MOMENT, not a verdict, so it is never memoised.
+
+    A store mid-write, an unmounted volume or an EMFILE moment all look like
+    "no journal", and caching that as "not a test session" would serve the
+    outage for the life of the store — ``resume.py`` refuses to cache the same
+    thing for its ``origin.json`` markers, for the same reason.
+    """
+    from local_operator.session import model_selection
+
+    directory = tmp_path / "sessions" / "absent01"
+    directory.mkdir(parents=True)
+    model_selection._HOSTING_VERDICT_CACHE.clear()
+
+    assert session_uses_test_hosting(directory) is False
+    assert model_selection._HOSTING_VERDICT_CACHE == {}
+
+
+def test_the_verdict_cache_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long-lived backend must not accumulate one entry per session forever."""
+    from local_operator.session import model_selection
+
+    monkeypatch.setattr(model_selection, "_HOSTING_VERDICT_CACHE_MAX", 2)
+    model_selection._HOSTING_VERDICT_CACHE.clear()
+
+    for index in range(3):
+        directory = _transcript_with_selection(
+            tmp_path / "sessions" / f"bounded{index}", "test/test-model"
+        )
+        assert session_uses_test_hosting(directory) is True
+
+    assert len(model_selection._HOSTING_VERDICT_CACHE) == 2
+
+
 def test_an_unreadable_or_selection_free_journal_fails_toward_notifying(tmp_path: Path) -> None:
     """Silencing a REAL session's banner is worse than bannering a test one."""
     assert session_uses_test_hosting(tmp_path / "missing") is False
@@ -428,6 +504,15 @@ def test_every_child_environment_builder_gates_notifications() -> None:
     park a gate and announce it. The switch names no pane or store, so a strip
     never removes it — but inheriting it by accident is not the property this
     wants, because the next builder may build from scratch.
+
+    THIS HALF IS TEXTUAL, and the PR must not read it as proof of behaviour:
+    it checks that each builder MENTIONS one of the sanctioned carriers. What
+    makes that enough is the pair —
+    ``test_a_harness_child_reports_notifications_disabled`` drives both
+    carriers into a real child and reads ``notifications_enabled()`` there — and
+    the residue is stated rather than hidden: a builder that mentions a carrier
+    in a COMMENT passes this sweep, so the sweep is a drift tripwire against a
+    new builder forgetting the gate, not a proof about any individual module.
     """
     population = _modules_that_gate_their_children()
     assert population, "the sweep found no builders; the predicate has rotted"
@@ -499,30 +584,41 @@ def test_a_harness_child_reports_notifications_disabled() -> None:
 
     Behavioural rather than textual: the switch is read from the environment of
     whoever composes a banner, and ``harness_child_env``'s whole job is to be
-    that environment. The control arm (a child without the switch) is not
-    asserted here — it would answer from the developer's own
-    ``display.notifications`` flag — and the flag path is covered in-process by
+    that environment. The suite's own mapping is driven the same way, from a
+    base environment with the switch REMOVED, so the mapping is the only thing
+    that can have silenced it — which is what makes the sweep below ("every
+    builder carries one of these") add up to behaviour rather than to a
+    mention. The control arm (a child with neither) is not asserted here: it
+    would answer from the developer's own ``display.notifications`` flag, and
+    the flag path is covered in-process by
     ``test_a_real_hosting_leaves_the_gate_alone``.
     """
     import subprocess
     import sys
 
     from local_operator.agent_shell import harness_child_env
+    from tests.e2e.harness import NO_NOTIFY_ENV
 
     code = (
         "from local_operator.tui.notify import notifications_enabled; "
         "print(notifications_enabled())"
     )
-    child = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env=harness_child_env(),
-        check=False,
-    )
-
-    assert child.returncode == 0, child.stderr
-    assert child.stdout.strip() == "False", child.stdout
+    stripped = {key: value for key, value in os.environ.items() if key != ENV_DISABLE}
+    arms = {
+        "harness_child_env": harness_child_env(),
+        "NO_NOTIFY_ENV": {**stripped, **NO_NOTIFY_ENV},
+    }
+    for label, env in arms.items():
+        assert env[ENV_DISABLE] == ENV_DISABLE_VALUE, label
+        child = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert child.returncode == 0, (label, child.stderr)
+        assert child.stdout.strip() == "False", (label, child.stdout)
 
 
 def test_the_sandboxes_carry_the_switch_by_literal() -> None:
