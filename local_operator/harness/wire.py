@@ -69,9 +69,17 @@ logger = logging.getLogger("local_operator.harness.wire")
 #:   = 56,000 chars) that already bounds one retained tool row, so a frame
 #:   bounded here is the same order of magnitude as the one the reconnect seed
 #:   already ships per turn.
-#: - It is 4x under the socket's own 1 MiB line (``_MAX_LINE_BYTES``), so the
-#:   relay's terminal ``relay_frame_or_degraded`` stage should stop firing for
-#:   conversation frames entirely.
+#: - It is 4x under the socket's own 1 MiB line (``_MAX_LINE_BYTES``), which
+#:   covers every turn of ordinary size. It does NOT follow that the relay's
+#:   terminal ``relay_frame_or_degraded`` stage stops firing for conversation
+#:   frames: this budget bounds CONTENT, and a frame's SKELETON — one entry per
+#:   message with its id, role and ``tool_call_id`` — is not elidable, so a
+#:   many-row turn crosses the line regardless. Measured on 500-char results:
+#:   at 1,400 rows (2,801 messages) the socket line is 1,043,682 B and fits,
+#:   and at 1,500 rows (3,001 messages) it is 1,117,282 B and does not — the
+#:   fitter then replaces the WHOLE frame with a notice and the viewer, which
+#:   gets none of the messages, recovers that state from ``frontend_sync`` and
+#:   durable history, exactly as the notice says.
 #: - It is ~18x under the 4 MiB ``bufio.Scanner`` buffer an external supervisor
 #:   reads ``lop exec --json`` with, which is the reader whose failure this
 #:   bound exists to prevent — and it leaves that reader three orders of
@@ -169,8 +177,9 @@ def bound_agent_end_for_wire(
     Three additive scalars are set on the bounded payload, and they are two
     counters rather than one because the two things they count are different:
     ``elided_tool_rows`` (rows elided IN WHOLE — each carries the marker naming
-    its transcript entry) and ``clipped_tool_rows`` (rows that kept a preview
-    but lost content to it — each ends in ``…``). A single counter named for the
+    its transcript entry) and ``clipped_tool_rows`` (rows that kept a preview and
+    lost part of their content — text clipped to ``…``, or a block replaced by
+    the dropped-block marker). A single counter named for the
     first left a consumer reading ``0`` next to a multi-kilobyte
     ``elided_bytes``, which is the one reading that must not happen. The third
     is ``elided_bytes``, what this bound removed, computed LAST so it cannot
@@ -355,8 +364,10 @@ def _elide_tool_rows(
     and ``clipped_tool_rows`` on the payload): a clipped row lost content just
     as surely as an elided one, and a single counter named for one of the two
     left a consumer reading ``0`` beside a multi-kilobyte ``elided_bytes``. Each
-    number is also what its row actually shows — whole-row elision leaves the
-    marker naming the transcript entry, a clip leaves ``…``.
+    number is also what its row's content shows — whole-row elision leaves the
+    marker naming the transcript entry, a clip leaves ``…`` — and neither count
+    includes a row the bound only trimmed ``details`` on, which is a change to
+    what a card renders rather than to what the row's content says.
     """
     preview_count = max(0, len(positions) - AGENT_END_PREVIEW_ROWS_MAX)
     elided = 0
@@ -387,7 +398,7 @@ def _elide_tool_rows(
     for index in previews:
         row = copy.deepcopy(messages[index])
         messages[index] = row
-        before = _frame_bytes(row)
+        before = _content_shape(row)
         # The bound reads ``details`` off the row itself; the harness keeps it
         # under ``provider_payload["details"]`` (see ``harness/types.py``), so
         # it is moved in for the call and moved back after — on the copy only.
@@ -398,9 +409,25 @@ def _elide_tool_rows(
         bound_row(row, share=share, placeholder=_ELIDED_BLOCK_MARKER)
         if moved_details:
             provider_payload["details"] = row.pop("details", None)
-        if _frame_bytes(row) < before:
+        if _content_shape(row) < before:
             clipped += 1
     return elided, clipped
+
+
+def _content_shape(row: dict[str, Any]) -> tuple[int, int]:
+    """What a READER of this row sees: (characters of text, number of blocks).
+
+    The counter it feeds (``clipped_tool_rows``) means "this row kept a preview
+    and lost part of its content", so it has to be driven by the content and
+    not by the row's serialized size: the bound also nulls an oversized
+    ``details``, and a row whose only change is that — no text touched, no block
+    dropped — counted as clipped. Measured on the shape that exposes it (100
+    rows, 100-char results, a 5,000-char ``details`` each): 100 counted,
+    0 ending in ``…``, 100/100 texts byte-identical to the source.
+    """
+    return _text_chars(row), len(
+        [block for block in (row.get("content") or []) if isinstance(block, dict)]
+    )
 
 
 def _elided_row_marker(row: dict[str, Any], *, chars: int, session_id: str | None) -> str:
