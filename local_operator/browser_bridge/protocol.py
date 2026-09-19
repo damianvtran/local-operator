@@ -70,7 +70,45 @@ def proto_supported(
 #: being older, and nothing is forced by it. Its one use is the update advisory
 #: below, which says a newer version exists without claiming the build is
 #: unusable — the store decides when a newer version is actually offered.
-EXPECTED_EXTENSION_VERSION = "0.1.17"
+#:
+#: 0.1.18 is the first tree that advertises capabilities and serves `upload`
+#: (PR #1318). `download` is deliberately NOT among the methods any extension
+#: build can serve: E1x in `docs/design/browser-file-transfer.md` measured that
+#: Chrome refuses the only two CDP primitives that could put a file somewhere the
+#: harness chooses to a tab-scoped `chrome.debugger` session — see
+#: :data:`EXTENSION_CANNOT_SERVE`.
+EXPECTED_EXTENSION_VERSION = "0.1.18"
+
+#: The first extension version that serves each capability-gated method.
+#:
+#: Capability travels in the `Capabilities` event and the host records, never in
+#: version arithmetic (design §6.3) — this table exists only for the REFUSAL
+#: copy, where "this host predates the feature, update it" and "this host is
+#: current but stopped answering" need opposite remedies and only the version
+#: separates them. The same distinction `OWNERSHIP_MIN_EXTENSION_VERSION` draws.
+CAPABILITY_MIN_EXTENSION_VERSION: dict[str, str] = {"upload": "0.1.18"}
+
+#: The methods a host must ADVERTISE before the daemon will send them.
+#:
+#: Every method that predates the capability advertisement is deliberately absent:
+#: refusing those on a pre-feature peer would break a host that works today. This
+#: set is therefore exactly "the methods whose absence a peer cannot report as
+#: anything better than a bare `internal`" — which is what the refusal exists for.
+CAPABILITY_GATED_METHODS: frozenset[str] = frozenset({"download", "upload"})
+
+#: Methods NO build of the extension can serve, with the measurement behind each.
+#:
+#: `download` needs a destination the harness chooses. The two CDP primitives
+#: that could give it one — `Page.setDownloadBehavior` and
+#: `Browser.setDownloadBehavior` — are unavailable from an extension (measured
+#: 2026-09-18, Chrome 153.0.8010.53: `-32000 "Cannot not access browser-level
+#: commands"` and `-32601` respectively; no browser target is attachable and no
+#: `downloadWillBegin`/`downloadProgress` event is delivered). The extension
+#: therefore does not advertise it, and the refusal says so instead of pointing
+#: the user at an update that cannot help. The desktop app's host CAN serve it
+#: (Electron's `will-download` + `setSavePath`), which is where the copy sends
+#: the caller.
+EXTENSION_CANNOT_SERVE: frozenset[str] = frozenset({"download"})
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
@@ -206,6 +244,23 @@ METHODS = (
     "owner_finish",
     "owner_retain",
     "owner_release",
+    # File transfer, and the two halves are NOT symmetric — measured, not
+    # assumed (design §12.4's E1x, `docs/design/browser-file-transfer.md`):
+    #
+    # * `upload` is servable on both non-cmux hosts. The extension attaches files
+    #   with `DOM.setFileInputFiles` over the tab-scoped session it already holds
+    #   (the same primitive Puppeteer/Playwright use), which needs no new
+    #   permission.
+    # * `download` is served by the desktop app's host only. No extension build
+    #   can serve it at all — see `EXTENSION_CANNOT_SERVE` — so the method exists
+    #   in this tuple because the wire is shared, and the extension answers it
+    #   with a capability refusal rather than by advertising it.
+    #
+    # Both are listed here regardless: this tuple is the protocol's vocabulary,
+    # and the per-host answer to "who serves this" is the `Capabilities` event and
+    # the host records, never a fork of the vocabulary.
+    "download",
+    "upload",
 )
 
 
@@ -267,6 +322,17 @@ COMMAND_TIMEOUTS = {
     # bound because the group queue it joins is shared and briefly serialises
     # behind an in-flight open's own reconcile.
     "retitle": 20.0,
+    # download waits on a PAGE, not on us: the click that starts it may be
+    # followed by a slow server, and the agent's own `timeout_s` may raise the
+    # wait (clamped to DOWNLOAD_TIMEOUT_MAX_S in browser_files). The daemon's
+    # budget is the ceiling, and it is the one method in this table whose bound
+    # is measured in minutes rather than seconds — a 200 MB file on a slow link
+    # legitimately takes longer than any other action here.
+    "download": 120.0,
+    # upload is local: the browser reads the bytes off disk, so the budget covers
+    # the attach plus the read-back that proves the DOM holds them. A 256 MB
+    # attach is the worst case (UPLOAD_MAX_BYTES), not the common one.
+    "upload": 60.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
@@ -330,6 +396,20 @@ class ErrorCode(StrEnum):
     # an old daemon validates `ErrorDetail.code` against this enum, so a value
     # it does not know fails Response.model_validate and the frame is dropped.
     EXTENSION_UNRESPONSIVE = "extension_unresponsive"
+    # The attached host cannot serve the requested method, and said so by not
+    # advertising it. Daemon-to-session only, and for the SAME reason spelled out
+    # above `EXTENSION_UNRESPONSIVE`: an already-released daemon validates
+    # `ErrorDetail.code` against this enum, so a deliberate policy refusal must
+    # never travel as an error code from the extension — it travels as an
+    # `ok: true` result with a reason in the payload (design §6.2), and only the
+    # daemon, which is on the safe side of the direction, emits this one.
+    #
+    # It exists instead of a 120-second timeout: the extension answers an unknown
+    # method with a bare `internal` (worker.ts's dispatch), so sending `download`
+    # to a host that does not serve it would burn the whole budget and then
+    # report an internal error naming nothing actionable. The daemon checks first
+    # and answers immediately with this code and the host's own advertised list.
+    CAPABILITY_UNSUPPORTED = "capability_unsupported"
     INTERNAL = "internal"
 
 
@@ -427,6 +507,35 @@ class Ping(WireModel):
 
 class Pong(WireModel):
     event: Literal["pong"] = "pong"
+
+
+class Capabilities(WireModel):
+    """Extension -> daemon: which wire methods THIS BUILD serves.
+
+    Sent immediately after ``hello``, and it is how capability travels in this
+    protocol rather than through version arithmetic (design §6.3). Two reasons
+    it is an EVENT and not a field on ``Hello``: ``Hello`` is validated with
+    ``extra="forbid"``, so a new field there would be closed 4001 by every
+    already-released daemon — a store build's popup showing an unfixable
+    "update needed" card — while an unknown EVENT is harmlessly dropped by an
+    old daemon (``protocol.py``'s own rule for what keeps ``PROTO_VERSION``
+    where it is). The same shape as ``TabClosed``/``TabUpdate``/``Unpair``.
+
+    ``methods`` is the extension's OWN dispatch table, not a hand-written list,
+    so an advertised capability cannot drift from a served one. ``version`` is
+    repeated from ``hello`` because the two frames are independent: a daemon
+    that missed ``hello``'s version, or a test peer that sends only this frame,
+    must not have to infer it.
+
+    Why the daemon must refuse to SEND an unadvertised method rather than let the
+    peer fail it: an unknown method gets a bare ``internal`` from the worker
+    (``worker.ts``), which spends the whole command budget and then reports
+    nothing the caller can act on.
+    """
+
+    event: Literal["capabilities"] = "capabilities"
+    methods: list[str] = Field(default_factory=list)
+    version: str = ""
 
 
 class TabClosed(WireModel):
