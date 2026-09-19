@@ -26,6 +26,9 @@ and not merely by file count.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import textwrap
 from collections.abc import Mapping
 from pathlib import Path
@@ -629,3 +632,191 @@ def test_run_jobs_with_no_commands_says_nothing_ran(tmp_path, capsys):
     rc = ci_scope.run_jobs(["lint"], tmp_path, {"lint": ()})
     assert rc == 0
     assert "nothing to run" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Files a gate reaches by PATH or by `-m`, not by an import
+# ---------------------------------------------------------------------------
+#
+# `scripts/` is executed by the suite through `sys.executable` + a path, and
+# several modules are spawned with `-m`, so an imports-only graph has no edge to
+# the file a test actually runs. On this head that made `make check-changed`
+# print `all selected gates passed` for a one-token change to
+# `scripts/visual_gallery.py` whose CI `test` job was red: the narrowed `test`
+# job selected NOTHING (review BLOCKER 1 on #1322). These tests are the shape
+# that has to fail if the name edge is ever lost again — the first two synthetic,
+# the third over the real tree so a rename cannot hide the instance.
+
+
+def test_a_script_a_test_executes_by_path_is_an_input(tmp_path):
+    """The executed target must be an input, spelled exactly as the suite does."""
+    root = _fixture_repo(tmp_path)
+    _write(root, "scripts/visual_gallery.py", "GALLERY = True\n")
+    _write(
+        root,
+        "tests/unit/test_gallery.py",
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        # The real shape: `tests/unit/tui/test_visual_gallery.py` builds this path
+        # from `__file__` and runs the script as a child process.
+        REPO = Path(__file__).resolve().parents[2]
+
+        def test_the_gallery_prints_its_inventory():
+            subprocess.run(
+                [sys.executable, str(REPO / "scripts" / "visual_gallery.py")],
+                check=True,
+            )
+        """,
+    )
+
+    decision = _plan(root, ["scripts/visual_gallery.py"])["test"]
+
+    assert not decision.whole_tree, decision.notes
+    assert decision.targets == ("tests/unit/test_gallery.py",)
+    assert any("named by path" in note for note in decision.notes), decision.notes
+
+
+def test_a_module_a_test_runs_with_dash_m_is_an_input(tmp_path):
+    """`python -m local_operator.x` records no import of `x` either."""
+    root = _fixture_repo(tmp_path)
+    _write(root, "local_operator/probe_worker.py", "WORKER = True\n")
+    _write(
+        root,
+        "tests/unit/test_worker_spawn.py",
+        """
+        import subprocess
+        import sys
+
+        def test_it_runs_the_worker():
+            subprocess.run([sys.executable, "-m", "local_operator.probe_worker"], check=True)
+        """,
+    )
+
+    decision = _plan(root, ["local_operator/probe_worker.py"])["test"]
+
+    assert not decision.whole_tree, decision.notes
+    assert decision.targets == ("tests/unit/test_worker_spawn.py",)
+
+
+@pytest.mark.slow
+def test_a_repo_python_file_a_test_names_is_always_selected():
+    """The same property over the REAL tree, so a rename cannot hide the case.
+
+    `scripts/visual_gallery.py` → `tests/unit/tui/test_visual_gallery.py` is the
+    instance review found; this asserts the class — every repo file a test names
+    in a string constant, by path or by dotted name, selects that test when it
+    changes. White-box (`build_import_graph` + `_select_tests`) because building
+    the real graph once is the only affordable way to ask it ~100 times.
+    """
+    root = Path(__file__).resolve().parents[2]
+    graph = ci_scope.build_import_graph(root)
+    universe = ci_scope._test_universe(graph, "tests/unit")
+    in_universe = set(universe)
+    by_target: dict[str, list[str]] = {}
+    for target, referrers in graph.referrers.items():
+        for test in referrers:
+            if test in in_universe:
+                by_target.setdefault(target, []).append(test)
+
+    assert by_target, "no test names any repo file, so this property proves nothing"
+
+    offenders: list[tuple[str, str]] = []
+    for target, tests in sorted(by_target.items()):
+        selected = set(ci_scope._select_tests(graph, [target], universe)[0])
+        offenders.extend((target, test) for test in sorted(tests) if test not in selected)
+
+    assert not offenders, f"a test names this file and is not selected on change: {offenders[:5]}"
+
+
+# ---------------------------------------------------------------------------
+# The reporting contract of a local run
+# ---------------------------------------------------------------------------
+
+
+def test_narrow_replaces_every_scripted_input():
+    """A command with the marker twice must not keep one whole-tree input.
+
+    Every command in `JOB_COMMANDS` carries its scripted input once, so nothing
+    is wrong today; the assertion is that a future one cannot leave a stray
+    whole-tree input inside a command that reports itself as scoped (review NIT 1
+    on #1322). The marker is matched as a whole token, so `.` inside
+    `--pythonpath .` is not a marker.
+    """
+    narrowed = ci_scope._narrow(
+        ".venv/bin/python -m pytest tests/unit tests/unit/x.py --pythonpath .",
+        "tests/unit",
+        ["tests/unit/alpha.py"],
+    )
+
+    assert narrowed == (
+        ".venv/bin/python -m pytest tests/unit/alpha.py tests/unit/x.py --pythonpath ."
+    )
+
+
+def test_run_jobs_with_no_jobs_says_nothing_was_selected(tmp_path, capsys):
+    """An empty selection is not the same sentence as a narrowed-to-empty job.
+
+    They shared one branch, so a clean tree read `every selected job was narrowed
+    to no file` about a decision that was never made (QA Q-1 on #1322).
+    """
+    rc = ci_scope.run_jobs([], tmp_path, {})
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no job was selected for this diff, so nothing ran" in out
+    assert "nothing to run" not in out
+
+
+def test_an_empty_diff_is_reported_as_empty_not_as_uncollected(tmp_path, capsys):
+    """A clean tree used to be told BOTH that whole-tree commands would run and
+    that nothing would: an empty diff and an uncollectable one shared a branch.
+
+    The distinction is observable behaviour — the two cases print different
+    things, and only the failure case promises a whole-tree run — so it is
+    asserted against a real (empty) repository rather than a mock.
+    """
+    if shutil.which("git") is None:  # pragma: no cover - every gate host has git
+        pytest.skip("git is not on PATH")
+    root = _git_repo(tmp_path)
+
+    assert ci_scope.main(["--root", str(root), "--since", "HEAD", "--run"]) == 0
+
+    out = capsys.readouterr().out
+    scope = out.split("### Local scope")[1]
+    assert "the diff is empty" in scope
+    assert "whole-tree command" not in scope.split("skipped locally")[0]
+    assert "no job was selected for this diff, so nothing ran" in out
+
+
+def _git_repo(root: Path) -> Path:
+    """A committed, clean repository: what an EMPTY diff has to be observed in."""
+    root.mkdir(parents=True, exist_ok=True)
+    # A scratch HOME and no system/global gitconfig: this only needs a commit
+    # identity, and the host's global config can carry a credential helper that
+    # reaches the login keychain (`credential.helper = osxkeychain`).
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(root),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    for args in (
+        ["init", "-q", "-b", "main", "."],
+        [
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "user.name=fixture",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    ):
+        subprocess.run(["git", *args], cwd=str(root), env=env, check=True, capture_output=True)
+    return root

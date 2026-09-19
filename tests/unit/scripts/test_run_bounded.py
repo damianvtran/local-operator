@@ -3,11 +3,16 @@
 WHY THESE EXIST
 ---------------
 `pyright` is a Python wrapper around an npm/node analyzer, and the local gate ran
-it as `timeout 900 .venv/bin/python -m pyright …`. `timeout(1)` signals only the
-process it started, so when the bound fired the analyzer kept running as an
-orphan (measured on this host: `ppid 1`, 2.28 GB and 1.50 GB RSS, one alive 81
-minutes after its parent died). Sessions then queue more analyzers behind a host
-those orphans are saturating, more of them hit the bound, and the leak compounds.
+it as `timeout 900 .venv/bin/python -m pyright …`. The fleet showed analyzers
+re-parented to launchd and holding their heap (`ppid 1`, 2.28 GB and 1.50 GB RSS,
+one alive 81 minutes after its parent died), which is the leak this wrapper
+removes. The tidy explanation — `timeout` signals only the wrapper, node
+survives — is NOT what this host's GNU coreutils does (it signals the child's
+process group, and no `timeout` spelling here left anything behind), so the
+wrapper is justified by the cases that ARE reproducible: a descendant alive when
+the leader exits by itself, and a group that ignores SIGTERM where a bare
+`timeout` wedges. See the module docstring for the full statement of what is
+measured and what is only observed.
 
 `scripts/run_bounded.py` exists to make that impossible, and these tests drive it
 as a real process — the defect IS a process-tree behaviour, so no amount of
@@ -215,11 +220,17 @@ def test_a_group_that_outlives_its_leader_is_reaped_with_no_bound_at_all(reap_ma
     assert _wait_until_gone(token) == [], "the leader exited and left its children running"
 
 
-def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers):
-    """Ctrl-C and `kill` must not leave the analyzer running either.
+@pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
+    """Ctrl-C, `kill` and SIGHUP must not leave the analyzer running either.
 
     The child leads its own session, so the terminal's SIGINT goes to the
     wrapper alone; an unforwarded signal is the same leak by another road.
+    SIGHUP is the other common route — a terminal, tmux or ssh session going
+    away — and only `SIGINT`/`SIGTERM` used to be forwarded, which was measured
+    leaving the group alive at `ppid 1` while the wrapper died (review MINOR 3
+    on #1322). The test is parametrised rather than duplicated so a THIRD signal
+    is one list entry, and the shape is asserted for each.
     """
     token = _marker("signal")
     reap_markers.append(token)
@@ -241,7 +252,7 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers):
             assert _wait_for_pid_carrying(
                 token, exclude={wrapper.pid}
             ), "the inner command never started"
-            wrapper.send_signal(signal.SIGTERM)
+            wrapper.send_signal(forwarded)
             try:
                 returncode = wrapper.wait(timeout=30)
             finally:
@@ -249,6 +260,45 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers):
                     wrapper.kill()
         stderr = err_path.read_text()
 
-    assert returncode == 128 + signal.SIGTERM, f"rc={returncode}, stderr={stderr!r}"
-    assert "signal 15" in stderr
+    assert returncode == 128 + forwarded, f"rc={returncode}, stderr={stderr!r}"
+    assert f"signal {forwarded}" in stderr
     assert _wait_until_gone(token) == [], "a signalled wrapper left its group running"
+
+
+def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers):
+    """A signal this wrapper did not send must still exit in its contract.
+
+    A `kill -9` by hand, the OOM killer or a job runner ends the child without
+    the wrapper forwarding anything, and the status then arrives as `-9`, which
+    `sys.exit` renders as 247 while the diagnostic line reads `rc=-9` — neither
+    is in the documented EXIT STATUS set, and 247 in a log explains nothing. A
+    shell reports 128 + the signal for a child killed this way, so this does too
+    (review MINOR 4 on #1322).
+    """
+    token = _marker("external")
+    reap_markers.append(token)
+    with tempfile.TemporaryDirectory() as tmp:
+        err_path = Path(tmp) / "stderr"
+        with err_path.open("w") as err:
+            wrapper = subprocess.Popen(
+                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                text=True,
+            )
+            victims = _wait_for_pid_carrying(token, exclude={wrapper.pid})
+            assert victims, "the inner command never started"
+            # EVERY carrier, so the kill cannot land on the grandchild while the
+            # leader this wrapper waits on lives on — that would make the test
+            # pass on a timeout instead of on the status it is asserting.
+            for pid in victims:
+                os.kill(pid, signal.SIGKILL)
+            try:
+                returncode = wrapper.wait(timeout=30)
+            finally:
+                if wrapper.poll() is None:  # pragma: no cover - wedged wrapper
+                    wrapper.kill()
+        stderr = err_path.read_text()
+
+    assert returncode == 128 + signal.SIGKILL, f"rc={returncode}, stderr={stderr!r}"
+    assert "killed by signal 9" in stderr

@@ -414,24 +414,40 @@ reads. Named barriers:
 **Where it pays, measured rather than assumed.** This suite's tests import the
 assembled app, so a change anywhere the app (or a conftest) imports selects most
 of the tree by construction, and **88% of `local_operator/**` is in that
-closure**: of its 503 modules, a change to 60 would scope and a change to 443
-falls back to whole-tree (`cli.py`, `tui/app.py` and `session_factory.py` are the
-roots of the boot closure). The shape is what decides it, not the file count:
+closure**: of its 503 modules, a change to 443 falls back to whole-tree on the
+closure alone (`cli.py`, `tui/app.py` and `session_factory.py` are the roots of
+the boot closure). Of the 60 left, 55 scope and 5 cross a fraction arm once the
+tests that NAME them are included — the price of the edge below, stated rather
+than hidden. The shape is what decides it, not the file count:
 
 | a change to | `lint` | `type-check` | `test` | `tui-e2e` |
 |---|---|---|---|---|
-| `scripts/shard_tests.py` | 1 file | 2 files | 1 of 722 | nothing |
-| `local_operator/clients/tavily.py` (outside the boot closure) | 1 file | 4 files | 3 of 722 | nothing |
-| `local_operator/ansi.py`, `local_operator/server/models/schemas.py` (inside it) | 1 file | whole tree (closure 88%) | whole tree (598/722 files, 93% of the weight) | whole tree |
+| `scripts/shard_tests.py` | 1 file | 2 files | 1 of 724 | nothing |
+| `local_operator/clients/tavily.py` (outside the boot closure) | 1 file | 4 files | 3 of 724 | nothing |
+| `local_operator/ansi.py`, `local_operator/server/models/schemas.py` (inside it) | 1 file | whole tree (closure 89%) | whole tree (614/724 files, 94% of the weight) | whole tree |
 
 Measured on a five-file diff here (two scripts, three test files): `lint` over
 the 5 changed files **16 s** against **211 s** whole-tree, `test` over the 3
 selected files **20 s** (80 passed) against a 40-55 min whole-tree suite, and
 `type-check` over the same 5 files **3 s** against **508 s** whole-tree (both
 `0 errors`) — with `tui-e2e` skipped outright, since no e2e file reaches a
-script. The graph itself is the fixed cost: **19.5-37.6 s** of wall time here for
-1532 files read and parsed, which is why lint is decided before the graph is
+script. The graph itself is the fixed cost: **15-38 s** of wall time here for
+1533 files read and parsed, which is why lint is decided before the graph is
 built at all, and why the report prints the graph's own timing.
+
+**An edge is not always an import.** The suite also reaches files by NAME: a test
+runs `scripts/visual_gallery.py` through `sys.executable` + a path, and several
+modules are spawned as `-m local_operator.x`. No import statement records either,
+so an imports-only graph selected NOTHING for such a change and a local run
+printed `all selected gates passed` while CI's `test` job was red (the blocker on
+#1322). A string constant that resolves to a covered file — a path (relative,
+absolute, or a bare basename) or a dotted module name — is therefore an edge in
+the REVERSE direction: when the named file changes, the file that NAMES it is
+selected, and so is anything that imports that namer. It is reverse-only on
+purpose — a name is not a static import, so it must not inflate the `type-check`
+cost estimate. `test_a_repo_python_file_a_test_names_is_always_selected` asserts
+that property over the real tree, so the next instance of the class fails a test
+rather than a CI job.
 
 **Two honest limits, both printed on a scoped run.** First, an import whose
 target is a computed name — `importlib.import_module(name)` — is invisible to
@@ -449,9 +465,9 @@ The local `type-check` command is spelled
 
 **Why a wrapper and not `timeout(1)`.** `pyright` is a Python wrapper around an
 npm/node analyzer, and node runs as a *separate* process: measured here, 845 MB
-of RSS within twelve seconds, a child of the Python wrapper. A bound that kills
-only the process it started is therefore relying on the child noticing its
-parent's death, and the fleet shows what happens when it does not — orphans
+of RSS within twelve seconds, a child of the Python wrapper. Leaving a group to
+notice its own leader's death is therefore the risk, and the fleet shows what
+the symptom looks like when something does not: orphans
 re-parented to `ppid 1` holding **2.28 GB and 1.50 GB**, one of them still alive
 **81 minutes** after its parent died, ten analyzers alive at once at ~5 GB while
 sessions queued more behind them.
@@ -466,7 +482,11 @@ while a descendant lives on. `run_bounded.py` runs the command in its own proces
 group and signals the GROUP — on the bound, on a signal to the wrapper, and as a
 sweep once the leader exits — so all three paths end with nothing left running.
 It keeps `timeout(1)`'s statuses (124 on a fired bound, 125 when the command
-could not start), writes diagnostics to stderr only, and reports what it reaped.
+could not start), reports **128 + signum** when a signal ends the run — forwarded
+by this wrapper, or delivered to the child by someone else, where `sys.exit`
+used to render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
+SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
+diagnostics to stderr only, and reports what it reaped.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the

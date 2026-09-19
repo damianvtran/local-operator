@@ -3,31 +3,44 @@
 
 WHY THIS EXISTS
 ---------------
-`pyright` (the pip wrapper) runs the real analyzer as an npm/node child. The
-local gate used to be spelled `timeout 900 .venv/bin/python -m pyright …`, and
-`timeout(1)` signals only the process it started — the Python wrapper. Nothing
-forwards that signal to the node child, so when the bound fires the gate is
-over but the analyzer is not:
+`pyright` (the pip wrapper) runs the real analyzer as an npm/node child, and the
+local gate used to be spelled `timeout 900 .venv/bin/python -m pyright …`.
 
-    $ timeout 8 .venv/bin/python -m pyright --pythonpath .venv/bin/python .
+On this host's GNU coreutils, `timeout(1)` turns out to signal the child's whole
+process group, so the tidy causal story — "the bound fires, the wrapper dies,
+node survives as an orphan" — is NOT the mechanism, and it could not be
+reproduced on demand: `timeout 6`, `timeout -k 2 6`, `timeout -s KILL 6` and the
+job-control shape all left nothing behind on the machines this was tried on.
+What the fleet DID show is the symptom no such run explains:
+
     $ ps -o pid,ppid,pgid,rss,etime,command -p <node pid>
       pid   ppid  pgid   rss  etime  command
     92099      1 92098  2.28G  03:41  node …/pyright/index.js --outputjson …
 
-`ppid 1` is the whole defect: the orphan is re-parented to launchd and keeps its
-heap for as long as its work takes — measured at 2.28 GB and 1.50 GB on one
-host, ten analyzers alive at once, 5.1 GB total. Sessions queue more pyrights
-behind a host those orphans are already saturating, more of them hit the bound,
-and the leak compounds. A bound that leaves a gigabyte running is not a bound.
+`ppid 1` is the defect: the orphan is re-parented to launchd and keeps its heap
+for as long as its work takes — measured at 2.28 GB and 1.50 GB on one host, ten
+analyzers alive at once, 5.1 GB total, one alive 81 minutes after its parent
+died. Sessions queue more pyrights behind a host those orphans are already
+saturating, more of them hit the bound, and the leak compounds. A bound that
+leaves a gigabyte running is not a bound.
 
-The fix is NOT a longer timeout. It is to put the command in its own session
-(`start_new_session=True`, so it leads a fresh process group that its children
-inherit) and to signal the GROUP on every exit path: the timeout, a signal to
-this wrapper, and the ordinary exit where the leader is gone but its
-descendants are not.
+Two failure modes ARE reproducible here, and they are enough to justify this
+wrapper on their own:
 
-`timeout(1)` cannot do this portably — it has no `--kill-group`, and `setsid`
-does not exist on macOS, which is the platform this bites hardest.
+* a descendant still alive when the leader exits BY ITSELF — an ordinary exit is
+  not a bound at all, and nothing else reaps the group;
+* a group that ignores SIGTERM, where a bare `timeout` waits it out (measured:
+  wedged for 300 s, while this wrapper's SIGKILL escalation cleared the same tree
+  in ~8 s).
+
+So the wrapper puts the command in its own session (`start_new_session=True`, so
+it leads a fresh process group its children inherit) and signals the GROUP on
+every exit path: the timeout, a forwarded signal, and the ordinary exit where the
+leader is gone but its descendants are not.
+
+What `timeout(1)` cannot do is the third case: by then it HAS exited, so no
+spelling of it can reap anything. `setsid` does not exist on macOS, which is the
+platform this bites hardest.
 
 USAGE
 -----
@@ -40,9 +53,11 @@ never as a console script — the #423 shebang rule applies to this file too.
 EXIT STATUS
 -----------
 The command's own status; `124` when the bound fired (what `timeout(1)` reports,
-so existing callers keep reading the same code); `128 + signum` when a forwarded
-signal ended it; `125` when the command could not be started at all — never 0
-for a gate that did not run.
+so existing callers keep reading the same code); `128 + signum` when a signal
+ended it — forwarded to the group here, or delivered to the child by someone
+else (a `kill -9`, the OOM killer, a job runner), which a shell would report the
+same way; `125` when the command could not be started at all — never 0 for a
+gate that did not run.
 
 DIAGNOSTICS go to stderr, never stdout: the lint/format gates' stdout is
 parseable output and the suite's `-q` output is parsed too (the same rule the
@@ -71,6 +86,13 @@ EXIT_NOT_STARTED = 125
 #: moment to unwind; a group that ignores SIGTERM entirely must still not outlive
 #: the gate, which is the failure this module exists to remove.
 DEFAULT_GRACE_SECONDS = 10.0
+
+#: Signals forwarded to the child's group. SIGHUP and SIGQUIT are here for the
+#: same reason as the other two — a dangling terminal, a tmux/ssh teardown or a
+#: `kill -HUP` must not leave the analyzer running. Measured with only
+#: SIGINT/SIGTERM forwarded: SIGHUP killed this wrapper and the node child
+#: survived it at `ppid 1`, which is the same leak by another road.
+FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
 #: Polling interval while waiting for the group leader. Deliberately a poll loop
 #: rather than `Popen.wait()`: PEP 475 auto-retries the blocking waitpid after a
@@ -154,7 +176,7 @@ def run(
         if pgid:
             _signal_group(pgid, signum)
 
-    previous = {sig: signal.signal(sig, _forward) for sig in (signal.SIGINT, signal.SIGTERM)}
+    previous = {sig: signal.signal(sig, _forward) for sig in FORWARDED_SIGNALS}
     try:
         proc = subprocess.Popen(list(argv), start_new_session=True)
     except OSError as exc:
@@ -186,12 +208,23 @@ def run(
                 # and it says so — a gate that was signalled must not look like a
                 # gate that failed on its own.
                 if signum:
-                    stream.write(
-                        f"[run_bounded] signal {signum} received — process group "
-                        f"{pgid} signalled (rc={128 + signum})\n"
-                    )
+                    rc = 128 + signum
+                    note = f"signal {signum} received — process group {pgid} signalled"
+                elif status < 0:
+                    # Nobody here sent this signal (a `kill -9` by hand, the OOM
+                    # killer, a job runner). `sys.exit(-9)` is 247 and the
+                    # diagnostic line would read `rc=-9`: neither is in the EXIT
+                    # STATUS contract, and both are unreadable in a log. A shell
+                    # reports 128 + the signal for a child killed this way, so
+                    # this does too.
+                    rc = 128 - status
+                    note = f"child killed by signal {-status}"
+                else:
+                    rc = status
+                    note = None
+                if note:
+                    stream.write(f"[run_bounded] {note} (rc={rc})\n")
                     stream.flush()
-                rc = 128 + signum if signum else status
                 break
             if signum:
                 _reap(pgid, grace, proc.poll, stream, reason=f"signal {signum} received")

@@ -467,7 +467,11 @@ GRAPH_TREES: tuple[str, ...] = ("local_operator", "tests", "scripts")
 #: `local_operator/` is package data no linter reads, but it IS an input to the
 #: tests that exercise it — which is why those paths are barriers below rather
 #: than silently unscoped-and-unrun.
-LINT_SUFFIXES: tuple[str, ...] = (".py", ".pyi")
+#: What black/isort/flake8 read. `.pyi` is deliberately absent: a stub change is a
+#: `scope_barriers` trigger (the graph does not parse stubs), so it never reaches
+#: the lint target filter — listing it here would describe an arm no input can
+#: hit, which reads as coverage this does not have.
+LINT_SUFFIXES: tuple[str, ...] = (".py",)
 
 #: The two fraction arms a narrowed TEST selection must stay under. Weight is
 #: the primary arm because this suite's cost is not spread evenly over its
@@ -750,6 +754,17 @@ def categories_of(paths: Sequence[str]) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------
 
 
+#: Force git to emit paths as raw bytes rather than C-quoting them. With the
+#: default `core.quotePath`, a non-ASCII path arrives as
+#: `"local_operator/probe_\303\274n\303\257code.py"`, which names no real file:
+#: the path is reported mangled, `category_of` reads it as `CAT_OTHER`, and a
+#: one-file change escalates to the whole matrix for a reason that does not apply
+#: (fail-open, but the wrong answer and an inapplicable explanation). A path
+#: containing a NEWLINE is still mangled by the line-based parse below and still
+#: fails open — that is the residual, and `-z` is the fix if it ever bites.
+_GIT_RAW_PATHS = ("-c", "core.quotePath=false")
+
+
 def _git(args: Sequence[str], cwd: Path | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(
         ["git", *args],
@@ -810,14 +825,14 @@ def collect_paths(base: str, local: bool, cwd: Path | None = None) -> list[str] 
     change set.
     """
     target = [] if local else ["HEAD"]
-    rc, out, _ = _git(["diff", "--name-status", "-M", base, *target], cwd=cwd)
+    rc, out, _ = _git([*_GIT_RAW_PATHS, "diff", "--name-status", "-M", base, *target], cwd=cwd)
     if rc != 0:
         return None
     paths = _parse_name_status(out)
     if local:
         # Untracked files are changes a local gate must see (a new test file
         # nobody staged still has to be linted) and are invisible to `git diff`.
-        rc, out, _ = _git(["ls-files", "--others", "--exclude-standard"], cwd=cwd)
+        rc, out, _ = _git([*_GIT_RAW_PATHS, "ls-files", "--others", "--exclude-standard"], cwd=cwd)
         if rc != 0:
             return None
         paths.extend(_norm(p) for p in out.splitlines() if p.strip())
@@ -975,6 +990,13 @@ def summary_lines(
 #: A dotted path literal is a candidate module name only if it looks like one.
 DOTTED_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
 
+#: A string constant that could NAME a Python file: a path ending in a source
+#: extension, absolute or relative, or a bare basename. This is how the suite
+#: reaches a file it does not import — `sys.executable` + a path, or `-m` — which
+#: no import statement records, so a scoped `test` job that ignored these names
+#: would go green while CI's `test` job failed (#1322 review, BLOCKER 1).
+PY_PATH_RE = re.compile(r"[A-Za-z_][\w./\-]*\.py[io]?\Z")
+
 #: Dynamic-import callables: `importlib.import_module(...)`, `__import__(...)`.
 _DYNAMIC_IMPORT_NAMES = ("import_module", "__import__")
 
@@ -1041,6 +1063,57 @@ def _resolve_module(root: Path, dotted: str) -> str | None:
     return None
 
 
+def _repo_basenames(files: Iterable[str]) -> Mapping[str, tuple[str, ...]]:
+    """Covered files indexed by basename.
+
+    A name reference may carry no directory at all (`"visual_gallery.py"`) or a
+    directory that is not this checkout's (an absolute path built from
+    `__file__`, or one that reached the test through `sys.executable`). The
+    basename is then the only part that resolves, and it may resolve to more
+    than one file: the edge is an OBLIGATION to run a test, so every candidate
+    is kept — over-including is the fail-closed direction here.
+    """
+    index: dict[str, list[str]] = {}
+    for rel in files:
+        index.setdefault(rel.rsplit("/", 1)[-1], []).append(rel)
+    return {name: tuple(sorted(paths)) for name, paths in index.items()}
+
+
+def _name_target(
+    root: Path,
+    literal: str,
+    basenames: Mapping[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """The covered files a string constant can NAME, or an empty tuple.
+
+    Two spellings, because the suite uses both for a file it never imports: a
+    dotted module name (`python -m local_operator.exec_worker`, a registry name)
+    and a path (`sys.executable` + `scripts/visual_gallery.py`). A path is tried
+    as written and then with leading components stripped one at a time, so an
+    absolute path or a `../../`-relative one still lands on its file.
+    """
+    resolved: set[str] = set()
+    if DOTTED_NAME_RE.match(literal):
+        target = _resolve_module(root, literal)
+        if target:
+            resolved.add(target)
+    if PY_PATH_RE.match(literal):
+        parts = literal.lstrip("./").split("/")
+        hit = next(
+            (
+                suffix
+                for start in range(len(parts))
+                if (root / (suffix := "/".join(parts[start:]))).is_file()
+            ),
+            None,
+        )
+        if hit:
+            resolved.add(hit)
+        elif len(parts) == 1:
+            resolved.update(basenames.get(parts[0], ()))
+    return tuple(sorted(resolved))
+
+
 def _dynamic_call_target(node: ast.Call) -> tuple[str, str] | None:
     """Classify `import_module(...)`/`__import__(...)` by what it can load.
 
@@ -1092,10 +1165,13 @@ def _references(rel: str, source: str) -> _References:
 
     Every `Import`/`ImportFrom` counts, at module level or inside a function:
     a lazy import is still a real dependency, and it is how this codebase loads
-    most of its heavy modules. String constants are collected too, but they are
-    only USED for files that import by name (see `build_import_graph`), because
-    that is the case where a literal is evidence of a dependency — a registry
-    naming `"local_operator.providers.oauth.anthropic"` in a table.
+    most of its heavy modules. String constants are collected too — both dotted
+    module names and file paths (`PY_PATH_RE`) — because a name a file carries is
+    evidence of a dependency even when no import statement exists: a registry
+    naming `"local_operator.providers.oauth.anthropic"` in a table, a test
+    naming `"scripts/visual_gallery.py"`, a `mock.patch("a.b.c")` target. Which of
+    those become edges is decided in `build_import_graph` (a dotted name is only
+    taken from a file that imports by name, to keep prose out of the graph).
     """
     tree = ast.parse(source, filename=rel)
     package = _package_parts(rel)
@@ -1126,7 +1202,7 @@ def _references(rel: str, source: str) -> _References:
                 if alias.name != "*":
                     submodules.add((base, alias.name))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if DOTTED_NAME_RE.match(node.value):
+            if DOTTED_NAME_RE.match(node.value) or PY_PATH_RE.match(node.value):
                 literals.add(node.value)
         elif isinstance(node, ast.Call):
             dynamic = _dynamic_call_target(node)
@@ -1155,6 +1231,14 @@ class ImportGraph:
     `importers` is the reverse edge, which is what a change needs: the tests
     that can observe a module are the ones that transitively IMPORT it.
 
+    `referrers` is the same question asked of a NAME instead of an import: a file
+    that carries another file's path or dotted module name in a string constant
+    can reach it at run time (`sys.executable` + a path, `python -m <name>`, a
+    registry table, a `mock.patch("a.b.c")` target). That edge is reverse-only on
+    purpose — it is an obligation to select the namer when the named file
+    changes, not a claim that the file is imported, so `forward_closure` must not
+    let it inflate the pyright cost estimate.
+
     The graph deliberately does NOT add an edge from an importer to a module's
     parent `__init__.py`. Importing `local_operator.tools.foo` does execute
     `local_operator/tools/__init__.py`, but every `__init__.py` is a
@@ -1165,11 +1249,13 @@ class ImportGraph:
     imports: Mapping[str, frozenset[str]]
     importers: Mapping[str, frozenset[str]]
     prefixes: Mapping[str, tuple[str, ...]]
+    referrers: Mapping[str, frozenset[str]]
+    literals: Mapping[str, frozenset[str]]
     unnamed: tuple[str, ...]
     unreadable: tuple[str, ...]
 
     def dependents(self, seeds: Iterable[str]) -> frozenset[str]:
-        """Every file that transitively imports a seed (the seeds excluded).
+        """Every file that transitively imports or NAMES a seed (seeds excluded).
 
         Breadth-first over the reverse edges, so a chain through an
         intermediate module counts: a test does not have to import the changed
@@ -1180,11 +1266,24 @@ class ImportGraph:
         seen: set[str] = set()
         queue = [seed for seed in seeds if seed in self.files]
         while queue:
-            for importer in self.importers.get(queue.pop(), ()):
-                if importer not in seen:
-                    seen.add(importer)
-                    queue.append(importer)
+            rel = queue.pop()
+            for dependent in (*self.importers.get(rel, ()), *self.referrers.get(rel, ())):
+                if dependent not in seen:
+                    seen.add(dependent)
+                    queue.append(dependent)
         return frozenset(seen - set(seeds))
+
+    def name_referrers(self, rel: str) -> tuple[str, ...]:
+        """Files whose string constants name `rel` — a path or a module name."""
+        return tuple(sorted(self.referrers.get(rel, ())))
+
+    def literals_of(self, rel: str) -> frozenset[str]:
+        """The name-shaped string constants a file carries.
+
+        Exposed for the graph's own property test, which asserts that every repo
+        `.py` path a test names makes that test an input.
+        """
+        return self.literals.get(rel, frozenset())
 
     def hubs_for(self, rel: str) -> tuple[str, ...]:
         """Files that may dynamically load `rel` through a literal head.
@@ -1225,8 +1324,10 @@ class ImportGraph:
 def build_import_graph(root: Path) -> ImportGraph:
     """Parse the covered trees into an `ImportGraph`. Never imports them."""
     files, unreadable = _graph_files(root)
+    basenames = _repo_basenames(files)
     imports: dict[str, set[str]] = {}
     prefixes: dict[str, set[str]] = {}
+    literals_by_file: dict[str, frozenset[str]] = {}
     unnamed: list[str] = []
     for rel in files:
         try:
@@ -1260,6 +1361,7 @@ def build_import_graph(root: Path) -> ImportGraph:
             if (target := _resolve_module(root, name)) is not None and target != rel
         }
         imports[rel] = targets
+        literals_by_file[rel] = refs.literals
         for prefix in refs.prefixes:
             prefixes.setdefault(prefix, set()).add(rel)
         unnamed.extend(refs.unnamed)
@@ -1267,11 +1369,24 @@ def build_import_graph(root: Path) -> ImportGraph:
     for rel, targets in imports.items():
         for target in targets:
             importers.setdefault(target, set()).add(rel)
+    # Name edges (see `ImportGraph.referrers`): a file whose string constants
+    # name another covered file can reach it at run time with no import to find.
+    # Every covered file's literals are resolved, not just the importing ones —
+    # a test naming `scripts/visual_gallery.py` imports nothing, so an
+    # imports-only graph has no edge at all for the file it executes.
+    referrers: dict[str, set[str]] = {}
+    for rel, literals in literals_by_file.items():
+        for literal in literals:
+            for target in _name_target(root, literal, basenames):
+                if target != rel:
+                    referrers.setdefault(target, set()).add(rel)
     return ImportGraph(
         files=frozenset(files),
         imports={rel: frozenset(targets) for rel, targets in sorted(imports.items())},
         importers={rel: frozenset(sources) for rel, sources in sorted(importers.items())},
         prefixes={prefix: tuple(sorted(hubs)) for prefix, hubs in sorted(prefixes.items())},
+        referrers={rel: frozenset(sources) for rel, sources in sorted(referrers.items())},
+        literals={rel: literals for rel, literals in sorted(literals_by_file.items())},
         unnamed=tuple(sorted(unnamed)),
         unreadable=tuple(sorted(unreadable)),
     )
@@ -1359,8 +1474,14 @@ def _narrow(command: str, marker: str, targets: Sequence[str]) -> str:
     tokens = shlex.split(command)
     if marker not in tokens:
         raise ScopeError(f"{command!r} has no {marker!r} input to narrow")
-    index = tokens.index(marker)
-    return shlex.join(tokens[:index] + list(targets) + tokens[index + 1 :])
+    # EVERY occurrence, not just the first: the scripted input is what a job runs
+    # the tool over, and replacing one of two would leave a stray whole-tree input
+    # inside a command that reports itself as scoped. The marker is matched as a
+    # whole token, so `.` inside `--pythonpath .` is untouched.
+    narrowed: list[str] = []
+    for token in tokens:
+        narrowed.extend(targets if token == marker else (token,))
+    return shlex.join(narrowed)
 
 
 def _narrow_where_possible(
@@ -1489,6 +1610,14 @@ def _select_tests(
             notes.append(
                 f"{rel} is also loadable by name from {', '.join(hubs)}, so "
                 "everything exercising those is selected"
+            )
+        named_by = graph.name_referrers(rel)
+        if named_by:
+            reachable_seeds.update(named_by)
+            listed = ", ".join(named_by[:3]) + (" …" if len(named_by) > 3 else "")
+            notes.append(
+                f"{rel} is also named by path or module string in {len(named_by)} "
+                f"file(s) ({listed}), so those are selected too"
             )
     reachable = set(graph.dependents(reachable_seeds)) | reachable_seeds
     selected = tuple(rel for rel in universe if rel in reachable)
@@ -1791,7 +1920,13 @@ def run_jobs(
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    if not any((commands or JOB_COMMANDS)[job] for job in jobs):  # pragma: no cover
+    if not jobs:
+        # Distinct from the branch below: nothing was SELECTED here, which is
+        # what a clean tree produces, and saying "narrowed to no file" for it
+        # tells the reader a decision was made that never was (QA Q-1 on #1322).
+        print("no job was selected for this diff, so nothing ran")
+        return 0
+    if not any((commands or JOB_COMMANDS)[job] for job in jobs):
         print("nothing to run: every selected job was narrowed to no file")
         return 0
     print("all selected gates passed")
@@ -1944,6 +2079,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     base_label = "(none)"
     paths: list[str] = []
     diff: str | None = None
+    # Bound only when the classification branch below actually asks git for a
+    # diff, so `--all`, a missing base and a failed `git diff` stay distinguishable
+    # from "the diff is empty".
+    collected: list[str] | None = None
 
     if args.all:
         flags = _all(True)
@@ -2048,13 +2187,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             scope = scope_plan(selected, paths, root)
             for line in scope.report():
                 print(line)
-        else:
-            # No diff was collected (an unresolvable base, a failed `git diff`).
-            # Classification already failed open to "run everything", and the
-            # file-level layer must not turn that into "scope to nothing".
+        elif collected is None:
+            # No diff was available to scope by: `--all`, a base that could not be
+            # resolved, or a `git diff` that failed. Classification already failed
+            # open to "run everything" for each of those, and the file-level layer
+            # must not turn that into "scope to nothing".
             print(
-                "\n### Local scope\n- no diff could be collected, so every "
-                "selected job runs its whole-tree command"
+                "\n### Local scope\n- no diff is available to scope by (`--all`, an "
+                "unclassifiable base, or a failed `git diff`), so every selected job "
+                "runs its whole-tree command"
+            )
+        else:
+            # An EMPTY diff — a clean tree, or a base equal to HEAD. Distinguishing
+            # this from `collected is None` is the point: the base revision told the
+            # reader that whole-tree commands would run, then ran none, and reported
+            # `nothing to run` about a decision it never made (QA Q-1 on #1322).
+            print(
+                f"\n### Local scope\n- the diff is empty (no change against "
+                f"{base_label}), so no job has anything to run"
             )
         for job, reason in sorted(LOCAL_EXCLUSIONS.items()):
             print(f"skipped locally: {job} — {reason}")

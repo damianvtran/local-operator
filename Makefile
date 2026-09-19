@@ -141,12 +141,15 @@ check-changed: ## Run the CI gates this branch's diff can affect
 
 # Run type checking with pyright
 #
-# Through `scripts/run_bounded.py`, not `timeout`, and never unbounded: pyright
-# is a Python wrapper around an npm/node analyzer, and `timeout` signals only
-# the wrapper — the node child survives as an orphan holding its heap (measured:
-# 2.28 GB and 1.50 GB, one alive 81 minutes after its parent died). The wrapper
-# signals the whole process group on every exit path. 900 s mirrors this job's
-# `timeout-minutes: 15` in ci.yml.
+# Through `scripts/run_bounded.py`, not `timeout`, and never unbounded. pyright
+# is a Python wrapper around an npm/node analyzer, and the fleet has shown
+# analyzers re-parented to launchd holding 1-2 GB each, one alive 81 minutes
+# after its parent died. The wrapper puts the command in its own process group
+# and signals the whole group on every exit path — including the two cases a
+# `timeout` cannot cover: a descendant alive when the leader exits by itself, and
+# a group that ignores SIGTERM (measured: a bare `timeout` wedged for 300 s where
+# the wrapper's SIGKILL escalation cleared the same tree in ~8 s). 900 s mirrors
+# this job's `timeout-minutes: 15` in ci.yml.
 type-check: ## Run type checking with pyright
 	.venv/bin/python scripts/run_bounded.py --timeout 900 -- \
 		.venv/bin/python -m pyright --pythonpath .venv/bin/python .
