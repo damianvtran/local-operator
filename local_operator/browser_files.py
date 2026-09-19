@@ -881,12 +881,25 @@ def session_dir(session_id: str, *, root: Path | None = None, stamp: str | None 
     A directory per session because that is what makes the before/after DIRECTORY
     DIFF a sound way to learn what a call landed with several sessions on one
     machine (§5.3), and a timestamp in the name so a later `ls` explains itself.
+
+    UNIQUE, not merely stamped: the stamp has one-second resolution, so two calls
+    inside the same second would otherwise share a directory — and then the diff
+    for the second call would be silently compared against the first call's
+    files. A `-2`, `-3`... suffix (the same rule the content-corrected rename
+    uses) keeps each call's directory its own without changing the documented
+    name shape.
     """
     session8 = "".join(ch for ch in (session_id or "nosession"))[:8] or "nosession"
     label = f"{stamp or time.strftime('%Y%m%d-%H%M%S')}-{_safe_component(session8)}"
-    directory = downloads_root(root) / label
+    parent = downloads_root(root)
+    parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(parent, 0o700)
+    directory = parent / label
+    index = 2
+    while directory.exists():
+        directory = parent / f"{label}-{index}"
+        index += 1
     directory.mkdir(parents=True, exist_ok=True)
-    os.chmod(downloads_root(root), 0o700)
     os.chmod(directory, 0o700)
     return directory
 
@@ -905,9 +918,14 @@ def session_bytes(session_id: str, *, root: Path | None = None) -> int:
     ceiling that can fail a turn is worse than one that is occasionally optimistic.
     """
     session8 = "".join(ch for ch in (session_id or "nosession"))[:8] or "nosession"
+    component = _safe_component(session8)
     total = 0
     try:
-        directories = list(downloads_root(root).glob(f"*-{_safe_component(session8)}"))
+        # Both spellings: a directory whose stamp collided inside one second gets a
+        # `-2` suffix (see `session_dir`), and it belongs to the same session.
+        directories = list(downloads_root(root).glob(f"*-{component}")) + list(
+            downloads_root(root).glob(f"*-{component}-*")
+        )
     except OSError:
         return total
     for entry in directories:
@@ -954,6 +972,10 @@ def audit(record: Mapping[str, Any], *, root: Path | None = None) -> None:
     try:
         path = downloads_root(root) / AUDIT_FILENAME
         path.parent.mkdir(parents=True, exist_ok=True)
+        # 0700 on the DIRECTORY too, not only on the file: a 0755 parent would
+        # let any local user LIST the download names the row's redaction exists
+        # to keep out of the log.
+        os.chmod(path.parent, 0o700)
         line = json.dumps({"ts_ms": int(time.time() * 1000), **record}, default=str)
         # O_APPEND + 0600 at creation: append-only by construction, private by
         # construction, and never truncated by a concurrent writer.
@@ -1047,6 +1069,11 @@ class ConformanceCase:
     #: Bytes that close the file. Only DMG needs one (its signature is `koly`,
     #: written LAST), so it is a fixture field rather than a second head.
     footer: bytes = b""
+    #: The sniffed extension the EXPECTED name was corrected with, or "" when the
+    #: name is reported uncorrected. Explicit rather than inferred, because the
+    #: TypeScript half must replay exactly this call and cannot tell from the
+    #: verdict alone which of the two produced the name it is comparing against.
+    sniffed_ext_for_name: str = ""
     #: Whether the sanitised name's own extension is on the deny list. The
     #: TypeScript policy port can compute exactly this much, so it is the half of
     #: the fixture the extension's own test can reproduce (§10.4).
@@ -1073,6 +1100,7 @@ CONFORMANCE_CASES: tuple[ConformanceCase, ...] = (
         expected_kind="allow",
         expected_sniffed="pdf",
         expected_safe_name="invoice.pdf",
+        sniffed_ext_for_name="pdf",
     ),
     ConformanceCase(
         # A PE executable under an innocent name: content wins, deleted.
@@ -1139,6 +1167,7 @@ CONFORMANCE_CASES: tuple[ConformanceCase, ...] = (
         expected_kind="allow",
         expected_sniffed="zip",
         expected_safe_name="handout.zip",
+        sniffed_ext_for_name="zip",
     ),
     ConformanceCase(
         name="photo.png",
@@ -1193,6 +1222,7 @@ CONFORMANCE_CASES: tuple[ConformanceCase, ...] = (
         expected_kind="allow",
         expected_sniffed="pdf",
         expected_safe_name="authorized_keys.pdf",
+        sniffed_ext_for_name="pdf",
     ),
     ConformanceCase(
         name="..\\..\\windows\\evil.txt",
@@ -1246,6 +1276,7 @@ CONFORMANCE_CASES: tuple[ConformanceCase, ...] = (
         expected_kind="allow",
         expected_sniffed="pdf",
         expected_safe_name=_fallback_name("  ") + ".pdf",
+        sniffed_ext_for_name="pdf",
     ),
 )
 
@@ -1290,6 +1321,7 @@ def tables_for_ts() -> dict[str, Any]:
                 "kind": case.expected_kind,
                 "sniffed": case.expected_sniffed,
                 "safeName": case.expected_safe_name,
+                "safeNameSniffedExt": case.sniffed_ext_for_name,
                 "nameIsDenyListed": case.name_is_deny_listed,
             }
             for case in CONFORMANCE_CASES
@@ -1324,6 +1356,16 @@ def fixture_mismatches() -> list[str]:
         if verdict.safe_name != case.expected_safe_name:
             problems.append(
                 f"{case.name!r}: safe_name {verdict.safe_name!r} != {case.expected_safe_name!r}"
+            )
+        # The TypeScript half replays exactly this call, so the fixture has to
+        # name the correction explicitly — and proving it here means the shared
+        # table cannot describe a sanitiser call the two languages disagree about.
+        replayed = safe_name(case.name, sniffed_ext=case.sniffed_ext_for_name)
+        if replayed != case.expected_safe_name:
+            problems.append(
+                f"{case.name!r}: safe_name({case.name!r}, sniffed_ext="
+                f"{case.sniffed_ext_for_name!r}) is {replayed!r}, not "
+                f"{case.expected_safe_name!r}"
             )
         if (_name_ext(case.name) in DENY_EXTS) != case.name_is_deny_listed:
             problems.append(

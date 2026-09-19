@@ -661,3 +661,67 @@ def test_only_describers_that_ask_for_the_context_receive_one() -> None:
         )
         assert _summary(tool, {"path": "x"}, ".", context) == expected
     assert seen == [("two", "."), ("three", context)]
+
+
+# --- download / upload: the two file-transfer rows ---------------------------
+
+
+def _browser_tool() -> AgentTool:
+    return AgentTool(
+        name="browser",
+        approval_tier="write",
+        execute=_unused_execute,
+        describe_approval=builtin._describe_browser_approval,
+    )
+
+
+def test_a_download_names_the_directory_the_page_may_write_into() -> None:
+    """The consent question is "may this page write files to your disk", and the
+    destination — which the HARNESS composes — is the answer. The file's own name
+    is the page's to choose, so naming one would describe the wrong thing."""
+    row = _summary(_browser_tool(), {"action": "download"})
+    assert row.startswith("download \u2192 ")
+    # Folded to `~` like every other row: the home prefix is on every row of a
+    # session and decides nothing.
+    assert "/browser/downloads/" in row
+    assert str(Path.home()) not in row
+
+
+def test_an_upload_names_both_the_file_and_where_it_goes(tmp_path: Path) -> None:
+    inside = _summary(
+        _browser_tool(),
+        {"action": "upload", "selector": "#f", "paths": [str(tmp_path / "deck.pptx")]},
+        str(tmp_path),
+    )
+    expected = (
+        f"upload: {tmp_path.resolve() / 'deck.pptx'}"
+        " \u2192 the page in the tab this session is driving"
+    )
+    assert inside == expected
+
+    outside = _summary(
+        _browser_tool(), {"action": "upload", "selector": "#f", "paths": ["/etc/passwd"]}
+    )
+    assert outside.startswith("[outside workspace] upload: ")
+
+
+def test_an_upload_with_several_files_admits_the_count(tmp_path: Path) -> None:
+    """A prompt that truncates a list of files to one name is worse than one that
+    says how many are leaving."""
+    row = _summary(
+        _browser_tool(),
+        {
+            "action": "upload",
+            "selector": "#f",
+            "paths": [str(tmp_path / "a.pdf"), str(tmp_path / "b.pdf"), str(tmp_path / "c.pdf")],
+        },
+    )
+    assert "+2 more" in row
+    assert "b.pdf" not in row
+
+
+def test_an_upload_with_no_paths_says_so_rather_than_showing_an_empty_row() -> None:
+    assert (
+        _summary(_browser_tool(), {"action": "upload", "selector": "#f"})
+        == "upload: no files named"
+    )

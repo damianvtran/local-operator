@@ -38,6 +38,7 @@ from pathlib import Path
 from local_operator import browser_files
 from local_operator.browser_bridge.protocol import (
     EXPECTED_EXTENSION_VERSION,
+    EXTENSION_CANNOT_SERVE,
     EXTENSION_UPDATE_NOTE,
     METHODS,
     ORIGIN_PROMPT_TIMEOUT_MS,
@@ -87,6 +88,7 @@ def _protocol_body() -> str:
     """
     error_values = "\n".join(f"  {item.name} = {item.value!r}," for item in ErrorCode)
     methods = " | ".join(repr(item) for item in METHODS)
+    cannot_serve = ", ".join(repr(item) for item in sorted(EXTENSION_CANNOT_SERVE))
     return f"""export const PROTO_VERSION = {PROTO_VERSION} as const;
 // The extension version this runtime was developed and released alongside.
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
@@ -107,6 +109,16 @@ export const ORIGIN_PROMPT_TIMEOUT_MS = {ORIGIN_PROMPT_TIMEOUT_MS} as const;
 export enum ErrorCode {{
 {error_values}
 }}
+
+// Methods NO build of this extension can serve, and the reason each is in the
+// vocabulary anyway: `download` needs a destination the harness chooses, and
+// Chrome refuses a tab-scoped `chrome.debugger` session the only two CDP
+// primitives that could give it one (`Page.setDownloadBehavior` answers
+// -32000 "Cannot not access browser-level commands", `Browser.setDownloadBehavior`
+// -32601; no browser target is attachable). Measured on Chrome 153.0.8010.53 —
+// docs/design/browser-file-transfer.md §17.1. Generated, so a method added there
+// cannot silently become "the extension forgot a handler".
+export const EXTENSION_CANNOT_SERVE: string[] = [{cannot_serve}];
 
 export type Method = {methods};
 // One buffered console/runtime log line, as `logs` returns it (newest last).
@@ -337,7 +349,7 @@ def render_tables() -> str:
 
     cases = ",\n".join(
         "  { name: %s, headBase64: %s, declaredMime: %s, kind: %s, sniffed: %s, "
-        "safeName: %s, nameIsDenyListed: %s }"
+        "safeName: %s, safeNameSniffedExt: %s, nameIsDenyListed: %s }"
         % (
             js(case["name"]),
             js(case["headBase64"]),
@@ -345,6 +357,7 @@ def render_tables() -> str:
             js(case["kind"]),
             js(case["sniffed"]),
             js(case["safeName"]),
+            js(case["safeNameSniffedExt"]),
             "true" if case["nameIsDenyListed"] else "false",
         )
         for case in tables["cases"]
@@ -399,6 +412,10 @@ def render_tables() -> str:
         "  kind: 'allow' | 'deny' | 'unknown';\n"
         "  sniffed: string;\n"
         "  safeName: string;\n"
+        "  // The sniffed extension the expected name was corrected with, or '' when\n"
+        "  // the name is reported uncorrected. Explicit so the TypeScript half can\n"
+        "  // replay exactly the call that produced `safeName`.\n"
+        "  safeNameSniffedExt: string;\n"
         "  nameIsDenyListed: boolean;\n"
         "}\n"
         "\n"

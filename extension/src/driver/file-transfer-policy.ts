@@ -118,7 +118,10 @@ export function fallbackName(raw: string, sniffedExt = ""): string {
  */
 export function safeName(raw: string, sniffedExt = ""): string {
   const parts = raw.replace(/\\/g, "/").split("/");
-  let name = parts[parts.length - 1].replace(CONTROL, "").replace(BIDI_ZERO_WIDTH, "");
+  /* `?? ""` rather than a non-null assertion: this module is vendored into a
+   * host compiled with `noUncheckedIndexedAccess`, and an empty basename simply
+   * falls through to the generated-name branch below. */
+  let name = (parts[parts.length - 1] ?? "").replace(CONTROL, "").replace(BIDI_ZERO_WIDTH, "");
   name = name.normalize("NFC").trim().replace(/[. ]+$/, "");
   if (name === "" || name === "." || name === "..") return fallbackName(raw, sniffedExt);
   const dot = name.lastIndexOf(".");
@@ -165,7 +168,10 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-const CREDENTIAL_GLOBS = CREDENTIAL_NAME_PATTERNS.map(globToRegExp);
+const CREDENTIAL_GLOBS = CREDENTIAL_NAME_PATTERNS.map((pattern) => ({
+  pattern,
+  regex: globToRegExp(pattern),
+}));
 
 /**
  * Why this path may not be uploaded, or "" when it may — the same rule as
@@ -180,14 +186,14 @@ const CREDENTIAL_GLOBS = CREDENTIAL_NAME_PATTERNS.map(globToRegExp);
 export function credentialRefusal(pathish: string): string {
   const parts = pathish.split("/").filter((part) => part !== "");
   const base = (parts[parts.length - 1] ?? "").toLowerCase();
-  for (let index = 0; index < CREDENTIAL_GLOBS.length; index += 1) {
-    if (CREDENTIAL_GLOBS[index].test(base)) {
-      return `refused: '${parts[parts.length - 1]}' matches the credential deny-list (${CREDENTIAL_NAME_PATTERNS[index]})`;
+  for (const { pattern, regex } of CREDENTIAL_GLOBS) {
+    if (regex.test(base)) {
+      return `refused: '${base}' matches the credential deny-list (${pattern})`;
     }
   }
   for (const part of parts) {
     if (CREDENTIAL_COMPONENTS.includes(part.toLowerCase())) {
-      return `refused: '${parts[parts.length - 1]}' is inside a '${part}' directory, which holds credentials`;
+      return `refused: '${base}' is inside a '${part}' directory, which holds credentials`;
     }
   }
   return "";
