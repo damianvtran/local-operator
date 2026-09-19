@@ -153,8 +153,8 @@ def _build_bundle() -> str | None:
         return (
             "node is not installed, and the portal bundle is built once with it "
             "(Node >=22, and the archive package is usually older than that -- "
-            "Ubuntu 24.04 ships 18 -- so check `node --version`; "
-            "https://nodejs.org, or `nvm install 22`); "
+            "Ubuntu 24.04 ships 18 -- so check `node --version`); install a current "
+            "Node from https://nodejs.org (or, if you use nvm, `nvm install 22`); "
             "re-run `lop mobile install` afterwards"
         )
     try:
@@ -162,14 +162,24 @@ def _build_bundle() -> str | None:
         if runner is None:
             corepack = _shim_argv("corepack")
             if corepack is None:
-                # SAME DEFECT AS THE NODE ARM ABOVE (design round 2, D8): the
-                # old sentence's only instruction was `pnpm build`, which is
-                # the command that cannot run BECAUSE pnpm is the missing
-                # thing. Name how to get pnpm instead.
+                # SAME DEFECT AS THE NODE ARM ABOVE (design round 2, D8), and this
+                # sentence then repeated it in its own replacement (design round
+                # 3, D14). The old text offered only `pnpm build` -- the command
+                # that cannot run BECAUSE pnpm is missing -- and the first fix
+                # named `corepack enable` with the assurance "it ships with
+                # Node". That assurance is FALSE from Node 25 on: Corepack is no
+                # longer distributed with it (the v26.9.0 tarball ships no
+                # corepack file at all, while v24.21.0 ships bin/corepack
+                # 0.36.0), so a reader on Current would run the remedy and get a
+                # different refusal back -- exactly the class D8 was raised for.
+                #
+                # So the sentence names the ONE route that works on every Node:
+                # pnpm's own install page. Corepack stays in the CODE below,
+                # where it is genuinely useful -- `_shim_argv` found it, so the
+                # self-heal runs -- but it is no longer promised in copy.
                 return (
                     "neither pnpm nor corepack is on PATH, and the portal bundle "
-                    "is built with pnpm: enable Corepack (`corepack enable`; it "
-                    "ships with Node) or install pnpm "
+                    "is built with pnpm: install pnpm "
                     "(https://pnpm.io/installation), then re-run "
                     "`lop mobile install`"
                 )
