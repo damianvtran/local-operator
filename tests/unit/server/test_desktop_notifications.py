@@ -49,7 +49,9 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
 )
 from local_operator.session.attention import AttentionStore
+from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
 from local_operator.tui.notify import BODIES
+from tests.notification_opt_in import notification_path_opt_in
 
 
 def _publish(
@@ -156,15 +158,19 @@ def _notification_gate_off() -> Iterator[None]:
     assertion looks at. Here the notification frame IS the subject, so the gate
     is cleared once for the module.
 
+    The body is ``tests/notification_opt_in.notification_path_opt_in`` — the shared
+    opt-in — which clears that switch AND waives the test-hosting rule; the
+    session this module fabricates for the test-hosting cell carries a real
+    selection row, and the cell that asserts the RULE (``test_a_stored_mock_
+    session_emits_no_notification``) turns the escape back off for itself.
+
     Set and restored by hand rather than through ``monkeypatch``: that fixture
     is FUNCTION-scoped and SHARED with the tests, and one test here calls
     ``monkeypatch.undo()`` to put a patched composer back — which would re-arm
     this gate mid-test and lose the very banner the test is about.
     """
-    prior = os.environ.pop("LOCAL_OPERATOR_NO_NOTIFICATIONS", None)
-    yield
-    if prior is not None:
-        os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = prior
+    with notification_path_opt_in():
+        yield
 
 
 async def _baselined(root: Path, session_id: str) -> _Bridge:
@@ -898,8 +904,21 @@ async def test_a_stored_mock_session_emits_no_notification(tmp_path: Path) -> No
     offer the renderer turns into a native banner — and a session that ran on the
     test hosting must not become one, whichever process is reading the store. The
     attention frame still goes out: that is the receipt sync, not chrome.
+
+    THE MODULE'S OPT-IN IS TURNED BACK OFF HERE, and that is the whole cell: the
+    shared fixture waives the test-hosting rule for the suites whose subject is
+    the frame, so a test asserting the RULE has to close the waiver it would
+    otherwise inherit. The kill switch stays cleared, so the frame is available
+    and the rule is the only thing suppressing it.
     """
     import json
+
+    # A plain pop, NOT `monkeypatch.delenv`: monkeypatch is set up before this
+    # module's autouse opt-in, so its undo runs AFTER that fixture's teardown and
+    # would re-set the escape for every later test in the worker (the feed
+    # module's rule cell went red exactly that way). The reader reads fresh, so
+    # popping it for the body of this cell is the waiver this test needs.
+    os.environ.pop(ENV_ALLOW_TEST_HOSTING_NOTIFY, None)
 
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))

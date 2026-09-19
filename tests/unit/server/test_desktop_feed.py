@@ -73,6 +73,7 @@ from local_operator.session.catalog import (
     status_of,
 )
 from local_operator.session.creation import CREATED_AT_NAME
+from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     desktop_attending_session,
@@ -83,6 +84,7 @@ from local_operator.session.runtime.presence import (
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 from local_operator.tui.notify import BODY_BACKGROUND_DIGEST, background_digest_title
 from local_operator.wakes.store import write_entry
+from tests.notification_opt_in import notification_path_opt_in
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +97,12 @@ def _notification_gate_off() -> Iterator[None]:
     banners composed here ARE the subject, so the gate is cleared once for the
     module rather than by each of the twenty tests that need it.
 
+    The body is ``tests/notification_opt_in.notifications_on`` — the shared
+    opt-in — which clears that switch AND waives the test-hosting rule: this
+    module's fabricated sessions carry no journal, so only the first applies
+    today, and sharing the helper is what keeps a module that later seeds a real
+    selection from having to remember a second variable.
+
     Set and restored by hand rather than through ``monkeypatch``, and that is
     deliberate: that fixture is FUNCTION-scoped and SHARED with the tests, so a
     test calling ``monkeypatch.undo()`` (``test_a_compose_failure_costs_the_
@@ -103,10 +111,8 @@ def _notification_gate_off() -> Iterator[None]:
     pins the gate itself (``test_a_silenced_process_composes_no_banner``) sets
     it back explicitly.
     """
-    prior = os.environ.pop("LOCAL_OPERATOR_NO_NOTIFICATIONS", None)
-    yield
-    if prior is not None:
-        os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = prior
+    with notification_path_opt_in():
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -2867,7 +2873,21 @@ def test_a_stored_mock_session_is_never_bannered_by_another_process(tmp_path) ->
     the operator with the mock's own reply. The control in the same cell is a
     real session in the same store, which must still be announced — the check is
     a filter, not a mute.
+
+    THE MODULE'S OPT-IN IS TURNED BACK OFF HERE, and that is the whole cell: the
+    shared fixture waives the test-hosting rule for the suites whose subject is
+    the frame, so a test asserting the RULE has to close the waiver it would
+    otherwise inherit. The kill switch stays cleared, so the frame is available
+    and the rule is the only thing suppressing it.
     """
+    # A plain pop, NOT `monkeypatch.delenv`: monkeypatch is set up before this
+    # module's autouse opt-in (it is what ``isolate_environment`` requests), so
+    # its undo runs AFTER that fixture's teardown and would re-set the escape
+    # for every later test in the worker — which is how this cell first made an
+    # unrelated suite's rule cell go red. The reader reads fresh, so popping it
+    # for the body of this cell is exactly the waiver this test needs.
+    os.environ.pop(ENV_ALLOW_TEST_HOSTING_NOTIFY, None)
+
     root = tmp_path
     mock_sid = "f" * 12
     real_sid = "a" * 12

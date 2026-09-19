@@ -41,6 +41,44 @@ _HOSTING_VERDICT_CACHE: dict[Path, tuple[tuple[int, int], bool]] = {}
 #: though a real tick touches the same handful of rows.
 _HOSTING_VERDICT_CACHE_MAX = 256
 
+#: The escape a HARNESS sets to exercise the notification path against a session
+#: recorded on the test hosting.
+#:
+#: WHY A PRODUCTION SEAM EXISTS FOR THIS AT ALL. The test-hosting rule is about
+#: what a USER sees: the desktop legs can only be asserted end to end by driving
+#: a session the rule would otherwise suppress, and the fixtures that build a
+#: real store for those tests create their sessions on the test hosting (the
+#: deterministic wire). Without an escape the assertion has nothing to observe —
+#: CI found exactly that when this rule first met the feed suites. The
+#: alternative, making every such test run on a real provider, would make the
+#: reply non-deterministic and put a network and a credit requirement in front of
+#: the suite.
+#:
+#: SAME SHAPE AS :data:`local_operator.agent_shell.ALLOW_NESTED_SESSION_ENV`,
+#: this repository's existing escape for a harness that must drive the real front
+#: end: one variable, named for the thing it waives, read fresh, documented as a
+#: test/QA seam rather than a user setting, and set by the harness rather than
+#: by anything the product decides on its own.
+#:
+#: IT CAN ONLY EVER ENABLE. ``session_uses_test_hosting`` answering ``False``
+#: means "not a test session", so a set escape can only make a notification
+#: MORE likely: it cannot silence a real session's completion, and it cannot
+#: touch a user's own notification preferences. THE PROCESS KILL SWITCH STILL
+#: WINS, because every leg asks ``tui.notify.notifications_enabled`` FIRST — a
+#: silenced process stays silent on every leg whether this is set or not, which
+#: is what keeps a test rig from putting a banner on the operator's screen by
+#: setting it.
+ENV_ALLOW_TEST_HOSTING_NOTIFY = "LOCAL_OPERATOR_NOTIFY_TEST_HOSTING"
+
+
+def test_hosting_rule_waived() -> bool:
+    """Whether this process waived the test-hosting rule (see the constant).
+
+    Read fresh on each call, like every other escape hatch here: a harness sets
+    it for the length of one test and restores what it found.
+    """
+    return bool((os.environ.get(ENV_ALLOW_TEST_HOSTING_NOTIFY) or "").strip())
+
 
 @dataclass(frozen=True)
 class StoredModelSelection:
@@ -448,6 +486,15 @@ def session_uses_test_hosting(directory: Path) -> bool:
     miss, which is why :data:`_HOSTING_VERDICT_CACHE` exists to make the miss
     rare rather than to excuse it.
 
+    A HARNESS MAY WAIVE THE WHOLE RULE for the length of a test, through
+    :data:`ENV_ALLOW_TEST_HOSTING_NOTIFY` — read FIRST, so a waived process does
+    not even stat the journal. This is the one seam the three legs share (the
+    TUI observer, the machine-wide feed and the per-session bridge all ask this
+    function), and it exists because the desktop legs can only be asserted end to
+    end against a session the rule would otherwise suppress. It can only ever
+    ENABLE: the process kill switch is still asked first by every leg, so a
+    silenced process stays silent whether the escape is set or not.
+
     THE OTHER GATE MAY STILL DISAGREE, and cannot be made to here: a process
     that ran the mock stays silenced for life (``tui.notify.
     suppress_notifications_for_process``), so a session that switched OFF the
@@ -455,6 +502,12 @@ def session_uses_test_hosting(directory: Path) -> bool:
     says no. Every leg asks the switch first, so the safe answer wins; the
     asymmetry and why it is not reconciled are spelled out on that helper.
     """
+    if test_hosting_rule_waived():
+        # A harness exercising the notification path (see the constant): the rule
+        # is waived for this process, so this answers "not a test session" — the
+        # only direction the escape can move, and the kill switch still wins
+        # because every leg asks it first.
+        return False
     path = directory / "transcript.jsonl"
     try:
         info = path.stat()

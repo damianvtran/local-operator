@@ -35,6 +35,7 @@ from tests.e2e.harness import (
     text_turn,
     tool_call_turn,
 )
+from tests.notification_opt_in import notification_path_opt_in
 
 pytestmark = pytest.mark.e2e
 
@@ -58,6 +59,11 @@ def notifications_on(headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch) ->
     which is function-scoped and shared with the test: a test that calls
     ``monkeypatch.undo()`` would otherwise re-arm the gate mid-cell.
 
+    THE BODY IS THE SHARED OPT-IN (``tests/notification_opt_in``), which clears
+    that switch AND waives the test-hosting rule — the sessions these cells
+    drive carry a real selection row, so the per-session rule would suppress the
+    very frame they assert without it.
+
     Opening the gate is safe ONLY because the fixture also doubles
     ``tui.notify.detached_notify`` — the detached banner is a real ``osascript``
     call on this host, and a cell that opens the gate without the double is a
@@ -76,10 +82,8 @@ def notifications_on(headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch) ->
     from local_operator.tui import notify as notify_module
 
     monkeypatch.setattr(notify_module, "detached_notify", lambda *args, **kwargs: False)
-    prior = os.environ.pop("LOCAL_OPERATOR_NO_NOTIFICATIONS", None)
-    yield
-    if prior is not None:
-        os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = prior
+    with notification_path_opt_in():
+        yield
 
 
 async def next_frame(lines, predicate):
