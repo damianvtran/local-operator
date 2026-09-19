@@ -118,7 +118,7 @@ async def list_runtimes(
     from local_operator.server.routes.desktop_sessions import reply
 
     root = request.app.state.config_manager.config_dir
-    async with errors():
+    async with errors(request):
         started = time.monotonic()
         roster = await asyncio.to_thread(_collect, root, probe=probe, budget_s=budget_s)
     logger.debug(
