@@ -434,3 +434,37 @@ async def test_maybe_start_disposes_and_raises_when_it_cannot_start(
     with pytest.raises(OSError):
         await maybe_start_exec_control(session, enabled=True, cwd="/tmp")
     assert session.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_the_unpublished_surface_is_closed_before_it_is_reported(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fatal path closes what it started, in that order (review round 2, MINOR-2).
+
+    ``start()`` has already put a thread and a loop behind the caller who is about
+    to fail this run, so raising alone abandons a runtime that may still be
+    serving — the D-5 fix. This is the ONLY test that reaches the
+    ``wait_until_published() == False`` branch: the sibling above fails inside
+    ``start()`` itself and never gets here. It pins both halves — the teardown is
+    awaited, and it runs before the raise.
+    """
+    session = FakeSession()
+    order: list[str] = []
+    real_aclose_remote = RuntimeServer.aclose_remote
+
+    async def never_published(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def teardown(self: Any) -> None:
+        # Records AND performs the real teardown, so nothing this test started is
+        # left behind — a stub that only recorded would leak the thread and the
+        # bound socket the fatal path exists to close.
+        order.append("closed")
+        await real_aclose_remote(self)
+
+    monkeypatch.setattr(RuntimeServer, "wait_until_published", never_published)
+    monkeypatch.setattr(RuntimeServer, "aclose_remote", teardown)
+    with pytest.raises(RuntimeError, match="never published its record"):
+        await start_exec_control(session, cwd="/tmp")
+    assert order == ["closed"], "the runtime this run started was left behind"

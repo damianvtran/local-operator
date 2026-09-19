@@ -441,14 +441,26 @@ class ServingSessionHandle(SessionHandle):
 
         No coroutine on the runtime's loop performs a synchronous cross-thread
         wait, and no code on the session's loop is called from the runtime's
-        thread except through a hop whose result is awaited — with ONE exception,
-        named rather than implied because the sentence above would otherwise
-        overstate: ``redate_from_phase``'s mutation of the fold's phase clock and
-        ``session_projection_seed``'s read of the live projection object DO run on
-        the runtime's loop. That is deliberate and bounded: both sit on the
-        WELCOME path (``RuntimeServer._projection_payload``), so hopping them
-        would re-couple the welcome to the turn — the coupling this change exists
-        to remove, and the reason a fresh dial is served while the loop is busy.
+        thread except through a hop whose result is awaited.
+
+        THE EXEMPTIONS ARE NAMED, NOT COUNTED — a number here is what drifted
+        twice already, in this class, for exactly this reason (review round 2,
+        NIT-1; the "six" this branch removed). They are one MUTATION and a
+        CATEGORY of reads, which is why "one exception" was never the right
+        shape:
+
+        * the mutation: ``redate_from_phase`` writes the fold's phase clock from
+          ``RuntimeServer._projection_payload``. Deliberate and bounded — it sits
+          on the WELCOME path, so hopping it would re-couple the welcome to the
+          turn, which is the coupling this change exists to remove and the reason
+          a fresh dial is served while the loop is busy.
+        * the reads: ``session_projection_seed`` hands out the LIVE projection
+          object, and ``is_busy``/``is_conversationally_active``/``subagent_counts``
+          are plain field reads — the class the heartbeat has always made from
+          this side, and they are named in the status bullet below rather than
+          hopped. A read of a field the session's loop owns is not the hazard the
+          hop exists for; a write is, and there is one.
+
         The pair is exactly what the TUI kind already does (audit §2.2: a data
         race in principle, shipped since the pair was written), the values are an
         int and an object reference, and the alternative was measured worse.
@@ -466,8 +478,9 @@ class ServingSessionHandle(SessionHandle):
       retire and kill-switch probes), ``has_admitted_command`` (the dedupe
       probe) and ``register_secret_redaction``/``cancel_subagents_count`` (the
       two ``_dispatch`` arms that mutate session state) — the last two added in
-      review, because a cancel that runs on the runtime's thread reports success
-      while the manager swallows a cross-loop ``RuntimeError``;
+      review, because a cancel that runs on the runtime's thread executes on the
+      wrong loop and has its cross-loop ``RuntimeError`` swallowed while the op
+      still reports success;
     * ``reannounce_pending`` is the one named method that is deliberately NOT
       hopped: one of its in-tree callers (the registrant's ``_drop_client``) is
       synchronous and cannot await a hop, and it is a read-then-NOTIFY whose
@@ -1164,7 +1177,18 @@ class ServingSessionHandle(SessionHandle):
         or an event. It RAISES when there is no store, so the viewer's sink
         declines to acknowledge and the broker denies the child rather than
         serving a value nothing can scrub — the fail-closed direction §6 requires.
+
+        THE LOOP GUARD IS WHAT MAKES THE SEAM'S CLOSED-LOOP BRANCH TRUE FOR A
+        ``def``. A synchronous method cannot carry ``@_on_session_loop``, so when
+        the session's loop is gone the registrant's helper runs this body INLINE
+        on the runtime's thread — the plane round 1's MAJOR-1 took it off. Without
+        this line that branch would execute the write and ack success (review
+        round 2, MINOR-1 / QA Q4); with it the caller gets the ordinary refusal.
+        Not a no-op for this method's other callers: the running loop IS the
+        session's loop when the session's own side calls it, which is the
+        condition this accepts.
         """
+        self._check_loop_thread()
         variables = getattr(self._session, "variables", None)
         if variables is None:
             raise RuntimeError("this runtime has no variable store to redact through")
@@ -1947,6 +1971,13 @@ class ServingSessionHandle(SessionHandle):
 
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
+        # THE GATE PATH NEEDS THE REFUSAL TOO (review round 2, UX U8). This is the
+        # one body on the decorator half of the seam that touches the loop
+        # directly — ``call_soon_threadsafe`` below — so on a closed session loop
+        # it raised ``RuntimeError: Event loop is closed`` and the client was handed
+        # the asyncio internal, in the middle of a person tapping Approve. The
+        # guard turns that into the named refusal the dispatcher already renders.
+        self._check_loop_thread()
         import concurrent.futures
 
         receipt: concurrent.futures.Future[None] = concurrent.futures.Future()
@@ -3947,7 +3978,15 @@ class ServingSessionHandle(SessionHandle):
         ``RuntimeServer._handle_call_on_session_loop`` (review round 1, BLOCKER
         D-1), which is also where the reasoning for why a bare call was worse
         than slow is written down.
+
+        THE LOOP GUARD, for the same reason as ``register_secret_redaction``'s:
+        this is the other ``def`` the registrant hops, so it is the other one a
+        dead session loop would run INLINE on the runtime's thread while still
+        returning a count (review round 2, MINOR-1 / QA Q4). The bodies that
+        carry ``@_on_session_loop`` get the refusal from the decorator's path;
+        these two need it written down.
         """
+        self._check_loop_thread()
         cancel = getattr(self._session, "cancel_subagents", None)
         if not callable(cancel):
             return 0

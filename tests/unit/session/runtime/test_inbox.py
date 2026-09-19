@@ -172,10 +172,47 @@ def test_the_drain_is_wired_before_the_socket_starts_listening() -> None:
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(process.amain)))
 
-    def call_line(*, function: str | None = None, method: str | None = None) -> int:
-        """The earliest line calling ``function(...)`` or ``runtime.method(...)``."""
+    def own_body(node: ast.AST) -> list[ast.AST]:
+        """Every node in ``amain``'s OWN body — nested scopes excluded.
+
+        A nested ``def`` is not part of the statement order this assertion is
+        about, so a call inside one must not be able to satisfy it (review round
+        2, NIT-2).
+        """
+        out: list[ast.AST] = []
+        stack = list(ast.iter_child_nodes(node))
+        while stack:
+            child = stack.pop()
+            out.append(child)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            stack.extend(ast.iter_child_nodes(child))
+        return out
+
+    def runtime_name() -> str:
+        """The local the runtime is bound to — ``runtime`` today, whatever after.
+
+        Resolved from the construction rather than hard-coded, so renaming the
+        local cannot fail a valid ordering (review round 2, NIT-2).
+        """
+        for node in own_body(tree.body[0]):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "RuntimeServer"
+            ):
+                return node.targets[0].id
+        raise AssertionError("amain no longer constructs a RuntimeServer")
+
+    def call_line(
+        *, function: str | None = None, method: str | None = None, receiver: str | None = None
+    ) -> int:
+        """The earliest line calling ``function(...)`` or ``<receiver>.method(...)``."""
         found: list[int] = []
-        for node in ast.walk(tree):
+        for node in own_body(tree.body[0]):
             if not isinstance(node, ast.Call):
                 continue
             called = node.func
@@ -186,14 +223,14 @@ def test_the_drain_is_wired_before_the_socket_starts_listening() -> None:
                 and isinstance(called, ast.Attribute)
                 and called.attr == method
                 and isinstance(called.value, ast.Name)
-                and called.value.id == "runtime"
+                and called.value.id == receiver
             ):
                 found.append(node.lineno)
         assert found, f"amain no longer calls {function or method}"
         return min(found)
 
     drain_at = call_line(function="_drain_inbox_into")
-    listen_at = call_line(method="start")
+    listen_at = call_line(method="start", receiver=runtime_name())
     assert drain_at < listen_at, (
         "the inbox drain must run before the control socket listens; "
         "moving it after turns the delivery guarantee into a race"

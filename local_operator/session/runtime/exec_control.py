@@ -256,7 +256,18 @@ async def start_exec_control(
         # 1, D-5). ``aclose_remote`` awaits the same bounded join through a
         # thread hop, which is the spelling ``process._clean_exit`` already uses
         # for the same teardown.
-        await runtime.aclose_remote()
+        #
+        # THE FALLBACK IS THE SAME SHAPE AS THE THREE SIBLING SITES (review
+        # round 2, MINOR-2). Calling ``aclose_remote`` directly made a reduced
+        # host — one answering only the owner-loop ``aclose`` form — raise
+        # ``AttributeError`` out of a failure path, REPLACING the RuntimeError
+        # this contract is written on, so the supervisor would be told an
+        # attribute is missing instead of that the surface never published.
+        remote = getattr(runtime, "aclose_remote", None)
+        if callable(remote):
+            await cast(Callable[[], Awaitable[None]], remote)()
+        else:  # pragma: no cover - a reduced host answering only the owner-loop form
+            await runtime.aclose()
         raise RuntimeError(
             "the exec control surface was asked for but the runtime never "
             "published its record; the run cannot be supervised"
