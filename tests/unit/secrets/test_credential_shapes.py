@@ -346,6 +346,7 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "cli-credential-flag",
         "vendor-prefixed-token",
         "gcp-service-account-value",
+        "gcp-service-account-value-open",
         "authorization-basic-bare",
     }
 
@@ -1048,8 +1049,12 @@ _PARTIAL_MASK_RESIDUAL = {
     # 152 → 89 and `gcp-service-account-key` 44 → 0 came from masking an anchored
     # value to its closing quote (M6-1), and `gcp-service-account-value` entered at 22
     # with that mask.
-    "pem-private-key": 89,
-    "gcp-service-account-value": 22,
+    # Re-measured after requiring the closing quote on the anchored rule: the counts
+    # moved (pem 89 → 119, value 22 → 42) because a truncated value now falls through to
+    # the line rules, which mask the marker and expose the same synthetic quote-in-marker
+    # case. They still all fall in the "a quote cannot occur here in real output" class.
+    "pem-private-key": 119,
+    "gcp-service-account-value": 42,
     "credential-url-value": 10,
 }
 
@@ -1228,3 +1233,48 @@ def test_a_following_word_line_keeps_its_word(tail: str) -> None:
     text = f"-----BEGIN RSA PRIVATE KEY-----\n{_PEM_BODY}\n-----END RSA PRIVATE KEY-----\n{tail}"
     scrubbed = rs.scrub_shapes(text)
     assert scrubbed.splitlines()[-1] == tail, scrubbed
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "NORMAL, more text\n",
+        '", "other": "value"}',
+        "prose that is not credential-shaped\n",
+    ],
+)
+def test_an_unterminated_anchored_value_stops_before_a_non_credential_line(tail: str) -> None:
+    """Rule 2 of the round-7 direction: mask the credential-SHAPED run, then stop.
+
+    An anchored value with no closing quote used to mask "the remainder", which is not
+    all credential: `…<BODY>\nNORMAL, more text\n` lost that whole line, and
+    `…<BODY>\n", "other": "value"}` lost the following JSON. A line counts as
+    credential-shaped only when, stripped, it is empty, a PEM header/footer, or solely
+    `[A-Za-z0-9+/=]` plus at most one trailing comma — and the mask must stop before the
+    first line that is not, byte-identical. Not "stop at the first newline": a bare
+    newline body would then publish the rest of a real key.
+    """
+    import local_operator.redaction_shapes as rs
+
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    text = '{"private_key": "' + header + "\n" + _PEM_BODY + "\n" + tail
+    scrubbed, hits = rs.scrub_shapes_with_hits(text)
+    assert _PEM_BODY not in scrubbed, "the credential run was not masked"
+    assert scrubbed.endswith(tail), f"the following line was eaten: {scrubbed!r}"
+    assert not any(hit.complete for hit in hits), "an unterminated value claimed completion"
+
+
+def test_a_credential_shaped_run_is_masked_to_its_end() -> None:
+    """The other half of rule 2: a multi-line base64 body IS masked, all of it.
+
+    The naive alternative — stop at the first newline — would publish every line after
+    the header, which is the whole body of a real key.
+    """
+    import local_operator.redaction_shapes as rs
+
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    text = '{"private_key": "' + header + "\n" + _PEM_BODY + "\n" + _PEM_BODY + "\n"
+    scrubbed, hits = rs.scrub_shapes_with_hits(text)
+    assert _PEM_BODY not in scrubbed
+    assert scrubbed == '{"private_key": "[redacted]'
+    assert not any(hit.complete for hit in hits)
