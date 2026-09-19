@@ -18,14 +18,18 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+from local_operator.browser_bridge import protocol
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import BridgeService
 from local_operator.browser_bridge.protocol import (
     CAPABILITY_GATED_METHODS,
+    CAPABILITY_MIN_EXTENSION_VERSION,
+    CAPABILITY_SWITCH_LABEL,
+    CAPABILITY_SWITCH_PERMISSION,
     COMMAND_TIMEOUTS,
-    EXTENSION_CANNOT_SERVE,
     PROTO_VERSION,
     Capabilities,
+    CapabilitySwitches,
     ErrorCode,
     Request,
     Response,
@@ -195,11 +199,175 @@ def test_the_daemon_stamps_the_record_with_the_advertisement_it_knows(tmp_path: 
     assert BridgeService(root=tmp_path).state.capabilities_known is True
 
 
-def test_no_extension_build_can_serve_download() -> None:
-    """The measured fact the refusal copy depends on (E1x, Chrome 153.0.8010.53)."""
-    assert EXTENSION_CANNOT_SERVE == frozenset({"download"})
+@pytest.mark.asyncio
+async def test_a_switched_off_method_is_refused_before_it_is_sent(tmp_path: Path) -> None:
+    """The operator's consent, enforced at the same place the advertisement is.
+
+    A session that got past the file check — a record read a moment before the
+    switch was flipped — must still not reach a capability the operator has turned
+    off, and the refusal has to carry the three-state payload so the copy can name
+    the switch rather than a version.
+    """
+    service = await _live(BridgeService(root=tmp_path))
+    sent: list[dict[str, Any]] = []
+
+    async def send(payload: dict[str, Any], wire: Any = None) -> None:
+        sent.append(payload)
+
+    service.link.send = send  # type: ignore[method-assign]
+    service.link.capabilities = ["upload"]
+    service.link.disabled_capabilities = ["download"]
+
+    body = await _rpc(service, {"id": "r-1", "method": "download", "params": {"tab": "bridge:1:n"}})
+    assert body["ok"] is False
+    assert body["error"]["code"] == ErrorCode.CAPABILITY_UNSUPPORTED.value
+    assert body["error"]["data"]["method"] == "download"
+    assert body["error"]["data"]["disabled"] == ["download"]
+    assert body["error"]["data"]["switches_known"] is True
+    assert sent == [], "a switched-off capability must not reach the peer either"
+
+
+@pytest.mark.asyncio
+async def test_the_switch_answer_is_published_with_the_advertisement(tmp_path: Path) -> None:
+    """The harness decides from the FILE, so both answers must land in it together."""
+    service = await _live(BridgeService(root=tmp_path))
+    service.link.capabilities = ["download", "upload"]
+    service.link.disabled_capabilities = ["upload"]
+    service.publish()
+
+    assert service.state.capabilities == ["download", "upload"]
+    assert service.state.disabled_capabilities == ["upload"]
+    assert service.state.switches_known is True, "the daemon's own stamp, not the peer's"
+
+
+def test_a_record_from_a_daemon_without_switches_reads_as_no_answer() -> None:
+    """Absent keys must not read as "the operator enabled everything".
+
+    Two causes share the empty list — a daemon that predates the switches and one
+    whose extension reported none — and only the stamp separates them. The
+    conservative reading is "nobody told us", which is why the fields default to
+    empty/false rather than to an empty-allowed state.
+    """
+    old = {
+        "pid": 1,
+        "port": 4099,
+        "session_key": "k" * 32,
+        "proto": PROTO_VERSION,
+        "extension_connected": True,
+        "extension_version": "0.1.18",
+        "capabilities": ["upload"],
+        "capabilities_known": True,
+    }
+    record = state_store.BridgeState.model_validate(old)
+    assert record.disabled_capabilities == []
+    assert record.switches_known is False
+
+
+def test_a_lockdown_field_on_the_capabilities_event_would_close_an_old_daemon() -> None:
+    """Why the switch answer is a SECOND event and not a field on the first.
+
+    Every envelope is ``extra="forbid"``, so adding `disabled` to `capabilities`
+    would be a 4001 close (or a dropped frame, depending on the peer) on every
+    already-released daemon — the failure a new field on `Hello` would cause, and
+    the reason capability travels as an event at all. This test fails the day
+    someone "simplifies" the two frames back into one.
+    """
+    with pytest.raises(ValidationError):
+        Capabilities.model_validate(
+            {"event": "capabilities", "methods": [], "version": "0.1.19", "disabled": ["upload"]}
+        )
+    # The sibling event accepts exactly the shape the extension sends, and rejects
+    # anything else — so a malformed frame is DROPPED by the daemon rather than
+    # allowed to blank a working answer (daemon.py's frame handler).
+    switches = CapabilitySwitches.model_validate(
+        {"event": "capability_switches", "disabled": ["download"], "version": "0.1.19"}
+    )
+    assert switches.disabled == ["download"]
+    with pytest.raises(ValidationError):
+        CapabilitySwitches.model_validate(
+            {"event": "capability_switches", "disabled": ["download"], "methods": []}
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_switched_on_method_still_reaches_the_peer(tmp_path: Path) -> None:
+    """The inverse, so a gate that refuses everything cannot pass this file."""
+    service = await _live(BridgeService(root=tmp_path))
+    sent: list[dict[str, Any]] = []
+
+    async def send(payload: dict[str, Any], wire: Any = None) -> None:
+        sent.append(payload)
+        request = Request.model_validate(payload)
+        future = service.link.pending.get(request.id)
+        if future and not future.done():
+            future.set_result(Response(id=request.id, ok=True, result={"armed": True, "files": []}))
+
+    service.link.send = send  # type: ignore[method-assign]
+    service.link.capabilities = ["download", "upload"]
+    service.link.disabled_capabilities = ["upload"]
+
+    body = await _rpc(service, {"id": "r-1", "method": "download", "params": {"tab": "bridge:1:n"}})
+    assert body["ok"] is True
+    assert [item["method"] for item in sent] == ["download"]
+
+
+@pytest.mark.asyncio
+async def test_download_with_the_switch_off_is_refused_before_any_socket_call(
+    tmp_path: Path,
+) -> None:
+    """The tool's own gate, for the state the daemon will not be asked about.
+
+    This is the path the model actually sees: the record is read from the FILE, so
+    the refusal costs nothing and cannot race the daemon's own check. The copy has
+    to name the switch and its location — sending this user to an update would be a
+    remedy that cannot work, since their build already serves the method.
+    """
+    from local_operator.browser_bridge.backend import (
+        HostCapabilities,
+        capability_refusal,
+        format_error,
+    )
+
+    caps = HostCapabilities(
+        methods=("upload",),
+        version="0.1.19",
+        capabilities_known=True,
+        disabled=("download",),
+        switches_known=True,
+    )
+    copy = format_error(
+        capability_refusal("download", host="extension", capabilities=caps),
+        action="download",
+        host="extension",
+    )
+    assert "switched off" in copy
+    assert "Allow downloads" in copy
+    assert "options page" in copy
+    assert "No update is involved" in copy
+
+
+def test_the_extension_can_serve_download_and_only_when_switched_on() -> None:
+    """The amendment to E1x: `download` IS servable now, behind the operator's switch.
+
+    E1x measured that a tab-scoped `chrome.debugger` session cannot put a download
+    where the harness chooses (Chrome 153.0.8010.53), which is why the extension
+    takes the optional `downloads` permission and lets Chrome write into the
+    user's own download directory first. The retired ``EXTENSION_CANNOT_SERVE``
+    set is asserted ABSENT rather than left implied: its only member is servable
+    now, and a constant claiming "no build can" is a lie the refusal copy would
+    act on (it would send the user away from an update that fixes it).
+    """
+    assert not hasattr(protocol, "EXTENSION_CANNOT_SERVE")
+    assert CAPABILITY_MIN_EXTENSION_VERSION["download"] == "0.1.19"
     assert "download" in COMMAND_TIMEOUTS, "it is still protocol vocabulary"
     assert "download" in CAPABILITY_GATED_METHODS
+    # The switch, its label and the permission it needs are the three facts the
+    # refusal copy and the options page both read; the labels are generated into
+    # the extension, so a rename here changes the words the user sees there.
+    assert CAPABILITY_SWITCH_LABEL["download"] == "Allow downloads"
+    assert CAPABILITY_SWITCH_LABEL["upload"] == "Allow uploads"
+    assert CAPABILITY_SWITCH_PERMISSION["download"] == "downloads"
+    assert "upload" not in CAPABILITY_SWITCH_PERMISSION, "uploads need no permission"
 
 
 def test_a_download_may_extend_its_own_budget_and_nothing_else_may() -> None:

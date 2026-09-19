@@ -47,12 +47,13 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import stat
 import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, NamedTuple
+from typing import Any, Literal, Mapping, NamedTuple, Sequence
 
 from local_operator.paths import config_dir
 
@@ -971,10 +972,222 @@ def is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+class IntakeRefusal(NamedTuple):
+    """One reported file the harness refused, and whether its entry was removed.
+
+    ``deleted`` is a FACT rather than a promise, so the caller can say which of the
+    two outcomes happened in the same words every other refusal uses
+    (``builtin._delete_outcome``). A reason without it would let a row claim a
+    file was gone when the unlink failed — the exact over-reporting review round 1
+    (R2) and round 2 (N7) exist for.
+    """
+
+    name: str
+    reason: str
+    deleted: bool
+
+
+class IntakeOutcome(NamedTuple):
+    """What one intake pass did: names now IN the session directory, and refusals."""
+
+    moved: tuple[str, ...]
+    refused: tuple[IntakeRefusal, ...]
+
+
+def _entry_stat(path: Path) -> os.stat_result | None:
+    """``lstat``, or ``None`` when the entry is not there any more.
+
+    ``lstat`` and never ``stat``: the subject is the ENTRY the host named, and a
+    symlink must be reported as a symlink rather than silently resolved to
+    whatever it points at (the R1 rule — the delete and the chmod both act on the
+    entry, and this is where that is decided).
+    """
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _unlink_entry(path: Path) -> bool:
+    """Remove the ENTRY, never its target; ``False`` when it could not be done."""
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
+def intake_landed(
+    items: Sequence[Mapping[str, Any]],
+    directory: Path,
+    *,
+    now: float | None = None,
+    window_s: float = DOWNLOAD_TIMEOUT_MAX_S + 60.0,
+) -> IntakeOutcome:
+    """Move files a HOST wrote OUTSIDE ``directory`` into it, or refuse them.
+
+    The extension host cannot put a download where the harness chooses: Chrome
+    refuses `chrome.downloads` a filename that escapes the user's default download
+    directory (measured, design §17.5 — `"../../x"` and `"/tmp/x"` both answer
+    `Invalid filename`), and the CDP primitive that could choose a path is refused
+    to an extension outright (§17.1). So its file lands in the user's REAL download
+    directory under the page's own name, and the harness — the only side with a
+    filesystem — is what moves it into the session's 0700 quarantine directory.
+
+    The app host's items carry no path at all (it writes into ``directory`` itself,
+    the Electron `will-download` + `setSavePath` path), so they are skipped here and
+    found by the ordinary before/after directory diff. That asymmetry is the whole
+    reason this function is post-hoc rather than a destination: on one host the
+    destination works, on the other it cannot exist.
+
+    WHAT IS BELIEVED, AND WHAT IS NOT. The reported path comes from the peer, and
+    the peer here is an extension holding `debugger` on every URL — so the page can
+    never influence it (§17.5 measured the filename restriction; a page cannot ask
+    Chrome for an absolute path), but a hostile or broken BUILD could name any file
+    on the disk. Three checks stand between that and a move, and they are chosen so
+    that each failure MODE is different:
+
+    * the source must be an absolute path, OUTSIDE both the config root and the
+      session directory, and a REGULAR FILE by ``lstat`` — a symlink or a
+      non-regular entry is deleted as an entry and never followed;
+    * the size, when the peer reported one, must match the file on disk, and the
+      mtime must fall inside this call's window (the command timeout plus slack).
+      A file that is not freshly written is not this download;
+    * a mismatch is refused WITHOUT deleting. That asymmetry is deliberate: a
+      corroborated file is ours and a failed one is probably the user's, and the
+      one thing this function must never do is remove a file it cannot show it just
+      watched arrive.
+
+    A transfer the peer CANCELLED (over the cap, over the per-call file count, or
+    never finished before the deadline) is a different case: the partial file IS
+    ours, it must not be left in the user's download directory, and it is deleted
+    on the strength of the same corroboration. That is the half of "the original is
+    gone afterwards" that no later step could do, because nothing later ever looks
+    outside the quarantine root.
+    """
+    current = time.time() if now is None else now
+    moved: list[str] = []
+    refused: list[IntakeRefusal] = []
+    root = config_dir()
+    for raw in items:
+        if not isinstance(raw, Mapping):
+            continue
+        reported = str(raw.get("path") or "")
+        name = safe_name(str(raw.get("name") or os.path.basename(reported)))
+        if not reported:
+            # The app host, which writes into `directory` and reports no path.
+            continue
+        state = str(raw.get("state") or "")
+        cancelled = str(raw.get("cancelled") or "")
+        source = Path(os.path.normpath(reported))
+        if not source.is_absolute():
+            # Resolved against OUR cwd it would name something arbitrary, which is
+            # exactly the confusion the upload gate refuses relative paths for.
+            refused.append(
+                IntakeRefusal(name, "the host reported a path that is not absolute", False)
+            )
+            continue
+        if is_within(source, directory):
+            # Already in the session directory: nothing to move, and the ordinary
+            # snapshot will pick it up.
+            moved.append(source.name)
+            continue
+        if is_within(source, root):
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host named a path inside Local Operator's own config directory",
+                    False,
+                )
+            )
+            continue
+        entry = _entry_stat(source)
+        if entry is None:
+            refused.append(IntakeRefusal(name, "the file the host named is not there", False))
+            continue
+        if not stat.S_ISREG(entry.st_mode):
+            # A symlink, a directory, a fifo: the entry dies, its target does not
+            # (R1). Nothing is followed, so a link pointing at /etc/passwd is an
+            # unlinked link and not a moved password file.
+            deleted = _unlink_entry(source)
+            refused.append(
+                IntakeRefusal(name, "the host named an entry that is not a regular file", deleted)
+            )
+            continue
+        size = int(raw.get("bytes") or 0)
+        if size and entry.st_size != size:
+            # Not corroborated, and therefore NOT deleted — see the docstring.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    f"the file on disk is {entry.st_size} bytes where the host reported {size}",
+                    False,
+                )
+            )
+            continue
+        if not (current - window_s <= entry.st_mtime <= current + 5.0):
+            refused.append(IntakeRefusal(name, "the file was not written during this call", False))
+            continue
+        if cancelled or state != "complete":
+            # Ours, and unusable: the peer stopped the transfer (the byte cap,
+            # the per-call file count, or the deadline), so a partial file is sitting
+            # in the user's download directory and this is the only step that will
+            # ever look at it.
+            reason = {
+                "over_cap": f"it was cancelled after crossing the {DOWNLOAD_MAX_BYTES} byte limit",
+                "over_count": (
+                    "it was cancelled after the "
+                    f"{DOWNLOAD_MAX_FILES_PER_CALL} files this call saves"
+                ),
+                "unfinished": "the transfer had not finished when the call's time ran out",
+            }.get(cancelled, f"the transfer did not complete (state {state or 'unknown'})")
+            deleted = _unlink_entry(source)
+            refused.append(IntakeRefusal(name, reason, deleted))
+            continue
+        destination = directory / name
+        if destination.exists():
+            # Never a silent overwrite (§11.4): Chrome uniquifies a colliding
+            # download name within the download directory, so this means a file from
+            # an EARLIER call of this session already holds the name. Refusing keeps
+            # both, and the caller says which one this was.
+            deleted = _unlink_entry(source)
+            refused.append(
+                IntakeRefusal(name, "this session already holds a file with that name", deleted)
+            )
+            continue
+        try:
+            # `shutil.move`, not `os.rename`: the user's download directory may be
+            # on another volume (a separate Downloads disk, a network mount) and a
+            # rename across filesystems raises EXDEV. The copy-then-unlink path is
+            # slower and is the only one that works everywhere.
+            shutil.move(str(source), str(destination))
+        except OSError as exc:
+            # The source is left where Chrome put it rather than half-moved: the
+            # refusal names that, so the caller's report cannot claim the user's
+            # download directory was cleaned up when it was not.
+            logger.warning("could not move the landed browser download %s: %s", source, exc)
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    f"it could not be moved into the session directory ({exc.strerror})",
+                    False,
+                )
+            )
+            continue
+        if source.exists():
+            # A cross-volume move that copied but could not unlink its source (an
+            # immutable file, a permission Chrome wrote but we cannot delete) would
+            # otherwise leave the ORIGINAL in place — the one outcome the operator's
+            # decision names as unacceptable, including when the content is refused.
+            # Best-effort, and the report says what actually happened.
+            _unlink_entry(source)
+        moved.append(name)
+    return IntakeOutcome(tuple(moved), tuple(refused))
+
+
 # ---------------------------------------------------------------------------
 # The quarantine root, and the audit trail
 # ---------------------------------------------------------------------------
-
 DOWNLOADS_DIRNAME = "browser/downloads"
 AUDIT_FILENAME = "audit.jsonl"
 
