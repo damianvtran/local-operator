@@ -680,3 +680,79 @@ def test_intake_accepts_a_file_already_in_the_session_directory(tmp_path: Path) 
     assert outcome.moved == ("receipt.pdf",)
     assert outcome.refused == ()
     assert landed.exists()
+
+
+def test_intake_refuses_a_download_another_page_started(tmp_path: Path) -> None:
+    """A download the USER started by hand must not be relocated as if it were ours.
+
+    The association is the one thing the extension's API cannot state (a
+    `DownloadItem` has no `tabId`), so the harness uses the referrer: an item whose
+    referrer is a different origin from the page this session is driving is the
+    user's own download, and it is refused WITHOUT being deleted — a file we never
+    asked for is not ours to remove either.
+    """
+    directory = _quarantine(tmp_path)
+    source = _downloaded(tmp_path, "my-tax-return.pdf")
+
+    outcome = bf.intake_landed(
+        [_item(source, referrer="https://elsewhere.example/account")],
+        directory,
+        page_origin="https://example.test/export",
+    )
+
+    assert outcome.moved == ()
+    assert source.exists(), "the user's own download must survive"
+    (refusal,) = outcome.refused
+    assert refusal.deleted is False
+    assert "a page this session is not driving" in refusal.reason
+
+
+def test_intake_accepts_an_absent_referrer_and_the_driven_pages_own(tmp_path: Path) -> None:
+    """Absent is not a mismatch, and same-origin-by-different-path is not either.
+
+    Both are the shapes a legitimate page-initiated download takes (a redirect
+    chain or a blob download reports no referrer; a page at another path of the
+    same site reports one), so a rule that refused them would break the feature to
+    close a window this check only narrows.
+    """
+    directory = _quarantine(tmp_path)
+    blob = _downloaded(tmp_path, "export.csv")
+    linked = _downloaded(tmp_path, "statement.pdf")
+
+    outcome = bf.intake_landed(
+        [
+            _item(blob, referrer=""),
+            _item(linked, referrer="http://127.0.0.1:9/form"),
+        ],
+        directory,
+        page_origin="http://127.0.0.1:9/export",
+    )
+
+    assert outcome.refused == ()
+    assert sorted(outcome.moved) == ["export.csv", "statement.pdf"]
+
+
+def test_a_cancelled_transfer_whose_partial_is_already_gone_says_so(tmp_path: Path) -> None:
+    """Chrome removes a cancelled download's own partial file, which the first
+    end-to-end run measured — and the old sentence called that "the file the host
+    named is not there", which reads like a corroboration failure when the outcome
+    is exactly the one the operator asked for."""
+    directory = _quarantine(tmp_path)
+
+    outcome = bf.intake_landed(
+        [
+            {
+                "name": "stall.bin",
+                "path": str(tmp_path / "Downloads" / "stall.bin"),
+                "state": "interrupted",
+                "cancelled": "unfinished",
+            }
+        ],
+        directory,
+    )
+
+    (refusal,) = outcome.refused
+    assert refusal.deleted is False
+    assert "the transfer was stopped" in refusal.reason
+    assert "already gone" in refusal.reason
+    assert "not there" not in refusal.reason
