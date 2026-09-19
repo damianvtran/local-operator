@@ -271,17 +271,17 @@ async def execute_web_read(
     # without the DeepSeek provider still gets an honest failure rather than a
     # hang.
     if page_context is None and parsed.search:
-        # Only pin the provider when the session actually has it CONFIGURED.
-        # ``provider_available`` answers whether a credential exists, not whether
-        # the provider is in the session's chain, and forcing an unconfigured one
-        # fails the whole call -- on a default install (duckduckgo, tavily,
-        # perplexity) a DeepSeek model login would make every `search=` read fail
-        # with "provider 'deepseek' is disabled". Falling back to the configured
-        # chain is honest: if it captures no pages, the refusal below says so.
+        # Pin DeepSeek whenever this install can actually use it and the user has
+        # not excluded it. The resolver joins EVERY available, non-excluded
+        # provider to the chain -- a logged-in DeepSeek lands in the metered band
+        # -- so "available and not excluded" now MEANS "in the chain", and forcing
+        # it cannot fail the way the old `"deepseek" in settings.providers` gate
+        # guarded against. Exclusion still wins, because a pin must not override an
+        # explicit "never".
         forced = (
             "deepseek"
-            if "deepseek" in settings.providers
-            and provider_available("deepseek", credentials, settings)
+            if provider_available("deepseek", credentials, settings)
+            and "deepseek" not in settings.excluded_providers
             else None
         )
         service = WebSearchService(
@@ -302,6 +302,17 @@ async def execute_web_read(
         page_context = PAGE_CONTEXTS.for_session(session_id)
 
     if page_context is None:
+        # Branch the copy on the reason the resolver already knows, like the
+        # forced-provider message does: "if you excluded it" is wrong for the
+        # common case (never logged in), and the command it named could not have
+        # helped (round-1 U3).
+        # Exclusion first, exactly as the resolver reads the two lists: a user who
+        # excluded DeepSeek is told the way back even before a missing credential,
+        # because `enable` is the command that would actually restore service.
+        if "deepseek" in settings.excluded_providers:
+            deepseek_setup = "run `local-operator search enable deepseek`"
+        else:
+            deepseek_setup = "run `local-operator login deepseek`"
         return _result(
             tool_call_id,
             (
@@ -309,6 +320,8 @@ async def execute_web_read(
                 "Reading works only on pages a `web_search` through the DeepSeek "
                 "provider retrieved (its results carry the page payload; other "
                 "providers return links only), and the captured pages expire. "
+                f"Reading needs the DeepSeek provider; {deepseek_setup} and try "
+                "again. "
                 "Use `web_fetch` (or `read <url>`) on the URLs you need, or pass "
                 "`search` to run a search first."
             ),

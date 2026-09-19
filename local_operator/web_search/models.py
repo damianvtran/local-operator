@@ -18,10 +18,17 @@ SearchProviderId = Literal[
     "perplexity",
     "brave",
     "exa",
+    "parallel",
     "serpapi",
     "searxng",
 ]
 SearchStrategy = Literal["round_robin", "ordered"]
+#: Which automatic band a provider joins when it is NOT named in
+#: ``web_search.providers`` (see ``resolve_provider_bands`` in ``providers.py``).
+#: ``rotate`` is the load-balanced free pool, ``fallback`` a credential-free but
+#: best-effort tier that is never a first attempt, ``metered`` the tail whose
+#: legs can only serve WITH a credential (money or a model turn).
+ProviderTier = Literal["rotate", "fallback", "metered"]
 
 PROVIDER_IDS: tuple[SearchProviderId, ...] = (
     "duckduckgo",
@@ -30,6 +37,10 @@ PROVIDER_IDS: tuple[SearchProviderId, ...] = (
     "perplexity",
     "brave",
     "exa",
+    # `parallel` sits beside `exa` because the pair is the same family --
+    # credential-free MCP endpoints -- and this tuple is the user-facing row
+    # order in `search list` and `/settings`.
+    "parallel",
     "serpapi",
     "searxng",
 )
@@ -59,7 +70,9 @@ class SearchUsage(BaseModel):
     Every field is optional because the transports differ: a scraped HTML search
     reports nothing, a token-billed one reports tokens, and a credit-billed one
     reports credits. ``keyless`` is how a keyed provider's free tier is
-    distinguished from its paid path, since both return normally.
+    distinguished from its paid path, since both return normally -- Tavily's
+    official keyless mode, and the credential-free MCP tiers ``exa`` and
+    ``parallel`` serve through when no API key is stored.
     """
 
     input_tokens: int | None = None
@@ -126,10 +139,23 @@ class ProviderStatus(BaseModel):
 
     id: SearchProviderId
     label: str
+    #: REDEFINED: whether the provider is in this session's chain RIGHT NOW --
+    #: named in the priority prefix, or auto-joined by the resolver. It used to
+    #: mean "named in ``web_search.providers``", which is what made `search
+    #: list` print "disabled" beside a provider the chain would in fact call.
     enabled: bool
     available: bool
     access: str
     detail: str
+    #: Named in ``web_search.providers`` -- the priority prefix, not the chain.
+    listed: bool = False
+    #: Named in ``web_search.excluded_providers``: a user-committed "never".
+    excluded: bool = False
+    #: Automatic band, "" when the provider is not an automatic candidate at all.
+    tier: str = ""
+    #: Effective auth mode on THIS install (``providers.provider_auth_mode``),
+    #: "" when the provider cannot serve at all.
+    mode: str = ""
 
 
 class WebSearchSettings(BaseModel):
@@ -137,7 +163,15 @@ class WebSearchSettings(BaseModel):
 
     enabled: bool = True
     strategy: SearchStrategy = "round_robin"
+    #: PRIORITY PREFIX, not an allowlist: these providers are tried first, in
+    #: this order, and every other usable provider follows in its automatic band.
     providers: list[SearchProviderId] = Field(default_factory=lambda: ["duckduckgo", "tavily"])
+    #: Providers NEVER used, in the prefix or in the automatic bands. Empty means
+    #: nothing is excluded. A list of its own rather than "absent from
+    #: providers", because absence is the resting state of a provider nobody has
+    #: decided about -- every installed config has ~6 of those, and reading them
+    #: as no would silently opt every user out of the automatic chain.
+    excluded_providers: list[SearchProviderId] = Field(default_factory=list)
     timeout_seconds: float = 20.0
     searxng_endpoint: str = ""
     #: Run the DeepSeek per-page evidence pass after a native search, so every
@@ -154,10 +188,14 @@ class WebSearchSettings(BaseModel):
 DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
     "enabled": True,
     "strategy": "round_robin",
-    # Two credential-free transports make load balancing useful on first run.
-    # Tavily's official keyless mode is rate-limited; DDG remains the durable
-    # no-account fallback when that budget is exhausted.
+    # A PRIORITY PREFIX: these two credential-free transports are tried first, and
+    # the resolver appends the rest of this install's usable providers in band
+    # order after them (tavily's keyless tier is rate-limited; DDG is the durable
+    # no-account fallback). A fresh install therefore walks
+    # duckduckgo, tavily, exa, parallel, perplexity, deepseek -- free legs first,
+    # the metered tail strictly last.
     "providers": ["duckduckgo", "tavily"],
+    "excluded_providers": [],
     "timeout_seconds": 20.0,
     "searxng_endpoint": "",
     "deepseek_evidence": False,
