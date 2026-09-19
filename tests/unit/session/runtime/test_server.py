@@ -4087,3 +4087,141 @@ async def test_a_reply_the_runtime_admitted_reaches_its_client_across_a_shutdown
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+class _ParkedSteerHandle(FakeHandle):
+    """A handle whose ``steer`` parks until the test releases it.
+
+    The shape of a mutation that is legitimately slow: on a TUI host the steer
+    is a hop into the app's loop, so it waits exactly as long as the app is busy.
+    While it waits, the connection must still answer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.steer_entered = threading.Event()
+        self.steer_gate = threading.Event()
+
+    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
+        self.calls.append(("steer", (text,), {}))
+        self.steer_entered.set()
+        # Bounded so a failing test reports an assertion rather than hanging.
+        await asyncio.to_thread(self.steer_gate.wait, 10.0)
+        return "steering queued"
+
+
+@pytest.mark.asyncio
+async def test_a_health_check_is_not_queued_behind_a_parked_op() -> None:
+    """``ping`` answers while another op on the SAME connection is parked.
+
+    Review round 1, UX U3. The reader loop used to ``await`` each request, so a
+    connection was strictly serial: one parked mutation made the whole
+    connection mute, and measured over a real socket a ``ping`` sent behind a
+    parked ``steer`` went unanswered for 8-15 s. New connections were never
+    affected (a fresh dial, its ping and its refusals all answered in 0.00 s) —
+    which is why the headline held while the health check did not.
+
+    The other half is asserted too: the chain still ORDERS what it orders. A
+    second mutation admitted after the parked one must not overtake it, or two
+    mutations could interleave on one session.
+    """
+    handle = _ParkedSteerHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+
+        writer.write(json.dumps({"op": "steer", "req": 1, "text": "first"}).encode() + b"\n")
+        await writer.drain()
+        assert await asyncio.to_thread(handle.steer_entered.wait, 5), "the steer never parked"
+
+        # HEALTH: answered while the steer is still parked.
+        writer.write(json.dumps({"op": "ping", "req": 2}).encode() + b"\n")
+        await writer.drain()
+        assert (await _until(reader, "ack", 2))["detail"] == "pong"
+
+        # ORDERING: the second steer is admitted but must WAIT for the first.
+        writer.write(json.dumps({"op": "steer", "req": 3, "text": "second"}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.sleep(0.1)
+        assert [call[1][0] for call in handle.calls if call[0] == "steer"] == ["first"], (
+            "a later mutation overtook one still in flight — two mutations can "
+            "now interleave on one session"
+        )
+
+        handle.steer_gate.set()
+        assert (await _until(reader, "ack", 1))["detail"] == "steering queued"
+        assert (await _until(reader, "ack", 3))["detail"] == "steering queued"
+        assert [call[1][0] for call in handle.calls if call[0] == "steer"] == ["first", "second"]
+    finally:
+        handle.steer_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_that_dies_mid_bind_leaves_no_subscription_behind() -> None:
+    """A connection dropped mid-bind releases what the bind registered.
+
+    Review round 1, F3, and it is a window the previous reasoning denied
+    existed: ``_drop_client`` cancels the bind task, and its comment argued a
+    cancelled bind could not leave a subscription because "a bind that is still
+    parked in its handle call has not received a subscription yet, and
+    everything between receiving one and recording it is synchronous". The
+    premise is false — the subscription is registered INSIDE the awaited handle
+    call — so a cancel landing after that registration and before
+    ``conn.frontend_unsubscribe`` is written used to leave a subscriber for the
+    life of the app (reproduced over a real socket: "store has subscribers AFTER
+    the drop: True" with zero registered clients).
+
+    The fix is structural: the bind is shielded so the cancel cannot abort it
+    half-registered, and its cancellation path releases whatever did register.
+    """
+    handle = _BoundButUnsentHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bound.wait, 5), "the bind never subscribed"
+        assert handle._frontend.has_subscribers, "the subscription never existed to leak"
+
+        # The viewer dies mid-bind: its socket goes away while the bind is still
+        # parked inside the handle call, so the drop lands between
+        # "subscribed" and "recorded".
+        writer.close()
+        writer = None
+
+        # THE ORDER IS THE TEST. The bind is allowed to land only AFTER the drop
+        # has actually happened, because that is the case the old argument
+        # missed: a bind that lands after its connection is gone still holds a
+        # registration nobody recorded. Releasing first would race the drop and
+        # let the bind complete normally — the test would then pass on a tree
+        # with no fix at all (measured: it did exactly that).
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline:
+            if not runtime._clients:
+                break
+            await asyncio.sleep(0.05)
+        assert not runtime._clients, "the viewer was never dropped"
+        handle.hold_gate.set()
+
+        deadline = asyncio.get_running_loop().time() + 5
+        while asyncio.get_running_loop().time() < deadline:
+            if not handle._frontend.has_subscribers and not runtime._clients:
+                break
+            await asyncio.sleep(0.05)
+        assert not runtime._clients, "the dropped viewer is still registered"
+        assert not handle._frontend.has_subscribers, (
+            "the dropped viewer's frontend subscription is still registered — "
+            "the session keeps pushing canonical state to a socket nobody owns"
+        )
+    finally:
+        handle.hold_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
