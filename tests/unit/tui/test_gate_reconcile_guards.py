@@ -45,6 +45,7 @@ import pytest
 
 from local_operator.tui.app import OperatorApp
 from tests.unit.tui.test_gate_resurface_on_switch import (
+    _attached,
     _install_probe,
     _pump,
     _pump_until,
@@ -85,7 +86,7 @@ async def test_an_answered_gate_does_not_remount_under_the_reconcile(tmp_path, m
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -164,7 +165,7 @@ async def test_the_reconcile_never_mounts_a_hidden_sessions_gate(tmp_path, monke
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha = app._session
+                alpha = _attached(app._session)
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -252,7 +253,7 @@ async def test_a_gate_arriving_with_no_navigation_coming_still_mounts(
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -339,7 +340,7 @@ async def test_the_navigation_settled_rearm_heals_a_display_only_source(
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -435,7 +436,7 @@ async def test_a_display_only_frame_is_ready_only_with_a_CORRECTLY_BOUND_card(
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
