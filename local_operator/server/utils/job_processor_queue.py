@@ -29,7 +29,6 @@ from local_operator.server.utils.sse_publisher import (
     publish_job_status,
     publish_record,
 )
-from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord
 
 if TYPE_CHECKING:
@@ -292,7 +291,6 @@ def create_and_start_job_process_with_queue(
     process_func: Callable[..., None],
     args: tuple[object, ...],
     job_manager: JobManager,
-    websocket_manager: WebSocketManager,
     scheduler_service: "SchedulerService",  # Changed to string literal
     event_broker: Optional[EventBroker] = None,
 ) -> Process:
@@ -307,11 +305,11 @@ def create_and_start_job_process_with_queue(
         process_func: The function to run in the process
         args: The arguments to pass to the function
         job_manager: The job manager for tracking the process
-        websocket_manager: Legacy websocket fan-out (unchanged wire format)
         scheduler_service: Scheduler used by scheduling-aware jobs
-        event_broker: SSE fan-out. Optional so a test or an embedder can run
-            the pump without a broker; when absent, every publish is a no-op
-            and only the websocket path is fed.
+        event_broker: SSE fan-out - the only streaming fan-out this pump has
+            (the deprecated websocket one was removed). Optional so a test or
+            an embedder can run the pump without a broker; when absent, every
+            publish is a no-op and only the job manager is updated.
 
     Returns:
         The created Process object
@@ -357,19 +355,14 @@ def create_and_start_job_process_with_queue(
                                 )
                             elif msg_type == "message_update" and len(message) == 3:
                                 # Message update: (type, record_id, message)
-                                _, received_job_id, update = message
-
-                                # The websocket path is deliberately unchanged:
-                                # the fallback transport must stay byte-identical
-                                # while SSE carries the same records plus the
-                                # richer taxonomy below.
-                                await websocket_manager.broadcast_update(received_job_id, update)
+                                _, _received_job_id, update = message
                                 publish_record(event_broker, current_job_id, update)
                             elif msg_type == "agent_event" and len(message) == 3:
                                 # Raw engine event: (type, job_id, payload dict).
-                                # SSE-only - these are the deltas and tool traces
-                                # the websocket bridge collapses away, so no
-                                # legacy consumer can regress on them.
+                                # The removed websocket bridge collapsed these
+                                # into record updates, so they are additive on
+                                # the wire: no installed consumer can regress on
+                                # frames it never received.
                                 _, _received_job_id, payload = message
                                 publish_agent_event(event_broker, current_job_id, payload)
                             # schedule_add / schedule_remove frames were
