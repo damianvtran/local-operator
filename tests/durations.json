@@ -206,7 +206,6 @@
   "tests/unit/server/test_server_speech.py": 0.009,
   "tests/unit/server/test_server_static.py": 0.092,
   "tests/unit/server/test_server_transcription.py": 0.134,
-  "tests/unit/server/test_server_websockets.py": 0.035,
   "tests/unit/server/test_sse.py": 0.242,
   "tests/unit/server/test_sse_bridge.py": 0.024,
   "tests/unit/server/utils/test_attachment_utils.py": 0.062,

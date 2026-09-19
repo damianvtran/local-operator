@@ -46,10 +46,12 @@ because silently downgrading is how a UI ends up rendering a hole forever.
 BACKWARD COMPATIBILITY
 ----------------------
 ``record.*`` events carry the legacy ``CodeExecutionResult`` dump verbatim,
-including the ``message_id``/``connection_type`` keys the WebSocket path
-injects. A client can therefore treat SSE as a transport swap and feed its
-existing reducer unchanged, then adopt the richer ``message.delta`` and
-``tool.*`` events at its own pace. The WebSocket publish path is untouched.
+including the ``message_id``/``connection_type`` keys the removed WebSocket
+path injected. A client can therefore treat SSE as a transport swap and feed
+its existing reducer unchanged, then adopt the richer ``message.delta`` and
+``tool.*`` events at its own pace. Those injections are load-bearing, not
+leftovers: an installed client's reducer reads them, and only the transport
+that gave them their name is gone.
 """
 
 from __future__ import annotations
@@ -109,14 +111,15 @@ class EventName:
     KEEPALIVE = "keepalive"
 
     # -- legacy-compatible record frames ----------------------------------
-    #: A ``CodeExecutionResult`` snapshot - byte-compatible with the WebSocket
-    #: data frame. Maps to ``runtime.agent.item.updated``.
+    #: A ``CodeExecutionResult`` snapshot - byte-compatible with the removed
+    #: WebSocket data frame, which is what an installed client parses. Maps to
+    #: ``runtime.agent.item.updated``.
     RECORD_UPDATE = "record.update"
     #: The same shape, with ``is_complete`` set. Maps to
     #: ``runtime.agent.item.completed``.
     RECORD_COMPLETE = "record.complete"
 
-    # -- richer engine events (dropped by the WebSocket bridge) ------------
+    # -- richer engine events (which the removed WebSocket bridge dropped) --
     #: Incremental assistant text: ``delta`` plus a cumulative ``snapshot``.
     #: Maps to ``runtime.agent.item.delta``.
     MESSAGE_DELTA = "message.delta"

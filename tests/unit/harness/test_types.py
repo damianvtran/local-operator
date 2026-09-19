@@ -1,6 +1,6 @@
 """Invariants on the harness event/message contract types.
 
-These are the shapes every front end (TUI, server websockets, exec --json) and
+These are the shapes every front end (TUI, server SSE, exec --json) and
 the compaction layer program against, so a field that can contradict itself is
 a UI defect waiting to happen rather than a style question.
 """

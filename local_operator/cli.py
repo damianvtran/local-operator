@@ -7288,8 +7288,8 @@ _SERVER_EXTRA_MODULES = frozenset(
 async def _run_with_scheduler(run_fn, *run_args) -> int:
     """Run the interactive front end with the SchedulerService alive (CL-07).
 
-    The legacy main() constructed ``SchedulerService`` (JobManager +
-    WebSocketManager, the same minimal managers the server app uses), started
+    The legacy main() constructed ``SchedulerService`` (JobManager, the same
+    minimal manager the server app uses), started
     it before the chat loop and shut it down afterwards — scheduled tasks
     created during a session only fire while the service runs. Dropping it in
     the rewrite would silently lose scheduled-task support, so the TUI and
@@ -7302,7 +7302,6 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
     try:
         from local_operator.jobs import JobManager  # lazy: server-shared module
         from local_operator.scheduler_service import SchedulerService
-        from local_operator.server.utils.websocket_manager import WebSocketManager
         from local_operator.types import OperatorType
 
         base_dir = config_dir()
@@ -7326,7 +7325,6 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
                 else VerbosityLevel.VERBOSE
             ),
             job_manager=JobManager(),
-            websocket_manager=WebSocketManager(),  # required by the constructor, unused in CLI
         )
     except ModuleNotFoundError as exc:
         # ONLY claim the extra when the missing module actually belongs to it.
