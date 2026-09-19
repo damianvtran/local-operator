@@ -164,7 +164,12 @@ async def test_the_live_stream_of_a_real_command_carries_no_shape(
     The pipe filter is the only guard on the bytes a UI paints while a command
     is still running — there is no finished result to scrub yet. The command
     prints its line in three writes with a flush between them, so the value
-    straddles reads exactly as a real child's buffering would.
+    straddles reads exactly as a real child's buffering would, and then KEEPS
+    RUNNING past the tool's 0.5 s update tick: the live snapshot is emitted on
+    that cadence, so a command that finished in 100 ms would leave ``updates``
+    empty and this test asserting nothing at all. The non-empty assertion below
+    is what keeps the guard from being vacuous — measured: without the trailing
+    sleep the collected updates are ``[]``.
     """
     updates: list[str] = []
     script = (
@@ -172,6 +177,7 @@ async def test_the_live_stream_of_a_real_command_carries_no_shape(
         f"sys.stdout.write({SENTINEL_LINE[:20]!r}); sys.stdout.flush(); time.sleep(0.05)\n"
         f"sys.stdout.write({SENTINEL_LINE[20:]!r}); sys.stdout.flush(); time.sleep(0.05)\n"
         "sys.stdout.write('\\n'); sys.stdout.flush()\n"
+        "time.sleep(1.2)\n"
     )
     context = ToolContext(
         cwd=str(tmp_path), variables=VariableStore(cwd=str(tmp_path)), session_id="s"
@@ -185,6 +191,7 @@ async def test_the_live_stream_of_a_real_command_carries_no_shape(
     )
     assert not result.is_error, result.text
 
+    assert updates, "the tool never painted a live update — this guard is vacuous"
     live = "\n".join(updates)
     assert SENTINEL_PW not in live, "the live stream painted the credential"
     assert SENTINEL_PW not in result.text, "the finished result carried the credential"
