@@ -203,9 +203,7 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
             # The forked branch is a SECOND registrant built by this same
             # process, so it is this process's console too (same reasoning as
             # above): the fork's own card is answered through it.
-            branch_server = RuntimeServer(
-                branch_handle, kind="daemon", operator_cap=operator_cap
-            )
+            branch_server = RuntimeServer(branch_handle, kind="daemon", operator_cap=operator_cap)
             await branch_server.start_in_process()
             runtimes[sid] = branch, branch_handle, branch_server
         current, _, runtime = runtimes[sid]
