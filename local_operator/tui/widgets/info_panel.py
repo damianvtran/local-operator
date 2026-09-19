@@ -55,6 +55,9 @@ from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
     SIGNAL_DRAIN_S,
+    UPDATE_FAILED,
+    UPDATING,
+    UPDATING_DONE,
     bound_text,
 )
 from local_operator.tui.widgets.analytics_panel import (
@@ -223,6 +226,26 @@ _LEAVING_SHORT: dict[str, str] = {
 
 #: The fallback above: no trigger named, no bound claimed, nothing false.
 _LEAVING_SHORT_OTHER = "leaving"
+
+#: The shelf form of an UPDATE WINDOW, keyed by the PHASE TOKEN rather than by the
+#: sentence — the one structural difference from ``_LEAVING_SHORT`` above, and it is
+#: forced: every updating sentence carries a build pair, so a table keyed by the
+#: sentence could not be written at all (``types.UPDATING``).
+#:
+#: THE THREE ARE NOT DEGREES OF ONE THING, which is why the shelf keeps them apart
+#: even at ~15 cells: ``updating`` means the message is already held and arrives in a
+#: second, while ``update failed`` means it is NOT coming and the session is still on
+#: the build it loaded. A narrow reader who cannot tell those apart either re-sends a
+#: queued message or waits on a handover that was abandoned.
+_UPDATING_SHORT: dict[str, str] = {
+    UPDATING: "updating",
+    UPDATING_DONE: "updated",
+    UPDATE_FAILED: "update failed",
+}
+
+#: The fallback above: a phase this build cannot place says only that a move is
+#: happening, and claims neither the queue nor the outcome.
+_UPDATING_SHORT_OTHER = "moving to a new build"
 
 
 @dataclass
@@ -871,6 +894,12 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # told both that it is leaving and how long that can take.
         if line.state == "wedged":
             short_meta = "not answering"
+        elif line.updating:
+            # The WINDOW outranks the departure on the shelf, because it is the
+            # newer fact about this row: a runtime that opened a window after a drain
+            # latched is leaving as well, and only one of the two tells the reader
+            # that their message is queued rather than refused.
+            short_meta = _UPDATING_SHORT.get(UPDATING, _UPDATING_SHORT_OTHER)
         elif line.leaving:
             short_meta = _LEAVING_SHORT.get(line.leaving, _LEAVING_SHORT_OTHER)
         else:

@@ -388,6 +388,12 @@ def collect_sessions(
                 # mid-table — `lop sessions` is the surface a host mid-upgrade
                 # is inspected WITH.
                 leaving=getattr(rec, "leaving", "") or "",
+                # The same getattr defaulting, for the same mid-upgrade reason: a
+                # record written by an OLDER runtime has no window field, and
+                # ``lop sessions`` is the surface a host mid-upgrade is inspected
+                # WITH. The pair is printed in the row's own column and is what a
+                # rotation script reads to tell "which of these is moving".
+                updating=getattr(rec, "updating", "") or "",
                 detached=bool(getattr(rec, "detached", False)),
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
@@ -673,6 +679,16 @@ def session_rows(
             # root per session. ``lop sessions`` also prints it (its own LEAVING
             # column, present only when some row carries one).
             "leaving": line.leaving,
+            # WHETHER THIS RUNTIME IS MOVING TO THE BUILD ON DISK RIGHT NOW, and to
+            # which one: appended at the END for the same reason the two keys above
+            # are — the established key order is a published contract and this
+            # EXTENDS it. Empty string, never ``None``, matching its neighbours so
+            # no consumer branches on key existence per row.
+            #
+            # It rides here rather than only on the record for the reason the
+            # ``leaving`` key spells out: the record is the runtime's own file, and
+            # a consumer diagnosing a fleet reads this table or its JSON.
+            "updating": line.updating,
         }
         for line in info.lines
     ]
