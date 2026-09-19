@@ -343,6 +343,8 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "credential-assignment",
         "credential-url-value",
         "cli-credential-flag",
+        "vendor-prefixed-token",
+        "authorization-basic-bare",
     }
 
     assignment = scrub_shapes("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
@@ -908,9 +910,17 @@ def test_a_hit_is_reported_only_when_the_whole_value_was_masked() -> None:
     """
     from local_operator.redaction_shapes import ShapeHit, _only_fully_masked
 
-    surviving = ShapeHit(label="credential-assignment", value="hunter2hunter2")
-    assert _only_fully_masked([surviving], "PASSWORD=hunter2hunter2") == []
-    masked = ShapeHit(label="credential-assignment", value="hunter2hunter2")
+    surviving = ShapeHit(
+        label="credential-assignment", value="hunter2hunter2", window="hunter2hunter2"
+    )
+    kept = _only_fully_masked([surviving], "PASSWORD=hunter2hunter2")
+    # KEPT for containment, flagged out of the notice: suppressing the claim is
+    # the point, and refusing to register the value would give up the protection
+    # the hit is worth (round 2, N2-4).
+    assert len(kept) == 1 and kept[0].complete is False
+    masked = ShapeHit(
+        label="credential-assignment", value="hunter2hunter2", window="hunter2hunter2"
+    )
     assert _only_fully_masked([masked], "PASSWORD=[redacted]") == [masked]
 
     # ...and the Q1 shape, end to end: a hit is reported ONLY because the whole

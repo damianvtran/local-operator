@@ -49,6 +49,7 @@ override would.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
@@ -61,7 +62,11 @@ from typing import Literal
 # module sits on the CLI startup path (``tests/unit/test_import_graph.py`` pins
 # that) and the shape pass has to be reachable from the result path without
 # dragging a session or a provider layer in behind it.
-from local_operator.redaction_shapes import ShapeHit, scrub_secrets_with_hits
+from local_operator.redaction_shapes import (
+    ShapeHit,
+    is_registerable_component,
+    scrub_secrets_with_hits,
+)
 
 #: Environment variables only surface to the agent when opted in with this
 #: prefix. Everything else in the process env stays invisible.
@@ -71,6 +76,8 @@ ENV_ALLOW_PREFIX = "LOCAL_OPERATOR_"
 #: targets credential KINDS (secret/token/password/.../api_key), not the bare
 #: token "key" which is far too common in legitimate config names. The
 #: matching is deliberately loose — over-matching only hides more.
+logger = logging.getLogger(__name__)
+
 _SECRET_RE = re.compile(
     r"(?i)(secret|token|password|passwd|credential|authorization|bearer|"
     r"api[_-]?key|apikey|[_-]key$|^key([_\-.]|$))"
@@ -519,10 +526,29 @@ class VariableStore:
         if not hits:
             return scrubbed, []
         self._register_shape_hits(hits)
+        # Containment takes EVERY hit; the NOTICE takes only the complete ones.
+        # A hit whose credential is still partly readable is a rotation ticket the
+        # operator would act on by NOT rotating — the fault `_only_fully_masked`
+        # exists to prevent — while the value it matched is exactly what the
+        # session should still contain.
         ordered: dict[str, None] = {}
         for hit in hits:
-            ordered.setdefault(hit.label, None)
+            if hit.complete:
+                ordered.setdefault(hit.label, None)
         return scrubbed, list(ordered)
+
+    #: How many DETECTED components one session may register. A bound, not a
+    #: budget: every registration is a value the exact-value pass scans for in
+    #: every later result of the session, so an unbounded set is a per-result cost
+    #: that grows with the session's age. On reaching it, detections keep being
+    #: counted and noticed — the ticket still fires — and only the CONTAINMENT
+    #: stops. Counted in registered values, not matches: a URI contributes two.
+    MAX_DETECTED_REGISTRATIONS = 64
+
+    #: The values this session has registered from SHAPE detections, and whether
+    #: the cap has already been logged (once per session, not once per result).
+    _shape_registrations: set[str] = set()
+    _shape_registration_cap_logged = False
 
     def _register_shape_hits(self, hits: Sequence[ShapeHit]) -> None:
         """Register each matched credential as a value to scrub, for this session.
@@ -543,4 +569,21 @@ class VariableStore:
         ``mcp.redaction``'s three-character value).
         """
         for hit in hits:
+            # The FLOOR and the placeholder rule govern REGISTRATION only; the hit
+            # itself is recorded for every mask (see ``_run_shapes``), so a short
+            # credential still produces its notice.
+            if not is_registerable_component(hit.value):
+                continue
+            if hit.value in self._shape_registrations:
+                continue
+            if len(self._shape_registrations) >= self.MAX_DETECTED_REGISTRATIONS:
+                if not self._shape_registration_cap_logged:
+                    self._shape_registration_cap_logged = True
+                    logger.warning(
+                        "shape registration cap reached (%d values); detections keep "
+                        "being counted and noticed, containment stops here",
+                        self.MAX_DETECTED_REGISTRATIONS,
+                    )
+                continue
+            self._shape_registrations.add(hit.value)
             self.register_redaction(hit.value)

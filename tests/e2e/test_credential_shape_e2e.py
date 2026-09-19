@@ -208,3 +208,53 @@ async def test_the_live_stream_of_a_real_command_carries_no_shape(
     assert SENTINEL_PW not in live, "the live stream painted the credential"
     assert SENTINEL_PW not in result.text, "the finished result carried the credential"
     assert "[redacted]" in result.text
+
+
+@pytest.mark.e2e
+async def test_an_output_only_credential_still_files_its_incident(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The incident this feature exists for: the credential is ONLY in the output.
+
+    The production shape — ``kubectl exec … env`` — has the credential in the
+    command's OUTPUT and nowhere in the command text. The pipe filter masks those
+    bytes while the command is still running, so by the time the loop's
+    ``redact_tool_result`` hook reads the finished result the credential is gone,
+    the shape pass finds nothing, and no incident is filed: measured before this
+    test existed, the row count for exactly this case was ZERO.
+
+    The command therefore carries a FILENAME and nothing else; the credential is
+    read out of the file by the child, which is the position the real incident was
+    in.
+    """
+    directory = headless_tui_env / "sessions" / "output-only"
+    password = "qa-output-only-4b7f"
+    (workspace / "agent.env").write_text(f"MONGO_DSN=mongodb+srv://svc:{password}@db.invalid/x\n")
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="reading the environment",
+                tool_name="bash",
+                tool_call_id="call-out",
+                arguments={"command": "grep MONGO_DSN agent.env"},
+            ),
+            text_turn("done"),
+        ]
+    )
+    session = build_session(directory, stream, tools=[build_bash_tool()], cwd=workspace)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    await session.async_init()
+    try:
+        await session.prompt("print the environment")
+    finally:
+        await dispose_quietly(session)
+
+    body = (directory / "transcript.jsonl").read_text()
+    assert password not in body, "the output-only credential reached the transcript"
+    assert "[redacted]" in body, "the mask did not happen at all"
+    rows = [line for line in body.splitlines() if "session_incident" in line]
+    assert rows, "an output-only credential filed no incident row"
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert notices, "an output-only credential produced no live notice"
+    assert notices[0].kind == "warning"

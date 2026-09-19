@@ -93,7 +93,7 @@ from local_operator.harness.message_types import (
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
-from local_operator.harness.redaction import current_tool_source
+from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
 
 # Hoisted to the harness so the evaluation runner can render a transcript
 # through this same function without importing session code. Only these two
@@ -2378,6 +2378,14 @@ class Session:
         #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
         #: next to the other parked notices.
         self._pending_shape_incidents: list[tuple[str, list[str], str]] = []
+        # The sink for shape hits observed by layers that mask BEFORE a result
+        # exists — the live pipe filter and the live/peek/abort text path. The
+        # production shape this feature exists for (``kubectl exec … env``) has
+        # the credential in the OUTPUT, so those layers mask it before the loop's
+        # result hook ever sees the text; without this the size of the incident
+        # that motivated the whole change is 0 notices and 0 rotation tickets,
+        # which is what round 2 measured.
+        set_shape_hit_reporter(self._queue_shape_incident)
         #: ``(tool, labels)`` already reported this session. A command that
         #: echoes the same credential ten times, or a poller that prints the
         #: same DSN every tick, is ONE fact about the session; reporting it per

@@ -79,6 +79,7 @@ from rich.cells import cell_len
 from local_operator.agent_shell import AGENT_SHELL_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -119,8 +120,11 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
-from local_operator.redaction_shapes import REDACTION_MARKER, credential_dump_notice
-from local_operator.redaction_shapes import scrub_secrets as scrub_shape_secrets
+from local_operator.redaction_shapes import (
+    REDACTION_MARKER,
+    credential_dump_notice,
+    scrub_secrets_with_hits,
+)
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_SCHEME,
@@ -1917,6 +1921,24 @@ class BashParams(BaseModel):
 #: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
 _LIVE_PENDING_TEXT = "no output yet"
 
+#: What the live view carries once the pipe filter has faulted. The text is
+#: withheld rather than guessed at: a filter that cannot vouch for the bytes must
+#: not paint them.
+_WITHHELD_LIVE_OUTPUT = (
+    "[live output withheld: this session's credential filter could not read its sink]"
+)
+
+#: A PEM armour header, and a base64 body line. Only a header opens the streaming
+#: mask, and only body lines are masked inside it — see
+#: ``_PipeRedactor._mask_open_key_block``.
+_PEM_HEADER_LINE = re.compile(r"-----BEGIN [A-Z0-9 ]{2,}-----")
+_PEM_BODY_LINE = re.compile(r"[A-Za-z0-9+/=]{16,}")
+
+#: How many lines a streamed PEM block may mask before the state resets. A real
+#: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
+#: short of "the rest of the command's output".
+_PEM_STREAM_LINE_LIMIT = 512
+
 
 class _BashOutput:
     """Bound retention while the pipe is drained, keeping both diagnostic ends.
@@ -2037,9 +2059,14 @@ class _PipeRedactor:
     """
 
     def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
-        #: An open ``-----BEGIN`` block, and whether its marker is already out.
+        #: An open PEM block, whether its marker is already out, and how many
+        #: lines it has covered (the bound that keeps a stream from holding the
+        #: state forever).
         self._in_key_block = False
         self._key_block_marker_sent = False
+        self._key_block_lines = 0
+        #: Whether this filter has withheld its output after a fault.
+        self._withheld = False
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -2064,43 +2091,96 @@ class _PipeRedactor:
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
+        """Release what is safe to paint; never raise, and never lose the stream.
+
+        FAIL CLOSED BY DRAINING, and that is the contract rather than an
+        implementation detail: a raise here used to kill the reader, which lost the
+        command's output silently AND — once the child filled its pipe — wedged the
+        command itself. The withheld marker goes out once, a sticky flag records it,
+        and the reader keeps draining so the child is never blocked on a full pipe.
+        """
+        try:
+            return self._feed_scrubbed(chunk, final=final)
+        except Exception:  # noqa: BLE001 — see the docstring: draining IS the guard
+            if not self._withheld:
+                self._withheld = True
+                return _WITHHELD_LIVE_OUTPUT.encode("utf-8")
+            return b""
+
+    def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
         text = self.pending + self.decoder.decode(chunk, final=final)
         cut = self._release_point(text, final=final)
         ready, self.pending = text[:cut], text[cut:]
         ready = self._mask_open_key_block(ready)
-        return scrub_shape_secrets(ready, self.secrets).encode("utf-8")
+        scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
+        # REPORT FROM HERE. This filter is the only layer that sees a credential
+        # that exists only in a command's OUTPUT — the production case this
+        # feature was written for — and it masks the bytes before the result
+        # exists, so the loop's hook later finds nothing to match and files
+        # nothing. Without this call the size of the incident that motivated the
+        # whole change is: zero notices, zero rotation tickets.
+        report_shape_hits([hit.label for hit in hits if hit.complete])
+        return scrubbed.encode("utf-8")
 
     def _mask_open_key_block(self, ready: str) -> str:
-        """Mask an open ``-----BEGIN … KEY-----`` block's BODY as it streams.
+        """Mask the BODY of an open ``-----BEGIN … KEY-----`` block, line by line.
 
-        The release point defers a whole key block until its terminator or the
-        cap, which is the right unit for the table but leaves the live view
-        publishing key material when the block is larger than the cap — an
-        8192-bit RSA body is ~6.4 KiB against an 8 KiB cap, so the case is not
-        hypothetical, and the finished result is only masked later (one piece,
-        by the result path). While a block is open its body is replaced here
-        instead, once, so a live view shows the header, one marker and the
-        trailer rather than the key.
+        Why it exists: the release point defers a whole key block until its
+        terminator or the cap, which is the right unit for the table but leaves
+        the live view publishing key material when the block is larger than the
+        cap — an 8192-bit RSA body is ~6.4 KiB against an 8 KiB cap.
+
+        Why it is written this way — three constraints, each paid for:
+
+        * only a PEM HEADER opens the state (``-----BEGIN [A-Z0-9 ]+-----``). A
+          bare ``-----BEGIN`` in prose (``head -n 5 key.pem``, a doc quoting an
+          armour header, ``grep BEGIN``) used to open it and then swallow
+          everything after it — in the live view AND in the settled result, which
+          is built from the same sink. Round 2 measured both.
+        * a line is masked only when it is base64 BODY. Prose after a stray
+          header is released verbatim and CLOSES the state, so no ordinary line
+          can be eaten by it.
+        * the state is bounded by lines, so a stream that never terminates a
+          block cannot hold it open for the rest of the command's output.
         """
         if self._in_key_block:
-            if "-----END" in ready:
+            out: list[str] = []
+            for line in ready.splitlines(keepends=True):
+                if self._key_block_lines > _PEM_STREAM_LINE_LIMIT:
+                    # Bound reached: stop masking, release, and reset.
+                    self._in_key_block = False
+                    out.append(line)
+                    continue
+                self._key_block_lines += 1
+                if line.startswith("-----END"):
+                    self._in_key_block = False
+                    self._key_block_marker_sent = False
+                    out.append(line)
+                    continue
+                if _PEM_BODY_LINE.match(line.strip()):
+                    if not self._key_block_marker_sent:
+                        self._key_block_marker_sent = True
+                        out.append(REDACTION_MARKER + "\n")
+                    continue
+                # Not body: prose. Release it and close the state.
                 self._in_key_block = False
-                body, separator, trailer = ready.partition("-----END")
-                head = "" if self._key_block_marker_sent else REDACTION_MARKER
                 self._key_block_marker_sent = False
-                return head + separator + trailer
-            if self._key_block_marker_sent:
-                return ""
-            self._key_block_marker_sent = True
-            return REDACTION_MARKER
-        begin = ready.rfind("-----BEGIN")
-        if begin < 0:
-            return ready
-        if ready.find("-----END", begin) >= 0:
+                out.append(line)
+            return "".join(out)
+        begin = _PEM_HEADER_LINE.search(ready)
+        if begin is None:
             return ready
         self._in_key_block = True
-        self._key_block_marker_sent = True
-        return ready[:begin] + REDACTION_MARKER
+        self._key_block_lines = 0
+        self._key_block_marker_sent = False
+        # Keep the rest of this chunk: it is the block's first lines, and they go
+        # through the same line loop as everything else. Replacing it with a
+        # marker here DROPPED whatever followed the header in the same read.
+        return (
+            ready[: begin.end()]
+            + "\n"
+            + self._mask_open_key_block(ready[begin.end() :].lstrip("\n"))
+        )
 
     def _release_point(self, text: str, *, final: bool) -> int:
         """Where the decidable prefix ends: after the last newline, capped."""
@@ -2237,6 +2317,24 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     redact = getattr(store, "redact", None)
     if not callable(redact):
         return text
+    # ``redact_with_hits`` when the store has it: the live stream, the peek
+    # buffer and the abort receipt are the surfaces that paint a credential
+    # BEFORE any result exists, so they have to file the incident themselves —
+    # there is no later hook that will see the pre-mask text.
+    # Cast rather than probed: ``getattr`` yields ``object``, and the two names this
+    # looks for are the store's own public surface (``VariableStore.redact_with_hits``
+    # and its ``redact``), so a Callable annotation is the honest description.
+    hits_aware = cast(
+        Callable[[str], tuple[str, list[str]]] | None,
+        getattr(store, "redact_with_hits", None),
+    )
+    if callable(hits_aware):
+        try:
+            scrubbed, labels = hits_aware(text)
+            report_shape_hits(labels)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("hit-aware redaction failed on a live surface", exc_info=True)
     try:
         redacted = redact(text)
     except Exception:
