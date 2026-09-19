@@ -67,10 +67,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator import buildwatch as _buildwatch
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
     SIGNAL_DRAIN_CAUSE,
     SIGNAL_DRAIN_S,
+    bound_text,
 )
 
 if TYPE_CHECKING:
@@ -1057,6 +1060,207 @@ class _Drain:
     #: had the signal been fatal on arrival, so a cut turn is classified
     #: identically whether the drain expired or never ran.
     cause: str = "runtime-retired"
+    #: The progress clock (:class:`_DrainProgress`), created on the drain's FIRST
+    #: tick rather than here, and the difference is not cosmetic: this dataclass is
+    #: built by :func:`_commit_to_leaving`, whose callers have just announced a
+    #: departure and know nothing about the work, while the tick is the one place
+    #: that can observe it. A drain that never ticks never needs a clock, and the
+    #: first tick is within ``REAP_CHECK_S`` of the latch.
+    progress: "_DrainProgress | None" = None
+
+
+#: The wire label the BACKSTOP announces when a build drain's work has stopped
+#: moving. A prefix of ``stale-build`` on purpose: the label a frame carries is
+#: what a reader with no phrase vocabulary yet (a released app, another build of
+#: this one) classifies the departure from, and ``types._BUILD_REASON_LABELS`` is
+#: matched with ``startswith`` — so a runtime that has run out of patience still
+#: resolves to the build sentence for every reader that cannot read the phrase,
+#: while the phrase itself carries the bound for the readers that can.
+_BUILD_OVERDUE_REASON = "stale-build-overdue"
+
+#: What :func:`_leave_overdue` logs and journals this departure as. Distinct from
+#: ``drain.reason`` — the latch's why-now is still true — because the fact a
+#: successor has to read off an OPEN journal row is that a BOUND cut this turn
+#: rather than that the turn failed on its own: ``_clean_exit`` passes this to
+#: ``_note_journal_exit``, and amain's own direct-dispose block would otherwise
+#: reach the journal with a bare "unknown".
+_BUILD_OVERDUE_EXIT_REASON = (
+    "leaving for the build on disk without its in-flight work finishing: "
+    f"no movement for {bound_text(BUILD_DRAIN_PROGRESS_S)}"
+)
+
+
+def _transcript_footprint(transcript: object) -> "tuple[Any, ...]":
+    """The newest durable row of each transcript kind, or ``()`` unreadable.
+
+    THE TURN'S DURABLE FOOTPRINT, and it is the same event the drain's own
+    prompt queue subscribes to: every completed tool boundary lands a row
+    (``ToolExecutionEndEvent`` -> ``_note_turn_boundary``), so a turn that is
+    doing anything at all moves this. Read through ``latest_entry``, which is
+    O(1) per kind and says so ("without copying history") — this runs on every
+    reaper tick, and ``entries()`` would copy the whole transcript four times a
+    second. A compaction or prune row counts too: both REWRITE history, and both
+    are work the runtime did.
+
+    The kind constants are imported HERE rather than at module scope because this
+    module is RUN as ``__main__`` and its import block is the child's boot path —
+    the reason ``_drain_inbox_into`` imports its own the same way.
+    """
+    latest = getattr(transcript, "latest_entry", None)
+    if not callable(latest):
+        return ()
+    from local_operator.session.transcript import (
+        ENTRY_COMPACTION,
+        ENTRY_CUSTOM,
+        ENTRY_MESSAGE,
+    )
+
+    newest: list[Any] = []
+    for kind in (ENTRY_MESSAGE, ENTRY_COMPACTION, ENTRY_CUSTOM):
+        try:
+            entry = latest(kind)
+        except Exception:  # noqa: BLE001 — unreadable state is not movement
+            entry = None
+        newest.append((kind, getattr(entry, "id", ""), getattr(entry, "ts", 0.0)))
+    return tuple(newest)
+
+
+def _job_footprint(session: object) -> "tuple[Any, ...]":
+    """Every job row as ``(id, status)``, sorted, or ``()`` when unreadable.
+
+    A job settling, a queued job admitted, a subagent lane opening or closing.
+    This is also where "the subagent count changed" is read, and it is read as
+    ROWS rather than through ``running_subagents()`` because that predicate is a
+    count derived from the same rows: one lane finishing as another starts is
+    invisible to a count and visible here. Sorted, so a reordered table is not
+    read as movement.
+
+    ``is_busy`` already builds this list on the same tick, so the cost is one
+    list comprehension over a table that is small by construction (capacity is
+    capped), and a manager that cannot list is not movement.
+    """
+    manager = getattr(session, "jobs", None)
+    listing = getattr(manager, "list", None)
+    if not callable(listing):
+        return ()
+    try:
+        rows = cast("list[Any]", listing())
+    except Exception:  # noqa: BLE001 — unreadable state is not movement
+        return ()
+    return tuple(
+        sorted((str(getattr(job, "id", "")), str(getattr(job, "status", ""))) for job in rows)
+    )
+
+
+def _spool_footprint(transcript: object) -> int:
+    """How much the successor's spool holds, in bytes; ``-1`` when there is none.
+
+    WHAT IT PROVES, and what it does not: a spool row is written by the drain's
+    OWN delivery path when a peer message or a fired wake arrives, so a change
+    here means work reached this runtime and was preserved for its successor —
+    not that the turn in flight advanced. That is why it is the one field an
+    OUTSIDE actor can move, and it is stated rather than hidden: a peer that keeps
+    sending extends the bound by another window each time. It belongs in the
+    clock anyway, because the reading it replaces — "the work is stalled, so the
+    messages queueing behind it are irrelevant" — would cut a session whose
+    successor is being kept fed, and because the write is the drain's own hop
+    rather than any timer's tick.
+
+    Size rather than rows: it is one ``stat`` against a file the drain appends to
+    (``inbox.append_inbox`` opens with ``O_APPEND``), and a reader that counted
+    rows would have to parse the file on every tick.
+    """
+    directory = getattr(transcript, "directory", None)
+    if directory is None:
+        return -1
+    from local_operator.session.runtime.inbox import inbox_path
+
+    try:
+        return inbox_path(Path(directory)).stat().st_size
+    except OSError:
+        return -1
+
+
+def _work_motion(handle: object) -> "tuple[Any, ...]":
+    """Every observable sign that the work a drain is holding for has MOVED.
+
+    NOT A LIVENESS PROBE, and the distinction is the whole mechanism. The record
+    heartbeat, the reaper's own tick, a viewer's repaint and ``is_streaming`` all
+    keep reporting for a session whose work has stopped — the incident's runtime
+    answered ``busy`` and ``live`` for two hours while three subagent lanes sat
+    behind a bash child that had not printed anything in 23 minutes. A field
+    belongs in this tuple only if something OTHER than a clock changes it, and
+    only if a change means the work advanced. Four are read:
+
+    * the transcript's newest row per kind — the turn's durable footprint;
+    * the subagent ROSTER GENERATION — the one LANE-level signal that reaches the
+      parent: a lane's every completed assistant message, model change and
+      lifecycle event bumps it (``Session._schedule_subagent_persist``, driven by
+      the child relay in ``harness.subagent``), so a lane that is STEPPING keeps
+      this moving while its parent's own transcript stays frozen for the whole
+      lane. Read as a private attribute because there is no public seam for it,
+      and because the durable rendering of the same fact (the roster sidecar) is
+      a COALESCED, threaded write whose latency belongs to its own writer rather
+      than to the work — the failure mode is the same one ``_idle_for_refresh``
+      documents for a sampled predicate, on a signal that has a cheaper exact
+      source in this very process;
+    * the job rows, as ``(id, status)`` per row;
+    * the spool, as the inbox file's own size (:func:`_spool_footprint`).
+
+    UNREADABLE STATE IS NOT MOVEMENT: a probe that raises contributes a constant
+    and the clock keeps running. The direction is deliberate, and it is the
+    OPPOSITE of the fail-closed rule the residency predicates use — those answer
+    "may I destroy this work?" and must say no when unsure, while this tuple only
+    decides when to stop waiting for a session whose own work cannot tell anyone
+    it is alive, which is the case the bound exists for.
+    """
+    session = getattr(handle, "_session", None)
+    transcript = getattr(session, "transcript", None)
+    return (
+        _transcript_footprint(transcript),
+        getattr(session, "_subagent_roster_generation", None),
+        _job_footprint(session),
+        _spool_footprint(transcript),
+    )
+
+
+@dataclass
+class _DrainProgress:
+    """Has the work a drain is holding for moved lately? ``_drain_for``'s clock.
+
+    ``moved_at`` is the instant of the last observation that DIFFERED from the
+    one before it, and it is what :data:`types.BUILD_DRAIN_PROGRESS_S` is
+    measured against. Nothing here is advanced by the caller's own cadence, and
+    that is what makes this a bound on the WORK rather than a second timeout: a
+    runtime whose turn is stepping, whose lane is reporting, whose jobs are
+    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a
+    hold that is moving is never cut however long it runs.
+
+    ``overdue`` is the drain's own record that its hold was ended by the
+    backstop, and it is also the guard that keeps the rung from running twice.
+    """
+
+    motion: "tuple[Any, ...]" = ()
+    moved_at: float = 0.0
+    overdue: bool = False
+
+    @classmethod
+    def started(cls, handle: object, at: float) -> "_DrainProgress":
+        """Open the clock on the drain's first tick, already sampled."""
+        return cls(motion=_work_motion(handle), moved_at=at)
+
+    def sample(self, handle: object, at: float) -> bool:
+        """One observation. True when the work moved since the last one."""
+        motion = _work_motion(handle)
+        if motion == self.motion:
+            return False
+        self.motion = motion
+        self.moved_at = at
+        return True
+
+    def stalled_s(self, at: float) -> float:
+        """How long this drain's work has shown no movement, in seconds."""
+        return at - self.moved_at
 
 
 async def _begin_drain(
@@ -1292,7 +1496,14 @@ async def _commit_to_leaving(
     )
 
 
-async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: asyncio.Event) -> bool:
+async def _drain_for(
+    drain: _Drain,
+    handle: object,
+    runtime: object,
+    stop: asyncio.Event,
+    *,
+    now: float | None = None,
+) -> bool:
     """Leave at the first instant this runtime's own work is done. True if exited.
 
     THE DIFFERENCE FROM :func:`_refresh_for` IS THE FIX. That path samples the
@@ -1304,12 +1515,25 @@ async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: async
     (``ServingSessionHandle.begin_drain``), so the same predicate converges by
     itself — the running turn finishes, no successor turn can open, and the
     idle instant arrives. Nothing in flight is aborted: the wait is bounded by
-    the work, never by a clock.
+    the work.
+
+    AND ONLY BY THE WORK THAT IS STILL MOVING — see :func:`_leave_overdue`, the
+    one rung here that draws a bound at all. It reads no clock of the drain: the
+    clock it reads is reset by every observable sign that the work advanced
+    (:func:`_work_motion`), so it cannot fire on a turn that is merely long, and
+    what it bounds is not the hold but STALENESS. The state it exists for has no
+    other exit: ``is_busy()`` counts a gate parked on a user and a lane parked
+    behind a child process, both of which can hold for hours, and a drain that
+    holds forever takes its session with it (measured: 2 h and still refusing,
+    ``state=wedged``, three lanes stalled behind a 23-minute bash child).
 
     The viewer term of :func:`_should_exit` is deliberately absent, exactly as
     it is absent from ``may_refresh``. The ``retiring`` frame went out at drain
     start, so a viewer re-engages onto the new build instead of holding this
     one — and holding for it is what kept five-hour-stale runtimes resident.
+    PINNED BY TEST (``test_buildwatch_progress``): with an interactive attach
+    client connected, the exit still happens at the first idle instant, and a
+    viewer's presence resets no clock either.
 
     The exit commits through ``begin_retire``, so the last instant still says
     "idle" by construction and the cut-off note a retirement owes is written by
@@ -1319,10 +1543,27 @@ async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: async
     (:func:`_drain_detail_at_exit`): this path's whole shape is that the exit
     waits for hours of work, and a reason that names the build pair of the
     latch asserts a transition the install left long ago.
+
+    ``now`` is the caller's clock, injectable for the one test that has to cross
+    a fifteen-minute bound without waiting it out — the same convention
+    ``_BuildWatch.poll`` uses.
     """
-    if time.monotonic() < drain.stagger_until:
+    at = time.monotonic() if now is None else now
+    if drain.progress is None:
+        drain.progress = _DrainProgress.started(handle, at)
+    else:
+        drain.progress.sample(handle, at)
+    # The stagger is respected before ANY exit, the forced one included: sixteen
+    # runtimes that all went stale at once must not spawn sixteen successors
+    # together, which is the only reason this line is above the backstop rather
+    # than below it.
+    if at < drain.stagger_until:
         return False
     if not _idle_for_refresh(handle):
+        if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
+            return await _leave_overdue(
+                drain, handle, runtime, stop, progress=drain.progress, at=at
+            )
         return False
     begin_retire = getattr(handle, "begin_retire", None)
     if callable(begin_retire) and not begin_retire(drain.cause, _drain_detail_at_exit(drain)):
@@ -1331,6 +1572,111 @@ async def _drain_for(drain: _Drain, handle: object, runtime: object, stop: async
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
     await _hand_wakes_to_successor(handle)
     await _clean_exit(handle, runtime, reason=drain.reason)
+    stop.set()  # amain's wait() returns; exit code stays 0
+    return True
+
+
+async def _leave_overdue(
+    drain: _Drain,
+    handle: object,
+    runtime: object,
+    stop: asyncio.Event,
+    *,
+    progress: _DrainProgress,
+    at: float,
+) -> bool:
+    """The backstop: leave by FORCE, through the signal drain's own exit rung.
+
+    Reached only when :data:`types.BUILD_DRAIN_PROGRESS_S` has passed with no
+    movement in ANY of the signs :func:`_work_motion` reads — a hold whose work
+    has stopped reporting anything at all, which is the state a build drain would
+    otherwise sit in forever: ``is_busy()`` keeps answering True for a lane parked
+    behind a bash child, the drain's promise ("in-flight work finishes first") is
+    only as good as that work's willingness to finish, and nothing else in the
+    drain draws any bound. The runtime is still refusing every admission while it
+    holds, and a successor cannot be engaged while the predecessor holds the
+    transcript lease, so not firing here does not cost a slow handover — it costs
+    the session.
+
+    THE EXIT IS THE SIGNAL DRAIN'S, in all three parts, and it is deliberately not
+    a new exit path:
+
+    * the record and the frame are RE-PUBLISHED through ``announce_retiring`` — the
+      same one commit that writes ``SessionRecord.leaving`` and sends the frame —
+      so ``lop sessions`` stops advertising a wait the runtime has given up on,
+      and the label and phrase BOTH name the bound (see the constants above). The
+      frame is the ordinary ``retiring`` one a drain already sent at its start, so
+      a viewer that went cold on that first frame sees the same event again rather
+      than a new one it has to learn;
+    * the wakes this drain swallowed are handed to the successor FIRST, exactly as
+      the clean rung hands them over (:func:`_hand_wakes_to_successor`). Not an
+      extra: the wakes are the ones whose fire RETIRED their schedule, so a
+      handover skipped here does not defer the reminder, it loses it, and the
+      rung that cuts a turn is the last one that should also drop the user's
+      scheduled work;
+    * a gate still parked on a user's answer is DENIED rather than left holding a
+      process that is leaving: the turn it belongs to is being cut, and amain's own
+      direct-dispose block denies for exactly this reason before its dispose. It is
+      NOT the memo's "do not deny from the drain" case — that refusal is about a
+      drain that is still trying to preserve its turn, which is the case this rung
+      has already given up on;
+    * the exit runs ``_clean_exit``, the one convergence point every planned exit
+      already goes through, so the journal carries THIS departure's reason rather
+      than the "unknown" amain would journal for a stop it was not told about
+      (``_note_journal_exit``) — the successor reads that row to learn the turn it
+      finds open was cut by a bound, which is the evidence ``fix/no-mass-runtime-kill``
+      argues every path taking a runtime away owes.
+
+    WHY THE DRAIN'S CAUSE DOES NOT CHANGE, against the memo's "classified by
+    ``SIGNAL_DRAIN_CAUSE``". ``begin_drain`` is the latch that token lives on, and
+    calling it a second time is not a rename: it re-runs
+    ``Session.retire_wakes_to_inbox``, which STARTS A FRESH ``_wake_rearms`` list —
+    discarding the one-shot wakes this drain has already swallowed and would have
+    handed to its successor at the exit, so a reminder that fired between the latch
+    and this rung would be lost silently. Writing the handle's private
+    ``_retiring_cause`` instead would be the same latch minus its bookkeeping, and
+    it would ALSO make ``ServingSessionHandle._retiring_refusal`` name this
+    departure SIGNALLED ("This session was signalled to stop"), which is the only
+    token that accessor maps and maps for exactly this reason: a false sentence
+    about which trigger took a session away is the class of falsehood agent review
+    round 4 (MAJOR-2) filed in the other direction. The build drain's own
+    ``runtime-retired`` is TRUE of this exit — the runtime is leaving so the next
+    engage runs the build on disk — and that a BOUND ended the hold is carried by
+    the phrase, which is the primary carrier of which trigger committed a drain.
+    """
+    if progress.overdue:
+        # The drain is not exited twice: a second caller (the signal drain's own
+        # loop, in principle) gets the same answer without a second announcement
+        # or a second disposal.
+        return True
+    stalled = progress.stalled_s(at)
+    progress.overdue = True
+    logger.warning(
+        "session runtime: %s; no movement from the work in flight for %.0fs "
+        "(bound %.0fs); leaving without waiting for it",
+        drain.reason,
+        stalled,
+        BUILD_DRAIN_PROGRESS_S,
+    )
+    announce = getattr(runtime, "announce_retiring", None)
+    if callable(announce):
+        try:
+            await cast("Callable[..., Awaitable[None]]", announce)(
+                _BUILD_OVERDUE_REASON,
+                to=drain.to,
+                draining=True,
+                leaving=LEAVING_FOR_BUILD_OVERDUE,
+            )
+        except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
+            logger.debug("overdue announcement failed", exc_info=True)
+    deny = getattr(handle, "_deny_pending_gates", None)
+    if callable(deny):
+        try:
+            deny()
+        except Exception:  # noqa: BLE001 — the exit must not be held by a failed denial
+            logger.debug("gate denial failed at the overdue exit", exc_info=True)
+    await _hand_wakes_to_successor(handle)
+    await _clean_exit(handle, runtime, reason=_BUILD_OVERDUE_EXIT_REASON)
     stop.set()  # amain's wait() returns; exit code stays 0
     return True
 
