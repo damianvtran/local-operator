@@ -1357,3 +1357,43 @@ def test_a_numbered_prose_line_survives(prose: str) -> None:
     text = '{"private_key": "' + header + "\n" + _PEM_BODY + "\n" + prose + "\n"
     scrubbed = rs.scrub_shapes(text)
     assert prose in scrubbed, scrubbed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat key.pem",
+        "head -n 6 key.pem",
+        "sed -n '1,12p' key.pem",
+        "cat -n key.pem",
+        "grep -n -e '' key.pem",
+    ],
+)
+async def test_a_real_bash_command_never_publishes_an_open_key_body(
+    tmp_path: Path, command: str
+) -> None:
+    """The PIPE path, through the real tool call — the shape nothing covered before.
+
+    `_in_key_block` had no test at all, which is how this layer's body masking went
+    unreachable while `tests/unit/secrets` stayed green: the header test was aliased from
+    the shape table (whose anchors are per-line) and searched against a WHOLE multi-line
+    chunk, so the block opened only when the chunk was exactly one header line — which the
+    release point's hold makes impossible. Measured then: `head -n 6 key.pem` published 5
+    of 25 body lines through the real tool call. This drives the real command and asserts
+    the body is gone from the tool result.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import execute_bash
+    from local_operator.variables import VariableStore
+
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ"
+    key = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join([body] * 6) + "\n"
+    (tmp_path / "key.pem").write_text(key)
+    context = ToolContext(cwd=str(tmp_path), variables=VariableStore(cwd=str(tmp_path)))
+
+    result = await execute_bash("call-pipe-key", {"command": command}, None, None, context)
+
+    text = "".join(getattr(part, "text", "") for part in result.content)
+    assert body not in text, f"the key body reached the tool result for {command!r}"
+    assert "[redacted]" in text

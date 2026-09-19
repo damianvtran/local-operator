@@ -1043,8 +1043,7 @@ LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
 #: short FINAL line published where the previous head masked).
 _PEM_FULL_LINE = r"[A-Za-z0-9+/=]{8,},?[ \t]*"
 _PEM_SHORT_MID_LINE = (
-    r"[A-Za-z0-9+/=]{1,7},?[ \t]*(?="
-    + LINE_SEP + LINE_PREFIX + r"[A-Za-z0-9+/=]{8,})"
+    r"[A-Za-z0-9+/=]{1,7},?[ \t]*(?=" + LINE_SEP + LINE_PREFIX + r"[A-Za-z0-9+/=]{8,})"
 )
 #: A short line is a body line when a full one FOLLOWS it, and the run may end with one
 #: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
@@ -1055,12 +1054,18 @@ _PEM_RUN = (
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
     r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1,7},?)?"
 )
-PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$")
+PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$", re.MULTILINE)
 PEM_HEADER_LINE_RE = re.compile(
     r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
-    r"-{1,4}[\x27\x22]?-{1,4}$"
+    r"-{1,4}[\x27\x22]?-{1,4}$",
+    # MULTILINE, and that is not cosmetic: the pipe layer SEARCHES a multi-line read for
+    # this header, so without the flag it matched only when the read was exactly one
+    # header line — which the release point's hold makes impossible — and the entire
+    # body-masking path was unreachable (R11-1: `head -n 6 key.pem` published 5 of 25
+    # body lines through the real tool call while the unit suite stayed green).
+    re.MULTILINE,
 )
-PEM_END_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}END ")
+PEM_END_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}END ", re.MULTILINE)
 
 
 def _anchored_key_value_guard(match: Match[str]) -> bool:
@@ -1133,12 +1138,24 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # `done`, `INFO` (both stay readable) and `NORMAL,` (readable; the comma is
         # stripped by the class and the six remaining characters are under the floor).
         # A length floor is what keeps numbered PROSE alive (`12| done`, `12| 42`), and
-        # the price is that a body line under eight characters ends the run — the
-        # over-mask direction, which is the safer of the two.
+        # the price is measured in both directions: a run that has not started cannot be
+        # begun by a short line (prose survives), and TWO consecutive short lines publish
+        # the second one. Both are stated here because the earlier wording claimed only
+        # the over-mask direction, which is not what the measurements show.
         #
         # The prefix spelling above is general on purpose (see the block comment); the
         # trailing `[ \t]*` before it is part of that spelling.
-        # `INFO` are consumed, `NORMAL,` is not.
+        #
+        # RECORDED, with the measurement, rather than implemented: a SHORT FINAL line
+        # (`…<BODY>\nMIIEo`, and the second of two consecutive short lines) still
+        # publishes. It cannot be distinguished from numbered PROSE — `…<BODY>\n12| done`
+        # is the same shape, and the prose case is a requirement (a log line must survive),
+        # so the two demands are mutually exclusive for a word-shaped final line. What IS
+        # implemented is the shape QA measured: a short line in the MIDDLE, with a full
+        # line after it, masks. Reported as `deferred — short final line, indistinguishable
+        # from numbered prose, recorded on the unterminated-block follow-up`.
+        # `INFO` and `NORMAL,` all stay READABLE — they are under the floor and start no
+        # run. (An earlier comment said the opposite; the measurement is the source.)
         #
         # Not "stop at the first newline": that would publish the rest of a key whose
         # body is bare newline-separated base64, which is every real PEM.
@@ -1158,8 +1175,22 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # short line to close the block. Requiring the first line is what keeps a
             # lone short line — `12| done`, `12| 42` — readable: numbered PROSE has no
             # full body line before it, so the run never starts.
+            # The BODY RUN, as one expression: one or more body lines, each behind its
+            # separator, then an optional SHORT closing line — also behind a separator,
+            # which is what the previous spelling omitted, leaving that allowance unable
+            # to fire and a short FINAL line published (R11-3).
+            # The outer group already supplies the separator for each repeated line; the
+            # optional SHORT closing line carries its own, which is what the previous
+            # spelling omitted, leaving that allowance unable to fire (R11-3).
+            # The FIRST line must be a full one: that is what keeps numbered PROSE
+            # (`12| done`, `12| 42`) readable — prose has no full body line before it, so
+            # the run never starts — while a run that HAS started may end with a short
+            # line (R11-3: the allowance had no separator and could never fire).
+            # Each element may be a full line or a short one WITH A FULL LINE AFTER IT —
+            # the SHORT-MID shape QA measured (`3| Qw9z` then `4| MIIE…`) — which also
+            # keeps numbered prose safe: a prose line has no full body line after it, so
+            # it can neither start nor continue the run.
             r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")[ \t]*)+"
-            r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1,7},?[ \t]*)?"
             r"(?=" + LINE_SEP + r"|[\x27\x22]|$)"
             r")*)"
         ),
