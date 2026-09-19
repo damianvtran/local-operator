@@ -180,12 +180,14 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # unauthorised, so the two cases stay distinguishable in the logs.
         if not is_wire_hex(frame.get("operator_cap")):
             raise ValueError("operator_cap must be a hex string")
-    if "operator_nonce" in frame and not is_wire_hex(frame.get("operator_nonce")):
-        # The handshake's first half, validated on the same rule as the proof it
-        # will be answered with: a client that sends a malformed nonce is refused
-        # here rather than being silently demoted to "no handshake", so the two
-        # ends cannot disagree about whether a handshake was attempted.
-        raise ValueError("operator_nonce must be a hex string")
+    # ``operator_nonce`` is deliberately NOT validated here, and the reason is the
+    # one rule the two ends have to agree on (agent review round 2, R2-5/R2-6).
+    # The nonce is read on exactly one frame — the CONNECT frame, by the runtime's
+    # auth path — and an ill-shaped one there is demoted to "no handshake", which
+    # fails closed: no handshake, no authority, and the ordinary ops are untouched.
+    # On any OTHER frame it is inert, so shape-checking it there would refuse a
+    # frame for a field that has no meaning in it, and the previous check was the
+    # only place the two ends disagreed about what a malformed nonce meant.
     if op in ("prompt", "steer"):
         text = frame.get("text")
         if not isinstance(text, str) or (

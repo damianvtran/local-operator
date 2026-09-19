@@ -235,7 +235,12 @@ def test_a_proof_is_not_the_capability_and_is_bound_to_one_connection() -> None:
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (operator_nonce(), True),
+        # A LITERAL, never a computed value: a random one would make this row's
+        # NODE ID differ per worker, and pytest-xdist aborts the whole module
+        # ("Different tests were collected between gw3 and gwX") — which took
+        # every control in this file out of CI (agent review round 2, R2-1).
+        # The mint's own shape is covered by ``operator_nonce()`` inside a test
+        # body, and by ``test_the_capability_is_a_full_entropy_hex_string``.
         ("a" * 64, True),
         ("A" * 64, True),
         (None, False),

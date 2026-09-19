@@ -79,7 +79,19 @@ a follower terminal, the CLI — reaches the handle through it, or through
 dispatch: `harness/approval.AUTHORITY_OPS` names the ops in the class, and an
 increasing frame is refused unless it presents the capability. The refusal
 reuses the existing `{"op": "error"}` reply, carrying
-`OPERATOR_CAP_REQUIRED_NOTICE`.
+`OPERATOR_CAP_REQUIRED_NOTICE` — or `CARD_APPROVAL_REFUSED_NOTICE` when the
+refused frame was an `approval_answer`, because a person whose card was refused
+needs a different sentence from a person whose command was (UX round 2, U8). The
+op travels as a TOKEN and the sentence is rebuilt on the far side, exactly as the
+typed category is.
+
+**The reports are told, not guessing.** A report (`/approvals` with a
+divergence, `/approvals default …`) names remedies, and the same connection's
+`/approvals auto` may be refused — so the seam passes `may_loosen`, judged by
+its own predicate on the connection that asked, into the handle that builds the
+sentence (design round 2 D10, UX round 2 U7/U9). A handle serves every
+connection alike and cannot infer this; a report that offers a refused command
+is how a follower was sent to a dead end twice.
 
 **One capability.** 32 random bytes (`secrets.token_bytes(32)`), hex on the
 wire, present in exactly two places: the memory of the gate-owning process (a
@@ -149,7 +161,8 @@ only be a forgery.
 | Phone relay | unchanged | works iff the relay spawned that runtime; else refused |
 | `lop` CLI / one-shot front ends | unchanged | only if this process spawned the runtime |
 | `lop exec --control` (supervised one-shot), supervisor answering from another process | unchanged | **refused** — deny works, approve does not. The run's runtime is started by the `lop exec` process, which has exited or is backgrounded, so no live console holds the capability. Remedy for the next run: `--yolo`, or `tool_approval_mode: auto`; for an interactively approved run, start it where the approver is |
-| headless / `--yolo` | unchanged | n/a (the gate is born `auto`) |
+| `--yolo` | unchanged | n/a (the gate is born `auto`) |
+| headless (non-TTY) | unchanged | **nothing may loosen it**: the gate is born **denying** (`session_factory.py`'s non-TTY default, `cli.py`'s one-shot path) and no console exists to hand it a capability, so `/approvals auto` is refused from every route. `--yolo` or `tool_approval_mode: auto` is the lever, at launch (agent review round 2, R2-3) |
 | tightening `auto → ask`, any route | unchanged | unchanged |
 
 Operator-visible regressions, stated plainly: a phone loses `/approvals auto`
@@ -157,12 +170,28 @@ Operator-visible regressions, stated plainly: a phone loses `/approvals auto`
 pane attached to a background-started runtime cannot loosen it; and **a
 supervised `lop exec --control` run cannot be APPROVED by a supervisor in
 another process** — only denied — because its runtime is started by the `lop
-exec` process and no live console holds the capability. The remedies are
-`--yolo` or `tool_approval_mode: auto` for the next run, `lop refresh`,
-`/approvals default auto` plus a new session, or typing the command in the
-terminal that started it. Tightening, reporting and everything else are
-untouched — the routes that may loosen are a proper subset of the routes that
-may tighten.
+exec` process and no live console holds the capability. Tightening, reporting
+and everything else are untouched: the routes that may loosen are a proper
+subset of the routes that may tighten.
+
+### 4.1 The remedies, with their conditions
+
+The refusal copy names only what the person reading it can do from where they
+are, and this table is the fuller statement — several of these are CONDITIONAL,
+which is why the copy names the event and the lever rather than promising one
+total fix (design round 2, D11/D13; UX round 2, U9):
+
+| remedy | what it does | when it works |
+| --- | --- | --- |
+| type `/approvals auto` in the window that started the runtime | loosens THIS session, in one step | that window is still live and still attached |
+| let the runtime retire, then reopen the session here | makes this window the one that starts the next runtime, so it owns the gate | always, but only when the runtime leaves — retirement is readiness-judged (`cli.refresh_command`), never forced |
+| `lop refresh` | asks a live runtime to move to the install on disk and leave at its next boundary | the install on disk has MOVED (an update). Without a move a runtime answers "already current" and stays |
+| `/approvals ask` | tightens | everywhere, including a follower, the phone and the desktop |
+| `--yolo`, or `tool_approval_mode: auto` in `config.yml` | the NEXT session starts loosened | at launch; the config write is a file edit (or the desktop app's settings), not a session command — no control connection may write it |
+| `lop stop <session>`, then reopen | ends this session so this window can own the next one | always, and it ENDS the running turn: named here for completeness, never as a remedy |
+
+Note the one the product does not have: an unconditional command that retires a
+live runtime so a viewer can take over.
 
 ## 4. The residual
 
