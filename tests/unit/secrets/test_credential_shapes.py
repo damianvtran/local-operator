@@ -345,6 +345,7 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "credential-url-value",
         "cli-credential-flag",
         "vendor-prefixed-token",
+        "gcp-service-account-value",
         "authorization-basic-bare",
     }
 
@@ -1035,8 +1036,20 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
 #:   IS masked, and what survives is the host and path, which stay readable BY DESIGN
 #:   (the operator needs to see which endpoint was called). Not secret material.
 _PARTIAL_MASK_RESIDUAL = {
-    "pem-private-key": 152,
-    "gcp-service-account-key": 44,
+    # All three of these are the SYNTHETIC case only, and the proof is the same one:
+    # the quote is injected INSIDE the fixed marker phrase (`-----B'EGIN RSA PRIVATE
+    # KEY-----`) or inside a PEM body, and NEITHER ALPHABET CONTAINS A QUOTE — a PEM
+    # header is dashes, spaces and capitals, and a body is base64 (`A-Za-z0-9+/=`). A
+    # quote cannot occur there in real output, which is why these counts are allowed
+    # to stand rather than fixed.
+    #
+    # The numbers fall as real fixes land and must be updated in the SAME commit as
+    # the fix that moves them (the ratchet asserts exact equality): `pem-private-key`
+    # 152 → 89 and `gcp-service-account-key` 44 → 0 came from masking an anchored
+    # value to its closing quote (M6-1), and `gcp-service-account-value` entered at 22
+    # with that mask.
+    "pem-private-key": 89,
+    "gcp-service-account-value": 22,
     "credential-url-value": 10,
 }
 
@@ -1138,3 +1151,80 @@ def test_the_partial_mask_ratchet_only_ever_tightens() -> None:
         assert (
             measured.get(label, 0) == frozen
         ), f"{label} is frozen at {frozen} but now measures {measured.get(label, 0)}"
+
+
+#: Every PEM spelling the corpus and real tooling use. Completeness (R5-2) and the
+#: anchored-value mask (M6-1) both alternated silently all night because nothing in the
+#: suite asserted `complete` at all — one direction for the claim, one for the hold.
+_PEM_SPELLINGS = (
+    "RSA PRIVATE KEY",
+    "PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "DSA PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+)
+_PEM_BODY = "MIIEowIBAAKCAQEA1234abcd5678efgh"
+
+
+@pytest.mark.parametrize("spelling", _PEM_SPELLINGS)
+def test_a_complete_block_of_every_spelling_claims_its_mask(spelling: str) -> None:
+    """The claim direction: a finished block must file `complete=True`.
+
+    The literal `END PRIVATE KEY` matched PKCS#8 only, so RSA and OPENSSH — the
+    commonest spellings in real tool output — withheld the rotation notice entirely
+    (R5-2). Parametrised over the spellings so a future one cannot join them silently.
+    """
+    import local_operator.redaction_shapes as rs
+
+    text = f"-----BEGIN {spelling}-----\n{_PEM_BODY}\n-----END {spelling}-----"
+    scrubbed, hits = rs.scrub_shapes_with_hits(text)
+    assert _PEM_BODY not in scrubbed, "the body was published"
+    assert hits, "a complete block filed no hit"
+    assert any(hit.complete for hit in hits), f"{spelling} withheld its completion claim"
+
+
+@pytest.mark.parametrize("spelling", _PEM_SPELLINGS)
+def test_a_truncated_block_of_every_spelling_claims_nothing(spelling: str) -> None:
+    """The hold direction: a block with no END must never file a completion claim."""
+    import local_operator.redaction_shapes as rs
+
+    text = f'{{"private_key": "-----BEGIN {spelling}-----\\n{_PEM_BODY}\\n"}}'
+    scrubbed, hits = rs.scrub_shapes_with_hits(text)
+    assert _PEM_BODY not in scrubbed, "the body was published"
+    assert hits, "a truncated block filed no hit"
+    assert not any(hit.complete for hit in hits), f"{spelling} claimed a completed mask"
+
+
+def test_an_anchored_block_with_a_same_line_continuation_masks_whole() -> None:
+    """M6-1: a body line whose pad is followed by more text still masks the whole value.
+
+    The line-bounded iteration failed its first step on `…efgh, note` (and on an ANSI
+    reset), collapsed the alternation to the header, and published the entire body with
+    nothing flagged complete. Anchored values are masked to the VALUE's closing quote,
+    which is a real delimiter — the reason `[^\\r\\n]*` was the wrong remedy (it reopens
+    B4-1's eaten anchor).
+    """
+    import local_operator.redaction_shapes as rs
+
+    for continuation in (", note", "\x1b[0m", " and more"):
+        text = (
+            '{"private_key": "-----BEGIN RSA PRIVATE KEY-----\\n'
+            + _PEM_BODY
+            + continuation
+            + '\\n"}'
+        )
+        scrubbed, hits = rs.scrub_shapes_with_hits(text)
+        assert _PEM_BODY not in scrubbed, f"body published for continuation {continuation!r}"
+        assert scrubbed == '{"private_key": "[redacted]"}', scrubbed
+        assert not any(hit.complete for hit in hits)
+
+
+@pytest.mark.parametrize("tail", ["NORMAL, more text", "INFO, starting", "done. next"])
+def test_a_following_word_line_keeps_its_word(tail: str) -> None:
+    """M6-2: a line that is a word plus punctuation must not lose its leading word."""
+    import local_operator.redaction_shapes as rs
+
+    text = f"-----BEGIN RSA PRIVATE KEY-----\n{_PEM_BODY}\n-----END RSA PRIVATE KEY-----\n{tail}"
+    scrubbed = rs.scrub_shapes(text)
+    assert scrubbed.splitlines()[-1] == tail, scrubbed

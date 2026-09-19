@@ -1011,6 +1011,11 @@ def _tolerant(token_class: str) -> str:
     return token_class + r"+(?:\x27\x22" + token_class + r"+)*"
 
 
+def _anchored_key_value_guard(match: Match[str]) -> bool:
+    """Only a value that CARRIES a PEM header is a key, not every `private_key` field."""
+    return "BEGIN" in match.group(2).upper()
+
+
 CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # --- key material, before anything that could take it apart ---------------
     Shape(
@@ -1025,6 +1030,29 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # service-account form. The escaped ``\n`` sequences sit inside the JSON
     # string, so the PEM rule above spans them too and this rule only has to
     # catch the header when the body was truncated before an END line arrived.
+    Shape(
+        "gcp-service-account-value",
+        # The ANCHORED spelling — `"private_key": "-----BEGIN …` — is masked to the
+        # VALUE's closing quote, which is a real, bounded delimiter, instead of to a
+        # line boundary. The line-bounded iteration is what round 6 broke: a body line
+        # whose padding is followed by more base64 (`…, note`) or by an ANSI reset
+        # failed the first iteration, the alternation collapsed to the header, and the
+        # ENTIRE body was published with nothing flagged complete (M6-1) — silently,
+        # because a withheld claim means no notice either. The two obvious remedies are
+        # wrong and measurably so: `[^\r\n]*` reopens B4-1's eaten anchor, and a
+        # `{16,}` run floor leaks a short truncated final line. Masking to the closing
+        # quote cannot run away (the quote bounds it) and cannot eat a neighbouring
+        # line's anchor (it never crosses the value).
+        #
+        # The guard is what keeps it narrow: the value must actually carry a BEGIN
+        # marker, so an ordinary `"private_key": "projects/x/keys/k1"` stays readable.
+        # An unterminated string masks to the end of the input and its claim is
+        # withheld by ``_is_truncated_pem`` (no END marker to find).
+        re.compile(r'(?i)("?private[_-]?key"?\s*:\s*")([^"]*)'),
+        None,
+        2,
+        guard=_anchored_key_value_guard,
+    ),
     Shape(
         "gcp-service-account-key",
         # The masked group is the WHOLE BLOCK, not the BEGIN marker: masking the
@@ -1760,7 +1788,14 @@ def has_shape_anchor(text: str) -> bool:
 #: Rules whose shape can only be complete on one line, and the ones that can span
 #: lines. Splitting them is what lets the gate run per line: a 40-line log with
 #: one candidate line pays the table for that line only.
-_MULTILINE_LABELS = frozenset({"pem-private-key", "gcp-service-account-key"})
+#: Blocks and anchored values are MULTILINE rules because their match spans a line by
+#: construction (escaped newlines included). `gcp-service-account-value` must be here and
+#: FIRST in the table: the marker rule matching the same value first would consume the
+#: BEGIN marker and leave the value rule's guard looking at a value with no key material
+#: in it, which is how the whole body stayed published after the rule was added (M6-1).
+_MULTILINE_LABELS = frozenset(
+    {"pem-private-key", "gcp-service-account-key", "gcp-service-account-value"}
+)
 _MULTILINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label in _MULTILINE_LABELS)
 _LINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label not in _MULTILINE_LABELS)
 
