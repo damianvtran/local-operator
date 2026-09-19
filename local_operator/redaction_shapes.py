@@ -1052,7 +1052,13 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # rule exists to prevent. The pass is linear in the input: 7.9 s for a
             # 4.44 MB unterminated body, with the whole block masked.
             r"(?:\\r\\n|\\n|\r\n|\n|\r)"
-            r"(?:[A-Za-z0-9+/=]{2,}(?=\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$)"
+            # The terminator may sit after NON-BASE64 padding (`,`, a trailing
+            # space) — `MIIE…,\n` is a body line with a comma on it, and requiring
+            # the base64 run to touch the terminator made the whole block unmasked
+            # where the previous head masked it (R5-1). What must NOT happen is the
+            # run continuing into the next line's base64, and `[^A-Za-z0-9+/=]*`
+            # stops exactly there — which is what keeps B4-1 closed.
+            r"(?:[A-Za-z0-9+/=]{2,}(?=[^A-Za-z0-9+/=]*(?:\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$))"
             r"|-{1,4}[\x27\x22]?-{1,4}END [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4})"
             r")*)"
         ),
@@ -1559,15 +1565,16 @@ def _is_truncated_pem(hit: ShapeHit) -> bool:
     the reviewer recovered a live key from — has no END, so the region's extent is
     unknown and no masking claim may be made about it.
     """
-    marker = "PRIVATE KEY"
     upper = hit.value.upper()
-    if "BEGIN" not in upper or marker not in upper:
+    if "BEGIN" not in upper or "PRIVATE KEY" not in upper:
         return False
-    # The MARKER PHRASE, not the substring ``END``: a body line can contain those
-    # three letters (base64 spells them often), and the substring test then reported
-    # a completed mask over readable key material — the same false-claim class as
-    # B3-1, reproduced at ~0.6% of a body.
-    return f"END {marker}" not in upper.replace("\r", "").replace("\n", "")
+    # The END of the SAME KIND of key, matched as a phrase: ``END PRIVATE KEY`` is
+    # the PKCS#8 spelling only, so keying on that literal string withheld the claim
+    # for `RSA`/`OPENSSH`/`EC` blocks — the most common spellings — and the rotation
+    # notice never fired for them (round 5, R5-2). ``END`` alone is the opposite
+    # error: a base64 body spells those three letters often, and the substring test
+    # then reported a completed mask over readable key material (M4-1).
+    return re.search(r"END [A-Z0-9 ]*PRIVATE KEY", upper) is None
 
 
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
