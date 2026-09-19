@@ -801,6 +801,14 @@ _UNCHAINED_OPS = frozenset({"ping"})
 #: repaint, and those two answer with a receipt instead), so they are admitted
 #: on their own reason: their ``_dispatch`` arms touch only this connection's own
 #: watch/presence state and notify this connection, never the session.
+#:
+#: FOUR OF THE EIGHT ARE DAEMON-GATED IN EFFECT, and the set says so rather than
+#: leaving a reader to find out from the branches: ``watch``/``unwatch`` move the
+#: phone-watcher count and are ignored unless ``conn.kind == "daemon"`` (an
+#: attach client's frame is accepted and changes nothing), while
+#: ``watch_job``/``unwatch_job`` and ``desktop_watch`` each refuse themselves
+#: outside their own connection shape. That is why the remaining four — and not
+#: the set — are what the dial path actually relies on.
 _SYNC_LOCAL_OPS = frozenset(
     {
         "watch",
@@ -2567,6 +2575,10 @@ class RuntimeServer:
         handle cannot bind belongs on the connection path, where the socket still
         exists to be closed, not inside a task.
         """
+        # Declared before the ``try`` so the failure path can hand the bind task
+        # to ``_release_when_landed`` even when the raise happened before it was
+        # created (a capability check, a sync-payload build).
+        bind_task: asyncio.Task[Any] | None = None
         try:
 
             def on_update(update: Any) -> None:
@@ -2721,12 +2733,34 @@ class RuntimeServer:
             # bind failure: re-raise so the task settles as cancelled and the
             # subscription teardown stays in ``_drop_client``'s hands.
             raise
-        except Exception:  # noqa: BLE001 — one client's bind must not take the runtime down
+        except Exception as exc:  # noqa: BLE001 — one client's bind must not take the runtime down
             logger.warning(
                 "session runtime: frontend bind failed for %s — dropping the connection",
                 conn.surface,
                 exc_info=True,
             )
+            # A BIND THAT LANDS LATE STILL OWNS A SUBSCRIPTION (review round 2,
+            # U7). The bind task is shielded, so a failure of THIS await does not
+            # abort it: if it goes on to register a subscriber, that subscription
+            # has no owner left to record it — the caller is unwinding — and the
+            # session would keep pushing canonical state to it for the life of
+            # the app. Measured on the timeout path this patch removes (BASELINE
+            # subscribers = 2 → AFTER = 3, once per timed-out bind, compounding
+            # with each redial). The same release the cancellation path uses
+            # (F3) therefore runs here too: releasing a subscription nobody
+            # received is always correct, and it makes the leak impossible by
+            # construction rather than by the absence of a timeout.
+            if bind_task is not None:
+                self._release_when_landed(bind_task)
+            # AND THE CLIENT IS TOLD WHAT HAPPENED (review round 2, U6). The
+            # drop below closes a socket, and a closed socket reads to the far
+            # side as "owner exited" — which is false and alarming: the process
+            # is alive, this one connection could not be bound. Announced BEFORE
+            # the drop, the same ordering ``stop``'s ``stopping`` frame uses and
+            # for the same reason (there is no socket left afterwards); it is
+            # additive on the wire, so an older client that does not know the op
+            # falls back to exactly today's copy.
+            await self._announce_bind_failure(conn, exc)
             self._drop_client(conn, reason="frontend bind failed")
         finally:
             # Opened by ``_on_connection`` before this task was created, and
@@ -2734,6 +2768,24 @@ class RuntimeServer:
             # connection is gone and the gate no longer matters, and the
             # cancellation case, where ``_drop_client`` has already removed it.
             conn.frontend_sync_pending = False
+
+    async def _announce_bind_failure(self, conn: _ClientConn, exc: BaseException) -> None:
+        """Tell a viewer its connection could not be bound, before closing it.
+
+        The frame is unsolicited (no ``req``) because the failure belongs to the
+        CONNECTION, not to a request: it is the same shape as the ``stopping``
+        and ``retiring`` announcements, and it is carried the same way — the
+        client turns it into the reason string it reports when the socket closes
+        moments later, so the person reads "owner could not prepare this
+        session's interface" instead of "owner exited".
+
+        Best-effort: a failure to announce must never stop the drop that
+        follows, and the send path drops the client itself when the write fails.
+        """
+        try:
+            await self._send_to(conn, {"op": "bind_failed", "message": str(exc)[:400]})
+        except Exception:  # noqa: BLE001 — announcing is best-effort
+            logger.debug("bind-failure announcement write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
         """Release a viewer subscription whose connection died MID-BIND.
@@ -3640,15 +3692,17 @@ class RuntimeServer:
         try:
             # A CONNECTION THAT IS STILL BINDING IS REACHABLE BUT NOT YET
             # AUTHORITATIVE. ``_on_connection`` starts this connection's reader
-            # loop before the canonical ``frontend_sync`` is on the wire (the why
-            # is there: the bind is a cross-thread hop onto the session's loop,
-            # and running it inline used to leave a follower's socket deaf, so a
-            # guest could neither steer nor stop the session it was looking at).
-            # The price of that reachability is this gate: while the sync is
-            # pending, the connection may run :data:`_SYNC_PRIORITY_OPS` — health,
-            # and the three ways to regain control of a turn — plus the
-            # connection-local bookkeeping in :data:`_SYNC_LOCAL_OPS` that the dial
-            # path itself sends before it awaits the sync.
+            # loop before the canonical ``frontend_sync`` is on the wire (the
+            # why is there: the bind takes the cross-thread hop into a busy app
+            # loop, and running it inline used to leave the socket mute, so a
+            # user could neither steer nor stop the session they were looking
+            # at). The price of that reachability is this gate: while the sync
+            # is pending, the connection may run :data:`_SYNC_PRIORITY_OPS` —
+            # health, and the four ways to regain control of a turn (``stop``,
+            # ``abort``, ``steer`` and ``cancel``, which joined the set in review
+            # round 1) — plus the connection-local bookkeeping in
+            # :data:`_SYNC_LOCAL_OPS` that the dial path itself sends before it
+            # awaits the sync.
             #
             # Everything else is REFUSED, through the ordinary error-frame path
             # below rather than by running it or silently dropping it: a

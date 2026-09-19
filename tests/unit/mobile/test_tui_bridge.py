@@ -698,3 +698,56 @@ async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
     assert receipt == 'stopping "the conversation" — /resume sess reopens it'
     assert elapsed < 0.3, f"the receipt waited {elapsed:.2f}s for the app loop"
     assert await asyncio.to_thread(ran.wait, 5), "the stop hop never reached the app"
+
+
+@pytest.mark.asyncio
+async def test_tui_hop_names_itself_on_all_three_expiry_paths(monkeypatch) -> None:
+    """Every way a hop can run out of budget reports a sentence, not silence.
+
+    Review round 2, MINOR 1. There are three expiries: the enqueue does not come
+    back inside the budget; the enqueue comes back with nothing left of the
+    budget for the callback's result; and — the one that was unnamed — the
+    enqueue is serviced inside the budget but the callback's AWAITABLE does not
+    resolve in what remains. That third path raised a bare ``TimeoutError`` with
+    an empty message (reproduced by the reviewer with a 0.3 s budget), and an
+    empty message is the one shape a caller cannot act on: the sentence naming
+    the busy terminal is the whole difference between "retry when it settles"
+    and a mystery.
+    """
+    from local_operator.mobile import tui_handle as mod
+
+    monkeypatch.setattr(mod, "_APP_HOP_TIMEOUT_S", 0.3)
+    messages: list[str] = []
+
+    class Session(FakeSession):
+        pass
+
+    class App:
+        def __init__(self, session: Any, loop: Any) -> None:
+            self._session = session
+            self.owner_loop = loop
+
+        def call_from_thread(self, callback: Any) -> None:
+            # SERVICED AT ONCE, on the app's own loop: the enqueue costs nothing,
+            # which is what isolates the third path — the callback's awaitable is
+            # the only thing that consumes the budget. It must run ON that loop
+            # for the same reason the real app does: ``wrapped`` schedules the
+            # awaitable there.
+            asyncio.run_coroutine_threadsafe(_call(callback), self.owner_loop).result()
+
+    async def slow_refresh() -> dict[str, Any]:
+        await asyncio.sleep(1.0)
+        return {"unseen": 0}
+
+    class SlowSession(Session):
+        async def refresh_attention(self) -> dict[str, Any]:
+            return await slow_refresh()
+
+    app = App(SlowSession(), asyncio.get_running_loop())
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    with pytest.raises(TimeoutError) as caught:
+        await handle.refresh_attention()
+    messages.append(str(caught.value))
+    assert messages[0], "the third expiry path reported an empty message"
+    assert "did not answer within" in messages[0]
+    assert handle._late_hop_tasks, "the in-flight hop is not held by the handle"
