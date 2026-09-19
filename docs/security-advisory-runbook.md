@@ -213,7 +213,11 @@ gh api -X PATCH "repos/<owner>/<repo>/security-advisories/<GHSA>" -f state=publi
 ```
 
 Credits are shown publicly only once the credited user accepts them, so ask
-the reporter to accept in the thank-you message in phase 9.
+the reporter to accept in the thank-you message. Send that thank-you **before**
+you publish: publishing closes the advisory's comment thread, the reporter's
+thread lives there, and it cannot be reopened (measured on the September 2026
+advisories — see the note at the end of phase 8). If you have already published,
+thank them in the durable record instead (phase 9).
 
 ## 6. CVE request
 
@@ -297,9 +301,11 @@ what actually reaches the databases.
   filling in. If `cve_id` is still null and 7a is still 0, check the advisory
   for a curation comment from GitHub asking for changes (they can request a
   narrower range or a clearer description). While the advisory is still in
-  draft/triage you can answer on the advisory; once it is published there is no
-  comment surface, so GitHub contacts you by email instead — watch the report
-  address on the repository.
+  draft/triage you can answer on the advisory itself; once it is published that
+  thread is closed, so if GitHub needs something after publication they will
+  reach you through whatever contact channel the review process uses — check
+  the account the repository reports with, and do not assume a comment box
+  exists.
 - **+14 days**: rerun phase 7. Everything should be green. If it is not:
 
   1. **PYSEC submission** — open a PR to
@@ -348,15 +354,22 @@ what actually reaches the databases.
 
   Record which escalations were filed, which are still pending a human action,
   and their links, in the repository rather than on the advisory page. A
-  *published* repository advisory has no comment surface: the page renders only
-  the description, timeline events and the Request-CVE panel,
-  `GET /repos/<owner>/<repo>/security-advisories/<GHSA>/comments` is 404, the
-  GraphQL `SecurityAdvisory` type exposes no comment field and `Mutation` has no
-  advisory-comment mutation, and a `POST` to that REST path is 404 too.
-  Commentary is possible only while the advisory is in draft/triage. So record
-  it on the release/announcement discussion for the advisory batch (a comment
-  on it, via GraphQL `addDiscussionComment`) and/or the fix PR thread; if the
-  advisory is still in draft/triage at +14d, record it on the advisory as well.
+  *published* repository advisory has no comment surface. Measured on the two
+  September 2026 advisories once published: the advisory object reports
+  `comments_url: null`; `GET
+  /repos/<owner>/<repo>/security-advisories/<GHSA>/comments` resolves to `200`
+  with an empty list `[]` (the collection route resolves, but there is nothing
+  to read); a `POST` to that same path returns `404`;
+  `https://github.com/advisories/...`-style UI shows the description, timeline
+  events and Request-CVE panel with no comment form; and the GraphQL
+  `SecurityAdvisory` type exposes no comment field while `Mutation` has no
+  advisory-comment mutation. Do not read the `200 []` as an invitation to post:
+  the `comments_url: null` on the object is the authority. Commentary exists
+  only while the advisory is in draft/triage, which is why the reporter thread
+  is visible there before publication. So record the escalation on the
+  release/announcement discussion for the advisory batch (a comment on it, via
+  GraphQL `addDiscussionComment`) and/or the fix PR thread; if the advisory is
+  still in draft/triage at +14d, record it on the advisory as well.
   Say which escalations were filed and which are still pending a human action,
   rather than implying all were sent.
 
@@ -368,8 +381,12 @@ An advisory is closed when all of the following are true and recorded:
   durable record, any that need a human action (the Snyk email, the GitHub
   Support form) are marked pending and handed to the operator, and a further
   follow-up is scheduled.
-- The reporter has been thanked on the advisory, told the fixed version and
-  the CVE id (once assigned), and asked to accept the credit.
+- The reporter has been thanked before publication, on the advisory thread while
+  it is still open, or afterwards in the durable record (the release/
+  announcement discussion or the fix PR thread), and told the fixed version and
+  the CVE id (once assigned), and asked to accept the credit. Thank them *before*
+  publishing when you can: publishing closes that thread, and the September 2026
+  thank-you had to be posted to the announcement discussion instead.
 - The GitHub Release notes and `SECURITY.md` "Past advisories" table list the
   GHSA, publication date, fixed version, and reporter.
 - The temporary worktree(s), isolated `HOME` directories and any throwaway
