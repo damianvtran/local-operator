@@ -59,16 +59,44 @@ fact:
 
 ## Measured baseline
 
-Recorded 2026-09-18 at `e3d75f35` (= the released `v0.59.2`), i.e. **before**
-this branch's fixes, with the battery of that day. Read it as the before-picture
-the branch is measured against; re-run the battery to move a number (see
-[Re-measuring](#re-measuring)).
+Both halves are the same instrument on the same probes; only the platform and
+the revision differ. The **before** readings were re-taken on `09178d07` with
+the current battery (a battery that grew probes between the two readings would
+make the comparison a lie), and the **after** ones are at the head of this
+branch.
 
-| Host | Python | Reading | What was not a `PASS` |
+| Host | Python | Before | After |
 | --- | --- | --- | --- |
-| Ubuntu 24.04, arm64, in a container | 3.12.3 | `PASS=16 WARN=2 SKIP=2 FAIL=2` | `FAIL wake.install` (no supervisor installer for this platform), `FAIL mobile.install` (needs macOS launchd — the portal could only run in the foreground), `WARN static.posix_imports` (two unguarded module-level `import fcntl`), `WARN wake.status`, `SKIP` ×2 (no tunnel configured) |
-| Linux Mint 22, amd64 under emulation | 3.12.3 | `PASS=16 WARN=2 SKIP=2 FAIL=2` | the identical set — the two distros agreed on every probe |
-| macOS, arm64 (the release platform, and the one that must not regress) | 3.13 | `tui.boot` and `tui.tty` `PASS`, settled frame written and rendered — a full battery run on a development host also read `PASS=21 SKIP=3 FAIL=2`, taken while this branch was mid-flight, so re-take it rather than quoting it | — |
+| Ubuntu 24.04, arm64, in a container | 3.12.3 | `PASS=19 WARN=2 SKIP=2 FAIL=3` | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
+| Linux Mint 22, amd64 under emulation | 3.12.3 | same set — the two distros agreed on every probe | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
+| macOS, arm64 (the release platform, and the one that must not regress) | 3.13.12 | `PASS=21 WARN=2 SKIP=3 FAIL=0` with the pre-fix count of 11 unguarded POSIX attributes | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
+| Windows Server 2025, AMD64, `windows-latest` runner | 3.12.10 | `PASS=13 WARN=1 SKIP=3 FAIL=9` | the `xplat-probe-windows` artifact on this PR — see below |
+
+What the before-readings were not passing:
+
+* **Ubuntu and Mint**: `static.posix_attributes` `FAIL` (15 unguarded POSIX
+  attributes); `static.posix_imports` `WARN` (two unguarded module-level
+  `import fcntl`); `wake.install` `FAIL` — `no supervisor installer for this
+  platform`, so a scheduled wake fired only if a session happened to be
+  reopened; `mobile.install` `FAIL` — `install needs macOS launchd`, so the
+  phone portal could only run in the foreground.
+* **Windows**: `import.package` `FAIL` (`496/502` — `os.register_at_fork`
+  unguarded in the evidence store, plus the modules that import it);
+  `secret.roundtrip` `FAIL` (`module 'socket' has no attribute 'AF_UNIX'`, which
+  killed the secret store outright); `serve.health`, `serve.double_bind` and
+  `mobile.daemon_serve` all `FAIL` with "no response", i.e. `lop serve` and the
+  portal never came up; `config.roundtrip` and `tui.boot` `FAIL` on the
+  probe's own cp1252 decoding rather than on the product.
+* **macOS** was already green on behaviour; what moved there was the static
+  reading, 11 unguarded POSIX attributes to 0.
+
+The two `WARN`s that remain on every platform are honest and deliberate:
+`static.posix_attributes` reports 0 **fatal** and 16 *leads* (uses it cannot
+prove are guarded — a lead is for reading, not for acting on), and `wake.status`
+says it cannot be verified for an isolated store. The three `SKIP`s are: no
+tunnel configured on the host (×2), and `mobile.install`, which on macOS is not
+run at all because the installer writes to the login keychain an isolated
+`HOME` does not have, and on Linux refuses legibly for a missing `Node >= 22`.
 
 Where the readings come from:
 
@@ -79,10 +107,21 @@ Where the readings come from:
   recipe in `AGENTS.md` renders and looks at), because a `boot` that "passed"
   without a look at the frame is exactly the claim this document refuses to
   make;
-* the Windows leg has **no** reading from this workspace. It comes from the
-  `xplat-probe-windows` job in `.github/workflows/ci.yml`, which runs the same
-  battery on `windows-latest`, and its artifact is the only Windows evidence
-  there is. Nothing in this document should be read as a Windows measurement.
+* the Windows row comes from the `xplat-probe-windows` job in
+  `.github/workflows/ci.yml`, which runs the same battery on `windows-latest`
+  with PowerShell steps; its artifact is the only Windows evidence there is.
+  **Nothing in the matrix above should be read as a Windows measurement** —
+  every Windows cell is `contract` or `gap` for exactly that reason.
+
+A note on the Linux Mint row: the Mint image is `amd64`-only and this host is
+`arm64`, so its userland runs under emulation. That is fine for the things the
+battery measures there (imports, paths, config, the CLI, the locks, the
+supervisor's *decision*) and useless for systemd — every unit on that image,
+including a control `/bin/echo` unit, exits 255 under emulation. So Mint's
+service-manager behaviour is **not** covered by its row; the systemd arm was
+proved on real systemd 255 in an Ubuntu container instead, by installing the
+unit and observing `systemctl --user` report both the service and its timer
+enabled and active.
 
 ## What this document does not claim
 
