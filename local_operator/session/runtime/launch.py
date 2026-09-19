@@ -514,6 +514,32 @@ def _spawn_failure_reason(capture: Path) -> tuple[str, str]:
     return (lines[-1] if lines else ""), ""
 
 
+class _OwnerDraining(Exception):
+    """The target runtime has committed to leaving; a successor is owed.
+
+    Raised by :func:`_deliver` when the record it was handed carries a drain's
+    own phrase (``types.LEAVING_FOR_BUILD`` / ``LEAVING_ON_SIGNAL`` — written by
+    ``server.note_leaving`` in the same call that announces the ``retiring``
+    frame, so this reads state the runtime already publishes rather than a new
+    signal).
+
+    INTERNAL TO THIS MODULE, and never an error a caller sees:
+    :func:`engage_runtime` catches it and falls through to the arbitration rungs
+    below, which is where a successor comes from. Why a raise rather than a
+    returned sentence: the only errands that carry it (``WarmErrand``,
+    ``WakeErrand``) deliver nothing, because reaching a live runtime IS their
+    completed errand — so returning the drain as a ``detail`` would report a
+    COMPLETED handover for a runtime that will never run the work.
+
+    Measured cost of the lie this replaces, on the operator's host: a live,
+    heartbeating session (pid 70950, 0.59.7) latched the stale-build drain at
+    20:32:29 and refused every prompt for 1 h 40 m, while every engage that
+    followed — including the TUI's own warm re-bind on the ``retiring`` frame —
+    was answered ``runtime ready``. The bind reported success, set
+    ``_warm_engage_started``, and nothing ever started a successor.
+    """
+
+
 async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, bool]:
     """Hand one errand to a live runtime. Returns ``(detail, duplicate)``."""
     from local_operator.mobile.peer_client import send_peer_message
@@ -523,6 +549,14 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         # cost early, and a wake is delivered by the session's own scheduler
         # the moment it loads (see WakeErrand). Reaching a live runtime IS the
         # completed errand for both.
+        #
+        # AND THAT IS WHY A LEAVING RUNTIME CANNOT ANSWER FOR EITHER. The record
+        # is still published and the heartbeat is still fresh for the whole
+        # drain, so without this term the warm bind a viewer performs the moment
+        # it sees ``retiring`` is told the runtime is ready and stops looking.
+        leaving = str(getattr(record, "leaving", "") or "")
+        if leaving:
+            raise _OwnerDraining(leaving)
         return "runtime ready", False
     if isinstance(work, PeerMessageErrand):
         detail = await send_peer_message(
@@ -703,6 +737,20 @@ async def engage_runtime(
                     detail=detail,
                     spawned=spawned,
                     duplicate=duplicate,
+                )
+            except _OwnerDraining as exc:
+                # THE DRAIN LATCHED BETWEEN THE SCAN AND THE DELIVERY. The
+                # record was ordinary when it was read and is leaving now, which
+                # is a window this loop cannot close by reading harder — the
+                # latch is a client-side event (``server.note_leaving``) and the
+                # engage is in another process. It is not a failure and not a
+                # retry: the errand has no completed form against this runtime,
+                # so the loop falls through to the same rungs it uses when a
+                # record is draining at scan time — the predecessor still holds
+                # the transcript claim, so the pass WAITS, and the spawn happens
+                # the moment that claim is released (``_lease_holder``, below).
+                logger.debug(
+                    "engage: %s is leaving (%s); a successor is owed", session_id, exc
                 )
             except (ConnectionError, TimeoutError) as exc:
                 # The runtime died between the scan and the dial. Re-loop: the
