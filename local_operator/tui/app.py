@@ -393,6 +393,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
         SessionScreen,
     )
     from local_operator.variables import CredentialStoreFailure
+    from local_operator.web_search.models import ProviderStatus
 
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
@@ -33387,11 +33388,10 @@ class OperatorApp(App[None]):
             SearchStrategy,
         )
         from local_operator.web_search.providers import (
-            chain_bands_label,
-            provider_landing_label,
-            provider_ready_label,
-            provider_state_label,
+            chain_label,
+            provider_landing_line,
             provider_statuses,
+            state_legend,
         )
         from local_operator.web_search.service import (
             load_search_settings,
@@ -33411,26 +33411,34 @@ class OperatorApp(App[None]):
                 labels = {status.id: status.label for status in statuses}
                 strategy = settings.strategy.replace("_", " ").title()
                 order = " → ".join(labels[value] for value in settings.providers)
-                items: list[tuple[str, str]] = [
+                items: list[tuple[str, str | Text]] = [
                     (
                         "Web search",
                         f"{'On' if settings.enabled else 'Off'} · {strategy} · "
                         f"{order or 'No providers'}",
                     ),
-                    # `order:` is the priority prefix, not the whole chain. Without
-                    # this row the header would keep claiming the stored list is
-                    # everything a search can reach -- the exact claim the
-                    # operator's bug report was about.
-                    ("auto", chain_bands_label(statuses)),
+                    # `order:` above is the stored prefix, which on an install that
+                    # LISTS a paid provider cannot show where that leg lands. This
+                    # row is the chain as it will be walked, every leg in try order,
+                    # the paid ones marked. It replaced a summary that named only
+                    # the auto-joined bands and therefore printed a paid band of
+                    # `(none)` while a model-turn leg sat in the chain (round-1 D1).
+                    ("chain", chain_label(statuses)),
+                    # Same header fact as the CLI's, because the two surfaces
+                    # disagreed about the one thing an exclusion is FOR: the CLI
+                    # said `excluded: exa` and this listing said nothing at all
+                    # (round-1 U6).
+                    (
+                        "excluded",
+                        (
+                            ", ".join(settings.excluded_providers)
+                            if settings.excluded_providers
+                            else "none"
+                        ),
+                    ),
                 ]
                 for status in statuses:
-                    items.append(
-                        (
-                            status.label,
-                            f"{provider_state_label(status)} · "
-                            f"{provider_ready_label(status)} · {status.detail}",
-                        )
-                    )
+                    items.append((status.label, _search_status_detail(status)))
                 items.extend(
                     [
                         ("toggle", "/search on|off · /search enable|disable <provider>"),
@@ -33450,6 +33458,13 @@ class OperatorApp(App[None]):
                             "SearXNG (shell)",
                             "local-operator search setup searxng --endpoint <url>",
                         ),
+                        # The legend: every state word this listing prints, in one
+                        # place, from the same table that explains them to `search
+                        # enable`. Printed here because the reader who has just
+                        # logged in reads this surface first and would otherwise
+                        # have to infer what `auto paid` means from the word
+                        # "auto" (round-1 U5, D5).
+                        ("states", state_legend().removeprefix("States: ")),
                     ]
                 )
                 self._append_block(RichBlock(_tree_listing(items, "web search")))
@@ -33478,12 +33493,13 @@ class OperatorApp(App[None]):
                         f"{provider} excluded; it will not be used by any search until "
                         f"you run /search enable {provider}"
                     )
-                elif provider in settings.providers:
-                    notice(f"{provider} enabled (in your priority order); applies now")
                 else:
-                    # Same vocabulary AND the same meanings as `search list`: `enable`
-                    # no longer appends to the priority list, so the landing spot is
-                    # the band the resolver puts it in.
+                    # ONE sentence for both surfaces: `provider_landing_line` is
+                    # what the CLI prints too, so the same action cannot be
+                    # described two ways. It says where the provider will serve
+                    # from (a listed provider does not go to the front any more),
+                    # or -- when it cannot serve yet -- names the command that
+                    # fixes that instead of claiming it is both enabled and off.
                     row = next(
                         (
                             status
@@ -33492,8 +33508,12 @@ class OperatorApp(App[None]):
                         ),
                         None,
                     )
-                    landing = provider_landing_label(row) if row is not None else "enabled"
-                    notice(f"{provider} enabled ({landing}); applies to the next search")
+                    landing = (
+                        provider_landing_line(provider, row)
+                        if row is not None
+                        else f"{provider} enabled"
+                    )
+                    notice(f"{landing}; applies now")
                 return
             if command == "balance" and len(words) == 2:
                 strategy = words[1].lower()
@@ -33513,10 +33533,13 @@ class OperatorApp(App[None]):
                     cast(SearchProviderId, word) for word in provider_words
                 ]
                 set_provider_order(manager, providers)
+                # Word-for-word the CLI's sentence: "tried first" is the word that
+                # says the list is a priority PREFIX and not the whole chain, and
+                # dropping it here was the drift (round-1 U6).
                 notice(
                     "search order: "
                     + ", ".join(providers)
-                    + " (any exclusion named here was cleared)"
+                    + " (tried first; any exclusion named here was cleared)"
                 )
                 return
             if command == "setup" and len(words) == 2:
@@ -33533,7 +33556,17 @@ class OperatorApp(App[None]):
                     notice(
                         "run in a shell: local-operator search setup searxng " "--endpoint <url>"
                     )
-                elif provider in ("brave", "exa", "serpapi", "parallel"):
+                elif provider == "deepseek":
+                    # DeepSeek joining the chain automatically is what this change
+                    # is FOR, so this branch cannot be the DuckDuckGo fallback: it
+                    # has to say that a login is the whole setup (round-1 N1).
+                    notice(
+                        "DeepSeek search reuses the DeepSeek model key (one model "
+                        "turn per search): run in a shell `local-operator login "
+                        "deepseek`; it joins the chain automatically in the paid "
+                        "band, after every free provider"
+                    )
+                elif provider in ("brave", "exa", "serpapi", "parallel", "perplexity"):
                     if provider in ("exa", "parallel"):
                         # Their keyless MCP tier is the default, so `--api-key` is an
                         # upgrade rather than a requirement -- saying otherwise would
@@ -42758,7 +42791,7 @@ class _TreeRow(Text):
         self,
         branch: str,
         name: str,
-        detail: str,
+        detail: str | Text,
         *,
         dim: Style,
         name_style: Style,
@@ -42767,13 +42800,36 @@ class _TreeRow(Text):
         super().__init__()
         self._branch = branch
         self._name = name
-        self._detail = detail
+        # A ``Text`` detail is accepted so a row can style PART of its detail --
+        # `/search` prints its state word in its own ink (round-1 D5) -- while
+        # every other call site keeps passing plain strings. ``_detail_plain``
+        # keeps the inherited ``.plain`` readers (copy path, transcript walkers,
+        # the test helpers) working either way.
+        self._detail: str | Text = detail
         self._dim = dim
         self._name_style = name_style
         self._detail_style = detail_style
         self.append_text(self._head())
-        if detail:
-            self.append("  " + detail, style=detail_style)
+        if self._detail_plain():
+            self.append("  ")
+            if isinstance(detail, Text):
+                self.append_text(detail)
+            else:
+                self.append(detail, style=detail_style)
+
+    def _detail_plain(self) -> str:
+        """The detail as plain text, whichever form the row was built with."""
+        return self._detail.plain if isinstance(self._detail, Text) else self._detail
+
+    def _detail_text(self) -> Text:
+        """The detail as a styled ``Text``: a ``Text`` passes through, a ``str``
+        takes the row's detail style."""
+        if isinstance(self._detail, Text):
+            text = self._detail.copy()
+            if text.style is None:
+                text.style = self._detail_style
+            return text
+        return Text(self._detail, style=self._detail_style)
 
     def _head(self) -> Text:
         """The row up to the detail column — the glyph branch and the name.
@@ -42789,7 +42845,7 @@ class _TreeRow(Text):
 
     def __rich_console__(self, console: Any, options: Any) -> Any:
         row = self._head()
-        if not self._detail:
+        if not self._detail_plain():
             yield row
             return
         # The detail's own column: the glyph branch, the name, and the two
@@ -42797,7 +42853,7 @@ class _TreeRow(Text):
         column = cell_len(self._branch) + cell_len(self._name)
         room = max(1, options.max_width - column - 2)
         # ``Text.wrap`` keeps the spans and folds on words.
-        wrapped = Text(self._detail, style=self._detail_style).wrap(console, room)
+        wrapped = self._detail_text().wrap(console, room)
         for index, line in enumerate(wrapped):
             if index:
                 row.append("\n")
@@ -43055,8 +43111,51 @@ def _receipts_failure(root: Path) -> StoreFailure | None:
     return None
 
 
+#: The ink each `/search` state word carries (round-1 D5). Every word used to be
+#: painted with the same dim prose tint, so the one that says a leg spends money --
+#: the design's own mitigation for surprise spend -- was indistinguishable from the
+#: sentence describing the provider. Semantic tokens, not literal hex: the two
+#: spending words take `warning`, the two out-of-play words take the dimmest ramp
+#: step, and the free in-play words stay one step above the prose so a reader can
+#: see there IS a state word.
+#:
+#: Keys are the shared vocabulary in `providers.py`; the coverage test pins that
+#: every word in `STATE_MEANINGS` appears here, so a new state cannot render
+#: unstyled by omission.
+_SEARCH_STATE_TOKENS: dict[str, str] = {
+    "enabled": "muted",
+    "enabled (paid)": "warning",
+    "auto free": "muted",
+    "auto best-effort": "muted",
+    "auto paid": "warning",
+    "excluded": "faint",
+    "needs setup": "faint",
+}
+
+
+def _search_status_detail(status: "ProviderStatus") -> Text:
+    """One `/search` provider row: the state word in its own ink, then the prose.
+
+    Composed here rather than inline so the ink table above and the row cannot
+    drift, and returned as a `Text` so the state word keeps a span that the row's
+    single dim detail style would otherwise flatten. No readiness column: with the
+    resolver auto-joining every usable provider, "cannot serve" is the only reason
+    a provider is out of the chain, and the state word says it (round-1 D6).
+    """
+    # Function-local like every other provider touch in this module: the app is the
+    # TUI's entry point and the provider graph stays off its import path.
+    from local_operator.web_search.providers import provider_state_label
+
+    state = provider_state_label(status)
+    detail = Text()
+    detail.append(state, style=Style(color=theme_mod.semantic_color(_SEARCH_STATE_TOKENS[state])))
+    detail.append(" · ", style=Style(color=theme_mod.semantic_color("dim")))
+    detail.append(status.detail, style=Style(color=theme_mod.semantic_color("dim")))
+    return detail
+
+
 def _tree_listing(
-    items: list[tuple[str, str]], caption: str, *, detail_token: str = "dim"
+    items: Sequence[tuple[str, str | Text]], caption: str, *, detail_token: str = "dim"
 ) -> Group:
     """Tree-glyph section: ├─ / └─, name in the string tint, detail dim (D4).
 

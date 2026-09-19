@@ -71,41 +71,70 @@ def _reset_rotation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_round_robin_spreads_the_first_attempt_across_the_free_band(
+async def test_the_first_attempt_actually_rotates_across_the_free_pool(
     tmp_path, monkeypatch
 ) -> None:
-    """The listed prefix is tried first on EVERY call; the free band rotates behind it.
+    """`round_robin` must spread the first attempt, not just the tail.
 
-    Rotation no longer reorders the priority prefix: that list is the user's
-    stated priority, and rotating it would make `search order` a suggestion. What
-    spreads is the auto-joined credential-free band (and the hard invariant keeps
-    the metered band out of it entirely).
+    The strategy's whole purpose is that a rate-limited free tier is not the same
+    one on every search, and a chain whose prefix is tried first on every call
+    withdrew that for exactly the shape most installs run (round-1 M1/Q1/D2/U1).
     """
 
     async def duck(*_args):
         raise RuntimeError("challenged")
 
     async def exa(*_args):
-        return _response("exa")
+        raise RuntimeError("challenged")
 
     async def parallel(*_args):
-        return _response("parallel")
+        raise RuntimeError("challenged")
+
+    async def tavily(*_args):
+        raise RuntimeError("challenged")
 
     _modes(
         monkeypatch,
-        {"duckduckgo": "credential-free", "exa": "keyless-mcp", "parallel": "keyless-mcp"},
+        {
+            "duckduckgo": "credential-free",
+            "tavily": "keyless",
+            "exa": "keyless-mcp",
+            "parallel": "keyless-mcp",
+        },
     )
     monkeypatch.setitem(PROVIDERS, "duckduckgo", replace(PROVIDERS["duckduckgo"], search=duck))
+    monkeypatch.setitem(PROVIDERS, "tavily", replace(PROVIDERS["tavily"], search=tavily))
     monkeypatch.setitem(PROVIDERS, "exa", replace(PROVIDERS["exa"], search=exa))
     monkeypatch.setitem(PROVIDERS, "parallel", replace(PROVIDERS["parallel"], search=parallel))
     service = WebSearchService(
-        WebSearchSettings(providers=["duckduckgo"]),
+        WebSearchSettings(providers=["duckduckgo", "tavily"]),
         _credentials(tmp_path),
     )
 
-    served = [(await service.search("query")).provider for _ in range(4)]
+    tried: list[list[SearchProviderId]] = []
+    for _ in range(6):
+        chain = service.candidates()
+        assert chain == [*chain[:4], *chain[4:]]
+        tried.append(chain[:4])
 
-    assert served == ["exa", "parallel", "exa", "parallel"]
+    # The pool is the listed free legs in listed order followed by the auto-joined
+    # free band, and the cycle walks it one step per call -- both halves asserted,
+    # because "the set of first attempts" alone would pass on a pool that merely
+    # shuffled.
+    assert tried == [
+        ["duckduckgo", "tavily", "exa", "parallel"],
+        ["tavily", "exa", "parallel", "duckduckgo"],
+        ["exa", "parallel", "duckduckgo", "tavily"],
+        ["parallel", "duckduckgo", "tavily", "exa"],
+        ["duckduckgo", "tavily", "exa", "parallel"],
+        ["tavily", "exa", "parallel", "duckduckgo"],
+    ]
+
+    # The two original aims of the test survive as the same assertion: `duckduckgo`
+    # is no longer the first attempt on every call, and `tavily` -- the second
+    # listed leg -- now takes it too.
+    first_attempts = {chain[0] for chain in tried}
+    assert first_attempts == {"duckduckgo", "tavily", "exa", "parallel"}
 
 
 @pytest.mark.asyncio
@@ -174,13 +203,22 @@ async def test_unconfigured_key_provider_is_skipped(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_forced_provider_must_be_in_the_chain(tmp_path) -> None:
+async def test_forced_provider_must_be_in_the_chain(tmp_path, monkeypatch) -> None:
+    """The refusal names the command that can actually fix THIS reason.
+
+    `enable` no longer appends to the chain, so the old one-sentence advice sent a
+    user with no credential round a loop that could not end (round-1 U3).
+    """
+    _modes(monkeypatch, {"duckduckgo": "credential-free"})
     service = WebSearchService(
-        _chain("duckduckgo"),
+        WebSearchSettings(providers=["duckduckgo"]),
         _credentials(tmp_path),
     )
 
-    with pytest.raises(RuntimeError, match="is not in this session's provider chain"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"cannot serve yet on this install.*search setup brave.*BRAVE_API_KEY",
+    ):
         await service.search("query", forced_provider="brave")
 
 
@@ -312,16 +350,43 @@ def test_metered_tail_is_never_rotated(tmp_path, monkeypatch) -> None:
         assert chain.index("perplexity") > chain.index("exa")
 
 
-def test_free_pool_rotates_across_the_prefix_and_the_auto_free_band(tmp_path, monkeypatch) -> None:
+def test_a_listed_metered_provider_is_tried_after_every_free_leg(tmp_path, monkeypatch) -> None:
+    """The operator's own shape, which is what round-1 M2/Q2/D1/U2 measured.
+
+    ``providers: [duckduckgo, tavily, perplexity, deepseek]`` with a live DeepSeek
+    login used to resolve to a chain whose 4th leg was a MODEL TURN, with the two
+    free keyless legs behind it -- so the failure path paid while free providers
+    were reachable. The strengthened rule holds the listed paid leg back, and the
+    free legs still come first in the order they were listed.
+    """
     _modes(
         monkeypatch,
-        {"duckduckgo": "credential-free", "exa": "keyless-mcp", "parallel": "keyless-mcp"},
+        {
+            "duckduckgo": "credential-free",
+            "tavily": "keyless",
+            "perplexity": "anonymous",
+            "exa": "keyless-mcp",
+            "parallel": "keyless-mcp",
+            "deepseek": "login",
+        },
     )
-    service = WebSearchService(WebSearchSettings(providers=["duckduckgo"]), _credentials(tmp_path))
+    service = WebSearchService(
+        WebSearchSettings(providers=["duckduckgo", "tavily", "perplexity", "deepseek"]),
+        _credentials(tmp_path),
+    )
 
-    # The prefix leg is tried first on every call; the free band rotates behind it.
-    assert {service.candidates()[0] for _ in range(6)} == {"duckduckgo"}
-    assert {service.candidates()[1] for _ in range(6)} == {"exa", "parallel"}
+    assert service.resolve() == [
+        "duckduckgo",
+        "tavily",
+        "perplexity",
+        "exa",
+        "parallel",
+        "deepseek",
+    ]
+    for _ in range(6):
+        chain = service.candidates()
+        assert chain[-1] == "deepseek"
+        assert set(chain[:-1]) == {"duckduckgo", "tavily", "perplexity", "exa", "parallel"}
 
 
 def test_ordered_strategy_walks_the_bands_in_declaration_order(tmp_path, monkeypatch) -> None:
@@ -358,19 +423,44 @@ def test_best_effort_band_is_never_rotated(tmp_path, monkeypatch) -> None:
     assert positions == {2}
 
 
-def test_a_keyed_provider_is_metered_unless_the_user_lists_it(tmp_path, monkeypatch) -> None:
-    """A keyed transport is a spend decision, so it cannot rotate into the free pool."""
-    _modes(monkeypatch, {"duckduckgo": "credential-free", "exa": "api-key"})
+def test_a_listed_keyed_provider_is_held_back_to_the_paid_band(tmp_path, monkeypatch) -> None:
+    """A keyed transport is a spend decision, so listing it cannot put it first.
+
+    Listing stays authoritative for ORDER, but only within a band: a listed paid
+    leg leads the paid band instead of jumping the free ones (round-1 M2/Q2/D1/U2).
+    """
+    _modes(monkeypatch, {"duckduckgo": "credential-free", "tavily": "keyless", "exa": "api-key"})
 
     automatic = WebSearchService(
         WebSearchSettings(providers=["duckduckgo"]), _credentials(tmp_path)
     )
-    assert automatic.resolve() == ["duckduckgo", "exa"]
+    assert automatic.resolve() == ["duckduckgo", "tavily", "exa"]
 
     listed = WebSearchService(
         WebSearchSettings(providers=["exa", "duckduckgo"]), _credentials(tmp_path)
     )
-    assert listed.resolve() == ["exa", "duckduckgo"]
+    # `exa` is listed FIRST and still resolves last: the keyed leg is held back to
+    # the paid band, behind `tavily` which joined automatically and is free.
+    assert listed.resolve() == ["duckduckgo", "tavily", "exa"]
+
+    # With free legs behind it, the paid leg still goes last -- and it keeps its
+    # listing order relative to the OTHER paid legs, which is what "listing is
+    # authoritative within a band" means.
+    _modes(
+        monkeypatch,
+        {
+            "duckduckgo": "credential-free",
+            "tavily": "keyless",
+            "exa": "api-key",
+            "serpapi": "api-key",
+        },
+    )
+    mixed = WebSearchService(
+        WebSearchSettings(providers=["serpapi", "exa", "tavily", "duckduckgo"]),
+        _credentials(tmp_path),
+    )
+    assert mixed.resolve() == ["tavily", "duckduckgo", "serpapi", "exa"]
+    assert mixed.candidates() == ["tavily", "duckduckgo", "serpapi", "exa"]
 
 
 def test_forced_provider_is_refused_when_excluded(tmp_path, monkeypatch) -> None:
@@ -381,7 +471,10 @@ def test_forced_provider_is_refused_when_excluded(tmp_path, monkeypatch) -> None
     )
     service = WebSearchService(settings, _credentials(tmp_path))
 
-    with pytest.raises(RuntimeError, match="is not in this session's provider chain"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"is excluded, so it will not be used by any search.*search enable deepseek",
+    ):
         service.candidates(forced_provider="deepseek")
 
 

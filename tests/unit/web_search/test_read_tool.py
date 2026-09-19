@@ -10,6 +10,7 @@ from local_operator.harness.types import AbortSignal, TextContent, ToolContext
 from local_operator.web_search import read_tool
 from local_operator.web_search.cost import SEARCH_SPEND
 from local_operator.web_search.models import (
+    PROVIDER_IDS,
     SearchResponse,
     SearchSource,
     SearchUsage,
@@ -217,9 +218,32 @@ async def test_read_refuses_actionably_when_no_pages_were_captured(monkeypatch) 
     text = _text(result)
     assert "web_fetch" in text
     assert "DeepSeek" in text
-    # The new failure mode: a logged-in DeepSeek that the user EXCLUDED produces
-    # the same refusal, so the message has to name the way back.
+    # No DeepSeek credential in this environment, so the refusal names the command
+    # that fixes THAT: "if you excluded it, run search enable" was wrong for the
+    # common case and could not restore service (round-1 U3).
+    assert "local-operator login deepseek" in text
+    assert "search enable deepseek" not in text
+
+
+@pytest.mark.asyncio
+async def test_read_refusal_names_the_way_back_when_deepseek_is_excluded(monkeypatch) -> None:
+    """The excluded case keeps its own sentence: it is the one `enable` fixes."""
+    monkeypatch.setattr(
+        read_tool,
+        "load_read_settings",
+        lambda _manager: WebSearchSettings(
+            providers=["duckduckgo"],
+            excluded_providers=[value for value in PROVIDER_IDS if value != "duckduckgo"],
+        ),
+    )
+    result = await read_tool.execute_web_read(
+        "call-2", {"question": "What is the pricing?"}, None, None, _context()
+    )
+
+    assert result.is_error is True
+    text = _text(result)
     assert "local-operator search enable deepseek" in text
+    assert "local-operator login deepseek" not in text
 
 
 @pytest.mark.asyncio

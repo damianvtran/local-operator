@@ -1028,6 +1028,55 @@ async def test_a_served_shopping_answer_survives_the_chain(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_multi_leg_failure_leads_with_the_actionable_sentence(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-1 D4/U7: the cropped card showed the leg that could never run.
+
+    At six legs the whole-chain summary was ~1200 cells while the collapsed tool
+    card paints its first ~34 -- which used to be "All configured web search
+    providers failed: brave: not configured", the one leg that was never going to
+    serve. The message now leads with the last leg's own sentence (the paid
+    backstop on a free-first chain), then names the count and every leg tried, and
+    no longer calls auto-joined providers "configured".
+    """
+    from local_operator.web_search import providers as module
+    from local_operator.web_search.service import WebSearchService
+
+    monkeypatch.setattr(
+        module,
+        "provider_auth_mode",
+        lambda provider_id, _credentials, _settings: {
+            "duckduckgo": "credential-free",
+            "tavily": "keyless",
+            "exa": "keyless-mcp",
+            "deepseek": "login",
+        }.get(provider_id, ""),
+    )
+    service = WebSearchService(
+        WebSearchSettings(providers=["duckduckgo", "deepseek"]), _credentials(tmp_path)
+    )
+
+    async def walled(*_args: object, **_kwargs: object):
+        raise RuntimeError("Fetch a page directly, or set DEEPSEEK_API_KEY: refused")
+
+    for provider_id in ("duckduckgo", "tavily", "exa", "deepseek"):
+        monkeypatch.setitem(PROVIDERS, provider_id, SimpleNamespace(search=walled))
+
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("query")
+
+    message = str(raised.value)
+    assert message.startswith("Web search failed: Fetch a page directly")
+    assert "all 4 providers in the chain failed" in message
+    # Rotation decides the order the legs were TRIED in, so the list is asserted
+    # as a set: the message names every leg and no other.
+    listed = message.split("chain failed: ")[1].rstrip(")")
+    assert set(listed.split(", ")) == {"duckduckgo", "tavily", "exa", "deepseek"}
+    assert "configured" not in message
+
+
+@pytest.mark.asyncio
 async def test_a_forced_provider_failure_names_only_that_provider(tmp_path, monkeypatch) -> None:
     """Round-1 design review D2: the message described a chain that never ran.
 
@@ -1688,8 +1737,6 @@ def test_provider_auth_mode_truth_table_covers_the_whole_catalogue(tmp_path) -> 
 
 def test_provider_statuses_reports_the_resolved_chain_not_the_stored_list(tmp_path) -> None:
     from local_operator.web_search.providers import (
-        chain_bands_label,
-        provider_ready_label,
         provider_state_label,
         provider_statuses,
     )
@@ -1705,31 +1752,66 @@ def test_provider_statuses_reports_the_resolved_chain_not_the_stored_list(tmp_pa
     assert statuses["exa"].tier == "rotate"
     assert statuses["exa"].mode == "keyless-mcp"
     assert provider_state_label(statuses["exa"]) == "auto free"
-    assert provider_ready_label(statuses["exa"]) == "ready"
 
     assert provider_state_label(statuses["duckduckgo"]) == "enabled"
     assert provider_state_label(statuses["tavily"]) == "excluded"
     assert statuses["tavily"].enabled is False
-    assert provider_state_label(statuses["brave"]) == "off"
-    assert provider_ready_label(statuses["brave"]) == "setup needed"
+    # `off` became `needs setup`: it read as the master switch on the same screen
+    # and repeated the readiness column word for word (round-1 D6).
+    assert provider_state_label(statuses["brave"]) == "needs setup"
     assert provider_state_label(statuses["deepseek"]) == "auto paid"
 
-    # The auto line names ONLY the auto-joined providers, and prints `(none)` for
-    # an empty band so a reader can tell it from a surface that forgot to print.
-    label = chain_bands_label(list(statuses.values()))
-    assert label.startswith("free: Exa")
-    assert "best-effort: (none)" in label or "best-effort: Perplexity" in label
+
+def test_the_status_rows_follow_the_chain_and_the_paid_leg_is_never_plain_enabled(
+    tmp_path,
+) -> None:
+    """Rounds 1's D1 and U2: `paid: (none)` beside a metered leg, and a plain `enabled`.
+
+    The listing has to corroborate the chain line above it, and an install that
+    LISTS a paid provider must not read as if nothing paid were involved.
+    """
+    from local_operator.web_search.providers import (
+        chain_label,
+        provider_state_label,
+        provider_statuses,
+        resolve_providers,
+    )
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    settings = WebSearchSettings(providers=["duckduckgo", "perplexity", "deepseek"])
+    chain = resolve_providers(settings, credentials)
+    statuses = provider_statuses(settings, credentials)
+    order = [status.id for status in statuses]
+
+    # DeepSeek is listed THIRD and resolves LAST: the free legs come first, and
+    # the listed paid leg leads only the paid band.
+    assert chain == ["duckduckgo", "perplexity", "tavily", "exa", "parallel", "deepseek"]
+    assert order[: len(chain)] == chain, "the rows follow the chain, not the catalogue"
+    # DeepSeek is STILL listed, and its state word says both facts.
+    assert statuses[order.index("deepseek")].listed is True
+    assert provider_state_label(statuses[order.index("deepseek")]) == "enabled (paid)"
+
+    # The chain line spans the whole chain and marks the paid leg, so the summary
+    # cannot print `(none)` while a metered leg is in the chain.
+    label = chain_label(statuses)
+    assert label.endswith("DeepSeek (paid)")
+    assert "DuckDuckGo" in label and "Exa" in label
 
 
 def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
     """`search enable` and `search list` must not describe the same provider differently.
 
-    Both read `provider_state_label` + `provider_landing_label`, so a change to the
-    vocabulary moves both surfaces; this pins the pairing rather than the prose.
+    Both read `provider_state_label`, whose meanings live in `STATE_MEANINGS`, so a
+    change to the vocabulary moves both surfaces; this pins the pairing rather than
+    the prose.
     """
     from local_operator.web_search.providers import (
-        provider_landing_label,
+        STATE_MEANINGS,
+        provider_landing_line,
+        provider_state_label,
         provider_statuses,
+        state_legend,
     )
 
     credentials = _credentials(tmp_path)
@@ -1737,11 +1819,25 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
     settings = WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"])
     statuses = {status.id: status for status in provider_statuses(settings, credentials)}
 
-    assert provider_landing_label(statuses["deepseek"]) == (
-        "auto paid; tried after the free providers, never before a free leg"
+    # No stutter for a listed leg (`deepseek enabled (enabled; …)` was round-1 D3),
+    # and a landing sentence for every state the vocabulary can produce.
+    assert provider_landing_line("duckduckgo", statuses["duckduckgo"]) == (
+        "duckduckgo enabled (in your priority order)"
     )
-    assert provider_landing_label(statuses["duckduckgo"]) == "enabled; in your priority order"
-    assert provider_landing_label(statuses["tavily"]) == (
-        "excluded; never used, whatever else is configured"
+    assert provider_landing_line("deepseek", statuses["deepseek"]) == (
+        "deepseek enabled (auto paid; tried after the free providers, never before a free leg)"
     )
-    assert provider_landing_label(statuses["brave"]) == "off; not usable yet"
+    # A provider that cannot serve is told the command that fixes it, instead of
+    # "enabled (off; not usable yet)" (round-1 U4).
+    assert provider_landing_line("brave", statuses["brave"]) == (
+        "brave is allowed, but no search can use it yet: run "
+        "`local-operator search setup brave` (BRAVE_API_KEY)"
+    )
+
+    # The legend is the vocabulary, so no state word can be printed without one.
+    legend = state_legend()
+    for state in STATE_MEANINGS:
+        assert state in legend
+    assert set(STATE_MEANINGS) == {provider_state_label(status) for status in statuses.values()} | {
+        "enabled (paid)"
+    }
