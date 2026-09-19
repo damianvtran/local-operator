@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import json
 import os
 import re
@@ -1140,6 +1141,139 @@ def _name_target(
     return tuple(sorted(resolved))
 
 
+@dataclass(frozen=True)
+class _Scan:
+    """A directory scan: the files a file READS with no name to point at.
+
+    `(ROOT / "scripts").glob("*.py")` reads every Python file in `scripts/` and
+    names none of them, so an edge built only from names cannot see it — measured
+    on this tree: `tests/unit/tui/test_visual_gallery.py` reads all 197 covered
+    `scripts/*.py` that way and asserts an ordering invariant on each (#1322 QA
+    round 2, Q-1). One covered `scripts/**` file changed by a token and reached
+    only through that scan selected NOTHING, so the local gate went green while
+    CI's `test` job was red: the round-1 blocker shape, by a third road.
+
+    `hints` are the string constants in the scanned-directory EXPRESSION
+    (`"scripts"` above), tried as repository-relative directories by the resolver;
+    `from_file` records a `__file__`-relative receiver, whose directory is the
+    scanning file's own.
+    """
+
+    hints: tuple[str, ...]
+    from_file: bool
+    pattern: str
+    recursive: bool
+    lineno: int
+
+
+#: Directory-scan APIs: name -> (takes a glob pattern, walks a subtree).
+_SCAN_APIS: Mapping[str, tuple[bool, bool]] = {
+    "glob": (True, False),
+    "rglob": (True, True),
+    "iterdir": (False, False),
+    "listdir": (False, False),
+    "scandir": (False, False),
+    "walk": (False, True),
+}
+
+
+def _directory_scan(node: ast.Call) -> _Scan | None:
+    """A directory scan this call performs, or None when it is not one.
+
+    Only the shape is read here; whether the directory is a COVERED tree is
+    decided at resolve time against the real filesystem, which is also where an
+    unresolvable scan becomes a printed limit rather than a guess.
+    """
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        name = func.attr
+        receiver: ast.expr | None = func.value
+    elif isinstance(func, ast.Name):
+        name = func.id
+        receiver = node.args[0] if node.args else None
+    else:
+        return None
+    if name not in _SCAN_APIS or receiver is None:
+        return None
+    takes_pattern, walks = _SCAN_APIS[name]
+    pattern = "*"
+    if takes_pattern and node.args:
+        first = node.args[0]
+        # A computed pattern is not a reason to skip the scan: `*` over-approximates
+        # what it can read, which is the fail-closed direction.
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            pattern = first.value
+    hints = tuple(
+        sub.value
+        for sub in ast.walk(receiver)
+        if isinstance(sub, ast.Constant)
+        and isinstance(sub.value, str)
+        and not sub.value.endswith(".py")
+    )[:4]
+    from_file = any(
+        isinstance(sub, ast.Name) and sub.id == "__file__" for sub in ast.walk(receiver)
+    )
+    return _Scan(
+        hints=hints,
+        from_file=from_file,
+        pattern=pattern,
+        recursive=walks or "**" in pattern,
+        lineno=node.lineno,
+    )
+
+
+def _looks_like_a_python_scan(pattern: str) -> bool:
+    """Whether a scan's pattern explicitly asks for Python files.
+
+    The discriminator for the printed limit: a bare `*`/`iterdir()` scan is how
+    every runtime directory is listed (agent homes, session stores, a test's own
+    tmpdir) and reading the whole program into it would be a false alarm, while a
+    scan that spells `.py` is asking for source. 57 scans in this tree match the
+    looser shape and 18 spell `.py`; measured, treating the loose set as
+    program-wide readers selects 654 of 724 tests for ANY change and takes the
+    scoping win to zero.
+    """
+    return pattern.split("/")[-1].endswith(".py")
+
+
+def _scan_targets(
+    scan: _Scan, rel: str, root: Path, files: Sequence[str]
+) -> tuple[tuple[str, ...], bool]:
+    """Covered files a scan reads, and whether the scan could not be placed.
+
+    The directory is the first `hint` that is a real directory here, else the
+    scanning file's own when the receiver was built from `__file__`. A scan whose
+    directory is neither is not an edge at all — but if it spells `.py` it is
+    returned as unplaced, so the run prints it instead of staying quiet.
+    """
+    directory = next(
+        (
+            hint.strip("/")
+            for hint in scan.hints
+            if hint.strip("/") and (root / hint.strip("/")).is_dir()
+        ),
+        None,
+    )
+    if directory is None and scan.from_file:
+        parent = Path(rel).parent.as_posix()
+        directory = parent
+    name_pattern = scan.pattern.split("/")[-1]
+    if directory is None:
+        return (), _looks_like_a_python_scan(scan.pattern)
+    base = "" if directory == "." else f"{directory}/"
+    return (
+        tuple(
+            candidate
+            for candidate in files
+            if candidate != rel
+            and candidate.startswith(base)
+            and (scan.recursive or "/" not in candidate[len(base) :])
+            and fnmatch.fnmatch(Path(candidate).name, name_pattern)
+        ),
+        False,
+    )
+
+
 def _dynamic_call_target(node: ast.Call) -> tuple[str, str] | None:
     """Classify `import_module(...)`/`__import__(...)` by what it can load.
 
@@ -1184,6 +1318,7 @@ class _References:
     prefixes: frozenset[str]
     unnamed: tuple[str, ...]
     literals: frozenset[str]
+    scans: tuple[_Scan, ...]
 
 
 def _references(rel: str, source: str) -> _References:
@@ -1213,6 +1348,7 @@ def _references(rel: str, source: str) -> _References:
     prefixes: set[str] = set()
     unnamed: list[str] = []
     literals: set[str] = set()
+    scans: list[_Scan] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
@@ -1238,6 +1374,9 @@ def _references(rel: str, source: str) -> _References:
             if DOTTED_NAME_RE.match(node.value) or PY_PATH_RE.match(node.value):
                 literals.add(node.value)
         elif isinstance(node, ast.Call):
+            scan = _directory_scan(node)
+            if scan is not None:
+                scans.append(scan)
             dynamic = _dynamic_call_target(node)
             if dynamic is None:
                 continue
@@ -1254,6 +1393,7 @@ def _references(rel: str, source: str) -> _References:
         prefixes=frozenset(prefixes),
         unnamed=tuple(sorted(unnamed)),
         literals=frozenset(literals),
+        scans=tuple(scans),
     )
 
 
@@ -1361,6 +1501,7 @@ def build_import_graph(root: Path) -> ImportGraph:
     imports: dict[str, set[str]] = {}
     prefixes: dict[str, set[str]] = {}
     literals_by_file: dict[str, frozenset[str]] = {}
+    scans_by_file: dict[str, tuple[_Scan, ...]] = {}
     unnamed: list[str] = []
     for rel in files:
         try:
@@ -1395,6 +1536,7 @@ def build_import_graph(root: Path) -> ImportGraph:
         }
         imports[rel] = targets
         literals_by_file[rel] = refs.literals
+        scans_by_file[rel] = refs.scans
         for prefix in refs.prefixes:
             prefixes.setdefault(prefix, set()).add(rel)
         unnamed.extend(refs.unnamed)
@@ -1413,6 +1555,23 @@ def build_import_graph(root: Path) -> ImportGraph:
             for target in _name_target(root, literal, basenames):
                 if target != rel:
                     referrers.setdefault(target, set()).add(rel)
+    # Directory scans are the same obligation by a third road (see `_Scan`): a file
+    # that globs a covered directory READS every covered file it matches and names
+    # none of them, so when one of those files changes, the scanner is a referrer
+    # of it. A scan this graph cannot place is NOT dropped quietly — if it spells
+    # `.py` it joins the printed limit list, because the alternative (treating every
+    # unplaceable scan as a reader of the whole program) was measured to select 654
+    # of 724 tests for ANY change and take the scoping win to zero.
+    for rel, scans in scans_by_file.items():
+        for scan in scans:
+            targets, unplaced = _scan_targets(scan, rel, root, files)
+            for target in targets:
+                referrers.setdefault(target, set()).add(rel)
+            if unplaced:
+                unnamed.append(
+                    f"{rel}:{scan.lineno}: a `{scan.pattern}` directory scan whose "
+                    "directory the graph cannot resolve"
+                )
     return ImportGraph(
         files=frozenset(files),
         imports={rel: frozenset(targets) for rel, targets in sorted(imports.items())},
@@ -1724,9 +1883,9 @@ class ScopePlan:
             files = sorted({site.split(":", 1)[0] for site in self.unnamed})
             shown = ", ".join(files[:6]) + (", …" if len(files) > 6 else "")
             lines.append(
-                f"- selection limit: {len(self.unnamed)} import site(s) across "
-                f"{len(files)} file(s) name their target at run time, so the graph "
-                f"cannot see what they load: {shown}"
+                f"- selection limit: {len(self.unnamed)} site(s) across "
+                f"{len(files)} file(s) load or read their target at run time, so the "
+                f"graph cannot see it: {shown}"
             )
         return lines
 

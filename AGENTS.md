@@ -458,13 +458,31 @@ A conftest that NAMES a changed file is a namer pytest runs and nothing imports,
 so it is not in the test universe: seeding on it alone selected nothing. Its
 subtree is selected instead, which is the scope pytest itself gives it.
 
-**Two honest limits, both printed on a scoped run.** First, an import whose
-target is a computed name — `importlib.import_module(name)` — is invisible to
-the graph; resolvable ones are resolved (a literal string, or the literal head
-of an f-string), and the rest are listed by file on every scoped run. Second, a
-selected run is a subset: it cannot see cross-test pollution outside the
-selection. Neither makes a scoped run evidence about the whole tree — CI is, and
-CI is unchanged.
+**A glob is a reader, and reads have the same edge.**
+`tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
+and asserts an ordering invariant on each file it reads, so a one-token change to
+any of the 197 covered `scripts/*.py` has to select it — before the scan edge it
+selected NOTHING and the local run printed `all selected gates passed` while CI's
+`test` job failed (QA round 2, Q-1). `glob`/`rglob`/`iterdir`/`listdir`/`scandir`/`walk`
+are therefore read edges: the scanned directory is the first string constant in
+the scan's expression that is a real directory here, else — for a `__file__`-relative
+receiver — the scanning file's own, and the targets are the covered files that
+match. Two scans resolve in this tree; measured, the rule costs no coverage at all
+(55 of the 60 outside-closure modules still scope, referrer targets 263 → 755).
+A scan whose directory is neither is NOT an edge and, when it spells `.py`, is
+printed in the selection limit rather than dropped quietly — where a bare `*`
+scan (a runtime directory, a test's tmpdir) is not, because treating that set as
+program-wide readers selects 654 of 724 tests for ANY change and takes the whole
+scoping win to zero.
+
+**Two honest limits, both printed on a scoped run.** First, a name the graph
+cannot place — `importlib.import_module(name)` with a computed name, or a
+directory scan whose directory it cannot resolve — is invisible to the graph;
+resolvable ones are resolved (a literal string, the literal head of an f-string,
+and the scan rules above), and the rest are listed by file on every scoped run.
+Second, a selected run is a subset: it cannot see cross-test pollution outside
+the selection. Neither makes a scoped run evidence about the whole tree — CI is,
+and CI is unchanged.
 
 ### The local `pyright` gate is bounded and process-group-reaped
 

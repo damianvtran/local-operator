@@ -585,7 +585,9 @@ def test_the_report_states_what_a_narrowed_run_cannot_see(tmp_path):
     assert plan.unnamed and "local_operator/agents.py" in plan.unnamed[0]
     report = "\n".join(plan.report())
     assert "selection limit" in report
-    assert "cannot see what they load" in report
+    # The label covers names AND directory scans, because both are sites the graph
+    # cannot see (#1322 QA round 2 added the second).
+    assert "load or read their target at run time" in report
     assert "scoped to" in report
 
 
@@ -734,6 +736,25 @@ def test_a_repo_python_file_a_test_names_is_always_selected():
         offenders.extend((target, test) for test in sorted(tests) if test not in selected)
 
     assert not offenders, f"a test names this file and is not selected on change: {offenders[:5]}"
+
+    # …and the same question for a file reached by a DIRECTORY SCAN rather than a
+    # name. `tests/unit/tui/test_visual_gallery.py` globs `scripts/*.py` and asserts
+    # an ordering invariant on each, so a one-token change to any of them must
+    # select it — that is QA round 2's Q-1, and the fix it asks for.
+    scanner = "tests/unit/tui/test_visual_gallery.py"
+    assert scanner in universe, "the scanning test moved; update this guard"
+    # Directly under `scripts/`: the scan is `.glob("*.py")`, which is NOT recursive,
+    # so a nested script like `scripts/cold_engage_site/sitecustomize.py` is
+    # correctly NOT read by it.
+    scanned = sorted(
+        f
+        for f in graph.files
+        if f.startswith("scripts/") and f.endswith(".py") and "/" not in f[len("scripts/") :]
+    )
+    assert scanned, "no covered scripts/*.py to scan"
+    for target in scanned:
+        selected = set(ci_scope._select_tests(graph, [target], universe)[0])
+        assert scanner in selected, f"{scanner} reads {target} by glob and must be selected"
 
 
 # ---------------------------------------------------------------------------
@@ -920,3 +941,64 @@ def test_a_conftest_that_names_a_file_selects_the_tests_it_governs(tmp_path):
     assert not decision.whole_tree, decision.notes
     assert decision.targets == ("tests/unit/tui/test_widget.py",)
     assert any("conftest" in note for note in decision.notes), decision.notes
+
+
+# ---------------------------------------------------------------------------
+# Directory scans: files READ with no name to point at
+# ---------------------------------------------------------------------------
+
+
+def test_a_test_that_globs_a_covered_directory_reads_every_file_it_matches(tmp_path):
+    """The QA round-2 Q-1 shape: a glob is a reader, not an absence of an edge.
+
+    `tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
+    and asserts an ordering invariant on each file, so a one-token change to a
+    script it reads must select it. Before the scan edge, that change selected
+    NOTHING, the local run printed `all selected gates passed`, and CI's `test`
+    job failed.
+    """
+    root = _fixture_repo(tmp_path)
+    _write(
+        root,
+        "tests/unit/test_scan.py",
+        """
+        from pathlib import Path
+
+        ROOT = Path(__file__).resolve().parents[2]
+
+        def test_every_script_has_an_isolation_step():
+            for path in (ROOT / "scripts").glob("*.py"):
+                assert "TOOL" in path.read_text() or True
+        """,
+    )
+
+    decision = _plan(root, ["scripts/tool.py"])["test"]
+
+    assert not decision.whole_tree, decision.notes
+    assert decision.targets == ("tests/unit/test_scan.py",)
+
+
+def test_a_scan_this_graph_cannot_place_is_printed_not_silently_dropped(tmp_path):
+    """A scan over a directory the graph cannot resolve is a printed limit.
+
+    The directory here is a `tmp_path` value: no literal, no `__file__`, and a
+    pattern that asks for `.py`. Treating every such scan as a reader of the whole
+    program was measured at 654 of 724 tests selected for ANY change — the scoping
+    win gone — so the honest answer is to say it out loud instead.
+    """
+    root = _fixture_repo(tmp_path)
+    _write(
+        root,
+        "tests/unit/test_unplaced_scan.py",
+        """
+        from pathlib import Path
+
+        def test_it_scans_a_runtime_directory(tmp_path):
+            assert list(tmp_path.glob("*.py")) == []
+        """,
+    )
+
+    plan = ci_scope.scope_plan(["test"], ["local_operator/alpha.py"], root)
+
+    assert any("directory scan" in site for site in plan.unnamed), plan.unnamed
+    assert "selection limit" in "\n".join(plan.report())
