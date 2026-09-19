@@ -419,6 +419,24 @@ class WebSearchService:
 #: and 407 for a CJK one, where the character-counted crop measured 636 and the
 #: card folded again.
 #:
+#: THE BOUND IS THE CHAIN LENGTH, not the message shape: these two caps are computed
+#: for SIX legs, which is the operator's chain and the longest one a fixed cap covers.
+#: The cost is linear in the leg count -- a seventh leg measures 445 cells and nine
+#: measure 527, against the same 432-cell budget -- so a longer chain folds the TAIL
+#: of the expansion (`… N more lines`) while the collapsed row keeps the count and the
+#: cause it always carried. A seventh leg is one key away on an install with a
+#: DeepSeek login and a Brave key; it is recorded here rather than papered over
+#: (round-4 N9), because lifting it changes what the common case costs the reader.
+#: The lift is one line in `_search_with_client` where the digest is composed:
+#: derive the per-leg cap from the chain about to be printed rather than fixing it at
+#: 30 -- spend the fixed text (32 cells), the lead, the ids and the four cells of
+#: per-leg punctuation, then divide what is left by the leg count:
+#: `cap = (REASON_MAX_CELLS - 32 - LEAD_REASON_CELLS - ids - 4 * n) // n`. Computed
+#: on this catalogue that is 33 cells at the current six legs, 27 at seven, 22 at
+#: eight and 19 at nine -- so it names every leg, and past six it stops fitting the
+#: common transport reason (30 cells) whole. That trade is the reason this is its own
+#: change rather than a widening here.
+#:
 #: The lead keeps the most room because it is what the collapsed card shows; the
 #: per-leg cap is 30 because that is exactly the common transport reason
 #: (`All connection attempts failed`), so the usual case is not truncated at all.
@@ -435,8 +453,9 @@ def _short_reason(reason: str, cap: int) -> str:
     2, so a six-leg digest in a double-width script measured 636 cells against the
     432-cell budget and folded again -- the exact failure the caps were added to
     fix, surviving in the one case where the reader is furthest from the source
-    (round-4 N8; the same digest measures 402 after this crop). Measuring here with
-    the card's own function is what keeps the two from disagreeing about what fits.
+    (round-4 N8; the same digest measures 407 cells with the CJK body the test uses,
+    which is the number the caps' comment carries). Measuring here with the card's own
+    function is what keeps the two from disagreeing about what fits.
 
     ``set_cell_size`` is rich's cell-aware crop (it never adds an ellipsis of its
     own, and the early return above rules out its padding branch), so the result is
