@@ -58,6 +58,13 @@ if TYPE_CHECKING:
 
     from local_operator.harness.types import ImageContent
 
+from local_operator.harness.approval import (
+    AUTHORITY_OPS,
+    OPERATOR_CAP_REQUIRED_NOTICE,
+    frame_authority,
+    operator_cap_ok,
+    report_operator_cap_guarantee,
+)
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
 from local_operator.paths import config_dir
@@ -817,6 +824,22 @@ async def _maybe_await(result: Any) -> Any:
     return result
 
 
+#: Every control op that can reach an authority-INCREASING sink (issue #1310).
+#:
+#: The set itself lives in ``harness/approval.py`` beside the class predicate,
+#: because the CONSOLE reads it too (it presents the capability on exactly these
+#: frames) and a set that drifted between the two ends would leave a route the
+#: client believes it authorised and the server believes is ordinary. What is
+#: asserted here is the correspondence with THIS module's dispatch: every op
+#: whose dispatch reaches ``SessionHandle.slash`` / ``slash_images`` /
+#: ``run_slash_authoritative`` / ``approval_answer`` — the only ways to
+#: ``_approvals_slash``, ``_set_approve_all`` or a card approval — must appear in
+#: the set, and ``test_approval_authority_seam.py`` re-derives that group from
+#: this file's source so a route added in a new op fails the suite instead of
+#: shipping an unguarded way to loosen a running gate.
+_AUTHORITY_OPS = AUTHORITY_OPS
+
+
 def _accepts_kw(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes the keyword ``name``.
 
@@ -1150,7 +1173,22 @@ class RuntimeServer:
         *,
         kind: str = "tui",
         projection_sink: ProjectionSink | None = None,
+        operator_cap: bytes | None = None,
     ) -> None:
+        #: The capability this runtime demands for an authority-INCREASING
+        #: control request, or ``None`` when nothing handed one over (issue
+        #: #1310). Minted by whichever process started this runtime — the
+        #: detached spawn hands it over on an inherited descriptor, the TUI
+        #: passes the one it minted for its own in-process gate — and held ONLY
+        #: here. It is deliberately not a ``SessionRecord`` field and not on the
+        #: handle's projection: everything published in the record is readable
+        #: under this same uid, which is the defect this exists to close.
+        #:
+        #: ``None`` is a supported, fail-closed state rather than a bug: a
+        #: runtime started by an older console, or by a background spawn with no
+        #: console at all, keeps serving every ordinary operation and refuses
+        #: every loosening (see ``_authority_admitted``).
+        self._operator_cap = operator_cap
         #: Live state mirrored into the discovery record. Held here rather
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
@@ -2138,6 +2176,14 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
+        # HOW STRONG THE CAPABILITY'S BOUNDARY IS ON THIS HOST, reported rather
+        # than assumed, and reported HERE so every host says it exactly once (the
+        # helper latches): on Linux with ``ptrace_scope=0`` and on Windows a
+        # same-uid process can read this one's memory, so there the capability
+        # raises the cost of the attack instead of closing it. See
+        # ``harness/approval.operator_cap_guarantee`` and the residual section of
+        # ``docs/design/approval-authority.md``.
+        report_operator_cap_guarantee()
         try:
             # Port 0: the OS picks; the record carries the number. Binding
             # loopback only is the security invariant of the whole design.
@@ -3378,6 +3424,27 @@ class RuntimeServer:
             watching.add("viewer")
         return frozenset(watching)
 
+    def _authority_admitted(self, frame: dict[str, Any]) -> bool:
+        """Whether this frame may reach an authority-INCREASING sink.
+
+        True for every frame that is not in :data:`_AUTHORITY_OPS` — the
+        overwhelming majority of traffic, and the set whose authorization really
+        is the record key alone. True for an increasing frame that presents the
+        runtime's capability; False otherwise, including when this runtime holds
+        no capability at all.
+
+        The classification is by OP plus the fields that op carries, and it is
+        deliberately NOT by the handle method or by the resulting value: a frame
+        is judged before anything is dispatched, so a refused request cannot
+        have had a partial effect on the way to being refused.
+        """
+        if frame.get("op") not in _AUTHORITY_OPS:
+            return True
+        authority = frame_authority(frame)
+        if authority is None or authority == "ordinary":
+            return True
+        return operator_cap_ok(supplied=frame.get("operator_cap"), held=self._operator_cap)
+
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
         # HERE rather than at the reader's parse because this is the line that
@@ -3444,6 +3511,52 @@ class RuntimeServer:
                     "this viewer is still connecting to the session; the request was not "
                     "run — retry once the interface has connected"
                 )
+
+            # THE TWO REFUSALS, AND WHY THE READINESS ONE RUNS FIRST (rebase onto
+            # main, 2026-09-19). Upstream added the sync-pending gate above at the
+            # same seam this branch added the authority check to. They answer
+            # different questions: that one is "is this connection authoritative
+            # yet at all?", this one is "may THIS caller remove the gate?". Running
+            # the readiness gate first keeps its semantics intact — a follower
+            # that has not received the sync gets the retryable connect copy
+            # rather than the authority copy, which would be wrong advice for an
+            # op it will be allowed to run a moment later. The authority check is
+            # NOT skipped for what the priority and connection-local sets admit:
+            # ``approval_answer`` is in neither today, and if a future base puts it
+            # there, the check below still sees it.
+            #
+            # THE ONE SEAM WHERE THE GATE'S AUTHORITY IS DECIDED (issue #1310).
+            #
+            # `control_key` — published 0600 in the session record — is the
+            # whole authorization story for ORDINARY operations and stays that
+            # way. An authority-INCREASING one additionally demands the
+            # per-session operator capability, which exists only in the memory
+            # of the process that started this runtime and in the console that
+            # typed the command. A model-authored `bash` call runs as this same
+            # uid, can read the record, and can dial this loopback port; it
+            # cannot hold a value that was never written anywhere it can read.
+            #
+            # HERE rather than at each sink, because every route in the tree —
+            # the daemon's HTTP command surface, the phone relay, a peer send,
+            # a follower terminal, the CLI — arrives at the handle through this
+            # method. A second dispatch route added later is covered by
+            # construction, and `tests/unit/session/runtime/
+            # test_approval_authority_seam.py` fails if one appears that reaches
+            # a sink without being classified below.
+            #
+            # The refusal is raised rather than answered inline so it reuses the
+            # existing `{"op": "error"}` reply the branches below already
+            # produce: one shape for the client to surface, and the copy names
+            # the one-step remedies (see OPERATOR_CAP_REQUIRED_NOTICE).
+            if not self._authority_admitted(frame):
+                logger.warning(
+                    "session runtime: refused an authority-increasing request "
+                    "(op %r) from %s at %s",
+                    op,
+                    conn.kind,
+                    conn.writer.get_extra_info("peername"),
+                )
+                raise ValueError(OPERATOR_CAP_REQUIRED_NOTICE)
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
