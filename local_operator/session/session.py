@@ -5223,10 +5223,17 @@ class Session:
             # the same reason — it is rewriting the history a request would be
             # built from. Saying "already streaming" for it would send the user
             # looking for a turn that is not there.
-            raise RuntimeError(
+            # The TYPED refusal, not a bare sentence: the spooled-owner drain and
+            # the two command queues classify it, and classifying text breaks
+            # silently on a reword (agent review round 2, MINOR-1). A
+            # ``RuntimeError`` subclass, so nothing that already caught the plain
+            # raise changes behaviour.
+            from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+            raise TurnInFlight(
                 "context compaction is running; the prompt can be sent once it finishes"
                 if self._compacting
-                else "session is already streaming; use steer() to inject mid-turn"
+                else TURN_IN_FLIGHT
             )
         # `@path` expansion, and it runs HERE — after the probe, before the
         # lock, not inside it. An approval can park on a human indefinitely, and
@@ -5292,7 +5299,9 @@ class Session:
             # one they have just submitted.
             self._graceful_cancel_requested = False
             if self._is_streaming:
-                raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+                from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+                raise TurnInFlight(TURN_IN_FLIGHT)
             # INLINE a pending wake catch-up ahead of the user's message, in
             # the SAME turn: the missed wakes belong before the work they were
             # meant to start, and spawning the catch-up as a competing
@@ -5647,7 +5656,7 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
-        from local_operator.session.runtime.inbox import drain_inbox
+        from local_operator.session.runtime.inbox import SOURCE_USER, drain_inbox
 
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
@@ -5657,6 +5666,14 @@ class Session:
         except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
             logger.warning("peer inbox drain failed", exc_info=True)
             return
+        # Rows of ONE batch carrying the same owner ``command_id``: ``drain_inbox``
+        # empties the file, so a crash between the read and its receipt can
+        # re-deliver the whole batch, and the steer arm's identity does not
+        # reach the transcript index until the correction is drained at a later
+        # tool boundary — long after this loop has moved on (agent review round
+        # 1, R3). The set makes the batch's own repeats answerable here; the
+        # durable index remains the authority for the turn arm.
+        seen_owner_ids: set[str] = set()
         for line in lines:
             try:
                 # The row's own ``wake`` is forwarded, never guessed: a row
@@ -5669,14 +5686,65 @@ class Session:
                 # honoured with a turn of its own, while the first-turn drain
                 # reaches the receiver mid-turn and the row rides that turn's
                 # context instead (see the paragraph at its call site).
-                await self.receive_peer_message(
-                    line.text,
-                    mode="mailbox",
-                    wake=bool(getattr(line, "wake", False)),
-                    sender=line.sender,
-                )
+                #
+                # THE ROW'S ``source`` DECIDES WHO IS SPEAKING, the same split
+                # ``process._drain_inbox_into`` makes: a ``SOURCE_USER`` row is
+                # the OWNER's own prompt spooled by a draining runtime, and it
+                # joins this turn as an identified user message instead of
+                # acquiring a peer's provenance envelope (see
+                # ``_run_spooled_owner_prompt``).
+                if getattr(line, "source", "") == SOURCE_USER:
+                    self._run_spooled_owner_prompt(line, seen=seen_owner_ids)
+                else:
+                    await self.receive_peer_message(
+                        line.text,
+                        mode="mailbox",
+                        wake=bool(getattr(line, "wake", False)),
+                        sender=line.sender,
+                    )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
+
+    def _run_spooled_owner_prompt(self, line: Any, *, seen: set[str]) -> None:
+        """Join one spooled OWNER prompt to the turn already running.
+
+        The owner's own message, spooled by a runtime that was leaving a
+        replaced build, arriving at a successor that is ALREADY mid-turn — the
+        window where no durable history existed yet when the drain latched, so
+        ``process._drain_inbox_into`` kept the row for the first turn instead of
+        running it at boot.
+
+        ``steer`` rather than ``prompt``, and that is not a preference: this
+        drain runs from inside ``_run_turn_pipeline`` with ``_turn_lock`` held,
+        and ``Session.prompt`` REJECTS outright while a turn is running. The
+        conclusion is the one the peer paragraph above reaches for its own rows
+        — the row rides the turn in flight — taken with the verb the OWNER's
+        words deserve: this is the user speaking, so it is an identified user
+        message rather than a peer's ``CustomMessage``, and it carries the
+        message id the viewer painted the row under so its announcement matches
+        that row instead of adding one.
+
+        The durable index answers the already-appended case for the same reason
+        it does at boot (``process._run_owner_prompt``): the identity is
+        append-only, and a retried prompt must not land twice. ``seen`` covers
+        what the index cannot — two rows of one batch with the same id, where
+        the first steer is still queued and has therefore not reached the index
+        yet (agent review round 1, R3).
+        """
+        command_id = str(getattr(line, "command_id", "") or "")
+        if command_id and command_id in seen:
+            logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
+            return
+        if command_id and self.has_admitted_command(command_id):
+            logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        self.steer(line.text, [], message_id=command_id or None)
+        # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
+        # the batch's repeat is the retry the at-least-once contract promises,
+        # and it is only redundant once the first row landed (agent review round
+        # 2, MINOR-2).
+        if command_id:
+            seen.add(command_id)
 
     async def receive_peer_message(
         self,

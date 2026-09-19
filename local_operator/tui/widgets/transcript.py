@@ -1162,6 +1162,33 @@ class ExpandableActionBlock(TranscriptBlock):
             self._refresh_row()
 
 
+#: The receipt a prompt carries while its message is QUEUED FOR A RUNTIME THAT
+#: DOES NOT EXIST YET: the draining runtime spooled it rather than running it
+#: (``serving.ServingSessionHandle.prompt``), and the successor runs it when it
+#: boots — which may be minutes or hours later.
+#:
+#: ON THE ROW, NOT IN A NOTICE, and that is the deliberation rather than a
+#: preference: the queued state is a property of THIS MESSAGE, it has to END
+#: when the message runs, and a transcript-level row cannot do either (design
+#: round 1, D2/D3 — the receipt row can be taken down with its own message;
+#: a notice below it can only accumulate, one identical line per send, which is
+#: D4 and U3 measured). It wears the receipt ink the image receipt beside it
+#: already wears, because the app is talking here too.
+#:
+#: THE ESC CLAUSE IS AN OFFER THE RECALL CAN REFUSE, and the refusal has its own
+#: honest sentence (``RECALL_MISSED_NOTICE``): once the successor has drained
+#: the spool the message is out of reach, and the row saying otherwise for that
+#: brief window is why the press has to answer with the truth rather than
+#: silence.
+QUEUED_ROW_TEXT = "· queued for the next runtime \u2014 esc takes it back"
+#: The same state WITHOUT the offer, for every queued message but the newest.
+#: Only the newest is recallable (``app._withdraw_queued_prompt`` lifts one at a
+#: time, the sibling steer channel's rule), so a second marked row advertising
+#: the same key promises a recall that press will decline — measured: two rows
+#: offering, one honouring (UX round 2, U4).
+QUEUED_ROW_TEXT_OLDER = "· queued for the next runtime"
+
+
 class UserBlock(TranscriptBlock):
     """One user prompt behind a full-height rule in the gutter column.
 
@@ -1290,7 +1317,15 @@ class UserBlock(TranscriptBlock):
     #: is most crowded and the reader needs it most.
     MIN_BODY = 8
 
-    def __init__(self, text: str, attachments: int = 0, *, fold_width: int = 0) -> None:
+    def __init__(
+        self,
+        text: str,
+        attachments: int = 0,
+        *,
+        fold_width: int = 0,
+        queued: bool = False,
+        queued_offer: bool = True,
+    ) -> None:
         """``fold_width`` is the width this prompt is about to be given.
 
         This block wraps in ``__init__``, so unlike a streaming row there is no
@@ -1309,10 +1344,18 @@ class UserBlock(TranscriptBlock):
         #: renders a receipt, and keeping the base64 alive per row would hold
         #: the whole conversation's screenshots in the widget tree.
         self._attachments = attachments
+        #: Whether this prompt's message is on a draining runtime's spool — the
+        #: state that starts it is the spool receipt at submit, and the state
+        #: that ends it is the message's own announcement from the successor
+        #: (:meth:`set_queued`, and ``app.on_user_message_start``).
+        self._queued = queued
+        #: Whether that marker carries the recall offer (`esc takes it back`).
+        #: Only the NEWEST queued message does; see `QUEUED_ROW_TEXT_OLDER`.
+        self._queued_offer = queued_offer
         #: Rendered index of the receipt row, or None when there is none. Set
         #: by `_build` at the width it actually wrapped at, so `copy_row_is_chrome`
         #: never has to re-derive it and cannot disagree with the frame.
-        self._receipt_row: int | None = None
+        self._receipt_rows: set[int] = set()
         #: The width `_build` last authored the rows at; `on_resize` compares
         #: against it so a height-only resize does not re-wrap a prompt.
         self._built_width: int = -1
@@ -1346,7 +1389,7 @@ class UserBlock(TranscriptBlock):
         is the same wrap at the same width by construction, where a second
         computation could disagree with the frame after a resize.
         """
-        return self._receipt_row is not None and index == self._receipt_row
+        return index in self._receipt_rows
 
     def text(self) -> str:
         """The prompt as submitted, newlines and indentation intact."""
@@ -1429,6 +1472,9 @@ class UserBlock(TranscriptBlock):
         row always survives, so an empty prompt is still a block with a height.
         """
         rows: list[str] = []
+        # Rebuilt with the rows: the index set is a function of THIS wrap, and a
+        # stale one would mute the wrong row after a resize.
+        self._receipt_rows = set()
         for paragraph in self._text.split("\n"):
             # Leading spaces are lifted out before wrapping and put back on
             # every row. `wrap_cells` splits on " " and rebuilds with a single
@@ -1458,10 +1504,61 @@ class UserBlock(TranscriptBlock):
             # that silently attached nothing went unnoticed for so long.
             plural = "s" if self._attachments != 1 else ""
             rows.append(f"↑ {self._attachments} image{plural} attached")
-            self._receipt_row = len(rows) - 1
-        else:
-            self._receipt_row = None
+            self._receipt_rows.add(len(rows) - 1)
+        if self._queued:
+            # MARKED, and not only stated below it: measured, this row was
+            # painted identically to a delivered one — same spine, same body ink
+            # — so the only thing separating "queued" from "sent" was prose two
+            # rows away and scrolling out of reach (design round 1, D3).
+            #
+            # WRAPPED LIKE THE PROSE, not appended raw. The image receipt above
+            # is short enough for the narrowest body this block supports; this
+            # sentence is not (49 cells against a 31-cell body at 40 columns),
+            # and appending it raw clipped it mid-clause with no ellipsis — the
+            # clause lost first being the affordance itself ("esc takes it
+            # back"), which is the one part of the row that is not decoration
+            # (design round 2, D6). `wrap_cells` is what the notice tier and the
+            # prompt prose already use.
+            marker = QUEUED_ROW_TEXT if self._queued_offer else QUEUED_ROW_TEXT_OLDER
+            mark = wrap_cells(marker, max(body, 1))
+            start = len(rows)
+            rows.extend(mark)
+            # EVERY row the marker wrapped onto is receipt ink, not just its
+            # last: the receipt token means "the app is talking here", and a
+            # control row painted half in the prompt's own colour reads as
+            # something the user wrote.
+            self._receipt_rows.update(range(start, len(rows)))
         return rows
+
+    def set_queued(self, queued: bool, *, offer: bool = True) -> None:
+        """Mark or unmark this prompt as queued for the next runtime.
+
+        The END of the state is the whole reason the marker lives on the row:
+        the successor announces the message under the id this surface sent — or,
+        on the handover's normal arm, the durable transcript shows it — and that
+        is what takes the marker down, so the row stops asserting a state the
+        message is no longer in (design round 1, D2; UX round 2, U2).
+
+        ``offer`` decides whether the marker carries the recall key. The app
+        re-badges the older rows when one is queued or recalled, so exactly one
+        row advertises a press that lifts one message (UX round 2, U4).
+
+        A no-op when both flags are already what was asked, so the settlement
+        paths can call it unconditionally.
+        """
+        if queued == self._queued and offer == self._queued_offer:
+            return
+        self._queued = queued
+        self._queued_offer = offer
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build(self._built_width if self._built_width > 0 else None))
+        finally:
+            self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
 
     def retheme(self) -> None:
         """Re-ink rule, prose and receipt from the current ramp."""
@@ -1523,7 +1620,7 @@ class UserBlock(TranscriptBlock):
                 line.append("\n")
             line.append(gutter, style=rule_style)
             if row:
-                line.append(row, style=receipt_style if index == self._receipt_row else text_style)
+                line.append(row, style=receipt_style if index in self._receipt_rows else text_style)
         return line
 
 

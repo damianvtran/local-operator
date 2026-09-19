@@ -638,3 +638,302 @@ async def test_the_boot_drain_runs_a_spooled_wake(tmp_path: Path) -> None:
 
     assert await child_mod._drain_inbox_into(Handle()) == 2
     assert seen == [("run the report", "mailbox", True), ("fyi", "mailbox", False)]
+
+
+@pytest.mark.asyncio
+async def test_the_boot_drain_runs_a_spooled_owner_prompt_as_the_users_own(
+    tmp_path: Path,
+) -> None:
+    """The successor's half of the handover, for the OWNER's message.
+
+    A draining runtime spools the user's prompt rather than refusing it
+    (``serving.ServingSessionHandle.prompt``); this is where the successor makes
+    good on that. It is delivered by ``handle.prompt`` — the ordinary admission,
+    on the build that took over — and NOT by ``receive_peer_message``, because
+    the peer path wraps the text in a ``<peer-session-message>`` envelope for the
+    model and paints a ``peer`` card for a message the user typed in this very
+    session (``inbox.SOURCE_USER`` documents the split). The command id rides
+    along so the viewer that painted a row under it has that row matched rather
+    than duplicated.
+
+    The row that is already in the transcript is NOT run again: the same message
+    can be spooled twice (a retried op, a crash between the append and the
+    receipt) and the durability that protects a retried wire prompt is the
+    transcript's append-only index, asked here through the same accessor
+    ``server._already_admitted`` uses.
+    """
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    append_inbox(
+        tmp_path,
+        InboxLine(
+            text="deploy the fix",
+            sender={},
+            mode="mailbox",
+            wake=True,
+            source=SOURCE_USER,
+            command_id="p" * 8,
+        ),
+    )
+    append_inbox(tmp_path, InboxLine(text="fyi from a peer", sender={}, mode="mailbox", wake=True))
+    # A spooled message belongs to a session that has run a turn; without one the
+    # drain keeps the file for the first turn instead (see test_inbox.py).
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    prompts: list[tuple[str, str]] = []
+    peers: list[tuple[str, str, bool]] = []
+
+    class Handle:
+        _session = SimpleNamespace(
+            transcript=SimpleNamespace(directory=tmp_path),
+            session_id="s1",
+        )
+
+        def has_admitted_command(self, command_id: str) -> bool:
+            return False
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            prompts.append((text, command_id or ""))
+            return "prompt admitted"
+
+        async def receive_peer_message(self, text, *, mode="mailbox", wake=False, sender=None):
+            peers.append((text, mode, wake))
+            return "recorded"
+
+    assert await child_mod._drain_inbox_into(Handle()) == 2
+    assert prompts == [("deploy the fix", "p" * 8)], "the owner's row did not run as a prompt"
+    assert peers == [("fyi from a peer", "mailbox", True)], "the peer row changed shape"
+
+
+@pytest.mark.asyncio
+async def test_an_owner_row_behind_a_wake_row_is_delivered_not_swallowed(tmp_path: Path) -> None:
+    """The drain's write order makes a mid-turn owner row ORDINARY (QA round 1, Q-1).
+
+    The rows are delivered in the order they were written, and a peer
+    ``mailbox``+``wake`` row DRIVES A TURN — so an owner row spooled after one
+    lands while the session is streaming, where ``Session.prompt`` rejects
+    outright. Measured live before the fix: the receipt had already told the user
+    their message would run, the boot counted the row as delivered, and the
+    message was in NO transcript — destroyed, not deferred.
+
+    The real guard's own wording is what the double raises, because that is the
+    string the delivery path matches on.
+    """
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    append_inbox(tmp_path, InboxLine(text="fyi from a peer", sender={}, mode="mailbox", wake=True))
+    append_inbox(
+        tmp_path,
+        InboxLine(
+            text="deploy the fix",
+            sender={},
+            mode="mailbox",
+            wake=True,
+            source=SOURCE_USER,
+            command_id="p" * 8,
+        ),
+    )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+    steers: list[tuple[str, str]] = []
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path), session_id="s1")
+
+        def has_admitted_command(self, command_id: str) -> bool:
+            return False
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            # The peer row's wake turn is running by the time the owner row is
+            # read; this is the guard `Session.prompt` raises into.
+            raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+
+        async def steer(self, text, *, command_id=None, **kwargs):
+            steers.append((text, command_id or ""))
+            return "steering queued"
+
+        async def receive_peer_message(self, text, *, mode="mailbox", wake=False, sender=None):
+            return "recorded"
+
+    assert (
+        await child_mod._drain_inbox_into(Handle()) == 2
+    ), "a row that did not reach the session must not be counted as delivered"
+    assert prompts == []
+    assert steers == [
+        ("deploy the fix", "p" * 8)
+    ], "the owner's words must join the turn in flight, carrying their own id: " + repr(steers)
+
+
+@pytest.mark.asyncio
+async def test_a_swallowed_owner_row_is_loud_and_never_counted(tmp_path: Path, caplog) -> None:
+    """A failure of the user's own message is news, not a debug line (QA round 1, Q-1).
+
+    The receipt already told the user it would run and the spool is the only
+    place the message exists, so a row that cannot be delivered must be counted
+    as NOT delivered and named by its own id — the boot log used to claim
+    ``delivered 2`` while the operator's message was in no transcript.
+    """
+    import logging as _logging
+
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    append_inbox(
+        tmp_path,
+        InboxLine(
+            text="deploy the fix",
+            sender={},
+            mode="mailbox",
+            wake=True,
+            source=SOURCE_USER,
+            command_id="q" * 8,
+        ),
+    )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path), session_id="s1")
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            raise RuntimeError("the provider lane died")
+
+    with caplog.at_level(_logging.ERROR):
+        delivered = await child_mod._drain_inbox_into(Handle())
+
+    assert delivered == 0, "a message that never ran must not be counted as delivered"
+    assert any("q" * 8 in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
+    """The durable index is what dedupes a handover, not the spool file.
+
+    ``drain_inbox`` empties the file, but the same message legitimately reaches
+    it twice: an attach client retries the refused op under the SAME
+    ``command_id`` (``send_command`` keeps one identity across reconnects), and
+    the successor's own boot drain can be preceded by a first-turn drain in
+    another lifetime. Both rows carry the append-only identity, so the answer is
+    the same one a retried wire prompt gets — skip the second.
+    """
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    for _ in range(2):
+        append_inbox(
+            tmp_path,
+            InboxLine(
+                text="deploy the fix",
+                sender={},
+                mode="mailbox",
+                wake=True,
+                source=SOURCE_USER,
+                command_id="p" * 8,
+            ),
+        )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+    admitted: dict[str, bool] = {"p" * 8: False}
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path))
+
+        def has_admitted_command(self, command_id: str) -> bool:
+            # The FIRST delivery is what durably admits it; the second row is
+            # answered from the index, which is the whole point.
+            return admitted.get(command_id, False)
+
+        async def prompt(self, text, images=None, command_id="", **kwargs):
+            prompts.append(text)
+            admitted[command_id] = True
+            return "prompt admitted"
+
+    assert await child_mod._drain_inbox_into(Handle()) == 2
+    assert prompts == ["deploy the fix"], f"the message ran {len(prompts)} times"
+
+
+@pytest.mark.asyncio
+async def test_a_retried_owner_row_still_runs_after_a_failed_first_attempt(tmp_path: Path) -> None:
+    """The batch's repeat is the RETRY the at-least-once contract promises.
+
+    ``drain_inbox`` documents an at-least-once crash contract, so two rows
+    carrying one id in a single batch are the shape a crash between the read and
+    its receipt produces — and the second exists precisely to cover a FIRST that
+    did not land. Recording the id before the attempt instead of after it turned
+    that into at-most-once for the batch: the first raised, the second was
+    skipped as a repeat, and the user's message was gone (agent review round 2,
+    MINOR-2).
+    """
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    for _ in range(2):
+        append_inbox(
+            tmp_path,
+            InboxLine(
+                text="deploy the fix",
+                sender={},
+                mode="mailbox",
+                wake=True,
+                source=SOURCE_USER,
+                command_id="r" * 8,
+            ),
+        )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    attempts: list[str] = []
+    delivered: list[str] = []
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path), session_id="s1")
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            # The provider lane fails on the FIRST attempt only, which is the
+            # half of the pair the batch's second row is there for.
+            attempts.append(command_id or "")
+            if len(attempts) == 1:
+                raise RuntimeError("the provider lane died")
+            delivered.append(text)
+            return "prompt admitted"
+
+    total = await child_mod._drain_inbox_into(Handle())
+
+    assert attempts == ["r" * 8, "r" * 8], attempts
+    assert delivered == ["deploy the fix"], delivered
+    assert total == 1, "only the row that actually ran may be counted as delivered"

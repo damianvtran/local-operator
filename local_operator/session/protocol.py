@@ -384,7 +384,7 @@ class SessionProtocol(Protocol):
         ...
 
     # --- driving turns ----------------------------------------------------
-    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> str | None:
         """Run one user turn to completion (awaitable) or raise.
 
         ``images`` are attachments pasted into the prompt; they ride the same
@@ -396,6 +396,15 @@ class SessionProtocol(Protocol):
         it is prose, and it is left verbatim. There is no provenance keyword to
         pass and the signature does not widen — the resolver's strictness, not
         a flag, is what makes expanding any text safe.
+
+        THE RETURN IS THE OWNER'S OWN RECEIPT, when the transport has one
+        (``str | None``): the in-process ``Session`` runs the whole turn and
+        answers with nothing, while an ``AttachedSession`` is answered on
+        durable admission and passes the owner's sentence back unchanged — so a
+        viewer can tell 'the runtime admitted this' from the one other receipt
+        a draining owner can give, 'it was queued for the build that replaces
+        me'. A front end with nothing to do with the distinction may ignore it,
+        which is what every caller did while the line was being dropped here.
         """
         ...
 
