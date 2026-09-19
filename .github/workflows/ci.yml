@@ -875,6 +875,20 @@ jobs:
     # untouched: each matrix leg is its own machine, with its own process, its
     # own `flock` files and its own app lifecycles, so no shard can see a
     # sibling's hang.
+    #
+    # WHY THREE AND NOT TWO, and what the trade is. Measured on run 35420676112
+    # (the split from CI-measured timings): legs of 414/412/401 s on ubuntu and
+    # 442/441/400 s on macOS, i.e. ~7.5 min per leg including install, against a
+    # unit shard whose job wall is ~12-15 min. So the e2e job is NO LONGER the
+    # critical path at three shards, and two shards (~11 min per leg) would also
+    # finish first. Three buys earlier freeze-guard feedback on a tree that only
+    # grows, and costs two more jobs per run: this matrix takes a pull request
+    # from 17 jobs to 21, against the ~20-job account-wide budget the `test`
+    # job's comment names, on main from 20 to 24. That is a deliberate trade,
+    # not an oversight: if runner queue pressure becomes the binding constraint,
+    # `shard: [0, 1]` with `--total 2` restores the job count at the same
+    # critical path — which is why the matrix and `--total` are asserted equal
+    # in tests/unit/test_ci_hygiene.py rather than kept in sync by hand.
     strategy:
       fail-fast: false
       matrix:
