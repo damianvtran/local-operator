@@ -450,9 +450,13 @@ class TuiSessionHandle(SessionHandle):
                     await session.prompt(text, image_blocks, **fields)
                 except BaseException as exc:
                     if not admitted.done():
+                        from local_operator.session.errors import TurnInFlight
+
                         self._command_reservations.reject(
                             command_id,
-                            transfer_to_steer="already streaming" in str(exc),
+                            transfer_to_steer=(
+                                isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
+                            ),
                         )
                         admitted.set_exception(exc)
                     raise

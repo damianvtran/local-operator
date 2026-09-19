@@ -23,6 +23,27 @@ class AttachmentUnavailable(ValueError):
         )
 
 
+#: The sentence ``Session.prompt`` raises when a turn (or a compaction) already
+#: holds the lock. Public because four call sites classify that refusal —
+#: ``mobile/attach_client``, ``mobile/tui_handle``, ``session/runtime/serving``
+#: and ``session/runtime/process`` — and matching it as text is a seam that
+#: breaks silently when the wording changes (agent review round 2, MINOR-1).
+TURN_IN_FLIGHT = "session is already streaming; use steer() to inject mid-turn"
+
+
+class TurnInFlight(RuntimeError):
+    """``prompt`` was called while a turn holds the session's lock.
+
+    The TYPED form of :data:`TURN_IN_FLIGHT`, so a caller can decide what to do
+    about it (the spooled-owner drain steers the message into the turn in flight)
+    instead of pattern-matching a sentence. A ``RuntimeError`` subclass, so every
+    existing catcher of the plain raise is unaffected — which is why the three
+    call sites outside ``session/`` also accept the text: on a version skew the
+    producer may be a build that has never heard of this class, and the old
+    sentence is the only seam the two ends share.
+    """
+
+
 class RuntimeRetiring(ValueError, RuntimeError):
     """This runtime has committed to leaving; the message was not admitted.
 
@@ -155,6 +176,13 @@ class RuntimeRetiring(ValueError, RuntimeError):
     #: as a deferral. Never sent over the wire — the spool receipt is what the
     #: runtime answers with — so no ``error_*`` field carries it.
     TAIL_QUEUED = "your message is queued and will run as soon as this session runs again."
+    #: The queued tail for a departure that owes NO successor: a signalled stop, or
+    #: a phrase this build cannot place. The row IS durable — the next runtime to
+    #: open the session drains it — but whether one ever does is the host's
+    #: decision, not the signal's, so the sentence must not promise a future the
+    #: departure does not establish (the D6 rule the neighbouring notice is split
+    #: by; agent review round 2, NIT-1). Hence the conditional.
+    TAIL_QUEUED_OTHER = "your message is queued and will run if this session runs again."
 
     def __init__(self, trigger: str = "", leaving: str = "", *, queued: bool = False) -> None:
         # ``HEAD`` is per-INSTANCE because the situation is: the same refusal
@@ -193,7 +221,11 @@ class RuntimeRetiring(ValueError, RuntimeError):
         # rather than about the departure, and the two sentences are not
         # interchangeable: one asks for a re-send, the other says the message is
         # already on its way.
-        self.TAIL = self.TAIL_QUEUED if queued else _TAILS.get(self.trigger, self.TAIL)
+        self.TAIL = (
+            _QUEUED_TAILS.get(self.trigger, self.TAIL_QUEUED_OTHER)
+            if queued
+            else _TAILS.get(self.trigger, self.TAIL)
+        )
         super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
 
 
@@ -212,6 +244,13 @@ _HEADS: dict[str, str] = {
 #: the two ends must pick them the same way. A SIGNAL drain is leaving for good
 #: and owes nobody; a BUILD drain is handing the session to the build on disk,
 #: which is the one departure where re-sending is not the operator's job.
+#: The queued tail per trigger, on the same reasoning as ``_TAILS``: a sentence
+#: may state only what the departure establishes, and only a build drain
+#: establishes that a successor is coming.
+_QUEUED_TAILS: dict[str, str] = {
+    RuntimeRetiring.BUILD: RuntimeRetiring.TAIL_QUEUED,
+}
+
 _TAILS: dict[str, str] = {
     RuntimeRetiring.BUILD: RuntimeRetiring.TAIL_HANDOVER,
 }

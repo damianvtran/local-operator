@@ -1718,11 +1718,9 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
         raise RuntimeError("this handle cannot run a spooled prompt")
     run = cast(Callable[..., Awaitable[Any]], prompt)
     command_id = str(getattr(line, "command_id", "") or "")
-    if command_id:
-        if command_id in seen:
-            logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
-            return
-        seen.add(command_id)
+    if command_id and command_id in seen:
+        logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
+        return
     admitted = getattr(handle, "has_admitted_command", None)
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
@@ -1730,6 +1728,13 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
     try:
         if command_id:
             await run(line.text, command_id=command_id)
+            # RECORDED AFTER THE DELIVERY, not before it: the batch's own repeat
+            # only needs suppressing when the first row LANDED. The file's
+            # contract is at-least-once, and a second row carrying the same id is
+            # exactly the retry that contract promises — skipping it because a
+            # first attempt raised would turn at-least-once into at-most-once
+            # (agent review round 2, MINOR-2).
+            seen.add(command_id)
         else:
             # No identity to deduplicate on, which only a writer older than the
             # field can produce. It still runs: the message is the user's, and
@@ -1738,7 +1743,15 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
             await run(line.text)
         return
     except RuntimeError as error:
-        if "already streaming" not in str(error):
+        # STRUCTURALLY, with the old sentence as the cross-build fallback: the
+        # typed class is this build's seam, and a runtime one version behind
+        # raises a bare ``RuntimeError`` that only the text identifies. Matching
+        # the text alone — the first shape of this fix — degraded the recovery
+        # back to a logged drop the moment the wording changed (agent review
+        # round 2, MINOR-1).
+        from local_operator.session.errors import TurnInFlight
+
+        if not isinstance(error, TurnInFlight) and "already streaming" not in str(error):
             raise
         steer = getattr(handle, "steer", None)
         if not callable(steer):
@@ -1748,6 +1761,8 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
             command_id or "<no id>",
         )
         await cast(Callable[..., Awaitable[Any]], steer)(line.text, command_id=command_id or None)
+        if command_id:
+            seen.add(command_id)
 
 
 def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:

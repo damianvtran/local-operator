@@ -820,7 +820,11 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
             # duplicate the admission identity exists to prevent. The assertion
             # this cell was written for — that a SIGNALLED runtime is never
             # handed the build story — is the line above.
-            assert refusal.TAIL == RuntimeRetiring.TAIL_QUEUED, refusal.TAIL
+            # ...and on a SIGNALLED departure the queued tail is the conditional
+            # one: the spool row is durable, but no successor is owed, so the
+            # sentence may not promise a future this departure does not establish
+            # (agent review round 2, NIT-1).
+            assert refusal.TAIL == RuntimeRetiring.TAIL_QUEUED_OTHER, refusal.TAIL
             # And nothing was cut by the refusal: the turn is still the one the
             # signal asked this runtime to finish.
             assert rig.children["drainvis01"].poll() is None, "a refusal signals nothing"

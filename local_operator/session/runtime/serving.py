@@ -2380,9 +2380,13 @@ class ServingSessionHandle(SessionHandle):
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
                 if not command.admitted.done():
+                    from local_operator.session.errors import TurnInFlight
+
                     self._command_reservations.reject(
                         command.command_id,
-                        transfer_to_steer="already streaming" in str(exc),
+                        transfer_to_steer=(
+                            isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
+                        ),
                     )
                     command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for

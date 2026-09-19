@@ -5200,10 +5200,17 @@ class Session:
             # the same reason — it is rewriting the history a request would be
             # built from. Saying "already streaming" for it would send the user
             # looking for a turn that is not there.
-            raise RuntimeError(
+            # The TYPED refusal, not a bare sentence: the spooled-owner drain and
+            # the two command queues classify it, and classifying text breaks
+            # silently on a reword (agent review round 2, MINOR-1). A
+            # ``RuntimeError`` subclass, so nothing that already caught the plain
+            # raise changes behaviour.
+            from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+            raise TurnInFlight(
                 "context compaction is running; the prompt can be sent once it finishes"
                 if self._compacting
-                else "session is already streaming; use steer() to inject mid-turn"
+                else TURN_IN_FLIGHT
             )
         # `@path` expansion, and it runs HERE — after the probe, before the
         # lock, not inside it. An approval can park on a human indefinitely, and
@@ -5265,7 +5272,9 @@ class Session:
             # one they have just submitted.
             self._graceful_cancel_requested = False
             if self._is_streaming:
-                raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+                from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+                raise TurnInFlight(TURN_IN_FLIGHT)
             # INLINE a pending wake catch-up ahead of the user's message, in
             # the SAME turn: the missed wakes belong before the work they were
             # meant to start, and spawning the catch-up as a competing
@@ -5696,15 +5705,19 @@ class Session:
         yet (agent review round 1, R3).
         """
         command_id = str(getattr(line, "command_id", "") or "")
-        if command_id:
-            if command_id in seen:
-                logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
-                return
-            seen.add(command_id)
+        if command_id and command_id in seen:
+            logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
+            return
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
             return
         self.steer(line.text, [], message_id=command_id or None)
+        # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
+        # the batch's repeat is the retry the at-least-once contract promises,
+        # and it is only redundant once the first row landed (agent review round
+        # 2, MINOR-2).
+        if command_id:
+            seen.add(command_id)
 
     async def receive_peer_message(
         self,

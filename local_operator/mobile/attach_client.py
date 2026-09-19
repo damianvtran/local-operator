@@ -1415,7 +1415,12 @@ class AttachClient:
                 images=command.images,
             )
         except RuntimeError as exc:
-            if "already streaming" not in str(exc):
+            # Local import, matching this module's other `session.errors` use:
+            # the check is a TYPE when this build raised it and the old sentence
+            # when the producer is a build that has never heard of the class.
+            from local_operator.session.errors import TurnInFlight
+
+            if not isinstance(exc, TurnInFlight) and "already streaming" not in str(exc):
                 raise
             return await self.steer(
                 command.text, command_id=command.command_id, images=command.images

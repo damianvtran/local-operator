@@ -5150,6 +5150,26 @@ class OperatorApp(App[None]):
             source.notices.append((text, kind))
             del source.notices[:-64]
 
+    def _notice_block_for(
+        self, source: SessionInteraction, text: str, kind: Any = "info"
+    ) -> NoticeBlock | None:
+        """Like :meth:`_notice_for`, but hands back the row it painted.
+
+        For the notices that need an END (design round 2, D7): a state row that
+        is only ever added outlives the state it describes, so the caller keeps
+        the block and takes it down when the state does. ``None`` when the row
+        went to the interaction's bounded off-screen store instead of the
+        transcript — there is nothing to remove there, and the store's own bound
+        is what keeps it from growing.
+        """
+        if not self._is_current(source):
+            source.notices.append((text, kind))
+            del source.notices[:-64]
+            return None
+        block = NoticeBlock(text, kind)
+        self._append_block(block)
+        return block
+
     def _notice_unsent_runtime(self, source: SessionInteraction) -> None:
         """Print `UNSENT_RUNTIME_NOTICE` once per standing failure, not per press.
 
@@ -18114,28 +18134,15 @@ class OperatorApp(App[None]):
         *after* this frame is announced only on the sender's own surface. Both
         are named in the PR thread rather than papered over.
         """
-        directory = self._session_directory(source)
-        if directory is None:
-            return
-        from local_operator.session.runtime.inbox import SOURCE_USER, peek_inbox
-
-        try:
-            rows = [
-                line for line in peek_inbox(directory) if getattr(line, "source", "") == SOURCE_USER
-            ]
-        except Exception:  # a read on the paint path must never take the app down
-            logger.debug("could not read the spool for %s", directory.name, exc_info=True)
-            return
-        mine = set(source.turn.queued_prompts)
-        elsewhere = [
-            line for line in rows if (str(getattr(line, "command_id", "") or "")) not in mine
-        ]
+        elsewhere = self._foreign_queued_rows(source)
         if not elsewhere:
             return
         if len(elsewhere) == 1:
-            self._notice_for(source, QUEUED_ELSEWHERE_NOTICE, "note")
+            source.turn.queued_elsewhere_notice = self._notice_block_for(
+                source, QUEUED_ELSEWHERE_NOTICE, "note"
+            )
             return
-        self._notice_for(
+        source.turn.queued_elsewhere_notice = self._notice_block_for(
             source,
             f"{len(elsewhere)} messages are queued for the next runtime — "
             "they run when the session does",
@@ -18324,6 +18331,16 @@ class OperatorApp(App[None]):
             # by the refresh path and is cleared on read, so an ordinary
             # engage finds nothing and says nothing.
             self._announce_refresh_completed()
+            # AND THE QUEUED STATE OF THIS SESSION SETTLES HERE. A bind is the
+            # first moment a surface can ask whether the successor has run the
+            # messages its own queue names: the announcement cannot answer it on
+            # the handover's normal arm, because the boot drain admits the spooled
+            # row before the socket that would carry the event exists (UX round 2,
+            # U2). Idempotent and cheap when there is no queue: it reads nothing
+            # and takes nothing down.
+            interaction = self._interaction
+            if interaction is not None:
+                self._settle_handed_over_queues(interaction)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
@@ -20270,14 +20287,26 @@ class OperatorApp(App[None]):
         # stopping, and the press still means what Esc always means below
         # (abort the turn, deny the prompt), so the resend the user is
         # lining up goes now rather than queueing again.
+        # A SPOOLED PROMPT FIRST, AND OUTSIDE THE CHILDREN GATE. Two reasons,
+        # both measured. It is the stronger commitment of the two (a queued steer
+        # rides a turn already running; this message went to a runtime that does
+        # not exist yet), so it is not the press the subagent ladder should spend.
+        # And with children up the recall used to sit behind `if not children:` —
+        # so press 1 offered to stop them, press 2 STOPPED them and the queued
+        # message was never touched, while its own row said `esc takes it back`
+        # (UX round 2, U3, at the incident's own shape: `subagents_running=3`).
+        #
+        # A RECALL THAT HAPPENED RETURNS: the press has done what the row
+        # promised — an inert undo of the user's own words — and falling through
+        # to the stop ladder made it also abort the turn in flight, which is what
+        # ENDS a drain (its liveness is in-flight work), booted the successor
+        # three seconds later and put every other queued message out of the
+        # recall's reach (UX round 2, U1). A press that recalled nothing still
+        # means what Esc always means.
+        if self._withdraw_queued_prompt(self._interaction) == "withdrawn":
+            return
         if not children:
-            # A SPOOLED PROMPT FIRST, and it is the stronger commitment of the
-            # two: a queued steer rides a turn that is already running, while
-            # this message was committed to a runtime that does not exist yet
-            # and may run it hours from now. One press does one thing, so the
-            # steer recall is skipped when this one acted.
-            if not self._withdraw_queued_prompt(self._interaction):
-                self._recall_queued_steers()
+            self._recall_queued_steers()
 
         if not (pending or streaming or children):
             # A bang-mode command is the one remaining thing Esc can stop
@@ -41370,9 +41399,7 @@ class OperatorApp(App[None]):
         if not message_id:
             return
         source.turn.queued_prompts[message_id] = _QueuedPrompt(command_id=message_id, text=text)
-        block = self._user_block_for_message(message_id)
-        if block is not None:
-            block.set_queued(True)
+        self._refresh_queued_offers(source)
 
     def _settle_queued_prompt(self, message_id: str) -> None:
         """The successor has run the message: take the queued marker off its row.
@@ -41388,11 +41415,120 @@ class OperatorApp(App[None]):
         for source in self._interactions.values():
             if message_id not in source.turn.queued_prompts:
                 continue
-            del source.turn.queued_prompts[message_id]
+            self._settle_one_queued_prompt(source, message_id)
+            return
+
+    def _settle_one_queued_prompt(self, source: SessionInteraction, message_id: str) -> None:
+        """Drop one queued entry and take its marker down."""
+        source.turn.queued_prompts.pop(message_id, None)
+        block = self._user_block_for_message(message_id)
+        if block is not None:
+            block.set_queued(False)
+        self._refresh_queued_offers(source)
+
+    def _refresh_queued_offers(self, source: SessionInteraction) -> None:
+        """Only the NEWEST queued message advertises the recall key.
+
+        The recall lifts one message at a time (the sibling steer channel's rule,
+        and the reason its decline names the composer), so a second marked row
+        offering the same key promises a press that will decline — measured:
+        two rows offering, one honouring (UX round 2, U4). The order is
+        insertion order, which is queue order.
+        """
+        ids = list(source.turn.queued_prompts)
+        for index, message_id in enumerate(ids):
             block = self._user_block_for_message(message_id)
             if block is not None:
-                block.set_queued(False)
+                block.set_queued(True, offer=index == len(ids) - 1)
+
+    def _handover_admitted_ids(self, source: SessionInteraction) -> set[str]:
+        """Which of this surface's queued ids the DURABLE transcript already holds.
+
+        THE EVIDENCE A JOINED SURFACE CAN ACTUALLY SEE, and the reason the marker
+        needs it: the successor's boot drain admits the spooled row BEFORE its
+        control socket exists (``process._drain_inbox_into`` runs ahead of
+        ``RuntimeServer.start_in_process``), so no viewer that binds afterwards
+        can witness that message's ``MessageStartEvent`` — measured on the real
+        handover: the marker was still up 60 s after the successor had answered
+        (UX round 2, U2). The durable row carries the id this surface sent, and
+        it is the same index the runtime uses to avoid running the message twice,
+        so it is evidence rather than a heuristic.
+
+        Read from disk, best effort: an unreadable or absent transcript answers
+        "nothing admitted", which keeps the marker up rather than clearing a
+        state nobody has established has ended.
+        """
+        directory = self._session_directory(source)
+        if directory is None:
+            return set()
+        from local_operator.resume import TRANSCRIPT_NAME
+
+        if not (directory / TRANSCRIPT_NAME).is_file():
+            return set()
+        try:
+            from local_operator.session.transcript import Transcript
+
+            transcript = Transcript(directory)
+            return {
+                command_id
+                for command_id in source.turn.queued_prompts
+                if transcript.has_admitted_command(command_id)
+            }
+        except Exception:  # a settle must never take the app down
+            logger.debug("could not read the durable transcript", exc_info=True)
+            return set()
+
+    def _settle_handed_over_queues(self, source: SessionInteraction) -> None:
+        """Take down every queued state whose message has been HANDED OVER.
+
+        Called when a bind completes, which is the first moment a surface that
+        joined a drain can ask the two questions its own queue raises: has the
+        successor run this message (the durable row), and does the spool still
+        hold messages this surface is not showing (the foreign-queue row).
+
+        The announcement path stays (:meth:`_settle_queued_prompt`): on the
+        mid-turn arm the successor is already serving and does announce, and a
+        settlement that only ran on a bind would miss it.
+        """
+        for command_id in self._handover_admitted_ids(source):
+            self._settle_one_queued_prompt(source, command_id)
+        self._retire_queued_elsewhere_notice(source)
+
+    def _retire_queued_elsewhere_notice(self, source: SessionInteraction) -> None:
+        """Take the joiner's queued-messages row down once nothing is queued.
+
+        The D2 class on the surface round 1 added (design round 2, D7): the row
+        announced messages the spool held and could never stop announcing them,
+        so it sat above the very answer it described. It goes when the spool no
+        longer holds an owner row this surface is not already marking.
+        """
+        notice = source.turn.queued_elsewhere_notice
+        if notice is None:
             return
+        if self._foreign_queued_rows(source):
+            return
+        source.turn.queued_elsewhere_notice = None
+        try:
+            self._transcript_view().remove_block(notice)
+        except Exception:  # a row already gone is the common race, not a failure
+            logger.debug("queued-elsewhere row was already gone", exc_info=True)
+
+    def _foreign_queued_rows(self, source: SessionInteraction) -> list[Any]:
+        """Spooled owner rows this surface is NOT already showing as queued."""
+        directory = self._session_directory(source)
+        if directory is None:
+            return []
+        from local_operator.session.runtime.inbox import SOURCE_USER, peek_inbox
+
+        try:
+            rows = [
+                line for line in peek_inbox(directory) if getattr(line, "source", "") == SOURCE_USER
+            ]
+        except Exception:  # a read on the paint path must never take the app down
+            logger.debug("could not read the spool", exc_info=True)
+            return []
+        mine = set(source.turn.queued_prompts)
+        return [row for row in rows if str(getattr(row, "command_id", "") or "") not in mine]
 
     def _user_block_for_message(self, message_id: str) -> UserBlock | None:
         """The user row this surface painted for ``message_id``, if it is up.
@@ -41426,7 +41562,7 @@ class OperatorApp(App[None]):
             return None
         return config_dir() / "sessions" / session_id
 
-    def _withdraw_queued_prompt(self, source: SessionInteraction) -> bool:
+    def _withdraw_queued_prompt(self, source: SessionInteraction) -> str:
         """Esc: take the newest spooled prompt back out of the successor's spool.
 
         THE NEIGHBOUR OF :meth:`_recall_queued_steers`, making the same promise
@@ -41437,13 +41573,16 @@ class OperatorApp(App[None]):
         needs no op and cannot disturb the runtime: no runtime has read the row
         yet, which is exactly what makes it recallable.
 
-        Returns True when the press was spent here (the message was taken back, or
-        the spool had already released it and the user was told so), False when
-        this recall has nothing to do — no queued message of ours, no session
-        directory, or a composer that must not be disturbed. The False cases are
-        the same three guards the steer recall applies for the same reasons: the
-        aside owns the composer, a read-only composer cannot show the text, and a
-        half-typed draft is never displaced on the cancel key.
+        Returns ``"withdrawn"`` when the message was actually taken back — the
+        one outcome that ends the press, because the row promised an inert undo
+        and the caller must not go on to stop the turn (UX round 2, U1) — or
+        ``"missed"``/``"declined"``/``""`` when it was not: the successor already
+        has the row, the composer must not be disturbed, there is nothing of ours
+        queued, or there is no session directory. Those keep the rest of Esc's
+        meaning, because the press did not change anything. The three guards are
+        the ones the steer recall applies for the same reasons: the aside owns the
+        composer, a read-only composer cannot show the text, and a half-typed
+        draft is never displaced on the cancel key.
 
         LOSING THE RACE IS AN ANSWER, not a gap: once the successor has drained
         the spool the row is gone and the message WILL run, so the miss says
@@ -41453,31 +41592,32 @@ class OperatorApp(App[None]):
         """
         entries = list(source.turn.queued_prompts.items())
         if not entries:
-            return False
+            return ""
         message_id, queued = entries[-1]
         editor = self._editor()
         if self._aside_is_open() or editor.read_only:
-            return False
+            return ""
         if editor.text.strip():
             # Same reasoning as the steer recall's decline: a press that changes
             # nothing reads as a dropped keystroke, and the buffer is the
             # obstacle — so say what the obstacle is and how to clear it.
             self._replace_stop_notice(QUEUED_PROMPT_DECLINE_NOTICE, "note")
-            return True
+            return "declined"
         directory = self._session_directory(source)
         if directory is None:
-            return False
+            return ""
         from local_operator.session.runtime.inbox import withdraw_inbox
 
         try:
             withdrawn = withdraw_inbox(directory, queued.command_id)
         except Exception:  # a recall must never take the app down
             logger.debug("queued-prompt recall failed", exc_info=True)
-            return False
+            return ""
         if not withdrawn:
             self._replace_stop_notice(QUEUED_PROMPT_MISSED_NOTICE, "warning")
-            return True
+            return "missed"
         del source.turn.queued_prompts[message_id]
+        self._refresh_queued_offers(source)
         block = self._user_block_for_message(message_id)
         transcript = self._transcript_view()
         if block is not None:
@@ -41490,7 +41630,7 @@ class OperatorApp(App[None]):
         self._load_editor_draft(SessionDraft(text=queued.text))
         self._replace_stop_notice(QUEUED_PROMPT_TAKEN_BACK_NOTICE, "note")
         self._editor().focus()
-        return True
+        return "withdrawn"
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.

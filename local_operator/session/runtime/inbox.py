@@ -118,6 +118,13 @@ SPOOL_RECEIPT_PROMPT = "queued for the next runtime — it will run it"
 #: ``SOURCE_PEER``: every writer that predates it is the peer path.
 SOURCE_PEER = "peer"
 SOURCE_USER = "user"
+#: NOT a message: the owner took a message back before it ran. It carries the
+#: recalled row's ``command_id`` and nothing else, and both readers drop the row
+#: it names (see :func:`withdraw_inbox`). A MARKER rather than a rewrite of the
+#: spool, because this file is append-only by contract and every reader of it
+#: must be able to see the recall without the file being rewritten under a
+#: concurrent writer — see the measurement in :func:`withdraw_inbox`'s docstring.
+SOURCE_RECALL = "recall"
 
 #: Non-blocking lock retries, and the pause between them. Deliberately small:
 #: the critical section is one ``write()`` of a few hundred bytes, so a
@@ -177,11 +184,18 @@ class InboxLine:
             mode=str(payload.get("mode", "mailbox") or "mailbox"),
             written_at=float(payload.get("written_at", 0.0) or 0.0),
             wake=bool(payload.get("wake", False)),
-            # Anything that is not the owner's own row is a peer's: the peer
-            # path is the one that predates the field, so an unknown value
-            # (a build this one has never heard of) must not inherit the one
-            # delivery shape that skips the sender's provenance.
-            source=(SOURCE_USER if payload.get("source") == SOURCE_USER else SOURCE_PEER),
+            # Anything that is not one of the values THIS build knows is a
+            # peer's: the peer path is the one that predates the field, so an
+            # unknown value (a build this one has never heard of) must not
+            # inherit the one delivery shape that skips the sender's provenance.
+            # ``SOURCE_RECALL`` is one of ours and is preserved as itself —
+            # collapsing it to a peer row would deliver the recall marker as an
+            # empty peer message and, worse, hide the recall from both readers.
+            #
+            # (An OLDER runtime reading a spool that holds a marker does read it
+            # as a peer row and delivers an empty note: a downgrade-only case,
+            # not a shape this change creates, and the next drain consumes it.)
+            source=_known_source(payload.get("source")),
             command_id=str(payload.get("command_id", "") or ""),
         )
 
@@ -195,6 +209,16 @@ class InboxLine:
             "source": self.source,
             "command_id": self.command_id,
         }
+
+
+#: Every ``source`` value this build writes, so a reader can tell one of ours
+#: from a value a NEWER build invented (which is read as a peer's row).
+_KNOWN_SOURCES = frozenset({SOURCE_PEER, SOURCE_USER, SOURCE_RECALL})
+
+
+def _known_source(raw: Any) -> str:
+    """The row's own source when this build knows it, else the peer default."""
+    return raw if isinstance(raw, str) and raw in _KNOWN_SOURCES else SOURCE_PEER
 
 
 def inbox_path(session_dir: Path) -> Path:
@@ -313,89 +337,102 @@ def peek_inbox(session_dir: Path) -> list[InboxLine]:
     lock-free: a reader that saw a half-written final line simply drops it
     (``_parse`` skips unparseable rows), which is cheaper and safer than
     taking a lock on a UI path.
+
+    RECALLED ROWS ARE NOT IN THE ANSWER, and neither are the markers that recall
+    them: the spool still holds both until the next drain consumes the file, so
+    a reader that showed them would paint a message the user has taken back.
     """
     try:
-        return _parse(inbox_path(session_dir).read_bytes())
+        return _deliverable(_parse(inbox_path(session_dir).read_bytes()))
     except OSError:
         return []
 
 
+def _deliverable(lines: list[InboxLine]) -> list[InboxLine]:
+    """The rows of a spool batch that are FOR DELIVERY.
+
+    One spelling for both readers, so a recall cannot be honoured by the runtime
+    and ignored by the viewer (or the reverse). ``SOURCE_RECALL`` rows are the
+    markers themselves — they say what to drop and are dropped with it.
+    """
+    recalled = {
+        line.command_id for line in lines if line.source == SOURCE_RECALL and line.command_id
+    }
+    return [
+        line
+        for line in lines
+        if line.source != SOURCE_RECALL
+        and not (line.source == SOURCE_USER and line.command_id in recalled)
+    ]
+
+
 def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
-    """Take one OWNER row back out of the spool. True if a row was removed.
+    """Record that the owner took a spooled message back. True if recorded.
 
-    THE RECALL PATH, and it belongs here rather than behind an op: the spool is
-    a file that an unrelated process already writes (``peer_send``'s cold
-    note), and the front end that painted the row is the one asking — so a
-    withdrawal needs no runtime, no session and no successor to exist yet.
+    APPEND-ONLY, and that is a measured decision rather than a style one. The
+    obvious implementation — rewrite the spool without that row — has to replace
+    or truncate a file that a concurrent ``append_inbox`` may be writing to, and
+    this module's appenders do NOT hold the lock they cannot take (deliberately:
+    a producer's message must not be dropped for a lock). Measured with three
+    racing appenders and 48 recalls: an in-place truncate lost acked rows in one
+    shape (the reviewer measured 1/241 and 8/488), and a STAGED replace — the
+    discipline :func:`_replace_remainder` uses for the drain — lost 14 of 42
+    acked rows, because an appender's already-open ``O_APPEND`` descriptor points
+    at the inode the replace orphans. So the recall adds a MARKER row
+    (``SOURCE_RECALL``) instead: nothing is rewritten, no appender can lose a
+    row, and both readers drop the marker and the row it names.
 
-    HONEST ABOUT LOSING THE RACE. ``False`` means the row is no longer there,
-    and the overwhelmingly likely reason is that the successor drained it — so
-    the message IS going to run and the caller must say that rather than let the
-    user believe a recall worked. There is no third answer, and no retry: the
-    window closes on the successor's boot, which is not observable from here.
+    ``False`` means the row was not in the spool when this was called, and the
+    overwhelmingly likely reason is that the successor drained it — the message
+    WILL run, and the caller must say that rather than let the user believe a
+    recall worked. Best-effort by construction: a drain that has read the batch
+    and not yet emptied the file holds that row in memory and will deliver it.
+    There is no third answer and no retry; the caller's copy carries the
+    distinction (``app.QUEUED_PROMPT_MISSED_NOTICE``).
 
     Keyed by the OWNER's own ``command_id``, which only a ``SOURCE_USER`` row
     carries (``serving._spool_for_successor`` writes it for that source alone),
-    so a peer's message can never be withdrawn by this call even if ids were to
-    collide.
-
-    Locked and staged exactly like the other two writers here: ``LOCK_NB`` with
-    bounded retries (never a blocking flock — the app's paint path reads this
-    file), and the rewrite goes through ``os.replace`` so a concurrent reader
-    never sees a truncated spool.
+    so a peer's message can never be recalled by this call even if ids were to
+    collide. A spool at its ``MAX_INBOX_ROWS`` cap cannot record the marker: the
+    append fails, this returns False, and the caller says "too late" — the safe
+    direction, and a corner (the file is emptied by the next drain).
     """
     if not command_id:
         return False
-    path = inbox_path(session_dir)
+    if not any(
+        line.source == SOURCE_USER and line.command_id == command_id
+        for line in peek_inbox(session_dir)
+    ):
+        return False
+    return append_inbox(
+        session_dir,
+        InboxLine(text="", sender={}, source=SOURCE_RECALL, command_id=command_id),
+    )
+
+
+def _replace_remainder(path: Path, consumed: bytes) -> None:
+    """Rewrite the spool with only the bytes written after ``consumed``.
+
+    Staged through ``os.replace`` so a reader never sees a truncated file, and it
+    is the ONLY place this module replaces the file: the recall does not rewrite
+    the spool at all (see :func:`withdraw_inbox`).
+    """
+    staged = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
     try:
-        fd = os.open(path, os.O_RDWR)
-    except FileNotFoundError:
-        return False
+        current = path.read_bytes()
     except OSError:
-        logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
-        return False
+        current = consumed
+    remainder = current[len(consumed) :] if current.startswith(consumed) else b""
     try:
-        with _NonBlockingLock(fd):
-            raw = _read_all(fd)
-            kept: list[bytes] = []
-            removed = False
-            for row in raw.splitlines():
-                if not row.strip():
-                    continue
-                try:
-                    payload = json.loads(row.decode("utf-8", "replace"))
-                except ValueError:
-                    kept.append(row)  # a torn line is somebody else's, never ours
-                    continue
-                if (
-                    isinstance(payload, dict)
-                    and payload.get("source") == SOURCE_USER
-                    and payload.get("command_id") == command_id
-                ):
-                    removed = True
-                    continue
-                kept.append(row)
-            if not removed:
-                return False
-            # REWRITTEN IN PLACE, not staged through a temp file and
-            # ``os.replace``: this file is inside the session store, where a
-            # displacer has to be allow-listed (``tests/unit/session/
-            # test_no_session_deletion.py``), and the lock-free ``peek_inbox``
-            # reader already tolerates a torn final line — so the cheapest
-            # correct write here is truncate-and-write on the descriptor this
-            # call already holds. The drain cannot race it (same lock).
-            payload = b"".join(row + b"\n" for row in kept)
-            os.lseek(fd, 0, os.SEEK_SET)
-            written = 0
-            while written < len(payload):
-                written += os.write(fd, payload[written:])
-            os.ftruncate(fd, len(payload))
-            return True
+        staged.write_bytes(remainder)
+        os.chmod(staged, 0o600)
+        os.replace(staged, path)
     except OSError:
-        logger.warning("inbox withdrawal failed for %s", session_dir.name, exc_info=True)
-        return False
-    finally:
-        os.close(fd)
+        logger.warning("inbox rewrite failed for %s", path.parent.name, exc_info=True)
+        try:
+            staged.unlink()
+        except OSError:
+            pass
 
 
 def drain_inbox(session_dir: Path) -> list[InboxLine]:
@@ -427,6 +464,10 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
             lines = _parse(raw)
             if not lines:
                 return []
+            # The markers are consumed with the rows they name: the whole file
+            # goes, and a recall has done its job once the batch it applied to is
+            # gone.
+            deliverable = _deliverable(lines)
             if lock.acquired or os.name == "nt":
                 os.ftruncate(fd, 0)
             else:
@@ -436,7 +477,7 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
                 # appender's row lands in a file we just replaced, which the
                 # NEXT open drains.
                 _replace_remainder(path, raw)
-            return lines
+            return deliverable
     except OSError:
         logger.warning("inbox drain failed for %s", session_dir.name, exc_info=True)
         return []
@@ -453,26 +494,3 @@ def _read_all(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _replace_remainder(path: Path, consumed: bytes) -> None:
-    """Rewrite the spool with only the bytes written after ``consumed``.
-
-    Staged through ``os.replace`` so a reader never sees a truncated file.
-    """
-    staged = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
-    try:
-        current = path.read_bytes()
-    except OSError:
-        current = consumed
-    remainder = current[len(consumed) :] if current.startswith(consumed) else b""
-    try:
-        staged.write_bytes(remainder)
-        os.chmod(staged, 0o600)
-        os.replace(staged, path)
-    except OSError:
-        logger.warning("inbox rewrite failed for %s", path.parent.name, exc_info=True)
-        try:
-            staged.unlink()
-        except OSError:
-            pass

@@ -51,6 +51,12 @@ class TurnInteraction:
     #: ``Any`` here for the reason ``pending_echoes`` is — this module is imported
     #: by the app and must not import it back.
     queued_prompts: dict[str, Any] = field(default_factory=dict)
+    #: The row that names messages this surface did NOT send (``peek_inbox`` at
+    #: a bind), held so it can be taken down when the spool stops holding them —
+    #: a state row that is only ever added outlives the state it describes
+    #: (design round 2, D7; the same reason ``_retire_unsent_runtime_notice``
+    #: exists). ``None`` when it went to the off-screen store instead.
+    queued_elsewhere_notice: Any = None
     completion_deferred: bool = False
     settled_child_ids: set[str] = field(default_factory=set)
     waiting_kind: str | None = None
