@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,11 +48,20 @@ async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
     class App:
         def __init__(self, session) -> None:  # noqa: ANN001
             self._session = session
+            self._loop_lock = threading.Lock()
 
         def call_from_thread(self, callback) -> None:  # noqa: ANN001
             # The callback is the Textual loop's atomic admission section. This
-            # fake runs it inline while concurrent bridge tasks contend for it.
-            callback()
+            # fake runs it inline while concurrent bridge tasks contend for it,
+            # so it must hold a lock to keep it atomic: ``_on_app`` performs the
+            # enqueue on a WORKER thread (``asyncio.to_thread``), which means two
+            # concurrent hops call this from two threads at once — where the
+            # real ``App.call_from_thread`` cannot, because a Textual app runs
+            # its callbacks one at a time on one thread. Without the lock the
+            # double lets two steers into the admission section simultaneously
+            # and fails a test about a guarantee the product keeps.
+            with self._loop_lock:
+                callback()
 
     session = Session()
     handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
@@ -463,3 +473,79 @@ def test_the_formatter_fixture_is_what_its_generator_produces() -> None:
 
     assert FORMATTER_PARITY == FIXTURE, "the generator writes the file this suite reads"
     assert FORMATTER_PARITY.read_text() == render()
+
+
+@pytest.mark.asyncio
+async def test_tui_hop_never_parks_the_runtime_loop() -> None:
+    """No code on the runtime's loop may perform a synchronous cross-thread wait.
+
+    The invariant behind the operator's "a busy session reads as wedged": a TUI
+    runtime serves its control socket, its heartbeat, its attention ticks and
+    its projection pushes from ONE loop, and ``app.call_from_thread`` does not
+    merely enqueue — it enqueues and BLOCKS until Textual runs the callback. So a
+    hop taken directly from a coroutine parks that whole loop behind the app's
+    queue. Measured on 2026-09-18 against a real ``OperatorApp``: with one client
+    registered and the app loop held 50.5 s, the control thread sat 50.1 s
+    inside the enqueue, a fresh dial got no welcome within 20 s, and the
+    discovery record aged to 45.1 s and read ``wedged`` on a live idle pid.
+
+    Asserted STRUCTURALLY, as thread identity, because that cannot flake: the
+    thread that performs the blocking enqueue must not be the loop's thread.
+    The liveness half below is the same fact stated positively — a task on that
+    loop makes progress while the app still holds the callback — and both are
+    deterministic, since the fake's own wait is bounded rather than counted on.
+    """
+    loop_thread = threading.get_ident()
+    entered = threading.Event()
+    release = threading.Event()
+    hop_threads: list[int] = []
+
+    class Session(FakeSession):
+        def refresh_attention(self) -> dict[str, Any]:
+            # The exact call the runtime's ``_attention_loop`` makes once per
+            # second for as long as any client is registered.
+            return {"unseen": 0}
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            hop_threads.append(threading.get_ident())
+            entered.set()
+            # Bounded so the pre-fix shape reports the assertion below instead
+            # of hanging the suite; the assertion is the thread identity, not
+            # this wait.
+            release.wait(10.0)
+            callback()
+
+    handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
+    hop = asyncio.create_task(handle.refresh_attention())
+    assert await asyncio.to_thread(entered.wait, 5), "the hop never reached the app"
+
+    assert hop_threads and hop_threads[0] != loop_thread, (
+        "the cross-thread hop performed its blocking enqueue on the runtime's own "
+        "loop — every accept, ping and heartbeat behind it stops for as long as "
+        "the app is busy"
+    )
+
+    ticks = 0
+
+    async def spin() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    ticker = asyncio.create_task(spin())
+    # Bounded by loop TURNS, not seconds: a free loop needs a handful of them,
+    # and a parked one never reaches the count at all.
+    for _ in range(200):
+        if ticks >= 5:
+            break
+        await asyncio.sleep(0)
+    assert ticks >= 5, "the runtime's loop made no progress while the hop was parked"
+
+    release.set()
+    assert await asyncio.wait_for(hop, timeout=5) == {"unseen": 0}
+    ticker.cancel()

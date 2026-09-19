@@ -706,6 +706,21 @@ _PUBLISH_WAIT_TIMEOUT_S = 15.0
 #: identity from either side, where a local one would only work by luck.
 _WORK_ARRIVED = object()
 
+#: How long ``_shutdown_impl`` waits for requests the reader loops have ALREADY
+#: admitted to finish answering, before it closes the sockets they answer on.
+#:
+#: Five seconds, and the number is chosen from the two bounds it sits between:
+#: a hop into another thread's event loop is milliseconds when that loop is
+#: healthy (measured: a TUI hop returns in 0.0-0.1 s), and every client
+#: speaking to this socket gives a reply 15 s (``attach_client.ACK_TIMEOUT_S``)
+#: — so a shutdown that waits a few seconds gets the ack out while still being
+#: far below the caller's own patience. The wait exists because the ``stop`` op
+#: is answered by a hook that tears this runtime down (see
+#: ``_await_in_flight_requests``); a longer grace would buy nothing (a request
+#: still parked after 5 s is parked on something that is not going to answer)
+#: and would delay every genuine shutdown by that much.
+_SHUTDOWN_REPLY_GRACE_S = 5.0
+
 _PAYLOAD_OPS = {
     "slash_result",
     "cancel_subagents",
@@ -1376,6 +1391,15 @@ class RuntimeServer:
         # Strong references to the one event writer per subscribed client. A
         # bare create_task can be collected mid-flight, which drops frames.
         self._event_sends: set[asyncio.Task[None]] = set()
+        #: Requests the reader loops have ADMITTED and not yet answered, and the
+        #: event that fires when the count returns to zero. ``_shutdown_impl``
+        #: waits on it so a reply the runtime has already admitted reaches its
+        #: socket — see ``_await_in_flight_requests`` for why a shutdown can
+        #: otherwise beat its own ack, and why the counter (rather than one
+        #: long-lived Event) is what makes a later request wait on its own
+        #: admission rather than on an older one's completion.
+        self._in_flight_requests = 0
+        self._in_flight_idle: asyncio.Event | None = None
         # N authenticated connections keyed by id(writer): one daemon (a new
         # daemon dial evicts the old — that IS its reconnect story) plus up to
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
@@ -2250,8 +2274,73 @@ class RuntimeServer:
         """Join idempotent teardown from a coroutine on the runtime loop."""
         await asyncio.shield(self._ensure_shutdown_task())
 
+    def _admit_request(self) -> None:
+        """Count one request as in flight. Called on the runtime's loop."""
+        self._in_flight_requests += 1
+        if self._in_flight_requests == 1:
+            # A FRESH event per span, so a request admitted after an earlier one
+            # finished waits on its OWN admission: an event that was left set
+            # would make ``_await_in_flight_requests`` return immediately and
+            # silently drop the guarantee it exists for.
+            self._in_flight_idle = asyncio.Event()
+
+    def _release_request(self) -> None:
+        """Release one admitted request and wake the shutdown fence at zero."""
+        self._in_flight_requests -= 1
+        if not self._in_flight_requests and self._in_flight_idle is not None:
+            self._in_flight_idle.set()
+
+    async def _await_in_flight_requests(self) -> None:
+        """Let admitted requests answer before the sockets they answer on close.
+
+        WHY THIS IS A FENCE AND NOT A COURTESY. The ``stop`` op is answered by a
+        host hook that tears its own runtime down: ``TuiSessionHandle.request_stop``
+        schedules the app's teardown, the teardown closes the registrant, and
+        :meth:`_shutdown_impl` drops every client — including the one waiting
+        for the ack of the op that is doing the stopping. Losing that race turns
+        a successful graceful stop into a client-side ``OwnerAckTimeout``, and
+        the ladder then escalates to the signal rung on a session that had
+        already ended politely. Measured on 2026-09-19 with a trace of
+        ``_send_to``/``_shutdown_impl``/``_drop_client``: the shutdown ran at
+        +1.035 s and dropped the connection with reason ``runtime shutdown``
+        BEFORE the ack was written, and the client read
+        ``ConnectionError('runtime closed the connection')``.
+
+        THE RACE IS NOT NEW — the guarantee was. Until ``mobile/tui_handle``
+        stopped blocking its own loop on the hop into Textual, the serving loop
+        was held by that hop for the whole dispatch, so the teardown (which
+        needs this loop to progress) could not overtake the ack. That was
+        accidental, and removing it was the point of the change; this restores
+        the guarantee deliberately, as the thing the runtime actually owes its
+        client: **a request it has admitted is answered before the socket
+        closes.**
+
+        BOUNDED, because what this waits for may be another thread's event loop
+        (a hop into Textual): a genuinely wedged app must not turn ``close``
+        into a hang. After the grace the shutdown proceeds and drops the
+        connection — the pre-existing behaviour — with a warning naming how many
+        requests were still open.
+        """
+        idle = self._in_flight_idle
+        if idle is None or not self._in_flight_requests:
+            return
+        try:
+            await asyncio.wait_for(idle.wait(), timeout=_SHUTDOWN_REPLY_GRACE_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "session runtime: closing with %d request(s) still in flight; "
+                "a reply may not reach its client",
+                self._in_flight_requests,
+            )
+
     async def _shutdown_impl(self) -> None:
         """Cancel and join every object owned by the runtime event loop."""
+        # FIRST, and before anything else here touches a connection: a reply the
+        # runtime has already admitted goes out. See
+        # :meth:`_await_in_flight_requests` for the measured failure this
+        # prevents (a ``stop`` whose ack lost a race with its own teardown) and
+        # for why the wait is bounded.
+        await self._await_in_flight_requests()
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
         if self._attention_task is not None:
@@ -2938,7 +3027,15 @@ class RuntimeServer:
                 except ValueError:
                     continue
                 conn.last_seen = time.monotonic()
-                await self._on_request(frame, conn)
+                # ADMITTED BEFORE IT RUNS, and released when it settles however
+                # it settles: this span is what ``_shutdown_impl`` waits on so
+                # the reply to an admitted request is written before the socket
+                # it belongs to is closed.
+                self._admit_request()
+                try:
+                    await self._on_request(frame, conn)
+                finally:
+                    self._release_request()
         except (ConnectionResetError, BrokenPipeError):
             self._drop_client(conn, reason="reader reset")
             return
