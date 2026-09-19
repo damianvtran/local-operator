@@ -260,13 +260,30 @@ async def test_a_dead_pid_does_not_make_the_route_wait(
 async def test_the_response_does_not_wait_out_the_probe_queue(
     desktop, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A roster bigger than the probe pool must still return inside its budget.
+    """A roster bigger than the probe pool must not make the caller wait for its queue.
 
     ``ThreadPoolExecutor``'s context manager joins the QUEUE, so forty rows against
     a 0.1 s budget cost ``ceil(40 / 8) x 0.25 s`` — the budget was a hope, and QA
     measured 1.69 s at this endpoint against a 0.1 s request (review round 1, R1-4).
     The rows here are real records with real ports and a probe that never answers
     inside the budget, which is the shape that used to queue.
+
+    **The assertion is the DIAL COUNT, not a wall clock**, and that is the point of
+    the shape rather than a preference. The defect is "the queued probes were waited
+    out", which a count of the probes that started states directly; a ceiling states
+    a symptom that also moves with the host. This file asserted ``elapsed < 1.0`` — a
+    1.7x margin over the 1.69 s it was separating itself from — and it tripped in 2
+    of 5 runs on a loaded machine, while the census fork and socket read alone pushed
+    a *correct* response to 1.435 s (review round 3, R3-3; QA round 3, Q1). Those two
+    facts together are why the number cannot simply be raised: on a loaded host the
+    correct answer's own cost overlaps the pre-fix one.
+
+    The counts, by contrast, are far apart and load-independent. The pool is
+    ``min(PROBE_WORKERS, rows)`` wide and every probe holds its worker for the whole
+    ``PROBE_TIMEOUT_S``, which is longer than this request's budget, so at most one
+    probe per worker can start before the budget expires: **8 against 40 rows**. The
+    pre-fix ``shutdown(wait=True)`` runs every one of the 40. A count cannot be moved
+    by host load; a ceiling can.
     """
     _bare, client, root = desktop
     pids = list(range(MINE + 1, MINE + 41))
@@ -280,16 +297,29 @@ async def test_the_response_does_not_wait_out_the_probe_queue(
     monkeypatch.setattr(reclaim.registry, "pid_alive", lambda pid, **kwargs: True)
     monkeypatch.setattr(roster, "socket_evidence", lambda **kw: SocketEvidence())
     # A listener whose accept queue never drains: the connect blocks for the whole
-    # probe timeout rather than refusing.
-    monkeypatch.setattr(roster, "_connect_ok", lambda port, timeout: time.sleep(timeout) or False)
+    # probe timeout rather than refusing. Each call is recorded, because HOW MANY
+    # started is the fact under test.
+    dialled: list[int] = []
 
-    started = time.monotonic()
+    def _never_answers(port: int, timeout: float) -> bool:
+        dialled.append(port)
+        time.sleep(timeout)
+        return False
+
+    monkeypatch.setattr(roster, "_connect_ok", _never_answers)
+
     response = await client.get("/v1/desktop/runtimes?budget_s=0.1")
-    elapsed = time.monotonic() - started
     assert response.status_code == 200
-    assert elapsed < 1.0, elapsed
     rows = response.json()["result"]["runtimes"]
     assert len(rows) == len(pids)
     # Every row is ANSWERED, and the ones the budget cut short say so rather than
     # claiming the runtime did not answer.
     assert {row["reachability"] for row in rows} == {"unknown"}
+    # THE QUEUE WAS ABANDONED, NOT JOINED. Fewer probes ran than there were rows, so
+    # the ones that never started were cancelled rather than waited out — and the
+    # pool's own width is the ceiling, or a worker would have had to free itself
+    # inside a budget shorter than one probe.
+    assert len(dialled) < len(pids), (
+        f"dialled {len(dialled)} of {len(pids)} ports: the probe queue was waited out"
+    )
+    assert len(dialled) <= roster.PROBE_WORKERS, len(dialled)
