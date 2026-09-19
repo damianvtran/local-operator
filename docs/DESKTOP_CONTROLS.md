@@ -91,9 +91,18 @@ Defaults use the existing typed settings API; session model, effort and approval
 mutations do not silently persist. `/approvals default ...` opens the default
 editor for `tool_approval_mode` and explicitly leaves the current session alone:
 that editor writes the file, which is where every NEW session reads the mode, so
-a running session's gate is loosened only by `/approvals auto` in that session
-(route: `POST /v1/desktop/sessions/{id}/commands`). The file still tightens every
-running session at once, which is the safe direction.
+a running session's gate is loosened only by `/approvals auto` typed in the
+console that started it — see below. The file still tightens every running
+session at once, which is the safe direction.
+
+**The command route can tighten a running gate but cannot loosen one** (issue
+#1310). `/approvals auto` over
+`POST /v1/desktop/sessions/{id}/commands` is refused unless this backend is the
+process that started the session's runtime; the refusal names the remedies
+(`/approvals default auto` before starting, `--yolo`, or typing it in the
+console). `/approvals ask`, a bare `/approvals`, every other command and every
+non-approval op are unaffected. The app must present the refusal as an ordinary
+command error rather than retrying, and must not imply the mode changed.
 The frontend must obtain explicit default scope and premium-pricing consent in
 its forms. Retain locally selected images while presenting an interactive action.
 
@@ -133,7 +142,7 @@ and rendered verification.
 | btw | Runtime completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
 | compact | Existing runtime compact control/events | Pending/completed/error from canonical events |
 | stop | Explicit target list/confirmation, canonical stop protocol | Current/selected/all picker; submit exact IDs |
-| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one | Session/default scope and confirmation |
+| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one. Loosening a RUNNING gate (`auto`) is refused unless this backend started that runtime — `/approvals ask` and the report always work | Session/default scope and confirmation; render the cell as-is, never as a failed command. Never surface the copy as "not supported" — it is a rule, not a gap |
 | skills | Effective discovered catalogue and closed skill:// detail resolver | Catalogue/details; distinguish discoverable from selected |
 | mcp | Effective source ownership, configuration, connections and grants | Server panel, forms, transport/downstream auth distinction |
 | login | Central provider/method action and existing auth operation | Browser/input/cancel flow without renderer secrets |
