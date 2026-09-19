@@ -183,6 +183,46 @@ _TRIGGER_FOR_LEAVING: dict[str, str] = {
 }
 
 
+class OperatorAuthorityRequired(ValueError, RuntimeError):
+    """This request would loosen a running gate, and did not come from its console.
+
+    `/approvals auto` and an APPROVED card remove the approval gate that
+    constrains the caller, so the runtime additionally demands a per-connection
+    proof of the capability its own spawner minted (issue #1310, ``harness/
+    approval``). A request that arrives without it — a follower pane, the phone
+    relay for a runtime another process started, the desktop app for a session
+    its backend did not engage, or a model-authored tool call that merely read
+    the session record — is refused with this.
+
+    A TYPED refusal so every route can carry it verbatim. Before this, the
+    refusal crossed the socket as an anonymous `error` frame and then a bare
+    `RuntimeError`, and each route guessed: the desktop command surface answered
+    `503 runtime_unreachable` ("reconnect and reconcile") and the desktop card
+    route answered `409 "no longer pending"` while the card was still parked,
+    both of which describe a different problem than the one the operator has
+    (agent review round 1 R1-2 = design D1 = UX U4 = QA Q1).
+
+    BOTH BASES, deliberately, for the reason ``RuntimeRetiring`` records one
+    class down: the routes that carry a control request catch `ValueError` (the
+    relay's HTTP arm) or `RuntimeError` (the card route's answer path), and a
+    class that satisfied only one would silently change the catch shape of a
+    call site that already handles it.
+
+    The message is built HERE from the constant the runtime also sends, so the
+    category and its copy cannot drift (the decode path in
+    :func:`admission_error` takes no text off the wire).
+    """
+
+    code = "operator_authority_required"
+
+    def __init__(self, message: str | None = None) -> None:
+        if message is None:
+            from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
+
+            message = OPERATOR_CAP_REQUIRED_NOTICE
+        super().__init__(message)
+
+
 class ProfileRegistryUnavailable(ValueError):
     code = "profile_registry_unavailable"
 
@@ -380,6 +420,10 @@ def admission_error(
             trigger=trigger if isinstance(trigger, str) else "",
             leaving=leaving if isinstance(leaving, str) else "",
         )
+    if code == OperatorAuthorityRequired.code:
+        # No arguments off the wire: the sentence is rebuilt from the constant,
+        # so a peer cannot put prose into an operator-facing refusal.
+        return OperatorAuthorityRequired()
     if code == ProfileRegistryUnavailable.code:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None

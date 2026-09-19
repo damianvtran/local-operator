@@ -58,6 +58,7 @@ See ``docs/design/approval-authority.md``.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import inspect
 import logging
@@ -189,7 +190,8 @@ def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
 #: 1, D3). ``/approvals auto`` is the route that does loosen the gate.
 LOOSENING_REFUSED_NOTICE = (
     "keeping tool approvals: ask — config.yml now says auto, but a write from outside "
-    "this session cannot loosen it; /approvals auto loosens it here"
+    "this session cannot loosen it; type /approvals auto in the terminal or app window "
+    "that started this session"
 )
 
 
@@ -219,11 +221,14 @@ LOOSENING_KEPT_BY_ASK_NOTICE = (
 # one route over from the one #1282 closed.
 #
 # The fix is one predicate (:func:`transition_authority`) and one credential
-# (:func:`mint_operator_cap`) that never reaches the filesystem: the record key
-# stays the whole authorization story for ORDINARY operations, and an
-# authority-INCREASING one additionally demands a capability held only in the
-# memory of the process that started the session and of the console whose
-# keyboard typed the command.
+# (:func:`mint_operator_cap`) that never reaches the filesystem AND never
+# crosses the wire: the record key stays the whole authorization story for
+# ORDINARY operations, and an authority-INCREASING one additionally demands a
+# per-connection PROOF of that credential — the runtime proves possession in its
+# welcome, the console verifies before it presents anything, and the value
+# itself stays in the two processes that already had it. Sending the value
+# instead was an earlier revision of this change and was defeated by the record
+# being same-uid writable (see :func:`_proof`).
 
 #: Which class of control-plane request this is.
 #:
@@ -331,34 +336,150 @@ def frame_authority(frame: dict[str, Any]) -> Authority | None:
     return transition_authority(str(frame.get("command", "")), str(frame.get("args", "")))
 
 
-def operator_cap_ok(*, supplied: object, held: bytes | None) -> bool:
-    """Constant-time check of a capability offered against the one held here.
+def operator_nonce() -> str:
+    """A fresh per-connection nonce/salt, hex. NOT a secret, and not reusable.
 
-    ``held`` is the 32 raw bytes this process minted or received; ``supplied``
-    is whatever arrived in the frame's ``operator_cap`` field, which is a hex
-    string on the wire and may be anything at all — the validator types it, but
-    this comparison is the check that actually decides, so it must be total.
+    64 hex characters, so the wire shape is the one the validator already
+    admits for the proof field. It exists so every proof is bound to ONE
+    connection: a value that crosses the wire here is worthless on any other.
+    """
+    return secrets.token_hex(OPERATOR_CAP_BYTES)
+
+
+def is_wire_hex(value: object) -> bool:
+    """Whether ``value`` has the wire shape of a nonce, salt or proof.
+
+    One definition, used by the runtime's auth-frame reader, the frame
+    validator and the attach client's handshake check: a shape check that drifts
+    between the three would admit a value one end can produce and another cannot
+    read back. Not a security check — the PROOF is the check — but the reason a
+    malformed field degrades to "no handshake" rather than to an exception.
+    """
+    if not isinstance(value, str) or len(value) != OPERATOR_CAP_BYTES * 2:
+        return False
+    return all(character in "0123456789abcdef" for character in value.lower())
+
+
+#: The two directions a per-connection proof can be computed in, domain
+#: separated so a proof harvested from one cannot be replayed as the other.
+_PROOF_LABEL_HANDSHAKE = b"lop-operator-cap-handshake-v1"
+_PROOF_LABEL_REQUEST = b"lop-operator-cap-request-v1"
+
+
+def _proof(label: bytes, cap: bytes, client_nonce: str, server_salt: str) -> str:
+    """``hmac_sha256(cap, label || client_nonce || ":" || server_salt)``, hex.
+
+    The CAPABILITY ITSELF NEVER CROSSES THE WIRE. That is the whole point of
+    this shape and the reason it replaced an earlier one that sent ``cap.hex()``
+    as the frame field:
+
+    * The discovery record is 0600, but it is WRITABLE by anything running under
+      the same uid — including the model-run tool the gate is there to constrain.
+      An earlier revision sent the capability VALUE to whatever endpoint the
+      record named, so a same-uid impostor could rewrite ``control_port`` to its
+      own listener, receive the value from the real console, and replay it to the
+      real runtime (agent review round 1, R1-1; reproduced end to end with
+      production clients). A proof is useless to a passive endpoint: it is bound
+      to nonces chosen for one connection, and the impostor cannot make the real
+      runtime accept it (that runtime generates its OWN salt per connection).
+    * Mutual: the runtime proves possession FIRST (in its welcome), so a console
+      never presents anything — not even a proof — to an endpoint that cannot
+      produce the same proof. That keeps the harvest from being merely
+      non-replayable and makes it empty.
+    * Per connection: both ingredients are fresh per connection, so nothing
+      accumulates that a later connection could use. A same-uid adversary that
+      proxies an entire session (relaying the real runtime's proof to the
+      console) can relay that connection's requests, which is what a proxy is —
+      but it never learns the capability and cannot originate one of its own.
+
+    Domain-separated by ``label`` so the handshake proof and the request proof
+    are different values: a transcript's worth of one direction is not a
+    credential for the other.
+    """
+    message = label + b"|" + client_nonce.encode("utf-8", "surrogatepass") + b"|"
+    message += server_salt.encode("utf-8", "surrogatepass")
+    return hmac.new(cap, message, hashlib.sha256).hexdigest()
+
+
+def handshake_proof(cap: bytes, *, client_nonce: str, server_salt: str) -> str:
+    """What the RUNTIME puts in its welcome: proof it holds ``cap``.
+
+    The console verifies it before presenting anything, which is what stops a
+    rewritten record from harvesting a credential: an endpoint that cannot
+    compute this is an endpoint that never receives the next step.
+    """
+    return _proof(_PROOF_LABEL_HANDSHAKE, cap, client_nonce, server_salt)
+
+
+def request_proof(cap: bytes, *, client_nonce: str, server_salt: str) -> str:
+    """What the CONSOLE puts on an authority-increasing frame.
+
+    Sent only after a verified :func:`handshake_proof`, and only on the frames
+    :func:`frame_authority` classes as increasing.
+    """
+    return _proof(_PROOF_LABEL_REQUEST, cap, client_nonce, server_salt)
+
+
+def _proof_ok(
+    *,
+    label: bytes,
+    supplied: object,
+    held: bytes | None,
+    client_nonce: str,
+    server_salt: str,
+) -> bool:
+    """Constant-time comparison of an offered proof against the expected one.
 
     FAIL-CLOSED in every degenerate direction, and each one is a real case:
 
-    * ``held is None`` — this runtime was started by a process that did not
-      hand one over (an older console, a test that constructed the server by
-      hand, a background spawn with no console at all). There is nothing to
-      match, so nothing may loosen.
+    * ``held is None`` — this runtime was started by a process that did not hand
+      one over (an older console, a test that constructed the server by hand, a
+      background spawn with no console at all). There is nothing to match.
     * ``supplied`` absent or not a string — an old client, or a forged frame.
-    * ``held`` the wrong length — a programming error on this side; refusing is
-      the only safe reading of a credential that is not the one we minted.
+    * ``held`` the wrong length — a programming error on this side, and refusing
+      is the only safe reading of a credential that is not the one we minted.
+    * either nonce missing — a client that never asked for a handshake, so there
+      is no connection-bound value it could legitimately hold.
 
-    Compared with ``hmac.compare_digest`` over equal-length byte strings rather
-    than as strings, so the comparison cannot raise on a non-ASCII candidate
-    (Python's ``str`` form raises ``TypeError`` on non-ASCII input) and cannot
-    leak the shared prefix through timing.
+    ``hmac.compare_digest`` over hex strings of equal length, so the comparison
+    cannot raise on a non-ASCII candidate (Python's ``str`` form raises
+    ``TypeError`` on non-ASCII input) and cannot leak a shared prefix through
+    timing.
     """
     if not isinstance(held, (bytes, bytearray)) or len(held) != OPERATOR_CAP_BYTES:
         return False
     if not isinstance(supplied, str) or not supplied:
         return False
-    return hmac.compare_digest(supplied.encode("utf-8", "surrogatepass"), held.hex().encode())
+    if not client_nonce or not server_salt:
+        return False
+    expected = _proof(label, bytes(held), client_nonce, server_salt)
+    return hmac.compare_digest(supplied.encode("utf-8", "surrogatepass"), expected.encode())
+
+
+def handshake_proof_ok(
+    *, supplied: object, held: bytes | None, client_nonce: str, server_salt: str
+) -> bool:
+    """Whether ``supplied`` is this connection's handshake proof, unverified by us."""
+    return _proof_ok(
+        label=_PROOF_LABEL_HANDSHAKE,
+        supplied=supplied,
+        held=held,
+        client_nonce=client_nonce,
+        server_salt=server_salt,
+    )
+
+
+def request_proof_ok(
+    *, supplied: object, held: bytes | None, client_nonce: str, server_salt: str
+) -> bool:
+    """Whether ``supplied`` is this connection's proof for an increasing request."""
+    return _proof_ok(
+        label=_PROOF_LABEL_REQUEST,
+        supplied=supplied,
+        held=held,
+        client_nonce=client_nonce,
+        server_salt=server_salt,
+    )
 
 
 #: The ONE sentence a host hands back when a control-plane request tried to
@@ -368,17 +489,29 @@ def operator_cap_ok(*, supplied: object, held: bytes | None) -> bool:
 #: Lives here for the same reason :data:`LOOSENING_REFUSED_NOTICE` does — the
 #: runtime writes it into an ``error`` frame and the TUI would have to write it
 #: into a transcript, and two copies of one refusal is two chances for one
-#: surface to describe the rule differently from the other. Following the #1291
-#: precedent it names the ONE-STEP remedy rather than the rule, and it names the
-#: remedy for BOTH directions the caller might have wanted: loosening THIS
-#: session (type it where the session was started), or loosening NEW sessions
-#: (``default auto`` / ``--yolo``). The last clause is what makes the refusal a
-#: signpost rather than a wall — ``/approvals ask`` still works from here.
+#: surface to describe the rule differently from the other.
+#:
+#: EVERY REMEDY IT NAMES MUST WORK FROM WHERE IT IS PRINTED (design round 1 D3,
+#: UX round 1 U1/U2, agent review round 1 MINOR). This copy therefore replaced
+#: one that named ``/approvals default auto`` — which the RUNTIME refuses from
+#: the very pane that printed the notice — and it opens differently from
+#: :data:`LOOSENING_REFUSED_NOTICE` so the two refusals are not visual twins:
+#: that one is about a config write arriving from outside this session, this one
+#: is about a command typed where the gate is not owned.
+#:
+#: What it names, in order: the thing that would work and where to do it; what
+#: still works from here; the mechanism that DOES work when there is no owning
+#: window at all (a background-spawned runtime has none — let it retire and
+#: re-open the session, and the window that starts the runtime owns its gate);
+#: and, last, how to make a NEW session start loosened, which is the only place
+#: ``--yolo`` and the config key apply.
 OPERATOR_CAP_REQUIRED_NOTICE = (
-    "/approvals auto loosens a running gate and has to come from the session's console — "
-    "type it in the terminal (or app) that started this session. "
-    "/approvals default auto before starting, or --yolo, loosens new sessions. "
-    "/approvals ask works from here."
+    "tool approvals stay at ask: /approvals auto removes this session's approval gate, and only "
+    "the terminal or app window that started this session can do that. /approvals ask still "
+    "tightens it from here, and a bare /approvals still reports it. If no window owns this "
+    "session — it was started in the background — wait for its runtime to finish and go idle, "
+    "then open the session again in this window: the window that starts a runtime owns its gate. "
+    "New sessions can start loosened with --yolo, or with tool_approval_mode: auto in config.yml."
 )
 
 #: Runtime pid -> capability, for the runtimes THIS process spawned.
@@ -417,11 +550,6 @@ def operator_cap_for(pid: int) -> bytes | None:
     brought the session's runtime into existence keeps working.
     """
     return _OPERATOR_CAPS.get(int(pid))
-
-
-def forget_operator_cap(pid: int) -> None:
-    """Drop the entry for a runtime that has exited or retired."""
-    _OPERATOR_CAPS.pop(int(pid), None)
 
 
 def reset_operator_caps_for_tests() -> None:
@@ -608,8 +736,12 @@ def read_operator_cap_from_argv(argv: Sequence[str]) -> bytes | None:
     then holds no capability and refuses every authority-increasing request,
     while every ordinary operation is unaffected.
 
-    The descriptor is ALWAYS closed, on every path, because leaving it open is
-    what would let a later tool subprocess find it by number.
+    The descriptor is closed on every path that READ it — including the short
+    handoff, both failure branches and the platform branch — because leaving it
+    open is what would let a later tool subprocess find it by number. The one
+    case that cannot close it is the Windows handle translation failing: ``os``
+    never owned that handle, so there is nothing here to close and the caller
+    holds no capability (fail-closed).
     """
     value: str | None = None
     items = list(argv)
@@ -726,15 +858,19 @@ __all__ = [
     "OPERATOR_FD_FLAG",
     "OperatorCapHandoff",
     "ask_approval",
-    "forget_operator_cap",
     "frame_authority",
+    "handshake_proof",
+    "handshake_proof_ok",
+    "is_wire_hex",
     "loosening_is_authorised",
     "mint_operator_cap",
     "open_operator_cap_handoff",
     "operator_cap_for",
     "operator_cap_guarantee",
-    "operator_cap_ok",
+    "operator_nonce",
     "read_operator_cap_from_argv",
+    "request_proof",
+    "request_proof_ok",
     "remember_operator_cap",
     "report_operator_cap_guarantee",
     "reset_operator_caps_for_tests",

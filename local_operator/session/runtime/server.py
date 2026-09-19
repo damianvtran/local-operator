@@ -60,10 +60,12 @@ if TYPE_CHECKING:
 
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
-    OPERATOR_CAP_REQUIRED_NOTICE,
     frame_authority,
-    operator_cap_ok,
+    handshake_proof,
+    is_wire_hex,
+    operator_nonce,
     report_operator_cap_guarantee,
+    request_proof_ok,
 )
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
@@ -872,6 +874,15 @@ class _ClientConn:
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
+    #: The per-connection operator proof material (issue #1310). The client
+    #: offers a NONCE in its auth frame; this runtime answers with a random salt
+    #: and a proof over both, and later demands the same construction on an
+    #: authority-increasing request. Neither value is secret, and both die with
+    #: the connection, so a proof seen on the wire is worthless on another one.
+    #: Empty when the client offered no nonce — an old console, or one that
+    #: holds no capability for this runtime — which is the fail-closed state.
+    operator_nonce: str = ""
+    operator_salt: str = ""
     #: This viewer negotiated ``display-history-audit-v1`` and can therefore be
     #: sent the audit fields on a display page. A property of the CONNECTION,
     #: so it is read where the connection is known and never inferred from the
@@ -2051,6 +2062,17 @@ class RuntimeServer:
             if isinstance(raw_consumers, (list, tuple))
             else None
         )
+        # The client's half of the handshake (issue #1310). Only the SHAPE is
+        # checked here — a nonce is not a credential, and an ill-shaped one
+        # degrades to "this client asked for no handshake", which refuses rather
+        # than admits. Nothing is remembered across connections.
+        raw_nonce = frame.get("operator_nonce")
+        client_nonce = raw_nonce if is_wire_hex(raw_nonce) else ""
+        # The salt is minted per connection and only when there is a nonce to
+        # bind it to: a connection that will never be offered a proof does not
+        # need one minted.
+        server_salt = operator_nonce() if client_nonce else ""
+
         if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
             writer.close()
             return
@@ -2092,6 +2114,8 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            operator_nonce=client_nonce,
+            operator_salt=server_salt,
         )
         self._clients[id(writer)] = conn
         # A terminal arriving flips ``detached`` (round 1, U2: it was computed
@@ -2756,14 +2780,19 @@ class RuntimeServer:
             watching.add("viewer")
         return frozenset(watching)
 
-    def _authority_admitted(self, frame: dict[str, Any]) -> bool:
+    def _authority_admitted(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
         """Whether this frame may reach an authority-INCREASING sink.
 
         True for every frame that is not in :data:`_AUTHORITY_OPS` — the
         overwhelming majority of traffic, and the set whose authorization really
-        is the record key alone. True for an increasing frame that presents the
-        runtime's capability; False otherwise, including when this runtime holds
-        no capability at all.
+        is the record key alone. True for an increasing frame that presents THIS
+        CONNECTION's proof of the runtime's capability; False otherwise,
+        including when this runtime holds no capability at all.
+
+        The connection is taken rather than reached for because the proof is
+        bound to it: the client's nonce came in on the auth frame that created
+        ``conn`` and the salt was minted for it, so a proof is only ever valid
+        where it was produced.
 
         The classification is by OP plus the fields that op carries, and it is
         deliberately NOT by the handle method or by the resulting value: a frame
@@ -2775,7 +2804,12 @@ class RuntimeServer:
         authority = frame_authority(frame)
         if authority is None or authority == "ordinary":
             return True
-        return operator_cap_ok(supplied=frame.get("operator_cap"), held=self._operator_cap)
+        return request_proof_ok(
+            supplied=frame.get("operator_cap"),
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        )
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
@@ -2839,7 +2873,16 @@ class RuntimeServer:
             # existing `{"op": "error"}` reply the branches below already
             # produce: one shape for the client to surface, and the copy names
             # the one-step remedies (see OPERATOR_CAP_REQUIRED_NOTICE).
-            if not self._authority_admitted(frame):
+            #
+            # A TYPED refusal, not a bare `ValueError`, and the code is what
+            # makes it survivable: every route that carries a control request
+            # (the desktop command surface, the desktop card route, the relay,
+            # the attach screen) can name this outcome instead of guessing from
+            # the message, and the copy reaches the operator verbatim rather
+            # than being reported as "the runtime is unreachable" or "the
+            # question expired" (agent review round 1 R1-2 = design D1 = UX U4 =
+            # QA Q1, from four independent rounds on the same defect).
+            if not self._authority_admitted(frame, conn):
                 logger.warning(
                     "session runtime: refused an authority-increasing request "
                     "(op %r) from %s at %s",
@@ -2847,7 +2890,9 @@ class RuntimeServer:
                     conn.kind,
                     conn.writer.get_extra_info("peername"),
                 )
-                raise ValueError(OPERATOR_CAP_REQUIRED_NOTICE)
+                from local_operator.session.errors import OperatorAuthorityRequired
+
+                raise OperatorAuthorityRequired()
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
@@ -3196,13 +3241,20 @@ class RuntimeServer:
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
                 AttachmentUnavailable,
+                OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
                 RuntimeRetiring,
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
             if isinstance(
-                exc, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)
+                exc,
+                (
+                    AttachmentUnavailable,
+                    OperatorAuthorityRequired,
+                    ProfileRegistryUnavailable,
+                    RuntimeRetiring,
+                ),
             ):
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
@@ -4511,12 +4563,48 @@ class RuntimeServer:
         return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
-        """The welcome form of a push: one full projection to one connection."""
+        """The welcome form of a push: one full projection to one connection.
+
+        The ONE frame that may also carry the operator capability's handshake
+        proof (issue #1310) — deliberately here and not in ``_projection_frame``,
+        which every repaint goes through: the proof is per CONNECTION and belongs
+        to the frame that decides whether the client will present anything at
+        all. A client that sees no proof (this runtime holds no capability, or
+        the client offered no nonce) presents nothing, which is the fail-closed
+        reading of a runtime nobody handed one to.
+        """
         conn.sending_welcome = True
         try:
-            await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
+            frame = self._projection_frame(conn, self._projection_payload())
+            proof = self._welcome_operator_proof(conn)
+            if proof is not None:
+                # Salt alongside the proof, because the client needs both
+                # nonces to build its own proof and only the PROOF is
+                # credential-shaped: the salt is a value it just chose for a
+                # connection that will not outlive this list.
+                frame["operator_salt"] = conn.operator_salt
+                frame["operator_proof"] = proof
+            await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
+
+    def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
+        """This connection's handshake proof, or ``None`` when there is none to give.
+
+        MUTUAL, and that direction is the point: the console must be able to
+        tell a real runtime from an endpoint that merely has the record's
+        ``control_port`` written into it. A rewritten record points the console
+        at an impostor, and an impostor cannot compute this proof — it does not
+        hold the capability — so the console presents nothing. See
+        ``harness/approval._proof`` for the attack this closes.
+        """
+        if not conn.operator_nonce or not conn.operator_salt:
+            return None
+        if self._operator_cap is None:
+            return None
+        return handshake_proof(
+            self._operator_cap, client_nonce=conn.operator_nonce, server_salt=conn.operator_salt
+        )
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating

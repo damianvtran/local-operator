@@ -5078,6 +5078,27 @@ class ServingSessionHandle(SessionHandle):
         )
         return SlashResult(kind="notice", text=text, style="info")
 
+    @staticmethod
+    def _adopt_remedy(saved: str) -> str:
+        """The command that matches ``config.yml``, and where it has to be typed.
+
+        The same sentence the TUI's report builds (``OperatorApp._adopt_remedy``)
+        for the same reason: a remedy printed where it cannot be used is the
+        defect (design round 1 D3, UX round 1 U1/U2). This handle does not know
+        which connection asked, so it always names the place — which is accurate
+        for the window that owns the gate and load-bearing for the one that does
+        not.
+        """
+        from local_operator.harness.approval import transition_authority
+
+        remedy = f"/approvals {saved} adopts it in this session"
+        if transition_authority("approvals", saved) == "authority-increasing":
+            return (
+                f"/approvals {saved} adopts it, typed in the terminal or app window that "
+                "started this session"
+            )
+        return remedy
+
     def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
 
@@ -5130,12 +5151,18 @@ class ServingSessionHandle(SessionHandle):
                 # both directions — `/approvals auto` for the divergence this
                 # change makes common (a live `ask` over a file that says
                 # `auto`), and `/approvals ask` for the mirror case.
+                # The remedy names WHERE it works. This handle cannot see the
+                # connection that asked, so the sentence is written to be true
+                # from either side: a tightening word takes effect anywhere, and
+                # a loosening word takes effect only in the terminal or app
+                # window that started this session (issue #1310; design round 1
+                # D3, UX round 1 U1/U2 — the old wording sent a follower pane to
+                # `/approvals auto` and the same pane answered with a refusal).
                 return SlashResult(
                     kind="notice",
                     text=(
                         f"tool approvals: {live} (this session) — {effect}; "
-                        f"config.yml says {on_disk} — /approvals {on_disk} adopts it in "
-                        "this session"
+                        f"config.yml says {on_disk} — {self._adopt_remedy(on_disk)}"
                     ),
                     style="warning" if self._auto_approve else "info",
                 )

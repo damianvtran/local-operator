@@ -20,11 +20,22 @@ This document covers the other boundary, which #1282 does not touch: the
 **control plane**. A running session publishes a discovery record at
 `<config>/run/mobile/<pid>.json`, mode 0600 under a 0700 directory, carrying
 `control_key` and `control_port`. The runtime used to accept
-`{"op": "slash", "command": "approvals", "args": "auto"}` — and
-`{"op": "approval_answer", "approved": true}` — on that key alone. A
-model-authored `bash` tool call runs as the **same uid**, so it could read the
-record (it is 0600 *under its own account*), dial loopback and remove its own
-gate. Same invariant, same subject, one route over.
+`{"op": "slash_result", "command": "approvals", "args": "auto"}` — and
+`{"op": "approval_answer", "approved": true}` — on that key alone.
+`slash_result` rather than a bare `slash` is the op that reaches the sink: the
+runtime answers a bare `slash` with "terminal-only here", so the route an
+attacker actually uses is the `_result` one. A model-authored `bash` tool call
+runs as the **same uid**, so it could read the record (it is 0600 *under its own
+account*), dial loopback and remove its own gate. Same invariant, same subject,
+one route over.
+
+The two halves are not equally easy for that attacker, and the difference is
+worth stating exactly: `/approvals auto` is a single frame, while the card half
+needs the `request_id`, which is 8 random bytes and never guesses. It is not out
+of reach, though — the welcome projection hands the pending card, id included, to
+any client that authenticates with the record key, and a same-uid process can be
+that client (that is what the negative control does). So the card half is
+reachable *after one dial*, not by guessing (QA round 1, Q2).
 
 The distinction #1310 draws, in one sentence: **same-account process identity is
 not operator consent when the operation expands that process's own authority.**
@@ -74,7 +85,9 @@ reuses the existing `{"op": "error"}` reply, carrying
 wire, present in exactly two places: the memory of the gate-owning process (a
 `RuntimeServer` field) and the memory of the console that started it (a
 process-local pid → capability table in `harness/approval.py`). It is **never**
-written to the record, the environment, argv, a log file, or `lop info`.
+written to the record, the environment, argv, a log file, or `lop info` — and,
+since the record is same-uid writable, it never crosses the wire either: what
+crosses is a per-connection proof (see **Handoff** below).
 
 **Handoff.** `session/runtime/launch._spawn_runtime` mints it, opens a
 `socketpair`, passes the child's end with `pass_fds` and its *number* (not a
@@ -87,10 +100,20 @@ gone from this process's table too.
 The console half is a **pid → capability** table rather than a field threaded
 through every console object, because the question is a property of the process,
 not of any one object: "did I start the runtime behind this record?".
-`AttachClient.connect` resolves it from `record.pid`, and `_request_frame` /
-`_request_payload` attach it to exactly the frames `frame_authority` classes as
-increasing. That is what makes the surface table below fall out of *one* rule
-instead of five special cases.
+`AttachClient.connect` resolves it from `record.pid`. The VALUE NEVER CROSSES
+THE WIRE, and that is the second half of the design rather than a detail: the
+record is same-uid WRITABLE, so `control_port` is not a trusted pointer and an
+endpoint that receives a credential can replay it at the real runtime — measured
+end to end with production clients before this was fixed (agent review round 1,
+R1-1). What rides a frame is a per-connection HMAC **proof** of the capability
+(`harness/approval._proof`), the runtime proves possession FIRST in its welcome
+(`operator_proof` over the client's `operator_nonce` and a salt it mints for that
+connection), and the client presents nothing at all to an endpoint that cannot
+prove it holds the same value. `_request_frame` / `_request_payload` attach the
+proof to exactly the frames `frame_authority` classes as increasing; the phone
+relay's own writer does the same (`mobile/daemon._operator_request_proof`). That
+is what makes the surface table below fall out of *one* rule instead of five
+special cases.
 
 **Windows.** `pass_fds` is POSIX-only, so the Windows path uses an inheritable
 anonymous pipe with `close_fds=False`. The boundary is weaker there regardless
@@ -101,9 +124,12 @@ unless `/proc/sys/kernel/yama/ptrace_scope` is `0` (`not-a-boundary`), Windows
 `weak`, Linux without `yama` `unreported`. The refusal copy names remedies; it
 never claims a boundary the host does not have.
 
-**Wire.** One optional frame field, `operator_cap`, admitted by the validator in
-`mobile/types.py` and attachable by `AttachClient`'s request helper. Additive,
-so `PROTOCOL_VERSION` does not move: ordinary ops never carry it. A **rolling
+**Wire.** Three optional fields, all additive, so `PROTOCOL_VERSION` does not
+move: `operator_nonce` on the auth frame (the client's half of the handshake),
+`operator_proof`/`operator_salt` on the welcome (the runtime's half), and
+`operator_cap` — the proof, never the value — on the increasing ops only.
+`mobile/types.py` validates their shape; `AttachClient`'s request helper and the
+relay's writer attach the request proof, and ordinary ops never carry it. A **rolling
 upgrade fails closed** — an old console cannot loosen a new runtime (it sends no
 capability) and a new console cannot loosen an old runtime's gate any more than
 it could before (the old runtime simply ignores the field). The daemon's HTTP
@@ -117,13 +143,13 @@ only be a forgery.
 | --- | --- | --- |
 | TUI pane that OWNS the session (in-process gate) | unchanged | works, one step (the operator's own keyboard; not routed) |
 | TUI pane viewing a runtime IT spawned | unchanged | works (presents the capability) |
-| TUI pane viewing a runtime spawned by ANOTHER process (wake supervisor, peer send, `lop sessions refresh`) | unchanged | refused; the copy names the remedies |
+| TUI pane viewing a runtime spawned by ANOTHER process (wake supervisor, peer send, `lop refresh`) | unchanged | refused; the copy names the remedies |
 | TUI-hosted app reached by a follower (phone) | unchanged | refused |
 | Desktop app | unchanged | works iff its backend spawned that runtime; else refused |
 | Phone relay | unchanged | works iff the relay spawned that runtime; else refused |
 | `lop` CLI / one-shot front ends | unchanged | only if this process spawned the runtime |
 | `lop exec --control` (supervised one-shot), supervisor answering from another process | unchanged | **refused** — deny works, approve does not. The run's runtime is started by the `lop exec` process, which has exited or is backgrounded, so no live console holds the capability. Remedy for the next run: `--yolo`, or `tool_approval_mode: auto`; for an interactively approved run, start it where the approver is |
-| headless / `--yolo` / exec-control without a parked gate | unchanged | n/a (the gate is born `auto`) |
+| headless / `--yolo` | unchanged | n/a (the gate is born `auto`) |
 | tightening `auto → ask`, any route | unchanged | unchanged |
 
 Operator-visible regressions, stated plainly: a phone loses `/approvals auto`
@@ -132,7 +158,7 @@ pane attached to a background-started runtime cannot loosen it; and **a
 supervised `lop exec --control` run cannot be APPROVED by a supervisor in
 another process** — only denied — because its runtime is started by the `lop
 exec` process and no live console holds the capability. The remedies are
-`--yolo` or `tool_approval_mode: auto` for the next run, `lop sessions refresh`,
+`--yolo` or `tool_approval_mode: auto` for the next run, `lop refresh`,
 `/approvals default auto` plus a new session, or typing the command in the
 terminal that started it. Tightening, reporting and everything else are
 untouched — the routes that may loosen are a proper subset of the routes that
@@ -161,6 +187,11 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   that, exempt `kind="exec"` (which would reopen the hole for the most
   unattended surface), or hand a capability to a supervisor through the exec
   ledger is the operator's call and is recorded as an open question on the PR;
+- **a process that proxies the whole session** can relay a connection's proof
+  and that connection's requests — which is what a proxy is — but it never
+  learns the capability and cannot originate a request of its own: nothing that
+  crosses the wire is reusable on another connection (agent review round 1,
+  R1-1; `test_an_impostor_endpoint_learns_nothing_it_can_replay`);
 - **the phone relay's own password** remains the authority for reaching a
   runtime the relay started, over a remote transport — Stage 3 replaces it with
   a device-bound credential;
