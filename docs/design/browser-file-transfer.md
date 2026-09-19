@@ -484,9 +484,10 @@ the table the tests in §12.2 assert.
 
 | peer pair | direction of the new thing | behaviour | answer |
 |---|---|---|---|
-| new extension + old daemon | extension advertises `capabilities` | old daemon drops the unknown event; never sends `download` | unaffected; neither new action works, and `lop browser status` reports `bridge: predates the file-transfer actions` (the record's `capabilities_known` stamp is absent, which is what names the WRITER rather than the extension) |
-| old extension + new daemon | daemon would send `download` | **refused before sending** — extension advertises nothing | typed `capability_unsupported`; ordinary actions unaffected |
-| new extension + new daemon | full path | works | `download`/`upload` available |
+| new extension + old daemon | extension advertises `capabilities` + `capability_switches` | old daemon drops both unknown events; never sends an unadvertised method | a capability the operator has ENABLED works (its method is in `capabilities`, which the old daemon does read); a switched-off one is simply not advertised, so the old daemon refuses it with its own copy, which names an extension toggle and cannot name the switch. The switch answer is lost, not the gate |
+| old extension + new daemon | daemon reads a record with no `disabled` and `switches_known: false` | the peer advertises `upload` only (that is what 0.1.18 serves) and never reports switches | `download` refused with the UPDATE copy (`first version that does is 0.1.19`, plus the switch to turn on afterwards); `upload` works, because a pre-switch build serves it unconditionally and the daemon must not invent a consent it was never told about |
+| new extension + new daemon, switch OFF | full path | the method is absent from `capabilities` AND listed in `disabled` | typed `capability_unsupported` naming the switch and where it lives; no socket call, and this is the default state for both capabilities |
+| new extension + new daemon | full path | works | `download`/`upload` available (`download` needs the optional permission grant as well)|
 | new app host + old harness | host advertises `capabilities` in `host.json` + `/health` | old harness has no such action in its schema; never calls it | unaffected |
 | old app host + new harness | tool reads a record with no `capabilities` | `download`/`upload` refused | typed `capability_unsupported`, remedy "update the desktop app" |
 | new harness + old daemon | tool reads an old record | refused at the record check, no socket call | typed `capability_unsupported` naming `lop browser restart` — the record carries no `capabilities_known` stamp, so the copy attributes the empty list to the bridge and NOT to the extension (an extension toggle here would be advice that cannot help) |
@@ -1051,6 +1052,20 @@ takes seriously:
    redirected. This is the one place in the design where a page-derived string
    could have become a directory, and it is deleted by construction.
 
+**AMENDED 2026-09-19 (§17.13), and this paragraph is the one §17.1 overtook.** E1x
+measured that a tab-scoped `chrome.debugger` session may not use
+`Page.setDownloadBehavior` at all on current stable Chrome, so the primitive this
+section is about is unavailable to the extension and both of its consequences
+above are moot for that host: the extension can no longer reach a destination of
+its own choosing, and the danger the paragraph names is replaced by a DULLER one
+it never had — the file lands in the user's real download directory first, under
+the page's own name, because `chrome.downloads` refuses an absolute `filename`
+(§17.5, measured). What survives from this section is the rule that a path is
+never composed from page input: the harness still composes the quarantine
+directory, and now the harness is also the only side that MOVES the file into it.
+The mechanism is additionally behind the operator's own switch (§17.13), so on
+the extension host the capability does not exist until a human turns it on.
+
 ### 11.4 What is deliberately NOT done
 
 - **No extraction, ever.** A ZIP is stored, reported as a ZIP, and left alone.
@@ -1102,6 +1117,31 @@ takes seriously:
 - **R6** The DeepSeek end-to-end scenario needs a logged-in session in the
   operator's browser. If QA cannot get one, that scenario is BLOCKED and reported
   as such rather than substituted with a fixture (§12.1, E1).
+- **R7 (new with §17.13 — the operator's own decision names it)** A downloaded
+  file exists in the user's REAL download directory (`~/Downloads` by default)
+  under the page's own name for the length of the transfer, until the harness
+  moves it into the session quarantine directory. On the extension host there is
+  no way to avoid it: Chrome refuses an extension any `filename` that escapes the
+  default download directory (measured, §17.5 — `"../../x"` and `"/tmp/x"` both
+  answer `Invalid filename`), and the CDP primitive that could have chosen a path
+  is refused outright (§17.1). **What covers the window:** the capability is OFF
+  until the operator turns the switch on, and that switch is the only thing that
+  makes a download happen at all; the page cannot choose the path (§17.5); the
+  name is sanitised on both sides before it is used or reported; and the file is
+  deleted rather than left when it is refused, cancelled, or past the ceiling — so
+  the window ends with nothing on disk either way. **What does NOT cover it:** a
+  user or another program watching that directory sees the file appear, and a
+  scanner (or the user) can open it in that window. The alternative — no
+  extension download at all — is what PR A shipped, and the operator has now
+  chosen the other side of that trade with the cost stated here.
+- **R8 (new with §17.13)** The download appears in the user's browser download
+  history (`chrome://downloads`) even after the harness has moved the file away,
+  so the entry points at a path that no longer holds it. The extension
+deliberately does NOT call `chrome.downloads.erase`: the history row is the only
+  durable record the user has that this browser fetched that file, and deleting
+  our own writes from the owner's history is a worse default than a row that says
+  "this file is gone". Accepted, and named here so nobody "tidies" it later
+  without deciding to.
 
 ---
 
@@ -1219,7 +1259,24 @@ These are the things I could not settle by reading.
   invented in the dark. This is the single highest-risk unknown in the design.
 - **E2x — does adding the `downloads` permission to the published item re-prompt
   or disable the extension for existing users?** Only needed if E1x fails, but it
-  decides whether that fallback is even acceptable.
+  decides whether that fallback is even acceptable. **ANSWERED AS FAR AS A LOCAL
+  RIG CAN (2026-09-19): the question the store would ask is gone, and what is
+  measurable is the shape of the grant.** The permission is now declared in
+  `optional_permissions`, so an INSTALL OR UPDATE cannot re-prompt or disable
+  anything: the manifest that Chrome checks for a permission change has the same
+  install-time set as 0.1.18 (`debugger, tabs, tabGroups, scripting, storage,
+  alarms, webNavigation, notifications` + `<all_urls>`), verified on the built
+  artifact (`dist/manifest.json`: `downloads` under `optional_permissions`, not
+  under `permissions`). The user sees Chrome's own optional-permission dialog at
+  the moment they turn the switch on, and never before. **What is still NOT
+  measured, and must not be asserted:** whether the store treats a NEW
+  `optional_permissions` entry as a permission change requiring re-review of the
+  already-published item — that needs a published item and a reviewer (§17.5
+  says the same, and the 0.1.8 review took ~4.5 days). A local rig can measure
+  neither. The related reading this rig WOULD have taken — whether
+  `chrome.permissions.request` resolves true in headless Chrome from a real user
+  gesture — is BLOCKED in this window: Chrome aborts at launch on this host
+  (§17.13's evidence section), so the grant path is QA's to exercise.
 - **E3x — is `Page.setDownloadBehavior` per-tab or browser-wide in practice, and
   is the default state restorable?** Probe by setting it on a tab, downloading
   manually from another tab, and restoring with `{behavior: 'default'}`. The
@@ -1239,7 +1296,7 @@ These are the things I could not settle by reading.
 
 ## 13. Split, sequencing and release
 
-### 13.1 Exactly two PRs
+### 13.1 Exactly two PRs, then the consent amendment (a third)
 
 **PR A — `damianvtran/local-operator`, branch `feat/browser-file-transfer`** (this
 branch, whose first commit is this document). Harness + extension, one PR,
@@ -1370,11 +1427,16 @@ recommended (two locations for one file, and the mirror becomes the place a
 hostile file gets double-clicked). Evidence that would change my mind: the
 operator saying they actually look in `~/Downloads` for agent files.
 
-**16.2 `url` mode and the `downloads` permission.** Recommend: no, in v1 (the
-selector path covers the real case, and `bash` + `curl` covers the rest). Evidence
-that would change it: a real task where the download URL is known but the page
-offers no clickable control — which would then be solved by a *new* permission
-deliberately taken, not by accident.
+**16.2 `url` mode and the `downloads` permission.** **CLOSED 2026-09-19 by the
+OPERATOR (§17.13) — the recommendation above was not taken, and the reason is a
+fact the recommendation did not have.** The extension now takes the `downloads`
+permission, as an **optional** permission requested at runtime, so the sentence
+"solved by a *new* permission deliberately taken, not by accident" is exactly
+what happened: it was taken deliberately, it is gated by a switch the operator
+owns and that is OFF by default, and it exists because E1x (§17.1) left the
+extension no other way to serve a download at all. `url` mode itself is still not
+implemented — the page's own control is still the trigger — so the permission is
+the only part of this decision that moved.
 
 **16.3 Caps as constants or settings.** Recommend: constants now (C7 and
 `AGENTS.md:2180`'s per-key cost), a settings follow-up only if the operator
@@ -1704,3 +1766,133 @@ per-finding answer and the real gate output.
 | **`test (3.12, 1)`** — `tests/unit/session/test_no_session_deletion.py` flagged `<path>.unlink` in `_unlink_quietly` and `<path>.rename` in `_browser_download` | allow-listed, with the reason the guard asks for: both paths are composed by `browser_files.session_dir()` as `<config_dir>/browser/downloads/<stamp>-<session8>/` — a SIBLING of `sessions/`, never a descendant — the candidate names come from listing THAT directory, the unlink removes one direct child ENTRY (never a resolved target, R1), and the rename has both sides inside it |
 | **`test (3.12, 4)` (Linux only)** — `chmod_private` returns False for a symlink entry where `os.lchmod` does not exist, so the entry keeps `0o120777` and the test's `== 0o600` failed | the behaviour is unchanged (falling back to `chmod` would tighten the link's TARGET — the N8 bug) and the fact is now VISIBLE: the download result carries `could not tighten the mode of <name> to 0600 …`, so a mode the harness did not set is never implied. The test is platform-shaped — the target untouched is asserted everywhere, the entry's 0600 only where `lchmod` exists — and the Linux branch is EXECUTED rather than reasoned about, by `monkeypatch.delattr(os, "lchmod")` |
 | **round-4 minor** — `_host_byte_count` was `isdigit()`-then-`int()` without a guard, so `"--12"`, `"++5"`, `"+-3"`, `"²"` and any digit string past CPython's ~4300-digit `int()` limit still escaped as `Tool raised:` in both marker shapes | the guard is `isascii()` + `isdigit()` + a `try/except` around `int()`: `isascii()` rejects the Unicode digits `isdigit()` accepts and `int()` refuses, and the `try` absorbs the digit-count limit. Ten shapes × two marker shapes now answer typed, and all ten fail against the pre-fix sources |
+
+---
+
+### 17.13 The consent amendment: both capabilities are OFF until the operator turns them on
+
+Written by the implementing agent on branch `feat/browser-extension-downloads` (PR C),
+cut from `origin/main` at `4e2899cc`, after the operator amended the requirement. **This
+section supersedes §17.3's "no extension download" half, amends §11.3, closes §16.2, and
+adds §11.5's R7/R8.** §17.1–17.12 stay as written: they record what was measured in that
+window, and measurements do not expire.
+
+**The decision, recorded as the operator's, 2026-09-19:**
+
+> "Download can be a requested permission but make it a permission that the user needs
+> to turn on in the extension configuration to allow downloads, and to allow uploads
+> (separate permissions that need to be enabled, default off)."
+
+So the extension does serve downloads, and **both directions are gated by an operator
+switch that is off by default**. The brief this implements said "take the Chrome
+`downloads` permission so the Chromium extension can serve downloads too"; the operator
+narrowed that permission to one that must be *requested and enabled*, and extended the
+same shape to uploads, which previously ran unconditionally.
+
+#### What the extension serves now, and how
+
+The extension's `download` handler triggers the page's own download (the existing
+click/link path when a selector is given, and nothing at all when the page starts it
+itself), then watches `chrome.downloads` — `onChanged` as the wake-up, `search` as the
+source of truth — to learn the ABSOLUTE path Chrome wrote. It cannot choose that path:
+`chrome.downloads` resolves `filename` against the user's default download directory and
+refuses anything that escapes it (`Invalid filename`, §17.5), and the CDP primitive that
+could have chosen one is refused to a tab-scoped session entirely (§17.1).
+
+**The harness is still the judge, and the extension never claims otherwise.** The
+handler reports the path, the byte count, the state, the declared MIME, Chrome's `danger`
+verdict and whether it cancelled the transfer; `browser_files.intake_landed` then
+corroborates the file on disk before touching it (absolute, a REGULAR FILE by `lstat`,
+outside the config root and the session directory, size equal to what the peer reported,
+mtime inside this call's window), moves it into the session quarantine directory, and
+the existing pipeline does the rest — `classify_download`, the content-earned rename,
+`chmod 0600`, the audit rows. **The original in the user's Downloads is gone afterwards
+in every branch**, including the ones where nothing is kept: a file the content check
+refuses, a transfer the handler cancelled (over the ceiling, over the per-call file
+count, or past the deadline) and a name the session already holds are all deleted on the
+strength of the same corroboration. A file that FAILS corroboration is refused and left
+alone — it is probably the user's own file, and removing something we cannot show we
+watched arrive is worse than a stray file. That asymmetry is the control this section
+should be read with.
+
+#### The switches, and the optional permission
+
+- `downloads` is declared in **`optional_permissions`**, not `permissions`. Whatever else
+  is true of a store update, it cannot silently widen what the installed extension may
+  do; the grant is requested by `chrome.permissions.request` from the options page, on
+  the click that turns **Allow downloads** on, and turning the switch off hands the grant
+  back (`chrome.permissions.remove`). Verified on the built artifact: `dist/manifest.json`
+  has `version 0.1.19`, the same eight install-time permissions as 0.1.18, and `downloads`
+  under `optional_permissions`.
+- **Allow uploads** is the same switch for the direction that needs no permission at all
+  (it rides the `debugger` grant). Its switch is the only control that direction has.
+- **The stored flag is not the truth.** The effective answer is `flag AND permission`,
+  recomputed on every read and never cached, so revoking `downloads` in
+  `chrome://extensions` — or an enterprise policy removing it — makes the switch read OFF
+  (and `chrome.permissions.onRemoved` repairs the stored flag too). A switch that reads ON
+  while the API is unavailable is the failure mode this rule exists to design out, and
+  the extension's own suite pins it.
+- **The operator is the only writer.** The options page writes `allowDownloads` /
+  `allowUploads`; no daemon frame, tool call, page or pairing path can reach them, and the
+  worker only READS. The engine can still refuse one by flipping a switch, and it will —
+  which is the point.
+
+#### The three states, and why the answer is a SECOND event
+
+`methods` alone says a capability is unavailable. Three causes need three remedies: (a)
+this build cannot serve it — update the extension; (b) the build can and the operator has
+not enabled it — open the switch, and no update will help; (c) available, and the command
+failed for its own reason. The extension therefore sends `capability_switches
+{disabled: [..], version}` **in addition to** `capabilities`, and the daemon publishes
+`disabled_capabilities` plus its own `switches_known` stamp beside `capabilities` and
+`capabilities_known`.
+
+A second EVENT rather than a field on `capabilities` is forced, not stylistic: every
+envelope in `protocol.py` is `extra="forbid"`, so a new key on an existing event is
+closed by every already-released daemon, while an unknown event is dropped harmlessly —
+the same reasoning that made `capabilities` an event and kept `Hello` free of new fields.
+`PROTO_VERSION` stays **1**, `Hello` gains nothing, and PR B's vendored pin (`90992a61`)
+stays valid.
+
+The switch labels are not prose in two languages: `CAPABILITY_SWITCH_LABEL` and
+`CAPABILITY_SWITCH_PERMISSION` are generated into the extension
+(`CAPABILITY_SWITCHES`), so the refusal a model reads and the words on the options page
+name the same control. The retired `EXTENSION_CANNOT_SERVE` set is DELETED rather than
+emptied: its only member is servable now, and a constant claiming "no build can" is a lie
+the refusal copy acts on (it would send the user away from the update that fixes them).
+
+#### Residuals this decision accepts
+
+Named in §11.5 as **R7** (the file exists in the user's real download directory for the
+length of the transfer, with what covers that window and what does not) and **R8** (the
+browser's download history keeps a row for a file the harness has moved away, because we
+deliberately do not call `chrome.downloads.erase`). Both are the cost of serving downloads
+from the extension at all, and both are stated where a reviewer will meet them.
+
+#### Evidence in this amendment
+
+| what | result |
+|---|---|
+| extension suite (`node --test tests/*.test.mjs`) | **294 pass, 0 fail** — 11 new: 6 consent tests (off by default, flag+permission AND, revoked grant, missing API is "not held", the storage key, the generated labels) and 5 handler tests against a scripted `chrome.downloads` |
+| the handler suite found a real defect | the report omitted `name` (Chrome's `DownloadItem` has `filename`, not `name`), which is the key the harness looks its declared MIME up by. Fixed here: the name is `safeName(filename)` — the same function Python applies, so the report and the quarantine file cannot disagree |
+| Python: `tests/unit/browser_bridge`, `test_browser_files.py`, `tests/unit/tools/test_browser_file_*`, `tests/unit/ui_browser` | **709 pass**; the new coverage is 10 intake tests (move + original gone, cancelled partial deleted, uncorroborated NOT deleted, stale mtime, symlink entry unlinked and target kept, relative path, config-root path, duplicate name, already-in-directory, app-host item) and the three-state refusal copy plus the wire gate |
+| `gen_ts --check`, whole-tree `flake8`, `black --check`, `isort --check-only` | clean (`gen_ts --check` is what pins the regenerated `protocol.gen.ts` + `ui-vendor/` bundle) |
+| `pyright` | 0 errors on every file this PR touches; the whole-tree run reports 17 errors, all inside the `session/`+`tui/` area this worktree could not materialise (below) |
+| the headless-Chrome E2E (`/tmp/lo-dl-e2e/rig.py`, written and complete) | **BLOCKED — Chrome aborts at launch on this host.** `rc=134 (SIGABRT)` with no log, no `DevToolsActivePort` and no profile directory created, twice, with two flag sets (`--headless=new --use-mock-keychain --password-store=basic` and `--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --remote-debugging-port=9222`); `pgrep`/`pkill` themselves fail on this host (`sysmond service not found`), so the process list is not even readable. The rig is left in `/tmp` for QA to run: it isolates `HOME`/config, loads the BUILT extension with a throwaway identity and a rewritten `DEFAULT_PORT`, redirects downloads with a browser-level `Browser.setDownloadBehavior` before anything can download, and drives the real tool through the real bridge for the switch-off refusal, the switch-on download (quarantine + mode + audit + original gone), the executable-wearing-a-`.pdf` refusal, a stalled transfer, and the two switches proved independent — plus rendered PNGs of the options page in both states for the design round |
+
+**What is deferred to QA, explicitly:** every E2E row above, the over-cap cancel (it
+needs a real >256 MiB stream, which is the heaviest case and the wrong thing to run on a
+host at load 200 with 43 GiB free), and the options-page design/UX rounds on rendered
+frames.
+
+#### Still unverified
+
+* Whether Chrome's store review treats a new `optional_permissions` entry as a permission
+  change for an already-published item (§12.4 E2x, answered as far as a local rig can).
+* Whether headless Chrome resolves `chrome.permissions.request` true from a real user
+  gesture — the rig would have measured it; Chrome would not start.
+* The app host's half is untouched by this amendment: `local-operator-ui` PR B keeps its
+  gate, and the switches are the EXTENSION's configuration, as the brief says.
+* The `~/Downloads` window (R7) as seen by a real user — the rig's download directory is
+  redirected, so the design's residual is stated from Chrome's documented behaviour and
+  §17.5's measurement rather than from a screen recording.
