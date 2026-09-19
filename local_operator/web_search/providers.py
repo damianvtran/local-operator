@@ -1755,6 +1755,16 @@ def provider_auth_mode(
     "can this provider serve" (:func:`provider_available`) and "what would it use"
     -- so the chain and the status view cannot disagree about WHY a provider is or
     is not in play.
+
+    N3 (round 1) asked whether Tavily's OAuth MCP transport belongs here. It does
+    not, deliberately: the delegate that serves it is injected by the harness
+    (``WebSearchService.tavily_oauth_search``) and the MCP server entry lives in
+    ``mcp.json``, so neither is visible to a function that reads credentials and
+    search settings -- and reading ``mcp.json`` per call would put a filesystem
+    probe inside the status loop. It also cannot change the tier: Tavily's OAuth
+    MCP is the user's own free tier, so it classifies ``rotate`` either way. If a
+    future change makes an OAuth transport cost money, the mode has to be added
+    here and the mcp config read once per session, not per call.
     """
     if provider_id == "duckduckgo":
         return "credential-free"
@@ -1818,16 +1828,32 @@ def resolve_provider_bands(
 ) -> ProviderBands:
     """Split this install's provider chain into its bands.
 
-    ``web_search.providers`` is a PRIORITY PREFIX, not an allowlist: whatever it
-    names is tried first, in the order it names them, and every other usable
-    provider follows in its automatic band. ``excluded_providers`` is the only
-    way to say never -- exclusion beats listing, so a user who disabled a
-    provider does not have to also edit the priority list.
+    ``web_search.providers`` is a PRIORITY PREFIX, not an allowlist, and its
+    authority is over ORDER WITHIN A BAND. Listing a provider whose effective
+    transport here would spend a credential (a key, or a model turn) therefore
+    does NOT move it to the front of the chain: it moves to the head of the METERED
+    band, ahead of the auto-joined metered legs and behind every free leg. That is
+    what makes "no free leg is ever skipped for a paid one" true by construction --
+    the band invariant used to constrain rotation only, which left a listed paid
+    provider free to sit ahead of available free legs (round-1 M2/Q2/D1/U2).
+    ``excluded_providers`` is still the only way to say never, and exclusion beats
+    listing.
     """
     excluded: set[SearchProviderId] = set(settings.excluded_providers)
-    prefix: list[SearchProviderId] = [
+    listed: list[SearchProviderId] = [
         value for value in settings.providers if value not in excluded
     ]
+    prefix: list[SearchProviderId] = []
+    listed_metered: list[SearchProviderId] = []
+    for provider_id in listed:
+        # A listed provider that cannot serve at all (no credential, no endpoint)
+        # stays in the prefix: trying it costs nothing, and the search loop reports
+        # `not configured` for it rather than silently dropping what the user asked
+        # for. Only a provider that WOULD spend is held back.
+        if provider_auth_mode(provider_id, credentials, settings) in METERED_AUTH_MODES:
+            listed_metered.append(provider_id)
+        else:
+            prefix.append(provider_id)
     rotate: list[SearchProviderId] = []
     fallback: list[SearchProviderId] = []
     metered: list[SearchProviderId] = []
@@ -1837,13 +1863,36 @@ def resolve_provider_bands(
         "metered": metered,
     }
     for provider_id in AUTO_PROVIDER_TIERS:  # declaration order IS the band order
-        if provider_id in prefix or provider_id in excluded:
+        if provider_id in settings.providers or provider_id in excluded:
+            # `settings.providers`, not `prefix`: a listed leg the prefix dropped
+            # (because it is metered) has already been placed in the paid band and
+            # must not also be auto-joined there.
             continue
         tier = provider_tier(provider_id, credentials, settings)
         if tier is None:
             continue
         bands[tier].append(provider_id)
-    return ProviderBands(prefix, rotate, fallback, metered)
+    # Listing decides order INSIDE a band too, and a listed leg comes first there:
+    # a user who names a paid provider has said it matters to them, so it outranks
+    # the auto-joined paid legs rather than being demoted behind them.
+    return ProviderBands(prefix, rotate, fallback, [*listed_metered, *metered])
+
+
+def free_pool(
+    settings: WebSearchSettings,
+    credentials: CredentialManager,
+) -> list[SearchProviderId]:
+    """The legs `round_robin` spreads its first attempt across: prefix + rotate.
+
+    ONE pool, not two: the listed free legs in their listed order, then the
+    auto-joined free band in declaration order. Rotating only the auto band -- which
+    sits behind the whole prefix -- pinned the first attempt to ``providers[0]`` on
+    every install, withdrawing the released strategy's whole purpose (round-1
+    M1/Q1/D2/U1). Metered and best-effort legs are never in the pool: they do not
+    rotate.
+    """
+    bands = resolve_provider_bands(settings, credentials)
+    return [*bands.prefix, *bands.rotate]
 
 
 def resolve_providers(
@@ -1858,16 +1907,27 @@ def resolve_providers(
 def provider_state_label(status: ProviderStatus) -> str:
     """The ONE state vocabulary `search list` and `/search` print.
 
-    Shared so the two surfaces cannot drift into describing the same provider
-    differently: the operator's original complaint was a status line saying
-    "disabled" about a provider the chain was in fact using.
+    Every word answers "what does the chain do with this provider": ``enabled``
+    (listed and free) / ``enabled (paid)`` (listed, and therefore in the paid band)
+    / ``auto free`` / ``auto best-effort`` / ``auto paid`` / ``excluded`` (the user
+    said never) / ``needs setup`` (it cannot serve, so no chain would use it).
+    Shared so the two surfaces cannot drift into describing one provider
+    differently; the meanings live beside the words in ``STATE_MEANINGS``, which is
+    also what the legend prints.
     """
     if status.excluded:
         return "excluded"
-    if not status.enabled:
-        return "off"
+    if not status.available:
+        # Nothing can use a provider with no credential or endpoint, so "cannot
+        # serve" is a state of its own rather than a second column repeating it.
+        # (`off` used to say this, which also read as the master switch and as the
+        # old `disabled`; round-1 D6.)
+        return "needs setup"
     if status.listed:
-        return "enabled"
+        # A listed leg whose transport spends money or a model turn is in the PAID
+        # band, and plain `enabled` is what made the operator's own frame read as
+        # "nothing paid is involved" (round-1 D1/U2).
+        return "enabled (paid)" if status.tier == "metered" else "enabled"
     if status.tier == "rotate":
         return "auto free"
     if status.tier == "fallback":
@@ -1875,72 +1935,127 @@ def provider_state_label(status: ProviderStatus) -> str:
     return "auto paid"
 
 
-def provider_ready_label(status: ProviderStatus) -> str:
-    """Whether the provider can serve right now (its counterpart to the state)."""
-    return "ready" if status.available else "setup needed"
-
-
 #: What each state label MEANS for the user's next search. It lives beside the
 #: labels themselves (not in the CLI and the TUI) for the same reason the labels
 #: do: a surface that prints `auto paid` and a surface that explains it must not be
-#: able to drift into saying different things.
+#: able to drift into saying different things. Declaration order is the legend's
+#: order.
 STATE_MEANINGS: dict[str, str] = {
     "enabled": "in your priority order",
+    "enabled (paid)": "listed, and tried in the paid band after every free leg",
     "auto free": "with the free providers",
     "auto best-effort": "after the free providers",
     "auto paid": "tried after the free providers, never before a free leg",
     "excluded": "never used, whatever else is configured",
-    "off": "not usable yet",
+    "needs setup": "not in any chain until it can serve",
 }
 
 
-def provider_landing_label(status: ProviderStatus) -> str:
-    """`"auto paid; tried after the free providers"` -- the state plus its meaning.
+def state_legend() -> str:
+    """One line naming every state word, derived from the table it explains."""
+    return "States: " + " · ".join(STATE_MEANINGS)
 
-    Both `search enable` landing lines read this, so `enable` telling the user
-    where a provider landed cannot disagree with the label printed by `search
-    list` for the same provider.
+
+def provider_setup_hint(provider_id: SearchProviderId) -> str:
+    """The command that makes ``provider_id`` servable, for copy that must say it."""
+    if provider_id == "searxng":
+        return f"`local-operator search setup {provider_id} --endpoint <url>`"
+    if provider_id == "deepseek":
+        # DeepSeek search has no search-specific secret: it bills the model key, and
+        # `login` is where that key lives. `search setup` says so too.
+        return f"`local-operator login deepseek` (or `local-operator search setup {provider_id}`)"
+    keys = PROVIDERS[provider_id].credential_keys
+    suffix = f" ({', '.join(keys)})" if keys else ""
+    return f"`local-operator search setup {provider_id}`{suffix}"
+
+
+def provider_refusal(
+    provider_id: SearchProviderId,
+    settings: WebSearchSettings,
+    credentials: CredentialManager,
+) -> str:
+    """Why this session will not use ``provider_id``, and the command that fixes it.
+
+    The old advice was one sentence naming `search enable`, which stopped working
+    the moment `enable` came to mean "clear an exclusion" rather than "append to
+    the chain": a provider with no credential was answered with a command that
+    could not help, twice (round-1 U3). The reason is already known here, so the
+    copy branches on it instead of naming the wrong verb.
+    """
+    if provider_id in settings.excluded_providers:
+        return (
+            f"{provider_id!r} is excluded, so it will not be used by any search. "
+            f"Run `local-operator search enable {provider_id}` to allow it again."
+        )
+    return (
+        f"{provider_id!r} cannot serve yet on this install, so it is not in the "
+        f"chain. Run {provider_setup_hint(provider_id)}."
+    )
+
+
+def provider_landing_line(provider_id: SearchProviderId, status: ProviderStatus) -> str:
+    """The one sentence both surfaces print after `search enable <pid>`.
+
+    Returned WITHOUT a closing period: the two surfaces end it differently (the CLI
+    full stop, the TUI `; applies now`), and a second copy for the tail is how the
+    two sentences drifted apart before (round-1 U6).
     """
     state = provider_state_label(status)
-    return f"{state}; {STATE_MEANINGS[state]}"
+    if state == "needs setup":
+        # "enabled (off; not usable yet)" told the user their action had both
+        # worked and not worked and named no next step (round-1 U4). The honest
+        # reply says the provider is allowed and names what it still needs.
+        return (
+            f"{provider_id} is allowed, but no search can use it yet: run "
+            f"{provider_setup_hint(provider_id)}"
+        )
+    meaning = STATE_MEANINGS[state]
+    if state.startswith("enabled"):
+        # The state word IS the verb here, so printing it again stutters:
+        # "brave enabled (enabled; in your priority order)" (round-1 D3/U10).
+        return f"{provider_id} enabled ({meaning})"
+    return f"{provider_id} enabled ({state}; {meaning})"
 
 
-def chain_bands_label(statuses: list[ProviderStatus]) -> str:
-    """One line naming the AUTO-JOINED providers: "free: Exa · paid: DeepSeek".
+def chain_label(statuses: list[ProviderStatus]) -> str:
+    """The whole chain in try order: `DuckDuckGo → Exa → DeepSeek (paid)`.
 
-    Listed providers are left out on purpose -- the `order:` line already names
-    them, and repeating them here would read as a second, competing chain.
-    ``(none)`` is printed rather than omitted so a reader can tell an empty band
-    from a surface that forgot to print one.
+    It spans EVERY leg in the chain, listed ones included, because the summary it
+    replaces reported only the auto-joined bands -- so on an install that listed a
+    paid provider it printed `paid: (none)` while a model-turn leg sat in the
+    chain (round-1 D1). A leg whose effective transport spends is marked `(paid)`,
+    whatever put it there.
     """
-    groups: dict[str, list[str]] = {"rotate": [], "fallback": [], "metered": []}
-    for status in statuses:
-        if status.enabled and not status.listed and status.tier in groups:
-            groups[status.tier].append(status.label)
-    parts = (
-        f"free: {', '.join(groups['rotate']) or '(none)'}",
-        f"best-effort: {', '.join(groups['fallback']) or '(none)'}",
-        f"paid: {', '.join(groups['metered']) or '(none)'}",
+    legs = [status for status in statuses if status.enabled]
+    if not legs:
+        return "(none)"
+    return " → ".join(
+        f"{status.label} (paid)" if status.tier == "metered" else status.label for status in legs
     )
-    return " · ".join(parts)
 
 
 def provider_statuses(
     settings: WebSearchSettings,
     credentials: CredentialManager,
 ) -> list[ProviderStatus]:
-    """Return every provider in the stable, user-facing catalogue order.
+    """Every provider: the chain in TRY order first, then the rest by catalogue.
 
-    ``enabled`` reports the provider's membership in THIS session's resolved chain
-    (listed, or auto-joined), which is what a reader of `search list` is asking;
-    ``listed`` and ``excluded`` keep the stored state visible beside it.
+    ``enabled`` reports membership of THIS session's resolved chain (listed, or
+    auto-joined), which is what a reader of `search list` is asking; ``listed`` and
+    ``excluded`` keep the stored state visible beside it.
+
+    The rows follow the chain rather than ``PROVIDER_IDS`` so they corroborate the
+    chain line above them: in catalogue order the DeepSeek row printed above the
+    Perplexity row while the chain put it last (round-1 D1). A provider outside the
+    chain keeps its catalogue position, which is the only order left for it.
     """
-    chain = set(resolve_providers(settings, credentials))
-    return [
+    chain = resolve_providers(settings, credentials)
+    position = {provider_id: index for index, provider_id in enumerate(chain)}
+    statuses = [
         ProviderStatus(
             id=provider_id,
             label=PROVIDERS[provider_id].label,
-            enabled=provider_id in chain,
+            enabled=provider_id in position,
             available=provider_available(provider_id, credentials, settings),
             access=PROVIDERS[provider_id].access,
             detail=PROVIDERS[provider_id].detail,
@@ -1951,3 +2066,11 @@ def provider_statuses(
         )
         for provider_id in PROVIDER_IDS
     ]
+    return sorted(
+        statuses,
+        key=lambda status: (
+            (0, position[status.id])
+            if status.id in position
+            else (1, PROVIDER_IDS.index(status.id))
+        ),
+    )

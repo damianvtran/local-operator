@@ -302,6 +302,17 @@ async def execute_web_read(
         page_context = PAGE_CONTEXTS.for_session(session_id)
 
     if page_context is None:
+        # Branch the copy on the reason the resolver already knows, like the
+        # forced-provider message does: "if you excluded it" is wrong for the
+        # common case (never logged in), and the command it named could not have
+        # helped (round-1 U3).
+        # Exclusion first, exactly as the resolver reads the two lists: a user who
+        # excluded DeepSeek is told the way back even before a missing credential,
+        # because `enable` is the command that would actually restore service.
+        if "deepseek" in settings.excluded_providers:
+            deepseek_setup = "run `local-operator search enable deepseek`"
+        else:
+            deepseek_setup = "run `local-operator login deepseek`"
         return _result(
             tool_call_id,
             (
@@ -309,8 +320,8 @@ async def execute_web_read(
                 "Reading works only on pages a `web_search` through the DeepSeek "
                 "provider retrieved (its results carry the page payload; other "
                 "providers return links only), and the captured pages expire. "
-                "Reading needs the DeepSeek provider; if you excluded it, run "
-                "`local-operator search enable deepseek`. "
+                f"Reading needs the DeepSeek provider; {deepseek_setup} and try "
+                "again. "
                 "Use `web_fetch` (or `read <url>`) on the URLs you need, or pass "
                 "`search` to run a search first."
             ),

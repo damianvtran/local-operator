@@ -154,10 +154,13 @@ def test_enable_is_an_un_exclusion_and_the_landing_line_names_the_band(
     assert search_command(_args("disable", "deepseek")) == 0
     assert "excluded" in capsys.readouterr().out
 
-    # No DeepSeek credential here: enabled, but honestly reported as not usable yet
-    # (the landing line reads the SAME state the `search list` row shows).
+    # No DeepSeek credential here: allowed, and the reply names what it still
+    # needs. "enabled (off; not usable yet)" told the user their action had both
+    # worked and not worked and named no way forward (round-1 U4).
     assert search_command(_args("enable", "deepseek")) == 0
-    assert "off; not usable yet" in capsys.readouterr().out
+    landing = capsys.readouterr().out
+    assert "no search can use it yet" in landing
+    assert "login deepseek" in landing
 
     settings = load_search_settings(ConfigManager(config_dir()))
     assert settings.excluded_providers == []
@@ -170,7 +173,10 @@ def test_enable_is_an_un_exclusion_and_the_landing_line_names_the_band(
     assert search_command(_args("disable", "deepseek")) == 0
     capsys.readouterr()
     assert search_command(_args("enable", "deepseek")) == 0
-    assert "auto paid; tried after the free providers" in capsys.readouterr().out
+    landing = capsys.readouterr().out
+    # The landing sentence is the same one the TUI prints (`provider_landing_line`),
+    # and it says where the leg will actually serve from.
+    assert "deepseek enabled (auto paid; tried after the free providers" in landing
 
 
 def test_search_list_states_the_chain_bands_and_the_new_vocabulary(
@@ -183,9 +189,17 @@ def test_search_list_states_the_chain_bands_and_the_new_vocabulary(
     assert search_command(_args("list")) == 0
     table = capsys.readouterr().out
 
-    assert "auto:" in table and "free: Exa, Parallel" in table
+    # `order:` is the stored prefix; `chain:` is what a search will walk, and it
+    # names the free legs first (round-1 D1).
+    assert "chain: DuckDuckGo → Tavily → Exa → Parallel → Perplexity" in table
     assert "excluded: brave" in table
-    # The stored prefix is no longer the whole chain, and the table says so.
     assert "duckduckgo   enabled" in table
     assert "exa          auto free" in table
     assert "brave        excluded" in table
+    # A provider that cannot serve and was never excluded is the `needs setup`
+    # state: no readiness column repeats it any more (round-1 D6).
+    assert "serpapi      needs setup" in table
+    # Every state word the table can print is defined in the legend under it, and
+    # there is no readiness column left to repeat the state word (round-1 D6/U5).
+    assert "States: enabled · enabled (paid) · auto free · auto best-effort" in table
+    assert "setup needed" not in table

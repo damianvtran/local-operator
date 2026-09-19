@@ -22,7 +22,9 @@ from local_operator.web_search.models import (
 )
 from local_operator.web_search.providers import (
     PROVIDERS,
+    free_pool,
     provider_available,
+    provider_refusal,
     resolve_provider_bands,
     resolve_providers,
 )
@@ -215,7 +217,10 @@ class WebSearchService:
             # Allowed iff it is in the resolved chain, so an EXCLUDED provider is
             # still refused (the forced path is also web_read's pin, and a pin must
             # not override an explicit "never"), while an available provider that
-            # auto-joined the metered band is allowed.
+            # auto-joined the metered band is allowed. The refusal says WHY and
+            # names the command that can actually fix it: the old copy always said
+            # `search enable`, which stopped being able to help once `enable` meant
+            # "clear an exclusion" (round-1 U3).
             if forced_provider not in (
                 *bands.prefix,
                 *bands.rotate,
@@ -223,20 +228,22 @@ class WebSearchService:
                 *bands.metered,
             ):
                 raise RuntimeError(
-                    f"Search provider {forced_provider!r} is not in this session's provider "
-                    f"chain. Run `local-operator search list` to see why, or "
-                    f"`local-operator search enable {forced_provider}`."
+                    f"Search provider "
+                    f"{provider_refusal(forced_provider, self.settings, self.credentials)}"
                 )
             return [forced_provider]
-        rotate = list(bands.rotate)
-        if self.settings.strategy == "round_robin" and len(rotate) > 1:
-            offset = _next_offset(len(rotate))
-            rotate = rotate[offset:] + rotate[:offset]
-        # THE BAND INVARIANT: rotation happens INSIDE the rotating band only, so a
-        # metered leg -- money, or a model turn -- can never be rotated ahead of a
-        # free one. The prefix and the two trailing bands are always walked in
-        # their declared order.
-        return [*bands.prefix, *rotate, *bands.fallback, *bands.metered]
+        # ONE rotating free pool: the listed free legs in their listed order, then
+        # the auto-joined free band. Rotating only the auto band pinned the first
+        # attempt to providers[0] on every install (round-1 M1/Q1/D2/U1).
+        pool = free_pool(self.settings, self.credentials)
+        if self.settings.strategy == "round_robin" and len(pool) > 1:
+            offset = _next_offset(len(pool))
+            pool = pool[offset:] + pool[:offset]
+        # THE BAND INVARIANT, strengthened: nothing that spends can rotate, and
+        # nothing that spends can precede a free leg -- the paid band is appended
+        # last here and a listed paid leg is resolved INTO that band rather than
+        # left in the prefix.
+        return [*pool, *bands.fallback, *bands.metered]
 
     async def search(
         self,
@@ -335,26 +342,19 @@ class WebSearchService:
                 return response
 
         summary = "; ".join(failures) or "no candidates"
-        # Name only what was TRIED. With a forced provider (or one enabled
-        # provider) the candidate list is a single entry, and "all configured
-        # web search providers failed" then describes a chain that was never
-        # run: a design review reproduced it on a forced Perplexity call, where
-        # the message told the reader that every provider had failed while the
-        # other two had not been asked.
+        # Name only what was TRIED, and lead with the leg that most likely has the
+        # actionable sentence -- the LAST one, which on a free-first chain is the
+        # paid backstop whose failure is the one a reader can act on. A six-leg
+        # chain makes the old whole-prefix summary a ~1200-cell string, and the
+        # tool card crops the collapsed row to its first ~34 cells: leading with
+        # "All configured web search providers failed: brave: not configured" put
+        # the one leg that was never going to run where the reader looks (round-1
+        # D4/U7). The count and the tried list follow, where the expansion shows
+        # them.
+        #
         # One candidate covers both the forced call and the one-provider install,
         # and this function cannot tell them apart -- so the message says what is
         # true of either: this provider failed and no other was tried.
-        #
-        # TWO REVIEW FINDINGS MEET HERE, which is why it is worded this way and
-        # not more naturally. The provider's own sentence leads with the move the
-        # reader can act on, and the operator's card renders the whole thing on
-        # ONE line that it crops and never wraps (design review D1): anything
-        # this prefix puts in front of that sentence is what the reader sees
-        # instead. So the prefix is the shortest true one -- and the scope note
-        # that used to be the prefix ("all configured web search providers
-        # failed") was also FALSE for a single candidate, describing a chain that
-        # was never run (design review D2). It goes last, where diagnostics
-        # belong, phrased so it is true of both cases.
         if len(candidates) == 1:
             only = candidates[0]
             detail = summary
@@ -364,7 +364,14 @@ class WebSearchService:
             raise RuntimeError(
                 f"Web search failed: {detail} ({only!r} was the only provider tried)"
             )
-        raise RuntimeError(f"All configured web search providers failed: {summary}")
+        last = failures[-1] if failures else "no candidates"
+        last_provider = candidates[-1]
+        redundant = f"{last_provider}: "
+        detail = last[len(redundant) :] if last.startswith(redundant) else last
+        raise RuntimeError(
+            f"Web search failed: {detail} (all {len(candidates)} providers in the chain "
+            f"failed: {', '.join(candidates)})"
+        )
 
 
 def search_settings_dict(settings: WebSearchSettings) -> dict[str, Any]:

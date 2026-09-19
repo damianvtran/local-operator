@@ -44,15 +44,17 @@ def add_search_subparser(
     commands.add_parser("on", help="Enable the web_search tool")
     commands.add_parser("off", help="Disable the web_search tool")
 
-    enable = commands.add_parser("enable", help="Enable a provider")
+    enable = commands.add_parser("enable", help="Allow a provider (clears its exclusion)")
     enable.add_argument("provider", choices=PROVIDER_IDS)
-    disable = commands.add_parser("disable", help="Disable a provider")
+    disable = commands.add_parser("disable", help="Never use a provider (excludes it)")
     disable.add_argument("provider", choices=PROVIDER_IDS)
 
     strategy = commands.add_parser("balance", help="Choose load-balancing strategy")
     strategy.add_argument("strategy", choices=("round_robin", "ordered"))
 
-    order = commands.add_parser("order", help="Set enabled providers and their priority")
+    order = commands.add_parser(
+        "order", help="Set the priority prefix (tried first; also clears exclusions)"
+    )
     order.add_argument("providers", nargs="+", choices=PROVIDER_IDS)
 
     setup = commands.add_parser("setup", help="Configure credentials or free access")
@@ -85,10 +87,10 @@ def _stack() -> tuple[ConfigManager, CredentialManager]:
 def format_search_status(manager: ConfigManager, credentials: CredentialManager) -> str:
     """Plain, width-tolerant status table shared by CLI and TUI."""
     from local_operator.web_search.providers import (
-        chain_bands_label,
-        provider_ready_label,
+        chain_label,
         provider_state_label,
         provider_statuses,
+        state_legend,
     )
     from local_operator.web_search.service import load_search_settings
 
@@ -99,21 +101,22 @@ def format_search_status(manager: ConfigManager, credentials: CredentialManager)
         f"balance: {settings.strategy}\n"
         f"order: {', '.join(settings.providers) or 'none'} | "
         f"excluded: {', '.join(settings.excluded_providers) or 'none'}\n"
-        # The auto bands get their own line because `order:` is only the priority
-        # prefix now -- without this line the table would still read as if the
-        # stored list were the whole chain.
-        f"auto: {chain_bands_label(statuses)}"
+        # `order:` is the stored prefix; this line is the chain as it will be
+        # walked, every leg named in try order. A paid leg is marked, because on an
+        # install that LISTS one the order line cannot show where it lands.
+        f"chain: {chain_label(statuses)}"
     )
     rows = [header]
     for status in statuses:
-        # The state column is 16 wide to hold `auto best-effort`; `off` replaced
-        # `disabled` because that word claimed a provider was unusable when it may
-        # simply not be in the chain.
+        # ONE state column, no readiness column: a provider that cannot serve is
+        # never in a chain, so `off`/`setup needed` said the same thing twice on
+        # every such row (round-1 D6). The words and meanings come from
+        # providers.py, and the legend below defines them in place.
         rows.append(
-            f"{status.id:<12} {provider_state_label(status):<16} "
-            f"{provider_ready_label(status):<12} {status.access} | {status.detail}"
+            f"{status.id:<12} {provider_state_label(status):<16} {status.access} | {status.detail}"
         )
     rows.append("Setup: local-operator search setup <provider>")
+    rows.append(state_legend())
     return "\n".join(rows)
 
 
@@ -251,13 +254,13 @@ def _print_landing(
 ) -> None:
     """Say where a provider landed, so the user never has to guess.
 
-    `search enable` only clears an exclusion now: it cannot promote a provider into
-    the priority prefix, so the message names the band it will actually serve from
-    -- using the SAME state vocabulary (`provider_state_label`) and the same
-    meanings (`provider_landing_label`) that `search list` and `/search` print.
+    The sentence comes from ``provider_landing_line`` so this surface and /search
+    print the same words for the same state; `search enable` only clears an
+    exclusion, so what a user needs is where the provider will serve from -- or,
+    when it cannot serve yet, the command that fixes that (round-1 U4).
     """
     from local_operator.web_search.providers import (
-        provider_landing_label,
+        provider_landing_line,
         provider_statuses,
     )
 
@@ -268,7 +271,7 @@ def _print_landing(
     if status is None:
         print(f"{provider_id} enabled.")
         return
-    print(f"{provider_id} enabled ({provider_landing_label(status)}).")
+    print(f"{provider_landing_line(provider_id, status)}.")
 
 
 async def _test_search(args: argparse.Namespace) -> int:

@@ -568,9 +568,10 @@ The agent's built-in tools, each with its own card in the transcript:
 ### 🔎 Web search
 
 Search works out of the box. The chain walks **free legs first and metered legs
-last**: a priority prefix you control, then the credential-free providers this
-install can reach, then the best-effort ones, then anything that would spend
-money or a model turn.
+last**: the free providers you list, then the credential-free providers this
+install can reach, then the best-effort ones, then anything that would spend money
+or a model turn — including a paid provider you listed, which is tried first among
+the paid legs and never before a free one.
 
 ```bash
 lop search list
@@ -583,24 +584,34 @@ lop search setup tavily --oauth      # official Tavily MCP server
 lop search setup searxng --endpoint https://search.example.com
 ```
 
-`web_search.providers` is a **priority prefix, not an allowlist**: those
-providers are tried first, in that order, and every other usable provider joins
-automatically behind them. `web_search.excluded_providers` is the only way to
-say never — an id there is skipped in the prefix *and* in the automatic bands.
-A provider that becomes usable mid-session (a DeepSeek login, an Exa key) joins
-its band on the next search with no further configuration; `lop search list`
-states each provider's state, so the chain is never a guess.
+`web_search.providers` is a **priority prefix, not an allowlist**, and its
+authority is over order **within a band**: those providers are tried first, in
+that order, and every other usable provider joins automatically behind them.
+`web_search.excluded_providers` is the only way to say never — an id there is
+skipped in the prefix *and* in the automatic bands. A provider that becomes
+usable mid-session (a DeepSeek login, an Exa key) joins its band on the next
+search with no further configuration; `lop search list` states each provider's
+state, so the chain is never a guess.
 
-`round_robin` rotates only the free rotating band, never across a band boundary,
-so a metered leg can never be rotated ahead of a free one.
+Listing a provider whose transport would **spend** — a key, or a model turn —
+does not put it first. It moves it to the head of the **paid** band, so every
+free leg is still tried before it: a paid provider listed ahead of a free one is
+tried first *among the paid legs*, and `lop search list` names it as `paid` rather
+than as a plain `enabled`. That keeps the free-before-paid rule absolute, and
+`search list`'s `chain:` line shows the resulting order.
+
+`round_robin` spreads the first attempt across the whole **free pool** — the
+listed free providers in their listed order, then the credential-free providers
+that joined automatically — and never across a band boundary, so nothing that
+spends can be rotated (or listed) ahead of a free leg.
 
 | Provider | Access | Default |
 | --- | --- | --- |
 | DuckDuckGo | Credential-free | Priority prefix |
-| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Priority prefix |
-| Exa | Keyless MCP (no key needed), or `EXA_API_KEY` | Automatic (free) |
-| Parallel | Keyless MCP (no key needed), or `PARALLEL_API_KEY` | Automatic (free) |
-| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Automatic (best-effort) |
+| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Priority prefix (keyed: paid band) |
+| Exa | Keyless MCP (no key needed), or `EXA_API_KEY` | Automatic (free; keyed: paid band) |
+| Parallel | Keyless MCP (no key needed), or `PARALLEL_API_KEY` | Automatic (free; keyed: paid band) |
+| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Automatic (best-effort; keyed: paid band) |
 | DeepSeek | Model login or `DEEPSEEK_API_KEY` | Automatic (paid) |
 | Brave | `BRAVE_API_KEY` | Automatic (paid) |
 | SerpApi | `SERPAPI_API_KEY` | Automatic (paid) |
