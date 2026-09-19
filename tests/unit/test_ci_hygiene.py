@@ -489,47 +489,262 @@ def test_tui_e2e_still_runs_on_macos() -> None:
     )
 
 
-def test_every_test_file_lands_in_exactly_one_shard() -> None:
-    """The shard partition must never drop or duplicate a test file.
+def test_every_e2e_shard_runs_on_both_platforms() -> None:
+    """Sharding the e2e tree must not narrow which platform runs it.
 
-    This is the load-bearing invariant of the duration-balanced split. The
-    positional `i % 5` scheme could not lose a file by construction; a
-    weighted partition reading a committed manifest can, if it ever grows a
-    "skip what I have no weight for" path. A silently dropped test file is a
-    test that stops running while CI stays green -- strictly worse than the
-    imbalance the manifest exists to fix.
+    The matrix is a product: `shard` decides which slice of the tree a leg
+    runs, `os` decides where. A leg that exists on only one OS is a slice of
+    the tree that the macOS-only freeze guard never sees — the #401 deadlock
+    is a macOS/BSD property, so an ubuntu-only shard 2 would be exactly the
+    test that cannot catch it, and a macos-only shard 2 would be untested on
+    the platform where the rest of the stage is exercised.
+    """
+    matrix = _ci_jobs()["tui-e2e"]["strategy"]["matrix"]
+    oses = matrix["os"]
+    shards = matrix["shard"]
+    assert sorted(oses) == ["macos-latest", "ubuntu-latest"], (
+        "tui-e2e must run on exactly the macOS and ubuntu legs; "
+        f"os={oses!r} would leave part of the freeze guard unrunnable"
+    )
+    assert shards, "tui-e2e has an empty shard matrix"
+
+
+#: The trees CI shards, and the job whose matrix runs each one. Which tree a
+#: job shards and how many shards it makes are READ from ci.yml (see
+#: `_shard_plan`); this mapping only says which job owns which tree, and is
+#: asserted to be exhaustive by `test_every_shard_matrix_job_uses_a_known_tree`.
+SHARD_JOBS: dict[str, str] = {"test": "unit", "tui-e2e": "e2e"}
+
+#: The job names the parametrized shard guards run against, sorted so a
+#: failure names the job it is about in a stable order.
+SHARD_JOB_IDS = sorted(SHARD_JOBS)
+
+
+def _shard_step_run(job: str) -> str:
+    """The `run:` body of `job`'s partition step, found by what it invokes.
+
+    Found by the script it calls rather than by step NAME: a name is prose, so
+    renaming a step would silently detach every assertion below from the thing
+    it guards (the same mistake `_partition_step_run` used to make).
+    """
+    steps = [s for s in _steps(job) if "scripts/shard_tests.py" in (s.get("run") or "")]
+    assert len(steps) == 1, f"{job} must have exactly one shard partition step, got {len(steps)}"
+    return steps[0]["run"]
+
+
+def _run_step(job: str) -> str:
+    """The `run:` body of `job`'s step that actually runs the tests.
+
+    Found by the `pytest` invocation rather than by step name, for the same
+    reason `_shard_step_run` is: the assertions built on it are about what the
+    step EXECUTES (does it run the partitioned list, does it keep `-n0`), and a
+    renamed step must not be able to detach them.
+    """
+    steps = [s for s in _steps(job) if "pytest" in (s.get("run") or "")]
+    assert len(steps) == 1, f"{job} must have exactly one pytest step, got {len(steps)}"
+    return steps[0]["run"]
+
+
+#: A shell command substitution: `$(cat e2e_tests.txt | tr '\n' ' ')`. Replaced
+#: by `_SUBSTITUTION_TOKEN` before the argv is split, because a naive split
+#: cannot see the shell text inside as separate arguments and `shlex` would
+#: raise on its quotes.
+_SUBSTITUTION = re.compile(r"\$\([^)]*\)")
+_SUBSTITUTION_TOKEN = "__substitution__"
+
+
+def _pytest_argv(run: str) -> list[str]:
+    """The arguments of a step's pytest invocation, substitutions included.
+
+    `pytest $(cat list.txt) tests/e2e -q` therefore yields
+    `['pytest', '__substitution__', 'tests/e2e', '-q']` -- the directory is
+    visible AS an argument. That is the whole point: an assertion that looks
+    for the substring `pytest tests/e2e` is evaded by appending the tree to a
+    correct command (`pytest $(cat list.txt) tests/e2e`), which collects the
+    list AND the whole tree, and by any reordering or extra whitespace.
+    """
+    return shlex.split(_SUBSTITUTION.sub(_SUBSTITUTION_TOKEN, run))
+
+
+def _shard_plan(job: str) -> tuple[str, int]:
+    """`(tree, total)` as `job` declares them, read from ci.yml."""
+    run = _shard_step_run(job)
+    total_match = re.search(r"--total\s+(\d+)", run)
+    assert total_match, f"no --total in {job}'s partition step: {run!r}"
+    tree_match = re.search(r"--tree\s+(\w+)", run)
+    tree = tree_match.group(1) if tree_match else "unit"
+    assert tree in shard_tests.TREES, f"{job} shards unknown tree {tree!r}"
+    assert tree == SHARD_JOBS[job], (
+        f"{job} shards tree {tree!r}, expected {SHARD_JOBS[job]!r}: the two jobs "
+        "would otherwise shard the same tree to two different degrees"
+    )
+    return tree, int(total_match.group(1))
+
+
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_the_committed_manifest_belongs_to_the_tree_that_reads_it(job: str) -> None:
+    """Every weight in a tree's manifest must name a file that tree collects.
+
+    Coverage is deliberately NOT the property here -- a file may legitimately
+    be missing, and `test_unmeasured_test_files_are_still_scheduled` pins that
+    it runs anyway. The property is that no COMMITTED weight is dead. A
+    manifest written for the other tree passes every other guard in this file:
+    the partition finds 0 measured files, schedules everything at the fallback
+    weight, reports a perfectly balanced split, and has discarded every real
+    measurement it was given. `gen_test_durations.py --tree` refuses to write
+    such a file (see the next test); this catches one that is already
+    committed, including the stale-path case where a test file was renamed and
+    its weight was never removed.
+    """
+    tree = SHARD_JOBS[job]
+    files = set(shard_tests.collect_test_files(tree=tree))
+    weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
+
+    assert weights, (
+        f"{tree}'s manifest is empty or unreadable; every shard would then be "
+        f"balanced by the {fallback}s fallback, which measures nothing"
+    )
+    assert fallback > 0, (
+        f"{tree}'s manifest has a non-positive fallback ({fallback}); an "
+        "unmeasured file would be treated as free and pile onto the first shard"
+    )
+    dead = sorted(set(weights) - files)
+    assert not dead, (
+        f"{tree}'s manifest weighs {len(dead)} file(s) the tree never collects, " f"e.g. {dead[:5]}"
+    )
+
+    # A zero weight is WORSE than an absent one: absent files are scheduled at
+    # `fallback_seconds`, while zero tells LPT the file is free. JUnit reports
+    # 0.0 for a file whose tests all skipped, which is how one gets in there --
+    # `gen_test_durations.py` floors the value, and this pins the floor.
+    nonpositive = sorted(f for f, v in weights.items() if v <= 0)
+    assert not nonpositive, (
+        f"{tree}'s manifest has {len(nonpositive)} non-positive weight(s), e.g. "
+        f"{nonpositive[:3]}; the partitioner would treat them as free"
+    )
+
+
+def test_gen_refuses_a_report_from_the_other_tree(tmp_path: Path) -> None:
+    """`--tree X` must refuse a JUnit report of tree Y, before writing.
+
+    Run through the real entry point: the guard's entire value is that it fires
+    BEFORE the write, and a written manifest of dead paths is indistinguishable
+    from a good one afterwards (see the test above for what that costs).
+    """
+    from scripts import gen_test_durations
+
+    report = tmp_path / "wrong-tree.xml"
+    report.write_text(
+        '<?xml version="1.0"?>\n<testsuites><testsuite name="p">'
+        '<testcase classname="tests.unit.test_paths" time="1.0"/>'
+        "</testsuite></testsuites>\n"
+    )
+    out = tmp_path / "durations-e2e.json"
+
+    with pytest.raises(SystemExit) as excinfo:
+        gen_test_durations.main(["--tree", "e2e", "--junit", str(report), "--out", str(out)])
+
+    assert excinfo.value.code == 2, "argparse must report the mismatch as a usage error"
+    assert not out.exists(), "the mismatched manifest was written anyway"
+
+
+def test_a_measured_zero_never_becomes_a_free_file_or_a_free_fallback() -> None:
+    """The floor applies to `fallback_seconds` too, not only to per-file weights.
+
+    JUnit reports 0.0 for a file whose tests all skipped, so a small input -- or
+    a regeneration over an unlucky one -- can put the p90 quantile AT zero. A
+    zero fallback is worse than no fallback: an unmeasured file then weighs
+    nothing, LPT hands it to whichever shard is next, and every unknown piles
+    onto the first shard instead of being scattered across all of them. Latent
+    with today's tree, wrong the moment a regeneration sees such an input.
+    """
+    from scripts import gen_test_durations
+
+    per_file = {"tests/unit/test_all_skipped.py": 0.0}
+    manifest = gen_test_durations.build_manifest(per_file)
+
+    # `build_manifest` is typed loosely (`dict[str, object]`), so narrow before
+    # comparing: the assertion is about the VALUES it writes, and pyright will
+    # not check a comparison against `object`.
+    fallback = manifest["fallback_seconds"]
+    durations = manifest["durations"]
+    assert isinstance(fallback, float) and fallback > 0, manifest
+    assert isinstance(durations, dict), manifest
+    assert durations["tests/unit/test_all_skipped.py"] > 0, manifest
+
+
+def test_every_shard_matrix_job_uses_a_known_tree() -> None:
+    """Every job whose matrix has a `shard` axis must name one known tree.
+
+    The failure this catches is a THIRD sharded job added later with a matrix
+    of its own and no entry here: it would run whatever its inline command
+    said, unguarded, and the guards below would keep passing while covering
+    only the two trees they know about.
+    """
+    sharded = [
+        name
+        for name, job in _ci_jobs().items()
+        if isinstance(job.get("strategy", {}).get("matrix"), dict)
+        and "shard" in job["strategy"]["matrix"]
+    ]
+    assert sorted(sharded) == sorted(SHARD_JOBS), (
+        "a CI job has a `shard` matrix axis that this module does not know "
+        f"about (sharded={sorted(sharded)}, known={sorted(SHARD_JOBS)})"
+    )
+    for job, tree in SHARD_JOBS.items():
+        _shard_plan(job)
+
+
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_every_test_file_lands_in_exactly_one_shard(job: str) -> None:
+    """Each tree's partition must never drop or duplicate a test file.
+
+    This is the load-bearing invariant of the duration-balanced split, and it
+    is asserted PER TREE, because the two trees fail differently. For the unit
+    tree a dropped file is a unit test that stops running while CI stays
+    green. For `tests/e2e` it is worse: that tree is the only thing that drives
+    the assembled application, so a dropped file is a slice of the #401 freeze
+    guard that no longer executes — and with the tree now split across runners,
+    a dropped file is also invisible in a way it was not before, since no leg's
+    log contains the whole suite to compare against.
 
     Mutation-tested: filtering the file list through the manifest
-    (`[f for f in files if f in weights]`) fails this test.
+    (`[f for f in files if f in weights]`) fails this test for both trees.
     """
-    files = shard_tests.collect_test_files(REPO)
-    weights, fallback = shard_tests.load_weights()
-    assert files, "no unit test files collected; the glob is wrong"
+    tree, total = _shard_plan(job)
+    files = shard_tests.collect_test_files(tree=tree)
+    weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
+    assert files, f"no {tree} test files collected; the glob is wrong"
 
-    shards = shard_tests.partition(files, weights, fallback, 5)
+    shards = shard_tests.partition(files, weights, fallback, total)
     assigned = [f for shard in shards for f in shard]
 
     assert len(assigned) == len(set(assigned)), "a test file was assigned twice"
     assert set(assigned) == set(files), (
-        "the partition does not cover every collected test file; "
+        f"the {tree} partition does not cover every collected test file; "
         f"missing={sorted(set(files) - set(assigned))[:5]}"
     )
 
 
-def test_unmeasured_test_files_are_still_scheduled() -> None:
-    """A file absent from the manifest must still run.
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_unmeasured_test_files_are_still_scheduled(job: str) -> None:
+    """A file absent from a tree's manifest must still run.
 
-    The manifest is committed, so it is stale the moment anyone adds a test.
-    Staleness is allowed to cost BALANCE and must never cost COVERAGE: an
+    The manifests are committed, so they are stale the moment anyone adds a
+    test. Staleness is allowed to cost BALANCE and must never cost COVERAGE: an
     unknown file is weighted at `fallback_seconds` and scheduled like any
-    other. Without this, adding a test file would silently exempt it from CI.
+    other. The e2e tree makes this concrete rather than theoretical: its
+    manifest did not exist before the sharding PR, so EVERY e2e file is
+    unmeasured on the first run, and a partition that skipped unknowns would
+    have run nothing at all while all six legs reported success.
     """
-    files = shard_tests.collect_test_files(REPO)
-    weights, fallback = shard_tests.load_weights()
-    unknown = "tests/unit/test_not_in_the_manifest_at_all.py"
+    tree, total = _shard_plan(job)
+    files = shard_tests.collect_test_files(tree=tree)
+    weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
+    unknown = f"{shard_tests.TREES[tree].root}/test_not_in_the_manifest_at_all.py"
     assert unknown not in weights
 
-    shards = shard_tests.partition(files + [unknown], weights, fallback, 5)
+    shards = shard_tests.partition(files + [unknown], weights, fallback, total)
     holders = [i for i, shard in enumerate(shards) if unknown in shard]
     assert (
         len(holders) == 1
@@ -537,63 +752,194 @@ def test_unmeasured_test_files_are_still_scheduled() -> None:
     assert fallback > 0, "the fallback weight must be positive"
 
 
-def test_shard_partition_is_deterministic() -> None:
-    """The same commit must always produce the same split.
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_shard_partition_is_deterministic(job: str) -> None:
+    """The same commit must always produce the same split, per tree.
 
-    If the partition varied between the five shard jobs of one run, a file
-    could be run twice or not at all; if it varied between runs, a shard
-    failure would be unreproducible. Determinism comes from sorting on
-    (-weight, path) and breaking load ties on the lowest shard index.
+    If the partition varied between the shard jobs of one run, a file could be
+    run twice or not at all; if it varied between runs, a shard failure would
+    be unreproducible. Determinism comes from sorting on (-weight, path) and
+    breaking load ties on the lowest shard index. The e2e tree has a second
+    reason to require it: the same `--total 3` runs on both OS legs, so a
+    partition that varied would have macOS and ubuntu running DIFFERENT slices
+    of the same commit, and no leg's pass would mean the whole tree passed.
     """
-    files = shard_tests.collect_test_files(REPO)
-    weights, fallback = shard_tests.load_weights()
-    first = shard_tests.partition(files, weights, fallback, 5)
+    tree, total = _shard_plan(job)
+    files = shard_tests.collect_test_files(tree=tree)
+    weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
+    first = shard_tests.partition(files, weights, fallback, total)
     for _ in range(5):
-        assert shard_tests.partition(files, weights, fallback, 5) == first
+        assert shard_tests.partition(files, weights, fallback, total) == first
 
 
-def test_ci_partitions_the_suite_by_measured_duration() -> None:
-    """CI must invoke the balanced partitioner, not an inline positional split.
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_ci_partitions_each_tree_by_measured_duration(job: str) -> None:
+    """CI must invoke the balanced partitioner for every sharded job.
 
-    The `i % 5` split left the heaviest shard ~47 seconds under a 20-minute
-    cap and migrated that load between shards as files were added, so a PR
-    was failed by a cap while its log read `3693 passed`. Reverting to an
-    inline split silently restores that.
+    For the unit tree, the `i % 5` split left the heaviest shard ~47 seconds
+    under a 20-minute cap and migrated that load between shards as files were
+    added, so a PR was failed by a cap while its log read `3693 passed`.
+    Reverting to an inline split silently restores that. For the e2e tree the
+    inline split is worse than unbalanced — the tree is lumpy enough that a
+    file-count split puts several of the slowest pilot files in one leg and
+    leaves another leg nearly idle, which is the opposite of the wall-time cut
+    the matrix exists for.
     """
-    steps = _steps("test")
-    partition_steps = [s for s in steps if s.get("name") == "Partition test suite"]
-    assert len(partition_steps) == 1, "expected exactly one partition step"
-    run = partition_steps[0]["run"]
+    run = _shard_step_run(job)
     assert (
         "scripts/shard_tests.py" in run
-    ), "the test job no longer calls the duration-balanced partitioner"
+    ), f"{job} no longer calls the duration-balanced partitioner"
+    assert "i % total" not in run and "i % 5" not in run, "the inline positional split is back"
+
+
+#: Measured overhead per shard job: everything that is not the tests —
+#: checkout, `pip install -e`, collection, the coverage/artifact steps.
+#:
+#: Calibrated from run 35416005688 (the 02:33 main run), job wall minus the
+#: pytest-reported duration in the same log: the 3.12 unit shard 0 was 688 s
+#: against 650 s of tests, and the tui-e2e ubuntu leg was 1164 s against
+#: 1112 s. Observed overhead is therefore 38-52 s; 60 s is that rounded up,
+#: not a guess with room in it.
+SHARD_JOB_OVERHEAD_SECONDS = 60
+
+#: Workers the unit shard job actually gets, and the reason the two trees
+#: cannot share a bound. `conftest.py`'s hook takes EVERY core when `CI` is set
+#: (the 0.5 share is deliberately skipped on a dedicated runner — applying it
+#: measurably halved CI parallelism), and a GitHub `ubuntu-latest` runner has 4
+#: vCPUs, so a unit shard's serial weight divides by 4. The e2e tree divides by
+#: 1 by design: it runs `-n0` because a fired watchdog exits the process, which
+#: is exactly why its sharding axis had to be runners rather than workers.
+CI_UNIT_WORKERS = 4
+
+
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_each_shard_job_timeout_exceeds_its_projected_wall(job: str) -> None:
+    """The job ceiling must fit the work the partition gives that job.
+
+    A timeout shorter than the shard is not a faster job, it is a cancelled
+    one: GitHub reports it as a failure with a partial log, and (for the unit
+    matrix) the shard's coverage artifact never uploads. Retuning the partition
+    without revisiting the ceiling is the mistake this guards, and it matters
+    more than it did with one serial e2e leg, because the e2e matrix now
+    multiplies whatever ceiling that job carries by six jobs.
+
+    The bound is expressed against the SERIAL weight of the heaviest shard,
+    divided by the workers that job really gets, rather than against a wall
+    time recorded in this file. A recorded wall is a fact about yesterday's
+    tree; this is a fact about the tree the partition just read, so a suite
+    that grows by a factor of two fails here before it fails CI. What validates
+    the divisor: run 35416005688's heaviest 3.12 unit shard reported 1031 s of
+    pytest time for 2084 s of serial weight (ratio 2.0 against the modelled
+    4 workers, i.e. the model is CONSERVATIVE by 2x on that shard), and the
+    unsharded e2e leg reported 1112 s for 1112 s (ratio 1.0).
+    """
+    tree, total = _shard_plan(job)
+    files = shard_tests.collect_test_files(tree=tree)
+    weights, fallback = shard_tests.load_weights(shard_tests.TREES[tree].manifest)
+    shards = shard_tests.partition(files, weights, fallback, total)
+    heaviest = max(sum(weights.get(f, fallback) for f in shard) for shard in shards)
+
+    workers = 1 if tree == "e2e" else CI_UNIT_WORKERS
+    projected_wall = heaviest / workers
+
+    timeout = _ci_jobs()[job]["timeout-minutes"]
+    assert isinstance(timeout, int)
+    budget = timeout * 60 - SHARD_JOB_OVERHEAD_SECONDS
+    assert budget >= projected_wall, (
+        f"{job}'s {timeout}-minute ceiling leaves {budget:.0f}s for tests after "
+        f"{SHARD_JOB_OVERHEAD_SECONDS}s of job overhead, but its heaviest {tree} "
+        f"shard is {heaviest:.0f}s of serial weight — {projected_wall:.0f}s on "
+        f"{workers} worker(s)"
+    )
+
+
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
+def test_the_shard_job_runs_the_partitioned_list_not_the_whole_tree(job: str) -> None:
+    """A partition nothing consumes is a matrix of identical jobs.
+
+    This is the failure with the worst cost-to-noise ratio in the file: revert
+    the run step to the tree root (`pytest tests/e2e -m e2e -n0 -q`) while the
+    matrix still has three shards, and every leg runs the FULL tree, reports
+    success, and multiplies the critical path instead of cutting it — six jobs
+    each doing 19 minutes of work. The unit job has the same shape (`pytest
+    tests/unit` instead of the file list from `shard_tests.txt`). Nothing else
+    in CI would notice: the shards would still be balanced, deterministic and
+    fully covered; they would each just run everything.
+
+    `-m e2e`, `-n0` and the colour env are asserted alongside the file list
+    because they are the properties AGENTS.md calls load-bearing for this
+    stage, and a run step rewritten to consume the list is exactly when they
+    get dropped.
+
+    The tree-root check is PATH-AWARE (it parses the pytest argv) rather than a
+    substring search, because a substring search asserts the absence of one
+    spelling rather than the absence of the behaviour: `pytest $(cat
+    e2e_tests.txt | tr '\n' ' ') tests/e2e -m e2e -n0 -q` contains the file
+    list, does not contain the literal `pytest tests/e2e`, and collects the
+    whole tree in addition to the shard. Mutation-tested both ways: appending
+    the root to a correct command fails this test, as does replacing the list
+    with the root.
+    """
+    run = _run_step(job)
+    tree = SHARD_JOBS[job]
+    root = shard_tests.TREES[tree].root
+    argv = _pytest_argv(run)
+
     assert (
-        "i % total" not in run and "i % 5" not in run
-    ), "the inline positional split is back in ci.yml"
+        _SUBSTITUTION_TOKEN in argv
+    ), f"{job}'s run step does not pass the partition's file list: {run!r}"
+    # The filename lives INSIDE the substitution, so it is checked there rather
+    # than against the parsed argv (`pytest $(cat wrong_list.txt)` would
+    # otherwise pass as "the list is passed").
+    substitutions = _SUBSTITUTION.findall(run)
+    assert any(
+        "_tests.txt" in sub for sub in substitutions
+    ), f"{job}'s run step reads something other than the partition's file list: {substitutions!r}"
+
+    # The tree root must not appear as an ARGUMENT at all. A directory argument
+    # (`pytest tests/e2e ...`) collects the whole tree and makes the partition
+    # pointless, and it can be appended to a correct command, so this compares
+    # parsed arguments rather than searching the raw text.
+    roots = [a for a in argv if a.rstrip("/") == root]
+    assert not roots, (
+        f"{job} passes the whole {root} tree as a pytest argument ({roots}); "
+        "the shard matrix would then multiply the run instead of cutting it"
+    )
+    if tree == "e2e":
+        assert re.search(r"-m\s*e2e\b", run), "the e2e shard run lost `-m e2e`"
+        assert re.search(r"(?<!\w)-n\s*0(?!\d)", run), (
+            "the e2e shard run lost serial execution (`-n0`): under xdist a fired "
+            "watchdog kills a worker carrying unrelated tests (see AGENTS.md)"
+        )
+        assert (
+            "NO_COLOR" in run and "xterm-256color" in run
+        ), "the e2e shard run lost the environment the TUI suite composes a frame with"
 
 
-def _partition_step_run() -> str:
-    """The `run:` body of the shard job's partition step."""
-    steps = [s for s in _steps("test") if s.get("name") == "Partition test suite"]
-    assert len(steps) == 1, "expected exactly one partition step"
-    return steps[0]["run"]
-
-
+@pytest.mark.parametrize("job", SHARD_JOB_IDS)
 def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
-    tmp_path: Path,
+    job: str, tmp_path: Path
 ) -> None:
-    """The matrix must run every shard `--total` splits the suite into, and
+    """The matrix must run every shard `--total` splits that tree into, and
     `main()` must emit all of them.
 
     This asserts the coverage invariant on the REAL entry point. The other
     guards call `partition()` directly, which leaves the layer CI actually
-    invokes -- argument parsing, `shards[args.shard]` selection, the `--out`
-    write -- untested. Review round 1 (MAJOR-2) demonstrated three mutations
-    that silently stop test files from running while all guards stayed green:
+    invokes -- argument parsing, `--tree`/`--shard` selection,
+    `shards[args.shard]` lookup, the `--out` write -- untested. Review round 1
+    (MAJOR-2) demonstrated three mutations that silently stop test files from
+    running while all guards stayed green:
 
       - `selected = shards[args.shard][:1]` in `main()`  -> 91 of 92 files skipped
       - matrix `[0, 1, 2, 3]` while `--total` stays 5    -> ~92 files never run
       - `--total 6` while the matrix stays 5             -> shard 5 orphaned
+
+    The same three shapes exist for the e2e tree, where the matrix is a
+    product: a `shard` axis of `[0, 1]` against `--total 3` orphans a third of
+    the freeze guard on BOTH operating systems, with every leg reporting a
+    pass. `--tree` is part of the plan read here, so a job pointed at the
+    wrong tree (or at none, defaulting to `unit`) fails rather than sharding
+    the wrong suite.
 
     None of those is caught by asserting the step merely *calls* the script,
     because nothing coupled the matrix length to `--total`. Both numbers are
@@ -602,13 +948,10 @@ def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
     compared against the collected suite, so a truncated or misselected
     write fails too.
     """
-    run = _partition_step_run()
+    run = _shard_step_run(job)
+    tree, total = _shard_plan(job)
 
-    total_match = re.search(r"--total\s+(\d+)", run)
-    assert total_match, f"no --total in the partition step: {run!r}"
-    total = int(total_match.group(1))
-
-    matrix = _ci_jobs()["test"]["strategy"]["matrix"]["shard"]
+    matrix = _ci_jobs()[job]["strategy"]["matrix"]["shard"]
     assert isinstance(matrix, list)
     assert sorted(matrix) == list(range(total)), (
         f"the shard matrix {sorted(matrix)} does not cover every shard of "
@@ -617,19 +960,21 @@ def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
 
     # The step passes `--shard ${{ matrix.shard }}`, so the matrix value is
     # the argument. Drive main() the same way CI does, once per shard.
-    assert "--shard" in run, "the partition step no longer passes --shard"
+    assert "--shard" in run, f"{job}'s partition step no longer passes --shard"
 
     written: list[str] = []
     for shard in matrix:
         out = tmp_path / f"shard_{shard}.txt"
-        rc = shard_tests.main(["--shard", str(shard), "--total", str(total), "--out", str(out)])
+        rc = shard_tests.main(
+            ["--tree", tree, "--shard", str(shard), "--total", str(total), "--out", str(out)]
+        )
         assert rc == 0, f"main() failed for shard {shard}"
         written.extend(out.read_text().split())
 
-    expected = shard_tests.collect_test_files(REPO)
+    expected = shard_tests.collect_test_files(tree=tree)
     assert len(written) == len(set(written)), "a test file was written to two shards"
     assert set(written) == set(expected), (
-        "the files main() writes do not cover the collected suite; "
+        f"the files main() writes for the {tree} tree do not cover it; "
         f"missing={sorted(set(expected) - set(written))[:5]}"
     )
 
