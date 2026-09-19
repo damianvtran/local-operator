@@ -32,11 +32,13 @@ a keystroke: measured in this worktree, `run_test` to a ready session is ~0.74 s
 against ~0.13 s for arranging a state and settling one act, and 14 of the 15
 seconds the original arms spent per cell were boot. The cross product is 180
 cells and the equivalence property is checked against TWO apps per cell — the
-chord and its plain-arrow oracle — so the module as first written booted 783
+chord and its plain-arrow oracle — so the module as first written booted 775
 `OperatorApp`s for 303 tests and spent ~570 s of its 572 s doing it (the file's
 recorded weight, and the largest single item in `tests/durations.json`). Each
 group below (one state, one history value) now boots ONE app and drives every
-cell of the group through it, with `_SharedApp.run` restoring the composer
+cell of the group through it, and the whole module now boots 73: 23 for the
+group and single-cell tests, and 50 for the parity test (five per group — four
+fresh ``_run`` boots and one shared app). with `_SharedApp.run` restoring the composer
 between arms and ASSERTING the restored state against the fingerprint the
 group's own boot produced; a reset that missed anything fails there by name.
 The matrix, the oracle and every cell are unchanged — the group tests still run
@@ -66,6 +68,7 @@ from typing import Any
 
 import pytest
 from textual import events
+from textual._wait import wait_for_idle
 from textual._xterm_parser import XTermParser
 
 from local_operator.tui.app import OperatorApp
@@ -136,6 +139,15 @@ def _encode(encoding: str, chord: str) -> str | None:
 
 
 ENCODINGS = ("csi", "meta", "esc_prefixed")
+
+#: Cells one (state, history) group carries in the full matrix, and in the
+#: escape-pending axis. PINNED as literals rather than derived, because they are
+#: the independent side of two checks: the coverage test compares them against
+#: the generated cells (so deleting a chord from every table turns it red), and
+#: each group test counts the arms it actually ran against them (so a truncated
+#: loop that silently checks fewer cells is caught too).
+CELLS_PER_GROUP = 18  # csi 8 + meta 2 + esc-prefixed 8
+ESCAPE_PENDING_CELLS_PER_GROUP = 10  # csi 8 + meta 2; the esc spelling is excluded by nature
 
 #: Composer states. Each is a setup coroutine plus the buffer it leaves behind.
 STATES: dict[str, dict[str, Any]] = {
@@ -245,6 +257,7 @@ async def _run(
     history: bool,
     act: Callable[[Any, OperatorApp], Any],
     escape_pending: bool = False,
+    idle: bool = False,
 ) -> tuple[Any, ...]:
     """One matrix cell, run in a boot of its own.
 
@@ -255,6 +268,15 @@ async def _run(
     boot per group (see ``_SharedApp``) -- with the arm's own semantics
     unchanged: arrange, install the stop spy, hold an escape if this cell wants
     one, act, settle, observe.
+
+    ``idle`` is for the PARITY ARMS only (see
+    ``test_the_shared_app_still_behaves_like_a_boot_of_its_own``). It adds the
+    CPU-idle wait ``pilot.press`` already performs internally
+    (``App._press_keys`` → ``wait_for_idle``) after the act, so an arm whose key
+    is dispatched through the binding system is observed only once its action
+    has landed. The hot path keeps the zero-delay queue barriers ``_settle``
+    documents, and with them the rare load flake those barriers allow -- see the
+    flake note on the parity test.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     messages = MessageWaiter()
@@ -274,6 +296,8 @@ async def _run(
         if escape_pending:
             _hold_pending_escape(app)
         await act(pilot, app)
+        if idle:
+            await wait_for_idle(0)
         await _settle(pilot, editor, messages)
         return _observe(editor, stops)
 
@@ -397,6 +421,13 @@ def _fingerprint(editor: Editor, app: OperatorApp, stops: list[Any]) -> dict[str
         "picker_mode": str(editor._picker.mode),
         "picker_selected": editor._picker.selected_index,
         "picker_dismissed": editor._picker.is_dismissed(),
+        # The command picker's filter text, read through its own private because it
+        # has no public accessor (the model picker's `query_text` is the one that
+        # does). Present because of what review round 1 found in its sibling: a
+        # field that LOOKS checked and is not is worse than one that is absent, and
+        # a query surviving a reset would filter the next cell's list by the
+        # previous cell's word.
+        "picker_query": editor._picker._query,
         "picker_key": editor._picker_key_at_last_sync,
         "argument_command": editor._argument_command,
         "argument_subcommand": editor._argument_subcommand,
@@ -404,13 +435,24 @@ def _fingerprint(editor: Editor, app: OperatorApp, stops: list[Any]) -> dict[str
         "file_requested": editor._file_choices_requested,
         "model_open": editor._model_picker.is_open(),
         "model_selected": editor._model_picker.selected_index,
-        "model_query": editor._model_picker.query_text,
+        "model_query": editor._model_picker.query_text(),
         "model_dismissed": editor._model_picker.is_dismissed(),
         "stops": len(stops),
         # The two ladders the app carries ACROSS presses rather than within one:
         # the armed "esc again" stop offer, and the screen stack a cell can push
         # without popping. Neither is in `_observe`, and both are inherited by
         # the next cell if a reset forgets them.
+        #
+        # `stop_offered` reads a state this matrix cannot ARM, and that is
+        # deliberate rather than a gap: the offer is only raised by an Escape
+        # that reports subagents still running (`app._stop_offered_at` is set on
+        # `_running_subagents(...) > 0`), and every state in ``STATES`` carries a
+        # ``FakeSession`` with `running_children == 0`. Arming it would add a
+        # subagent-presence axis to the cross product -- a different feature's
+        # cells with different stop semantics -- not a state a chord could leave
+        # behind here. It stays in the fingerprint because a reset that FAILED to
+        # clear it (it is cleared on the non-escalating path) is exactly the kind
+        # of cross-cell carry-over this comparison exists to catch.
         "stop_offered": app._stop_offered_at is not None,
         "screens": len(app.screen_stack),
     }
@@ -427,13 +469,22 @@ async def _reset(pilot: Any, editor: Editor) -> None:
       the product's own funnel rather than by assigning ``text``.
     - ``set_shell_mode`` is bang-mode's own leave path; the mode is not a
       property of the buffer, so emptying the buffer does not leave it.
-    - ``_pending_escape`` is a LIVE deferred callback. Carried into the next
-      cell it would let a stop from the previous cell's Escape be counted
-      against this one's, which is precisely the axis the F8 test measures.
+    - ``_cancel_escape`` drops a held escape action without running it, through
+      the composer's own seam for it. Carried into the next cell it would let a
+      stop from the previous cell's Escape be counted against this one's, which
+      is precisely the axis the F8 test measures.
     - ``close()`` on either picker drops its rows AND zeroes the highlight and
       window offset pointing into them. That is the part a bare buffer swap
       leaves behind: ``_apply`` only re-zeroes those on a MODE change, so a list
       reopened into the same mode would inherit the previous cell's highlight.
+    - ``set_query("")`` clears the MODEL picker's filter text, which ``close()``
+      deliberately leaves alone (a reopen inherits it). It is the picker's own
+      seam and the one documented NOT to change open/closed state, so it cannot
+      reopen a list. This one is easy to miss because it is invisible while the
+      list is closed and the cells still pass: it was found by the fingerprint
+      itself once the field below stopped being a bound method (review round 1,
+      M1 -- the model-picker groups failed the reset the moment the query was
+      really read).
     - ``_draft`` is the buffer a history step restores when it leaves
       navigation; a fresh boot has it empty.
 
@@ -442,9 +493,10 @@ async def _reset(pilot: Any, editor: Editor) -> None:
     """
     editor.clear_content()
     editor.set_shell_mode(False)
-    editor._pending_escape = None
+    editor._cancel_escape()
     editor._picker.close()
     editor._model_picker.close()
+    editor._model_picker.set_query("")
     editor._draft = ""
     # One turn so the messages these calls post (the picker close, the shell-mode
     # change) are delivered BEFORE the fingerprint is read.
@@ -490,13 +542,25 @@ class _SharedApp:
         self._baseline = _fingerprint(self._editor, self._app, self._stops)
 
     async def run(
-        self, act: Callable[[Any, OperatorApp], Any], escape_pending: bool = False
+        self,
+        act: Callable[[Any, OperatorApp], Any],
+        escape_pending: bool = False,
+        idle: bool = False,
     ) -> tuple[Any, ...]:
         """Reset to the group's state, apply ``act``, and report what a user would see.
 
         The reset is asserted before the act rather than after: a cell that
         started from a state the boot never produced is not a cell of this
         matrix, whatever it then observes.
+
+        ``idle`` is for the PARITY ARMS only and is OFF on the hot path: it adds
+        the CPU-idle wait ``pilot.press`` already performs internally
+        (``App._press_keys`` → ``wait_for_idle``) between the act and the
+        observation, so an arm whose key is dispatched through the binding system
+        is read only once its action has landed. It costs a 20 ms sleep per arm,
+        which is why the 774 hot arms do not pay it -- they keep the zero-delay
+        queue barriers ``_settle`` documents and the rare load flake those
+        barriers allow.
         """
         await _reset(self._pilot, self._editor)
         await _arrange(self._pilot, self._editor, self._state, self._history)
@@ -515,6 +579,8 @@ class _SharedApp:
         if escape_pending:
             _hold_pending_escape(self._app)
         await act(self._pilot, self._app)
+        if idle:
+            await wait_for_idle(0)
         await _settle(self._pilot, self._editor, self._messages)
         return _observe(self._editor, self._stops)
 
@@ -564,6 +630,7 @@ async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
     cells = _cells_for(state, history)
     assert cells, f"no cells for {state} (history={history})"
     failures: list[str] = []
+    arms = 0
     async with _boot_shared(state, history) as shared:
         for chord, encoding in cells:
             raw = _encode(encoding, chord)
@@ -571,12 +638,17 @@ async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
 
             expected = await shared.run(_press_plain(CHORDS[chord]))
             actual = await shared.run(_feed_bytes(raw))
+            arms += 2
 
             if actual != expected:
                 failures.append(
                     f"{encoding} {chord} in {state} (history={history}) diverged from plain "
                     f"{CHORDS[chord]}:\n  plain={expected}\n  chord={actual}"
                 )
+    # Counted against a LITERAL, not against `len(cells)`: a loop that stopped
+    # early (a `break`, a `continue` added for one awkward case) would otherwise
+    # shrink the matrix while every remaining assertion still passed.
+    assert arms == 2 * CELLS_PER_GROUP, f"ran {arms} arms, not {2 * CELLS_PER_GROUP}"
     assert not failures, f"{len(failures)} of {len(cells)} cells diverged:\n" + "\n".join(failures)
 
 
@@ -613,6 +685,7 @@ async def test_a_self_contained_chord_never_swallows_a_pending_escape(
     ]
     assert cells, f"no escape-pending cells for {state} (history={history})"
     failures: list[str] = []
+    arms = 0
     async with _boot_shared(state, history) as shared:
         for chord, encoding in cells:
             raw = _encode(encoding, chord)
@@ -639,6 +712,7 @@ async def test_a_self_contained_chord_never_swallows_a_pending_escape(
 
             baseline = await shared.run(_feed_bytes(raw))
             actual = await shared.run(_feed_bytes(raw), escape_pending=True)
+            arms += 4
 
             # Whatever the escape did to the control's state, it must also have
             # done here: same shell mode, same picker states, same stop count.
@@ -667,6 +741,11 @@ async def test_a_self_contained_chord_never_swallows_a_pending_escape(
     # What must hold is that the chord behaves like a plain arrow pressed in
     # that same post-escape state, which the no-escape axis already pins for
     # every state the escape can leave behind.
+    # Counted against a LITERAL, for the reason the equivalence axis states: a
+    # loop that stopped early must not be able to shrink this axis in silence.
+    assert (
+        arms == 4 * ESCAPE_PENDING_CELLS_PER_GROUP
+    ), f"ran {arms} arms, not {4 * ESCAPE_PENDING_CELLS_PER_GROUP}"
     assert not failures, f"{len(failures)} of {len(cells)} cells diverged:\n" + "\n".join(failures)
 
 
@@ -680,16 +759,22 @@ async def test_a_pending_escape_still_stops_the_turn_after_a_chord() -> None:
     """
     cells = _spellable_cells(("csi", "meta"))
     assert cells, "no self-contained spelling for any chord"
+    assert (
+        len(cells) == ESCAPE_PENDING_CELLS_PER_GROUP
+    ), f"{len(cells)} self-contained cells, not {ESCAPE_PENDING_CELLS_PER_GROUP}"
     failures: list[str] = []
+    checked = 0
     async with _boot_shared("resting", False) as shared:
         for chord, encoding in cells:
             raw = _encode(encoding, chord)
             assert raw is not None
 
             result = await shared.run(_feed_bytes(raw), escape_pending=True)
+            checked += 1
             stops = result[-1]
             if stops != 1:
                 failures.append(f"{encoding} {chord} swallowed the pending escape (stops={stops})")
+    assert checked == ESCAPE_PENDING_CELLS_PER_GROUP, f"ran {checked} arms, not all of them"
     assert not failures, "\n".join(failures)
 
 
@@ -708,18 +793,22 @@ async def test_a_vertical_chord_never_destroys_a_typed_slash_command() -> None:
     typed = STATES["model_picker"]["text"]
     cells = _spellable_cells(ENCODINGS, chords=("up", "down"))
     assert cells, "no spelling for a vertical chord"
+    assert len(cells) == 4, f"{len(cells)} vertical cells, not 4"
     failures: list[str] = []
+    checked = 0
     async with _boot_shared("model_picker", True) as shared:
         for chord, encoding in cells:
             raw = _encode(encoding, chord)
             assert raw is not None
 
             result = await shared.run(_feed_bytes(raw))
+            checked += 1
             text = result[1]
             if text != typed:
                 failures.append(f"{encoding} ⌥{chord} destroyed the typed command: {text!r}")
             if text in HISTORY:
                 failures.append("the buffer was overwritten from history")
+    assert checked == 4, f"ran {checked} arms, not all of them"
     assert not failures, "\n".join(failures)
 
 
@@ -745,6 +834,28 @@ async def test_the_shared_app_still_behaves_like_a_boot_of_its_own(
     ``test_the_chord_is_indistinguishable_from_its_plain_arrow`` against the
     #370 defect and these cells are what pins the reused path to the same
     verdict.
+
+    WHAT IT DOES NOT PROVE, and why the arms here carry an idle wait the hot
+    path does not. This comparison is only as trustworthy as the barrier it
+    reads through, and the hot path's is deliberately weak: ``_settle`` uses
+    zero-delay queue barriers, so under extreme CPU starvation a key whose caret
+    action is dispatched through the binding system can still be pending when
+    the observation is taken -- measured on this host, that fires roughly once
+    per full-file run at load ~150-176, BOTH before and after the restructure,
+    and always with the chord arm unmoved while its plain arm moved. A genuine
+    reuse leak would print the same "disagree" message as that race, which is
+    what makes the race unacceptable HERE: a guard that cannot be told apart from
+    the thing it guards against is not a guard. So both sides of this comparison
+    wait for CPU idle after the act (``idle=True`` -- the same wait
+    ``pilot.press`` performs internally, ~20 ms an arm), and the 774 hot arms
+    keep the cheap barrier.
+
+    What is proven: for the first and last cell of every group, a reused app and
+    a boot of its own agree observation for observation, once both are read
+    through an idle-waiting barrier. What is not: anything about the MIDDLE of a
+    group (the reset's fingerprint assertion covers those), and nothing about the
+    hot arms' exposure to that starvation race, which this change neither causes
+    nor fixes.
     """
     cells = _cells_for(state, history)
     assert cells, f"no cells for {state} (history={history})"
@@ -753,16 +864,17 @@ async def test_the_shared_app_still_behaves_like_a_boot_of_its_own(
     for chord, encoding in (cells[0], cells[-1]):
         raw = _encode(encoding, chord)
         assert raw is not None
-        fresh.append(await _run(state, history, _press_plain(CHORDS[chord])))
-        fresh.append(await _run(state, history, _feed_bytes(raw)))
+        fresh.append(await _run(state, history, _press_plain(CHORDS[chord]), idle=True))
+        fresh.append(await _run(state, history, _feed_bytes(raw), idle=True))
 
     reused: list[tuple[Any, ...]] = []
     async with _boot_shared(state, history) as shared:
         for chord, encoding in (cells[0], cells[-1]):
             raw = _encode(encoding, chord)
             assert raw is not None
-            reused.append(await shared.run(_press_plain(CHORDS[chord])))
-            reused.append(await shared.run(_feed_bytes(raw)))
+            reused.append(await shared.run(_press_plain(CHORDS[chord]), idle=True))
+            reused.append(await shared.run(_feed_bytes(raw), idle=True))
+    assert len(fresh) == len(reused) == 4, "the parity comparison lost an arm"
     assert reused == fresh, (
         f"the shared app and a boot of its own disagree in {state} (history={history}):\n"
         f"  boot   ={fresh}\n  shared ={reused}"
@@ -774,34 +886,51 @@ def test_the_matrix_still_covers_the_whole_cross_product() -> None:
 
     Amortizing the boots moved these cells out of pytest ids and into loops
     inside a group's test, which means ``--collect-only`` no longer counts them
-    and cannot be the evidence that none was dropped. This is that evidence,
-    derived from the DECLARED axes -- states x history x the pairs each terminal
-    can spell -- rather than from the generator, so a generator that quietly
-    stopped emitting cells would fail here rather than shrink the matrix in
-    silence.
+    and cannot be the evidence that none was dropped. This is that evidence.
+
+    EVERY EXPECTED VALUE HERE IS A LITERAL, deliberately not an expression over
+    the tables the cells are generated from. An expectation built from the same
+    mutable constants it checks cannot fail when one of them loses a member:
+    deleting the ``left`` chord from ``CHORDS``, ``_CSI``, ``_META`` and the
+    esc-prefixed table together leaves "csi spells every chord" true, and would
+    take 30 cells with it in silence. Written out, a vanished member shows up as
+    a count that no longer matches and as an axis set that no longer covers the
+    declaration.
     """
-    # The encoding tables are the one place a chord could go missing silently:
-    # a chord with no CSI spelling is absent from the matrix by nature, and this
-    # is where that is required to be true of the TERMINAL rather than of the
-    # table.
+    # The declared axes, as literals.
+    assert len(STATES) == 5
+    assert len(CHORDS) == 8
+    assert set(ENCODINGS) == {"csi", "meta", "esc_prefixed"}
+
+    # The counts, per axis and in total: csi spells every chord, meta only the
+    # horizontal pair, and esc-prefixed spells everything (a bare ESC followed
+    # by the plain sequence).
+    assert len(_cells()) == 180
+    assert len(_escape_pending_cells()) == 100
+    assert len(_spellable_cells(("csi", "meta"))) == 10
+    assert len(_spellable_cells(ENCODINGS, chords=("up", "down"))) == 4
+
+    # ...and every MEMBER, so a chord, a state, a history value or an encoding
+    # dropped from any single table turns this red even if the totals above were
+    # edited to match.
+    assert {state for state, _, _, _ in _cells()} == set(STATES)
+    assert {history for _, history, _, _ in _cells()} == {True, False}
+    assert {chord for _, _, chord, _ in _cells()} == set(CHORDS)
+    assert {encoding for _, _, _, encoding in _cells()} == set(ENCODINGS)
     assert set(_CSI) == set(CHORDS), "the CSI table must spell every chord"
     assert set(_META) <= set(CHORDS), "the meta table is a subset of the chords"
 
-    # csi spells every chord, meta only the horizontal pair, and esc-prefixed
-    # spells everything (a bare ESC followed by the plain sequence).
-    spellable = len(CHORDS) + len(_META) + len(CHORDS)
-    assert len(_cells()) == len(STATES) * 2 * spellable
-    assert len(_escape_pending_cells()) == len(STATES) * 2 * (len(CHORDS) + len(_META))
-    assert len(_spellable_cells(("csi", "meta"))) == len(CHORDS) + len(_META)
-    assert len(_spellable_cells(ENCODINGS, chords=("up", "down"))) == 4
-
     # ...and every group carries the full set, which is what makes "no cell was
     # dropped" a property of the groups rather than of a total: a partition
-    # that lost one cell from each group would still satisfy a total, a
-    # per-group count would not.
-    assert len(_groups()) == len(STATES) * 2
+    # that lost one cell from each group would still satisfy a total, and the
+    # escape-pending axis must lose exactly the esc-prefixed spelling.
+    assert len(_groups()) == 10
     for group in _groups():
-        assert len(_cells_for(*group)) == spellable, f"group {group} lost a cell"
+        assert len(_cells_for(*group)) == CELLS_PER_GROUP, f"group {group} lost a cell"
+        escape = [cell for cell in _escape_pending_cells() if (cell[0], cell[1]) == group]
+        assert (
+            len(escape) == ESCAPE_PENDING_CELLS_PER_GROUP
+        ), f"group {group} lost an escape-pending cell"
 
 
 @pytest.mark.asyncio
