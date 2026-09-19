@@ -251,17 +251,32 @@ def test_the_watcher_never_signals_anyone() -> None:
     assert sites == [], "this module must not be able to end a process: " + "; ".join(sites)
 
 
-#: Method/function names that end a process, matched on the LAST component so that
-#: ``os.kill``, ``os.killpg``, ``Popen.kill()``, ``Process.terminate()``,
-#: ``Connection.send_signal()`` and ``signal.raise_signal()`` are one shape: a call
-#: whose name says what it does to a process.
-_KILL_CALLS = frozenset({"kill", "killpg", "terminate", "send_signal", "raise_signal"})
-
 #: Call names that SPAWN something, checked for a killer in their argv: a shell
 #: ``kill`` reaches the same place as ``os.kill`` while carrying none of its names,
 #: and this is the spelling a name-based pin cannot see.
 _SPAWN_CALLS = frozenset(
     {"run", "call", "check_call", "check_output", "system", "popen", "Popen", "execv", "execvp"}
+)
+
+#: Calls that reach a name through a STRING, so the name check has to read the
+#: argument: ``getattr(os, "kill")(…)`` and ``getattr(signal, "raise_signal")(…)``
+#: are the same sites as their attribute spellings and carry no attribute to match.
+#: ``__getattr__``/``__getattribute__`` are here for the same reason.
+_INDIRECT_NAMES = frozenset({"getattr", "__getattr__", "__getattribute__"})
+
+#: ``signal.pthread_kill`` and ``signal.raise_signal`` end a process and belong to
+#: the same shape as ``os.kill`` (review round 2, NIT 2): the pin's own docstring
+#: says anything it cannot see is reported as nothing rather than as a pass, which
+#: is exactly why the reach is widened rather than assumed.
+_KILL_CALLS = frozenset(
+    {
+        "kill",
+        "killpg",
+        "pthread_kill",
+        "terminate",
+        "send_signal",
+        "raise_signal",
+    }
 )
 _KILLER_TOKENS = ("kill",)
 
@@ -282,6 +297,33 @@ def _kill_shaped_sites(source: str) -> list[str]:
         if isinstance(func, ast.Attribute):
             return func.attr
         return func.id if isinstance(func, ast.Name) else ""
+
+    def name_from_literal(node: ast.Call) -> str:
+        """The name a call reaches by a STRING rather than by an attribute.
+
+        ``getattr(os, "kill")(pid, 9)`` ends a process exactly as ``os.kill``
+        does, and it carries no attribute for the walk above to read — the same
+        blind spot the spawn check covers for a shelled ``kill``, in the one
+        other spelling a name-based pin cannot see (review round 2, NIT 2). Only
+        ``getattr`` is read this way: an arbitrary call's string arguments are
+        full of words like "terminate", and reporting those would make the pin
+        fire on prose in an argument list — the failure mode the text pin this
+        replaced had.
+        """
+        if len(node.args) < 2:  # a malformed getattr; nothing to read
+            return ""
+        func = node.func
+        reached = (
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else func.id if isinstance(func, ast.Name) else ""
+        )
+        if reached not in _INDIRECT_NAMES:
+            return ""
+        target = node.args[1]
+        if isinstance(target, ast.Constant) and isinstance(target.value, str):
+            return target.value
+        return ""
 
     def literals(node: ast.Call) -> list[str]:
         """Every string constant in the call's own arguments, nested lists included."""
@@ -309,6 +351,11 @@ def _kill_shaped_sites(source: str) -> list[str]:
         if name in _KILL_CALLS:
             sites.append(f"line {node.lineno}: calls {name}()")
             continue
+        if name in _INDIRECT_NAMES:
+            indirect = name_from_literal(node)
+            if indirect in _KILL_CALLS:
+                sites.append(f"line {node.lineno}: calls {indirect}() by name")
+                continue
         if name in _SPAWN_CALLS and any(
             token in word for word in literals(node) for token in _KILLER_TOKENS
         ):
@@ -327,6 +374,11 @@ def _kill_shaped_sites(source: str) -> list[str]:
         "conn.send_signal(9)\n",
         'import subprocess\nsubprocess.run(["kill", "-9", "1"])\n',
         "control._signal_and_confirm(record, SIGTERM, 1.0)\n",
+        # Reaching the same two by NAME rather than by attribute (review round 2,
+        # NIT 2). Neither carries an attribute for the walk to read, and both end
+        # a process exactly as their attribute spellings do.
+        'import os\ngetattr(os, "kill")(1, 9)\n',
+        'import signal\ngetattr(signal, "pthread_kill")(1, 9)\n',
     ],
 )
 def test_the_no_kill_pin_sees_every_spelling(snippet: str) -> None:
@@ -347,3 +399,19 @@ def test_the_no_kill_pin_ignores_prose() -> None:
     allowed to talk about it (this file does), and only a CALL is a site.
     """
     assert _kill_shaped_sites("# never call os.kill / signal.SIGKILL here\nx = 1\n") == []
+
+
+def test_the_no_kill_pin_ignores_a_string_that_is_not_a_name() -> None:
+    """The widened reach must not become the text pin it replaced (NIT 2).
+
+    Reading a string argument is what makes ``getattr(os, "kill")(…)`` visible, and
+    it is also the way this could fire on prose: an ordinary call whose ARGUMENT
+    happens to contain the word. Only the name position of the three indirect
+    calls is read, so a message mentioning a kill is not a site — which is the
+    same distinction the comment case above draws, one layer in.
+    """
+    assert _kill_shaped_sites('print("we never terminate anything")\n') == []
+    assert _kill_shaped_sites('log.warning("os.kill was not called")\n') == []
+    assert _kill_shaped_sites('getattr(obj, "terminate_on_idle")\n') == []
+    # ...and a one-argument ``getattr`` must not be an index error inside the pin.
+    assert _kill_shaped_sites("getattr(obj)\n") == []

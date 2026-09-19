@@ -576,7 +576,7 @@ def _record_detail(record: Any, *, lead: str = "") -> str:
     ]
     if lead:
         parts.insert(0, lead)
-    return f" ({', '.join(parts)})" if parts else "" if parts else ""
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 def _classify_orphaned_run(
