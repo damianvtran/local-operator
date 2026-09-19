@@ -29,10 +29,11 @@ import asyncio
 import json
 import re
 import shlex
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import pytest
 
@@ -58,6 +59,7 @@ from local_operator.redaction_shapes import (
     match_shape_names,
     scrub_secrets,
     scrub_shapes,
+    scrub_shapes_with_hits,
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -142,30 +144,27 @@ async def _never_streams(_request: Any, _signal: Any = None) -> AsyncIterator[An
     raise AssertionError("the redaction tests never reach the provider stream")
 
 
-_SESSION: Session | None = None
+def _session(tmp: Path | None = None) -> Session:
+    """A real Session, built the way ``session_factory`` builds one.
 
-
-def _session() -> Session:
-    """One real Session, built the way ``session_factory`` builds one.
-
-    Cached because Session construction is not free and this file builds a lot
-    of them; the object is only ever asked to redact, so nothing it accumulates
-    across cases matters.
+    FRESH per call rather than cached, and that is not merely tidy: the store
+    CONTAINS — a value the shape pass matched is registered for the rest of the
+    session and masked in every later result — so one cached session let a corpus
+    case mask another case's text, and the incident dedupe keyed on
+    ``(tool, labels)`` was reachable from a neighbouring test. Isolated cases are
+    what makes a per-surface parametrisation meaningful.
     """
-    global _SESSION
-    if _SESSION is None:
-        cwd = Path.cwd() / ".shape-test-cwd"
-        _SESSION = Session(
-            model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
-            stream_fn=_never_streams,
-            tools=[],
-            transcript=Transcript(cwd / "session"),
-            system_blocks_provider=lambda *_a: [],
-            yolo=True,
-            cwd=str(cwd),
-            variables=VariableStore(cwd=str(cwd)),
-        )
-    return _SESSION
+    cwd = tmp or Path(tempfile.mkdtemp(prefix="shape-test-"))
+    return Session(
+        model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
+        stream_fn=_never_streams,
+        tools=[],
+        transcript=Transcript(cwd / "session"),
+        system_blocks_provider=lambda *_a: [],
+        yolo=True,
+        cwd=str(cwd),
+        variables=VariableStore(cwd=str(cwd)),
+    )
 
 
 # --- the corpus, over every surface -----------------------------------------
@@ -340,7 +339,11 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
     from local_operator.redaction_shapes import CREDENTIAL_SHAPES
 
     guarded = [shape for shape in CREDENTIAL_SHAPES if shape.guard is not None]
-    assert {shape.label for shape in guarded} == {"credential-assignment", "credential-url-value"}
+    assert {shape.label for shape in guarded} == {
+        "credential-assignment",
+        "credential-url-value",
+        "cli-credential-flag",
+    }
 
     assignment = scrub_shapes("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
     assert assignment == f"AWS_SECRET_ACCESS_KEY={REDACTION_MARKER}"
@@ -796,3 +799,207 @@ async def test_a_subagents_transcript_never_carries_the_credential(
     # And the command really ran: the masked value is what the child wrote.
     assert any(REDACTION_MARKER in body for body in bodies.values())
     await parent.dispose()
+
+
+# --- the review round that this file's guarantees are now pinned to ----------
+
+
+def test_every_rule_that_fires_trips_the_gate() -> None:
+    """Derive the gate requirement from the table, so a rule cannot lose its anchor.
+
+    ``_SHAPE_ANCHORS`` gates the whole pass: text carrying none of the anchors
+    skips the table entirely. A rule whose spelling has no anchor is therefore a
+    rule that fires in ``_run_shapes`` and is skipped in the shipped path — which
+    is exactly what happened to the `pk-`, `rk-`, `hf-` and `npm-` spellings of
+    ``vendor-prefixed-token``, and the corpus could not see it because it had no
+    ``-`` variant of those four prefixes.
+
+    This test asks the question directly, per rule, using the corpus as the
+    source of spellings: for every case a rule actually rewrites, the gate must
+    be open for that case. A new prefix, a new alternation arm or a new rule
+    without an anchor fails HERE.
+    """
+    from local_operator.redaction_shapes import CREDENTIAL_SHAPES, has_shape_anchor
+
+    missing: dict[str, str] = {}
+    for shape in CREDENTIAL_SHAPES:
+        for case in POSITIVE_CASES:
+            if _run_one_shape(shape, case.text) != case.text and not has_shape_anchor(case.text):
+                missing.setdefault(shape.label, case.text)
+    assert not missing, f"rules that fire on a case the gate skips: {missing}"
+
+
+def _run_one_shape(shape: Any, text: str) -> str:
+    from local_operator.redaction_shapes import _run_shapes
+
+    return _run_shapes((shape,), text, [])
+
+
+def test_every_notice_fits_one_narrow_card_row() -> None:
+    """The advisory has to be READABLE, not merely correct.
+
+    The notice lands in a result the operator reads through the tool card, which
+    renders one row per line and ellipsises at the row width — 92 cells at a
+    100-column frame. Measured before this budget existed: every one of the
+    sixteen rules produced 120-282 cells, so the actionable half (the safer
+    form, which is the point of the line) was behind an ellipsis at every width
+    a terminal is used at. 88 leaves the card's own padding room.
+    """
+    from local_operator.redaction_shapes import DUMP_SHAPES
+
+    probes = {
+        "environment-dump": "env | sort",
+        "named-variable-dump": "printenv MONGO_DSN",
+        "kubectl-exec-env": "kubectl exec x -- env",
+        "kubectl-secret-read": "kubectl get secret n -o yaml",
+        "docker-inspect": "docker inspect api",
+        "docker-exec-env": "docker exec x env",
+        "docker-compose-config": "docker compose config",
+        "aws-credentials-read": "aws secretsmanager get-secret-value",
+        "gcloud-token": "gcloud auth print-access-token",
+        "github-auth-token": "gh auth token",
+        "gitlab-auth-token": "glab auth status -t",
+        "vault-read": "vault kv get secret/x",
+        "heroku-config": "heroku config",
+        "terraform-output": "terraform output",
+        "npm-token-list": "npm token list",
+        "credential-file-read": "cat ~/.netrc",
+    }
+    assert set(probes) == {shape.label for shape in DUMP_SHAPES}, "a rule has no probe"
+    for label, command in probes.items():
+        notice = credential_dump_notice(command)
+        assert notice, f"{label} did not fire on its own probe"
+        assert len(notice) <= 88, f"{label} notice is {len(notice)} cells: {notice}"
+        assert "`" in notice, f"{label} offers no copy-pasteable form"
+
+
+def test_the_advisory_survives_a_long_result_and_is_not_last() -> None:
+    """The notice must not be the first thing the 40-line head crop drops."""
+    from local_operator.tools import builtin
+
+    # Read the MODULE, not ``inspect.getsource(execute_bash)``: the tool is
+    # wrapped by a decorator, so getsource returns the wrapper and the assertion
+    # sees none of the body it is meant to pin.
+    source = Path(builtin.__file__).read_text()
+    assert "parts.insert(1, notice)" in source, "the advisory went back to the tail"
+
+
+def test_the_live_pending_text_matches_the_card() -> None:
+    """The tool says "no output yet"; the card must say the same words.
+
+    The live card asserted the SETTLED ``(empty)`` while bytes were arriving and
+    the pipe was withholding them. The card owns the open-state wording, and the
+    tool layer cannot import the TUI layer, so the two constants are kept in step
+    here rather than by comment.
+    """
+    from local_operator.tools import builtin
+    from local_operator.tui.widgets.tool_card import LIVE_HEADER_PENDING
+
+    assert builtin._LIVE_PENDING_TEXT == LIVE_HEADER_PENDING
+
+
+def test_a_hit_is_reported_only_when_the_whole_value_was_masked() -> None:
+    """Never announce a masking that did not happen.
+
+    The row tells the operator a credential "was masked before you saw it", and
+    the operator acts on that by NOT rotating. A false all-clear is therefore
+    worse than silence. This was live: a DSN password containing ``@`` was masked
+    to the first ``@`` while the row promised the whole thing was gone.
+    """
+    from local_operator.redaction_shapes import ShapeHit, _only_fully_masked
+
+    surviving = ShapeHit(label="credential-assignment", value="hunter2hunter2")
+    assert _only_fully_masked([surviving], "PASSWORD=hunter2hunter2") == []
+    masked = ShapeHit(label="credential-assignment", value="hunter2hunter2")
+    assert _only_fully_masked([masked], "PASSWORD=[redacted]") == [masked]
+
+    # ...and the Q1 shape, end to end: a hit is reported ONLY because the whole
+    # password is gone. No fragment of the value may survive the mask.
+    scrubbed, hits = scrub_shapes_with_hits("MONGO_DSN=mongodb+srv://svc:p@ssw0rd@db.invalid/x")
+    assert [hit.value for hit in hits] == ["p@ssw0rd"]
+    for fragment in ("p@ssw0rd", "ssw0rd"):
+        assert fragment not in scrubbed, scrubbed
+
+
+@pytest.mark.asyncio
+async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
+    tmp_path: Path,
+) -> None:
+    """Both halves of "the operator sees it", which is the row's whole purpose.
+
+    Live: ``journal_shape_incident`` must emit a receipt an attached TUI paints.
+    Replay: the fold must have a branch for the record, or a resumed session
+    shows nothing (a custom message falls through every role-based branch).
+    Measured before this wiring: the row reached the model and painted nowhere.
+    """
+    from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+    from local_operator.harness.types import NoticeEvent
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
+        stream_fn=_never_streams,
+        tools=[],
+        transcript=Transcript(tmp_path / "incident"),
+        system_blocks_provider=lambda *_a: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    events: list[Any] = []
+    session.subscribe(events.append)
+    await session.journal_shape_incident("bash", ["dsn-password"], "kubectl exec api -- env")
+
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert notices, "the incident emitted no live receipt"
+    assert notices[0].kind == "warning"
+    assert "rotate" in notices[0].text
+
+    # Replay: the same record, folded through the real settlement path.
+    rows = _fold_incident_row(SESSION_INCIDENT_MESSAGE_TYPE, notices[0].text)
+    assert rows, "the incident row folded to nothing"
+    assert any("rotate" in row for row in rows)
+
+
+def _fold_incident_row(custom_type: str, text: str) -> list[str]:
+    """Fold one incident row through ``project_settled_rows`` and read the rows.
+
+    The fold reads a lot of bookkeeping off its target; this stand-in answers
+    every attribute it has not been given explicitly and records the BLOCKS,
+    which is the only thing the incident branch is responsible for. Anything
+    that must be a real dict or set is set here, because ``dict(...)`` and ``in``
+    over a ``MagicMock`` would raise or lie.
+    """
+    from unittest.mock import MagicMock
+
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui import session_presentation as presentation
+
+    class _Target:
+        def __init__(self) -> None:
+            self.blocks: list[str] = []
+            self._resume_results: dict[str, Any] = {}
+            self._resume_mounted_ids: set[str] = set()
+            self._live_wake_receipts: set[str] = set()
+            self._live_peer_receipts: set[str] = set()
+            self._replay_bang_pending: dict[str, Any] = {}
+            self._block_sink: list[Any] = []
+
+        def __getattr__(self, name: str) -> Any:
+            value = MagicMock()
+            setattr(self, name, value)
+            return value
+
+        def _append_block(self, block: Any, **_kwargs: Any) -> None:
+            # ``NoticeBlock`` keeps its text on ``_text``; ``.text`` is a method.
+            self.blocks.append(str(getattr(block, "_text", "") or type(block).__name__))
+
+    target = _Target()
+    message = CustomMessage(
+        custom_type=custom_type,
+        attribution="system",
+        details={"text": text},
+    )
+    # The double answers the protocol dynamically (see ``__getattr__`` above), so
+    # the cast is what tells the type checker what the runtime already knows.
+    presentation.project_settled_rows(cast(Any, target), [message], fold_width=80)
+    return target.blocks

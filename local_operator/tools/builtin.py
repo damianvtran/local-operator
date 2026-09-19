@@ -119,7 +119,7 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
-from local_operator.redaction_shapes import credential_dump_notice
+from local_operator.redaction_shapes import REDACTION_MARKER, credential_dump_notice
 from local_operator.redaction_shapes import scrub_secrets as scrub_shape_secrets
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
@@ -1907,6 +1907,17 @@ class BashParams(BaseModel):
     )
 
 
+#: What the live card shows while the pipe is holding an unterminated line.
+#:
+#: ``(empty)`` is the SETTLED answer — "there never will be output" — and the live
+#: card asserted it at every 500 ms emit while bytes were actively arriving and
+#: being withheld. The card's own word for the open case is
+#: :data:`local_operator.tui.widgets.tool_card.LIVE_HEADER_PENDING`, which this
+#: mirrors rather than imports (the tool layer must not depend on the TUI layer);
+#: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
+_LIVE_PENDING_TEXT = "no output yet"
+
+
 class _BashOutput:
     """Bound retention while the pipe is drained, keeping both diagnostic ends.
 
@@ -1924,6 +1935,11 @@ class _BashOutput:
         self.head = bytearray()
         self.tail: deque[bytes] = deque()
         self.tail_bytes = 0
+        #: Bytes the pipe filter is holding back right now — an unterminated
+        #: line, or an open key block. Reported so the live card can say "no
+        #: output yet" instead of the settled "``(empty)``" while a command is
+        #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
+        self.withheld = 0
 
     @property
     def retained_bytes(self) -> int:
@@ -2021,6 +2037,9 @@ class _PipeRedactor:
     """
 
     def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
+        #: An open ``-----BEGIN`` block, and whether its marker is already out.
+        self._in_key_block = False
+        self._key_block_marker_sent = False
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -2048,7 +2067,40 @@ class _PipeRedactor:
         text = self.pending + self.decoder.decode(chunk, final=final)
         cut = self._release_point(text, final=final)
         ready, self.pending = text[:cut], text[cut:]
+        ready = self._mask_open_key_block(ready)
         return scrub_shape_secrets(ready, self.secrets).encode("utf-8")
+
+    def _mask_open_key_block(self, ready: str) -> str:
+        """Mask an open ``-----BEGIN … KEY-----`` block's BODY as it streams.
+
+        The release point defers a whole key block until its terminator or the
+        cap, which is the right unit for the table but leaves the live view
+        publishing key material when the block is larger than the cap — an
+        8192-bit RSA body is ~6.4 KiB against an 8 KiB cap, so the case is not
+        hypothetical, and the finished result is only masked later (one piece,
+        by the result path). While a block is open its body is replaced here
+        instead, once, so a live view shows the header, one marker and the
+        trailer rather than the key.
+        """
+        if self._in_key_block:
+            if "-----END" in ready:
+                self._in_key_block = False
+                body, separator, trailer = ready.partition("-----END")
+                head = "" if self._key_block_marker_sent else REDACTION_MARKER
+                self._key_block_marker_sent = False
+                return head + separator + trailer
+            if self._key_block_marker_sent:
+                return ""
+            self._key_block_marker_sent = True
+            return REDACTION_MARKER
+        begin = ready.rfind("-----BEGIN")
+        if begin < 0:
+            return ready
+        if ready.find("-----END", begin) >= 0:
+            return ready
+        self._in_key_block = True
+        self._key_block_marker_sent = True
+        return ready[:begin] + REDACTION_MARKER
 
     def _release_point(self, text: str, *, final: bool) -> int:
         """Where the decidable prefix ends: after the last newline, capped."""
@@ -2465,7 +2517,11 @@ async def execute_bash(
         # the guard keeps the reader honest instead of asserting.
         if stream is None:
             return
-        redactor = _PipeRedactor(_stream_redaction_values(store, injected))
+        # The sentinel means "this session's own redaction sink could not be
+        # read" and must never be treated as an ordinary list of secrets; the
+        # loop checks it before every feed, and so must the construction site.
+        initial = _stream_redaction_values(store, injected)
+        redactor = _PipeRedactor([] if initial is _REDACTION_SEAM_BROKEN else initial)
         withheld = False
         try:
             while True:
@@ -2503,6 +2559,7 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
+                sink.withheld = len(redactor.pending)
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -2549,6 +2606,10 @@ async def execute_bash(
             ),
             context,
         )
+        if not stdout and not stderr and (stdout_chunks.withheld or stderr_chunks.withheld):
+            # Bytes are arriving and being held; ``(empty)`` would tell the
+            # operator the opposite of what is happening.
+            stdout = _LIVE_PENDING_TEXT
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=_bash_output_summary(stdout, stderr))],
@@ -2865,7 +2926,13 @@ async def execute_bash(
             tool_call_id,
             "bash",
             f"aborted ({(signal.reason or 'aborted') if signal else 'aborted'}): "
-            f"{params.command}\n{_redact_tool_text(partial, context)}",
+            # The COMMAND line is scrubbed as well as the output. A command can
+            # carry a credential (`curl -u svc:pw`, `-ppw`, a DSN in an argument)
+            # and this receipt is a tool result like any other; the loop's
+            # ``redact_tool_result`` covers the product path, and a direct caller
+            # of ``execute_bash`` had this one unredacted.
+            f"{_redact_tool_text(params.command, context)}\n"
+            f"{_redact_tool_text(partial, context)}",
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -2907,9 +2974,16 @@ async def execute_bash(
     # The notice carries no value from the command (see ``credential_dump_notice``)
     # and is appended here, before the footer, so a spilled transcript's
     # expansion hints stay at the end where the model looks for them.
+    # The advisory goes SECOND, immediately under the exit code — not last,
+    # which is where it was. The operator reads a result through the tool card,
+    # which keeps the HEAD of at most 40 lines, so a notice at the end of a long
+    # result was the first thing dropped: measured, a 200-line command whose last
+    # line held the credential settled with "… 169 more lines" and no advisory
+    # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
+    # survive both truncations.
     notice = credential_dump_notice(params.command)
     if notice:
-        parts.append(notice)
+        parts.insert(1, notice)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 

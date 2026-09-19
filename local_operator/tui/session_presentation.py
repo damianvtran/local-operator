@@ -818,7 +818,10 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import (
+        PEER_MESSAGE_MESSAGE_TYPE,
+        SESSION_INCIDENT_MESSAGE_TYPE,
+    )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
     # hosts so neither owns them: every divergence the convergence review
@@ -1034,6 +1037,22 @@ def project_settled_rows(
                 text, kind = compaction_refused_notice(details)
                 self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
+                continue
+            # A credential-shape incident — the operator's rotation ticket for a
+            # credential that reached a tool result. It has its own branch for the
+            # reason every row above does: a custom message with no branch falls
+            # through all of them and past the role-based handling below, so the
+            # row rendered NOWHERE. Measured on the live run before this branch:
+            # the persisted row folded to a blank frame, and the model was the
+            # only reader that ever saw it.
+            #
+            # `warning` ink: the text asks the operator to rotate a credential.
+            if getattr(message, "custom_type", None) == SESSION_INCIDENT_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
                 continue
             # The compaction boundary itself. The replay layer has always
             # emitted this row, and it rendered as NOTHING: it is a custom

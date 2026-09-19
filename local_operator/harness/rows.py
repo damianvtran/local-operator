@@ -90,6 +90,7 @@ _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[model switch] ",  # incidents.format_model_switch_message
     "[session incident",  # incidents.Incident.render
     "[session credential] ",  # incidents.format_credential_message
+    "[credential redaction] ",  # incidents.format_shape_incident_message
     "[mcp recovery] ",  # incidents.format_mcp_recovery_message
     "[session-state]\n",  # Session._system_state_message
     # The unattended-gate timeouts, in _default_convert_to_llm. Two heads rather

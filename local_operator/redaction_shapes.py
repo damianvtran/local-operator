@@ -40,6 +40,23 @@ store registered, is contained for the rest of the session). There is
 deliberately no "looks random" / entropy rule: see the note on
 :data:`CREDENTIAL_SHAPES`.
 
+**Two model-visible surfaces this pass does not reach, named rather than
+implied.** The composed scrubber is the tool/result seam and everything the
+session hands to the loop, which is where the audit that produced this module
+looked and where it found the leak. It is NOT on:
+
+* the **system-prompt blocks** (``prompts_api.build_system_blocks``: repo
+  guidance, the skills block, the base prompt). A credential sitting in a
+  checked-in file that the session injects therefore reaches the model verbatim;
+  the session is not the source of that value and cannot contain it;
+* the **MCP diagnostics scrubber** (``mcp/redaction.py``), which stays values-only
+  by design — the surfaces it protects (``report_failure`` logs, ``explain()``
+  text, the TUI notice) are not model-visible, and every model-visible MCP path
+  crosses the loop's result hook.
+
+Claiming "every model-visible surface" without those two would be overclaiming,
+so this module states the set it covers instead.
+
 **Over-masking is a defect, not headroom.** Every rule below is
 context-anchored — a credential has to be spelled the way its issuer spells one
 — because the text this runs over is also the text the agent must be able to
@@ -138,7 +155,7 @@ class Shape:
 #: The value characters an assignment may carry: a token, a URL, a base64 blob.
 #: Stops at whitespace, quotes, commas and closing braces so the mask cannot run
 #: away into the rest of a document when a value is unterminated.
-_ASSIGNED_VALUE = r"[^\s\"',;}{]{4,}"
+_ASSIGNED_VALUE = r"[^\s]{4,200}"
 
 #: The value of a named assignment, floored at 8 characters and required NOT to
 #: END on a separator character.
@@ -149,7 +166,32 @@ _ASSIGNED_VALUE = r"[^\s\"',;}{]{4,}"
 #: mask lands on a header name rather than on a credential; requiring the value
 #: to end on a value character (plus the assertion at the call site) makes that
 #: match impossible instead of merely unlikely.
-_ASSIGNED_VALUE_GROUP = r"([^\s\"',;}{]{7,}[^\s\"',;}{:])"
+#: A value is any run of non-whitespace, bounded, TERMINATED by a delimiter.
+#:
+#: The old class EXCLUDED ``,;{}"'``, which meant a credential containing one of
+#: them was published in part (``PASSWORD=hunter2hunter2,hunter2`` →
+#: ``PASSWORD=[redacted],hunter2``) or in full (``{"password": "abcdef,ghij"}``,
+#: ``DB_PASSWORD=abc,defghij`` — nothing masked at all, because the group could
+#: not reach its own floor). Excluding characters from a credential's charset is
+#: the wrong direction to bound a match in: the bound belongs in a LENGTH and a
+#: terminating delimiter, so the value keeps every character a real credential
+#: can contain and still cannot run away into the rest of a document.
+_ASSIGNED_VALUE_GROUP = (
+    # Greedy run of non-whitespace, whose LAST character must be a value
+    # character (not a separator, a closer, a quote or a full stop) and which
+    # must be followed by a delimiter or the end. Greedy is what makes
+    # ``PASSWORD=hunter2,hunter2`` mask the COMMA TOO rather than stopping at it;
+    # the last-character rule is what makes ``{"password": "abc,defghij"}`` stop
+    # before the closing quote instead of swallowing it.
+    #
+    # There is deliberately NO UPPER BOUND on the value. A bound with a
+    # "followed by a delimiter" requirement is a leak for a credential longer
+    # than the bound in a whitespace-free run: the engine finds no delimiter
+    # inside the window, gives up, and publishes the whole thing untouched.
+    # ``[^\s]`` already cannot cross a line, so there is nothing to run away
+    # into.
+    r"([^\s]{7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
+)
 
 #: A guard for the two rules that consume a WHOLE value: skip when that value
 #: already carries the marker.
@@ -275,7 +317,20 @@ _DSN_SCHEMES = (
 #: Triple-grouped so the password can be masked with the user and host kept:
 #: ``(scheme://user:)(password)(@)``. ``[^\s:/@"']*`` allows an EMPTY user,
 #: which is how ``redis://:password@host`` is spelled.
-_DSN_PATTERN = re.compile(rf"(?i)\b((?:{_DSN_SCHEMES})://[^\s:/@\"']*:)([^\s/@\"']+)(@)")
+#: ``scheme://user:password@host``.
+#:
+#: The password class admits ``@`` and ``/`` and is GREEDY, so it takes the run
+#: that ends at the LAST ``@`` of the authority rather than the first: a password
+#: containing either character (``p@ssw0rd``, ``p/ssw0rd`` — both ordinary in
+#: base64 and generated secrets) was masked up to the first one and the REST WAS
+#: PUBLISHED, with an incident row then telling the model the credential had been
+#: masked. Measured before the fix: ``mongodb+srv://svc:p@ssw0rd@db/x`` came out
+#: ``svc:[redacted]@ssw0rd@db/x`` and ``postgres://svc:p/ssw0rd@db/app`` — whose
+#: name is not credential-shaped, so the assignment rule cannot rescue it — was
+#: not masked at all, with ZERO incidents. The class still refuses whitespace,
+#: quotes and ``:`` so an unterminated line cannot run away, and the authority
+#: part (``user``) still cannot contain ``:``/``@``.
+_DSN_PATTERN = re.compile(rf"(?i)\b((?:{_DSN_SCHEMES})://[^\s:/@\"']*:)([^\s\"']+)(@)")
 
 
 #: The words a NAME may end in, and the qualifiers that may precede one inside a
@@ -405,10 +460,72 @@ def is_count_shaped(name: str) -> bool:
     return len(segments) > 1 and segments[0] in _COUNT_WORDS
 
 
+#: Issuer prefixes whose separator is one of ``-``/``_`` (so the gate needs both
+#: spellings) and the ones that carry a fixed literal separator already.
+_VENDOR_SEPARATED_PREFIXES: tuple[str, ...] = (
+    "sk",
+    "pk",
+    "rk",
+    "hf",
+    "gsk",
+    "xai",
+    "tvly",
+    "fal",
+    "serp",
+    "glpat",
+    "ya29",
+    "npm",
+    "pypi",
+)
+_VENDOR_FIXED_PREFIXES: tuple[str, ...] = (
+    "whsec",
+    "dckr_pat",
+    "shpat",
+    "shpss",
+    "lin_api",
+    "syt_",
+    "doo_v1",
+    "pat_",
+)
+
+#: The token-tail grammar, shared by every vendor prefix: at least 8 token
+#: characters that must include a digit. The digit is the cheapest honest
+#: discriminator between a real issuer token and an ordinary hyphenated name
+#: (``pypi-local-operator.json``); a length floor alone was not enough.
+_VENDOR_TAIL = r"(?:[A-Za-z0-9_.\-]{20,}|(?=[A-Za-z0-9_.\-]*[0-9])[A-Za-z0-9_.\-]{8,})"
+
+_VENDOR_PATTERN = re.compile(
+    r"\b(?:"
+    + "|".join(_VENDOR_SEPARATED_PREFIXES)
+    + r")[-_]"
+    + _VENDOR_TAIL
+    + r"|\b(?:"
+    + "|".join(_VENDOR_FIXED_PREFIXES)
+    + r")"
+    + _VENDOR_TAIL
+)
+
+#: Anchors DERIVED from that table — both separator spellings for every
+#: separated prefix, the literal for the rest. Derivation is the point: an anchor
+#: list maintained by hand beside a pattern is exactly how `pk-` went missing.
+_VENDOR_ANCHORS: tuple[str, ...] = (
+    tuple(
+        f"{prefix}{separator}" for prefix in _VENDOR_SEPARATED_PREFIXES for separator in ("_", "-")
+    )
+    + _VENDOR_FIXED_PREFIXES
+)
+
+
 #: ``scheme://user:password@``, for the URL-named rule's value check.
-_URL_USERINFO_PASSWORD = re.compile(r"://[^\s/@\"']*:(?!\[redacted\])[^\s/@\"']+@")
+_URL_USERINFO_PASSWORD = re.compile(r"://[^\s:/@\"']*:(?!\[redacted\])[^\s\"']+@")
 
 #: A credential-shaped query parameter, for the same check.
+#: A userinfo with NO password but a key-shaped user part — Sentry's DSN
+#: spelling (``https://<key>@o1.ingest.sentry.io/2``), where the public key IS
+#: the credential. Hex/base64-ish and long, so an ordinary ``user@host`` URL is
+#: not caught by it.
+_URL_KEY_USERINFO = re.compile(r"://[A-Za-z0-9_.\-]{16,}@")
+
 _URL_CRED_QUERY = re.compile(
     r"(?i)(?:^|[?&])(?:api[-_]?key|apikey|key|token|access[-_]?token|secret|password|"
     r"passwd|pwd|sig|signature)=(?!\[redacted\])"
@@ -416,6 +533,121 @@ _URL_CRED_QUERY = re.compile(
 
 #: Names whose VALUE decides whether the rule fires at all.
 _URL_NAME_HINTS = ("uri", "url", "dsn", "endpoint", "conn")
+
+
+def _HEADER_SCHEME_REPLACEMENT(match: Match[str]) -> str:
+    """Keep the header/flag context and the scheme keyword; mask the value."""
+    return match.group(0)[: match.start(3) - match.start(0)] + REDACTION_MARKER
+
+
+#: Values that are CODE rather than credentials, whatever the name says.
+#:
+#: Reading and editing source is a first-class tool surface, so the cost of a
+#: false positive is not cosmetic: a masked token inside a line the agent may
+#: write back into a file is a correctness bug. Measured on this repository's own
+#: ``local_operator/**`` before these rules: 1044 lines rewritten in 209 files,
+#: 948 of them by this one rule (``key = key.strip()`` → ``key = [redacted]``,
+#: ``COMPONENT_KEYS: tuple[str, ...] = (`` → ``COMPONENT_KEYS: [redacted]``).
+_EXPRESSION_CHARS = "()[]{}"
+
+
+#: Something a credential has and an ordinary word does not: a digit, or one of
+#: the characters every token/blob/DSN is full of. ``-``/``_``/``:``/``.`` are
+#: deliberately NOT in here — they are identifier and prose punctuation, and
+#: admitting them put ``ctrl+pageup``, ``models-dev.listing`` and
+#: ``PRESERVED_USER_TURN_KEY`` back on the masking side.
+_CREDENTIALISH = re.compile(r"[0-9=@/,;]")
+
+#: A bare URL, which is not a credential unless it carries one (see
+#: :func:`_url_value_guard` for the same judgement on ``*_URL`` names).
+_URL_LIKE = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
+
+#: A dotted attribute path (``current.session_key``, ``models-dev.listing``).
+_DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+")
+
+
+def _looks_like_an_expression(value: str) -> bool:
+    """Whether a matched value is a call, a subscript, a literal or a reference.
+
+    These are the shapes ordinary code puts on the right of ``=``: a call
+    (``_tokens(query)``), a subscript (``started["token"]``), a tuple/collection
+    literal (``("a", "b")``), a private reference (``_node_order``), a dotted
+    attribute path. None of them is a credential, and masking one mangles the
+    line the agent is reading.
+    """
+    if any(char in value for char in _EXPRESSION_CHARS):
+        return True
+    if value.startswith("_"):
+        return True
+    if value[0] in ".,;:'\"`" or value[-1] in ".,;:'\"`":
+        return True
+    # A bare filesystem path is not a credential. This is what keeps
+    # ``PWD=/Users/example/project`` — and every ``env`` dump's cwd — readable:
+    # ``pwd`` is a legitimate credential tail word (``pwd=…`` is how several
+    # client CLIs spell one, and ``?pwd=`` how a URL does), so the exclusion
+    # belongs on the VALUE rather than on the name.
+    if value.startswith("/"):
+        return True
+    # A bare URL is not a credential. ``AUTH_CLAIM_KEY = "https://api.openai.com/
+    # auth"`` is a claim NAME; the value proves itself the same way a ``*_URL``
+    # name's does — userinfo password or credential-shaped query parameter.
+    if _URL_LIKE.match(value):
+        # ``True`` here means "this is not a credential, do not mask it". A URL
+        # that carries one is caught by the DSN rule (and by ``*_URL`` names);
+        # a URL that carries none (``AUTH_CLAIM_KEY = "https://…/auth"``) is a
+        # claim name, not a secret.
+        return not (
+            _URL_USERINFO_PASSWORD.search(value)
+            or _URL_CRED_QUERY.search(value)
+            or _URL_KEY_USERINFO.search(value)
+        )
+    # A WORD is not a credential: ``never one shared token: revocation`` in a
+    # docstring, ``part of the key: ``max_recommendations`` in a comment,
+    # ``ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"`` in a widget table. Real
+    # credentials of any kind carry a digit or one of the blob's own characters,
+    # or are long enough that a word is not a plausible reading.
+    if not _CREDENTIALISH.search(value) and len(value) < 20:
+        return True
+    # ``key: raise/replace`` in a comment is two words, not a credential. A value
+    # whose ONLY signal is a path separator, with no digit anywhere, has to be
+    # long enough that a word-pair is not the more plausible reading.
+    if value.count("/") and not any(char.isdigit() for char in value) and len(value) < 16:
+        return True
+    # A dotted attribute path is a REFERENCE to a credential, not one — and the
+    # separator that let it past the check above is the dot itself.
+    if _DOTTED_PATH.fullmatch(value) and not any(char.isdigit() for char in value):
+        return True
+    # A bare IDENTIFIER with no digit is a NAME, not a token: ``env_keys=
+    # "OPENAI_API_KEY"``, ``key="model_name"``, ``tokens=tokens_before``,
+    # ``PRESERVED_USER_TURN_KEY = "compaction_preserved"``. The underscore that
+    # let these past the separator check is an identifier character, not a token
+    # one; every real credential of this shape carries a digit, and the ones the
+    # corpus names (``hunter2hunter2``, ``abc123def456ghij``) do.
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) and not any(char.isdigit() for char in value):
+        return True
+    return False
+
+
+def _is_keyword_argument(match: Match[str]) -> bool:
+    """Whether ``NAME=`` here is a call's keyword argument rather than an env var.
+
+    ``sorted(roots, key=_node_order)`` is not an assignment to a credential
+    named ``key``; it is one argument of a call. The signal is the nearest
+    non-space character before the name: ``(`` or ``,`` opens an argument list
+    that this name is inside.
+    """
+    # ``match.string`` is the text the pattern was searched in — the whole tool
+    # result or line — which is what the look-back has to walk.
+    text = match.string
+    index = match.start(1) - 1
+    while index >= 0 and text[index] in " \t":
+        index -= 1
+    return index >= 0 and text[index] in "(,"
+
+
+def _flag_value_guard(match: Match[str]) -> bool:
+    """A ``--flag VALUE`` pair, unless the value is syntax rather than a secret."""
+    return not any(char in match.group(2) for char in _EXPRESSION_CHARS)
 
 
 def _assignment_guard(match: Match[str]) -> bool:
@@ -432,7 +664,14 @@ def _assignment_guard(match: Match[str]) -> bool:
     if REDACTION_MARKER in match.group(4):
         return False
     name = match.group(1)
-    return is_credential_name(name) and not is_count_shaped(name)
+    if not is_credential_name(name) or is_count_shaped(name):
+        return False
+    # The value has to look like a credential. Everything below this line is a
+    # false positive that rewrites ordinary code (see
+    # ``_looks_like_an_expression`` for the census that forced it).
+    if _looks_like_an_expression(match.group(4)):
+        return False
+    return not _is_keyword_argument(match)
 
 
 def _url_value_guard(match: Match[str]) -> bool:
@@ -445,7 +684,11 @@ def _url_value_guard(match: Match[str]) -> bool:
     if not any(hint in name for hint in _URL_NAME_HINTS):
         return False
     value = match.group(4)
-    return bool(_URL_USERINFO_PASSWORD.search(value) or _URL_CRED_QUERY.search(value))
+    return bool(
+        _URL_USERINFO_PASSWORD.search(value)
+        or _URL_CRED_QUERY.search(value)
+        or _URL_KEY_USERINFO.search(value)
+    )
 
 
 #: The credential SHAPES, as ``(label, pattern, replacement, secret_group)``.
@@ -554,14 +797,6 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # whole shape on the most common surface there is.
             r"([\"']?\s*[:=]\s*)([\"']?)"
             rf"{_ASSIGNED_VALUE_GROUP}"
-            # ...and the value must not be a NAME followed by its own
-            # separator. Without this the rule fires on prose:
-            # ``invalid key: Authorization: Bearer …`` matched ``key:`` as the
-            # name and ``Authorization:`` as the value, masking a header name
-            # and a scheme keyword instead of a credential. Measured against
-            # tests/unit/clients/test_error_body_redaction.py, which pins that
-            # exact body.
-            r"(?![A-Za-z0-9_.\-:/])"
         ),
         # Keep the name, the separator and the opening quote; mask only the
         # value. Rendered by the guarded path, which knows the value group.
@@ -586,15 +821,31 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # ``Authorization: Bearer`` (no value) from being rewritten.
     Shape(
         "authorization-bearer",
-        re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._~+/=-]{4,})"),
-        r"\1 " + REDACTION_MARKER,
-        2,
+        # The HEADER, not the word: a bare ``Bearer`` matched ordinary English
+        # ("# Bearer serves both API keys and OAuth tokens on this wire"), and
+        # because a match registers its value for the session that false hit then
+        # masked the word in every later result and queued a rotation incident
+        # for a credential that does not exist. The scheme keyword must be the
+        # start of an ``Authorization``/``Proxy-Authorization`` header value, or
+        # be preceded by a ``-H``/`` --header`` style argument.
+        re.compile(
+            r"(?i)((?:authorization|proxy-authorization)\s*:\s*|(?:-H|--header)\s+\S{0,2})"
+            r"(?i:(bearer)\s+)([A-Za-z0-9._~+/=-]{8,})"
+        ),
+        _HEADER_SCHEME_REPLACEMENT,
+        3,
     ),
     Shape(
         "authorization-basic",
-        re.compile(r"(?i)\b(basic)\s+([A-Za-z0-9+/=]{8,})"),
-        r"\1 " + REDACTION_MARKER,
-        2,
+        # Same treatment, and the value floor is a base64 blob's, not a word's:
+        # ``Basic authentication is required`` was masked and the word
+        # ``authentication`` registered as a session credential.
+        re.compile(
+            r"(?i)((?:authorization|proxy-authorization)\s*:\s*|(?:-H|--header)\s+\S{0,2})"
+            r"(?i:(basic)\s+)([A-Za-z0-9+/=]{16,})"
+        ),
+        _HEADER_SCHEME_REPLACEMENT,
+        3,
     ),
     # A session cookie is a credential and the value is opaque by design, so the
     # whole header value goes. ``Set-Cookie`` is the response half, ``Cookie``
@@ -613,12 +864,18 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # (a duration) is not one of these.
     Shape(
         "cli-credential-flag",
+        # ``--secret NAME[=VAR]`` in a usage string is a PLACEHOLDER: a value
+        # carrying brackets or parentheses is syntax, not a secret, and masking
+        # it rewrites the help text the agent is reading. The pattern stays
+        # simple and the guard does the judging, which keeps the gate's anchors
+        # easy to keep honest.
         re.compile(
             r"(?i)(--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
             r"client[-_]?secret|auth[-_]?token|access[-_]?token)(?:=|\s+))([^\s\"']{3,})"
         ),
-        r"\1" + REDACTION_MARKER,
+        None,
         2,
+        guard=_flag_value_guard,
     ),
     # ``mysql -u root -phunter2``, ``psql -p…``. Anchored on the client binary
     # because ``-p`` is a PORT on almost everything else (``docker run -p
@@ -664,7 +921,10 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # context; a bare ``pass:`` would be prose.
     Shape(
         "openssl-pass-phrase",
-        re.compile(r"(?i)(-pass(?:in|out|phrase|wd|wdin|wdout)?\s+)(?:pass:)?(\S{4,})"),
+        # The FLAG, with its argument: ``-passw``/``-passphrase``/``-passin`` and
+        # friends are how openssl takes a passphrase, and a bare ``-pass``
+        # followed by any word matched prose ("the post-pass occupancy").
+        re.compile(r"(?i)(-pass(?:in|out|phrase|wd|wdin|wdout)\s+)(?:pass:)?(\S{4,})"),
         r"\1" + REDACTION_MARKER,
         2,
     ),
@@ -711,10 +971,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     ),
     Shape(
         "vendor-prefixed-token",
-        re.compile(
-            r"\b(?:sk|pk|rk|hf|gsk|xai|tvly|fal|serp|glpat|ya29|npm|pypi|whsec|"
-            r"dckr_pat|shpat|shpss|lin_api|syt_|doo_v1|pat_)[-_][A-Za-z0-9_.\-]{6,}"
-        ),
+        # Prefixes and their anchors come from ONE table (`_VENDOR_TOKENS`), which
+        # is a correctness requirement rather than tidiness: the anchors gate this
+        # pass, so a prefix spelled with a separator the anchor list does not
+        # carry is a token this rule can match and the gate will skip. That was a
+        # real defect — `pk-`, `rk-`, `hf-` and `npm-` were published verbatim
+        # while the rule itself masked them, and the corpus had no `-` variant to
+        # notice. The suffix must also look like a token: at least 8 characters
+        # AND at least one digit, which is what keeps `pypi-local-operator.json`
+        # (a filename, 159 such lines in this repo) readable.
+        _VENDOR_PATTERN,
         REDACTION_MARKER,
     ),
     Shape(
@@ -752,6 +1018,21 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
 _MIN_REGISTERABLE_SECRET = 8
 
 
+def _is_registerable(value: str) -> bool:
+    """Whether a matched value may become a session-wide redaction.
+
+    Registration is a PROMOTION: the value is masked in every later result for
+    the rest of the session, so a false positive here outlives the line that
+    caused it (``Basic authentication`` was registered as a credential once, and
+    the word was then masked in every subsequent result). The floor is well
+    floor is the masking floor and the discriminator is the SHAPE: a value that
+    is a plain word is never registered, whatever its length.
+    """
+    if len(value) < _MIN_REGISTERABLE_SECRET:
+        return False
+    return not re.fullmatch(r"[A-Za-z]+", value)
+
+
 @dataclass(frozen=True)
 class ShapeHit:
     """One shape that fired: its label, and the credential it matched.
@@ -785,15 +1066,35 @@ def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
         return text, hits
     # Then line by line, gated per line: the rules that remain are line-anchored
     # by construction, and ordinary lines never reach them.
-    pieces: list[str] = []
+    scrubbed_lines: list[str] = []
     for line in text.splitlines(keepends=True):
         if not has_shape_anchor(line):
-            pieces.append(line)
+            scrubbed_lines.append(line)
             continue
         line_hits: list[ShapeHit] = []
-        pieces.append(_run_shapes(_LINE_SHAPES, line, line_hits))
+        scrubbed_lines.append(_run_shapes(_LINE_SHAPES, line, line_hits))
         hits.extend(line_hits)
-    return "".join(pieces), hits
+    text = "".join(scrubbed_lines)
+    return text, _only_fully_masked(hits, text)
+
+
+def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
+    """Drop any hit whose credential is still readable in ``text``.
+
+    **A notice may never announce a masking that did not happen.** The row the
+    operator is asked to act on says the value "was masked before you saw it",
+    and a claim like that is worse than silence when it is false: it is the
+    difference between rotating a credential and believing you already have.
+    This was a real defect — a DSN password containing ``@`` was masked only to
+    the first ``@`` while the incident row still promised the whole thing was
+    gone, and the tail was in the transcript.
+
+    The check is a substring test per hit, not a proof: it catches a value that
+    survives WHOLE (the group was narrower than the credential) and not one that
+    survives in fragments. Fixing the patterns is the real work; this is the
+    backstop that stops the false claim if one slips through again.
+    """
+    return [hit for hit in hits if hit.value and hit.value not in text]
 
 
 def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> str:
@@ -809,7 +1110,7 @@ def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> s
         if matches:
             for match in matches:
                 value = _hit_value(shape, match)
-                if len(value) >= _MIN_REGISTERABLE_SECRET:
+                if _is_registerable(value):
                     hits.append(ShapeHit(shape.label, value))
         text = shape.pattern.sub(shape.replacement, text)
     return text
@@ -856,41 +1157,25 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
     "clickhouse-client",
     "redis-cli",
     "influx",
-    "sk_",
-    "sk-",
-    "pk_",
-    "rk_",
-    "hf_",
-    "gsk_",
-    "xai-",
-    "tvly-",
-    "fal-",
-    "serp-",
-    "glpat",
-    "ya29",
-    "npm_",
-    "pypi",
-    "whsec",
-    "dckr_pat",
-    "shpat",
-    "shpss",
-    "lin_api",
-    "syt_",
-    "doo_v1",
-    "pat_",
-    "ghp_",
-    "gho_",
-    "ghs_",
-    "ghu_",
-    "github_pat_",
-    "akia",
-    "asia",
-    "aiza",
-    "xox",
-    "sg.",
-    "eyj",
     "hooks.slack.com",
-)
+    # Bare issuer tokens, whose rules have no name to anchor on. Each group
+    # names the rule it gates; a prefix added to one of those patterns without a
+    # line here is the defect `_VENDOR_ANCHORS` was derived to make impossible
+    # for the vendor rule (B-1), and the corpus test
+    # `test_every_rule_that_fires_trips_the_gate` catches the rest.
+    "ghp_",  # github-token
+    "gho_",  # github-token
+    "ghs_",  # github-token
+    "ghu_",  # github-token
+    "github_pat_",  # github fine-grained token
+    "akia",  # aws-access-key-id
+    "asia",  # aws temporary access key id
+    "aiza",  # google-api-key
+    "ya29",  # google-oauth-token
+    "eyj",  # jwt
+    "xox",  # slack-token
+    "sg.",  # sendgrid-key
+) + _VENDOR_ANCHORS
 
 
 #: Answers "could anything in the table match?" — cheaply, and that is the whole
@@ -946,7 +1231,7 @@ def _apply_guarded(shape: Shape, text: str, hits: list[ShapeHit]) -> str:
             search_from = match.start() + 1
             continue
         value = _hit_value(shape, match)
-        if len(value) >= _MIN_REGISTERABLE_SECRET:
+        if _is_registerable(value):
             hits.append(ShapeHit(shape.label, value))
         # Keep everything before the credential, mask the credential: an
         # assignment keeps its name and separator, a URL-valued name keeps the
@@ -1182,8 +1467,8 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
     DumpShape(
         "github-auth-token",
         re.compile(r"(?i)\bgh\s+auth\s+token\b"),
-        'use it inside the command that needs it: `gh api -H "'
-        '"Authorization: token $(gh auth token)"`',
+        "use it inside the command that needs it: "
+        '`gh api -H "Authorization: token $(gh auth token)"`',
     ),
     DumpShape(
         "gitlab-auth-token",
@@ -1206,6 +1491,11 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         re.compile(r"(?i)\bterraform\s+(?:output|state\s+show)\b"),
         "read one output by name: `terraform output name`, and mark secrets "
         "`sensitive = true` so they are not printed at all",
+        # `terraform output NAME` IS the safer form; the rule is for the bare
+        # `terraform output` (every output, secrets included) and for
+        # `state show`. Flagging the command the notice recommends is how a
+        # guard teaches the model to ignore it.
+        excluded=re.compile(r"(?i)\bterraform\s+output\s+(?:-json\s+)?[A-Za-z_]\w*"),
     ),
     DumpShape(
         "npm-token-list",
@@ -1223,6 +1513,10 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         ),
         "read the one field you need (e.g. `grep -c .`, `jq '.client_email'`), or "
         "use the value inside the command that needs it, e.g. `$(lop secret get NAME)`",
+        # An EXAMPLE file is explicitly not a secret: `cat .env.example` is how
+        # a newcomer reads the shape of the config, and nagging about it is
+        # noise the operator learns to skip.
+        excluded=re.compile(r"(?i)\.env\.(?:example|sample|template|dist|example\.[a-z]+)\b"),
     ),
 )
 
@@ -1232,6 +1526,36 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
 _NAME_ONLY_PIPELINE = re.compile(
     r"(?i)^\s*\|?\s*(?:(?:cut\s+-d\s*=)|(?:awk\s+-F\s*=)|(?:sed\s+-E?\s*\"?'?s/=))"
 )
+
+
+#: The BRIEF form of each rule's advice, which is what the notice emits.
+#:
+#: Why a second, shorter string rather than the table's ``safer`` text: the
+#: notice lands at the END of a result the operator reads through the tool card,
+#: which renders one row per line, ellipsised at the row width (92 cells at a
+#: 100-column frame) and cropped to the first 40 lines — so the full advice
+#: (120-282 cells, measured across all sixteen rules) was unreadable at every
+#: width and absent entirely on a long result. A notice the operator cannot read
+#: is not a notice. ``test_every_notice_fits_one_narrow_card_row`` pins the
+#: budget; ``safer`` keeps the long form for the module documentation.
+_BRIEF_ADVICE: dict[str, str] = {
+    "environment-dump": "print names, not values: `env | cut -d= -f1`",
+    "named-variable-dump": "use it in place: `$(lop secret get NAME)`",
+    "kubectl-exec-env": "print names in the pod: `env | cut -d= -f1`",
+    "kubectl-secret-read": "select one key: `-o jsonpath='{.data.KEY}'`",
+    "docker-inspect": "select a field: `--format '{{.State.Status}}'`",
+    "docker-exec-env": "print names only: `env | cut -d= -f1`",
+    "docker-compose-config": "read one part: `compose config --services`",
+    "aws-credentials-read": "prefer `aws sso login` and a scoped role",
+    "gcloud-token": "use it in place: `$(gcloud auth print-access-token)`",
+    "github-auth-token": "use it in place: `$(gh auth token)`",
+    "gitlab-auth-token": "drop `-t`: `glab auth status`",
+    "vault-read": "select one field: `-field=KEY`",
+    "heroku-config": "read one key: `heroku config:get KEY -a APP`",
+    "terraform-output": "read one output: `terraform output <name>`",
+    "npm-token-list": "revoke unused tokens: `npm token revoke <id>`",
+    "credential-file-read": "read one field: `grep -c .`, `jq .field`",
+}
 
 
 def credential_dump_notice(command: str) -> Optional[str]:
@@ -1253,10 +1577,8 @@ def credential_dump_notice(command: str) -> Optional[str]:
             continue
         if _is_name_only_pipeline(command, match):
             continue
-        return (
-            f"[credential guard] this command prints credentials "
-            f"({shape.label}). Safer: {shape.safer}."
-        )
+        brief = _BRIEF_ADVICE.get(shape.label, shape.safer)
+        return f"[credential guard] {shape.label}: {brief}"
     return None
 
 
