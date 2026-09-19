@@ -1027,10 +1027,21 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # catch the header when the body was truncated before an END line arrived.
     Shape(
         "gcp-service-account-key",
+        # The masked group is the WHOLE BLOCK, not the BEGIN marker: masking the
+        # marker alone published the entire key body while the hit still filed as
+        # complete, so a "credential was masked, rotate it" row was queued over a
+        # live private key (the reviewer recovered it with `openssl pkey`). The body
+        # is base64 lines, each preceded by an escaped or a real newline, optionally
+        # closed by the END marker — bounded, because a `\s`-run without a bound
+        # would walk to the end of the document.
         re.compile(
             r"(?i)(\"?private[_-]?key\"?\s*:\s*\"?)"
             r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
-            r"-{1,4}[\x27\x22]?-{1,4})"
+            r"-{1,4}[\x27\x22]?-{1,4}"
+            r"(?:(?:\\r\\n|\\n|\n)"
+            r"(?:[A-Za-z0-9+/=]{2,}"
+            r"|-{1,4}[\x27\x22]?-{1,4}END [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}))*"
+            r"(?:\\r\\n|\\n|\n)?)"
         ),
         r"\1" + REDACTION_MARKER,
         2,
@@ -1526,6 +1537,21 @@ def _credential_fragments_survive(hit: ShapeHit, text: str) -> bool:
     return False
 
 
+def _is_truncated_pem(hit: ShapeHit) -> bool:
+    """Whether a PEM-shaped match has no END marker for its BEGIN.
+
+    The completeness check scores a hit against its credential region, and for a
+    ``private_key`` the region is the whole block. A block that was cut short — the
+    spelling a service-account file takes when a tool truncates it, and the shape
+    the reviewer recovered a live key from — has no END, so the region's extent is
+    unknown and no masking claim may be made about it.
+    """
+    value = hit.value
+    if "BEGIN" not in value.upper():
+        return False
+    return "END" not in value.upper()
+
+
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     """Drop any hit whose credential is still readable in ``text``.
 
@@ -1544,6 +1570,13 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     """
     marked: list[ShapeHit] = []
     for hit in hits:
+        if _is_truncated_pem(hit):
+            # A BEGIN with no END is a key whose LENGTH we cannot see: everything
+            # visible is masked, and the claim is still withheld, because nothing
+            # proves the rest of the key is not further down a transcript we have
+            # not read. Withholding the claim is the honest half of the fix.
+            marked.append(replace(hit, complete=False))
+            continue
         if _credential_fragments_survive(hit, text):
             # Keep it for CONTAINMENT, flag it out of the NOTICE: the value is
             # registered for the rest of the session either way, and the honest
@@ -1580,7 +1613,11 @@ _INCOMPLETE_MASK_RE = re.compile(
 _INCOMPLETE_MASK_LEFT_RE = re.compile(
     # `^` as well as a delimiter: a credential at the start of a line has nothing
     # before it, and that is where a prefix-orphaning split lands most often.
-    r"(?:(?<=[\s,;:(\[=])|^)([\w.~+/=@%$!:,-]+)(['\"])\[redacted\]"
+    # The run must not be an assignment NAME: `AWS_ACCESS_KEY_ID='AKIA…'` is a name
+    # the operator (and this session's own notice) needs to see, and swallowing it
+    # also left the quoting unbalanced. An env-var-style name — capitals, digits and
+    # underscores — is excluded; a token prefix like `github` or `dckr_` is not.
+    r"(?:(?<=[\s,;:(\[=])|^)(?![A-Z][A-Z0-9_]*\b)([\w.~+/=@%$!:,-]+)(['\"])\[redacted\]"
 )
 
 

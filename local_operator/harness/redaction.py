@@ -73,9 +73,28 @@ def _hold(report: Any) -> Any:
     best-effort by contract — a hit report must never break a mask — so a sink
     that has been collected is simply no sink.
     """
+    if report is None:
+        return None
     if inspect.ismethod(report):
-        return weakref.WeakMethod(report)
-    return report
+        # A bound method of an object that supports weak references — the session's
+        # own sink, and the only case that needs the weak form.
+        try:
+            return weakref.WeakMethod(report)
+        except TypeError as exc:  # a bound method of a non-weak-referenceable object
+            raise TypeError(
+                "the shape-hit sink must be a bound method of a weak-referenceable "
+                "object, or a plain callable: a strong reference to it is what kept "
+                "a disposed child session alive (see tests/unit/session/"
+                "test_launch_subagent.py)"
+            ) from exc
+    if callable(report):
+        # A plain function or closure owns no session, so there is nothing to
+        # release: held directly, and that is the documented fallback.
+        return report
+    raise TypeError(
+        "the shape-hit sink must be a bound method of a weak-referenceable object, "
+        f"or a plain callable; got {type(report).__name__}"
+    )
 
 
 def _resolve(report: Any) -> Any:

@@ -1035,7 +1035,7 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
 #:   IS masked, and what survives is the host and path, which stay readable BY DESIGN
 #:   (the operator needs to see which endpoint was called). Not secret material.
 _PARTIAL_MASK_RESIDUAL = {
-    "pem-private-key": 184,
+    "pem-private-key": 152,
     "gcp-service-account-key": 44,
     "credential-url-value": 10,
 }
@@ -1108,13 +1108,18 @@ def test_a_quote_inside_a_credential_never_leaves_a_readable_fragment(case: Case
 
 
 def test_the_partial_mask_ratchet_only_ever_tightens() -> None:
-    """The frozen counts are a ceiling, never a licence.
+    """The frozen counts are an EXACT ceiling, in both directions.
 
-    Each number may only fall, and only as the consequence of a real rule fix. This
-    asserts the current measurement is AT MOST the frozen figure and that no rule
-    has joined the class undeclared — so widening the table (a new label, or a
-    raised number) fails here, and a PR that lowers one has to show it red before
-    and green after.
+    A number that RISES fails — a regression, or a rule that joined the class
+    undeclared. A number that FALLS also fails, because a fall that nobody records
+    is a fix nobody can see: it must come with the code change that caused it and an
+    update to the frozen table in the same commit (red before, green after). That is
+    what makes this a ratchet rather than a floor.
+
+    SCOPE, stated because the measurement is corpus-scoped and not universal: this
+    covers the cases in `POSITIVE_CASES` only. A rule the corpus does not exercise
+    with a credential is not measured here, and the corpus is the specification for
+    what must be masked — a case added to the corpus can only tighten this test.
     """
     measured: dict[str, int] = {}
     for case in POSITIVE_CASES:
@@ -1124,6 +1129,12 @@ def test_the_partial_mask_ratchet_only_ever_tightens() -> None:
         assert (
             label in _PARTIAL_MASK_RESIDUAL
         ), f"{label} joined the partial-mask class without being declared: {count} cases"
+        assert count == _PARTIAL_MASK_RESIDUAL[label], (
+            f"{label}: measured {count}, frozen {_PARTIAL_MASK_RESIDUAL[label]} — a rise "
+            "is a regression, and a fall has to update the frozen number in the same "
+            "commit as the fix that caused it"
+        )
+    for label, frozen in _PARTIAL_MASK_RESIDUAL.items():
         assert (
-            count <= _PARTIAL_MASK_RESIDUAL[label]
-        ), f"{label} got worse: {count} > frozen {_PARTIAL_MASK_RESIDUAL[label]}"
+            measured.get(label, 0) == frozen
+        ), f"{label} is frozen at {frozen} but now measures {measured.get(label, 0)}"
