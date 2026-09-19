@@ -1977,11 +1977,11 @@ def state_legend(statuses: list[ProviderStatus]) -> str:
     wording already exists in this module -- so the line carries it rather than
     making them infer it from the row above (round-2 U2-5, D2-4).
 
-    Scoped to the words on screen, because the full table is 477 cells: 6 of the
-    listing's 26 painted rows at 110x44 and 8 of 15 at 80x24, most of it defining
-    states the install does not have, while the header rows of the same listing are
-    what a narrow terminal folds away (round-3 D3-3). Order is first appearance, so
-    the line reads in the order the rows above it do.
+    Scoped to the words on screen, because the full table costs 526 cells on one
+    header line while a listing paints only a few of its words, most of the table
+    defining states the install does not have -- and the header rows of the same
+    listing are what a narrow terminal folds away first (round-3 D3-3). Order is
+    first appearance, so the line reads in the order the rows above it do.
     """
     words: list[str] = []
     for status in statuses:
