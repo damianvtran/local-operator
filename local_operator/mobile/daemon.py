@@ -2754,6 +2754,14 @@ def build_app(daemon: MobileDaemon):
         if not isinstance(body, dict):
             return JSONResponse({"error": "request body must be an object"}, status_code=400)
         body = dict(body)
+        # THE OPERATOR CAPABILITY IS NOT PART OF THE REMOTE CONTRACT (issue
+        # #1310). It is a LOCAL process fact: the relay attaches it itself
+        # (``AttachClient._present_authority``) when this process is the one
+        # that started the runtime, so a value arriving in an HTTP body can only
+        # be a forgery attempt. Dropped rather than refused so a client that
+        # sends one learns nothing about the field's shape — and so the
+        # endpoint's error surface is unchanged for every ordinary request.
+        body.pop("operator_cap", None)
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
