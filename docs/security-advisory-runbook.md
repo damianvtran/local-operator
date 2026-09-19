@@ -231,8 +231,10 @@ gh api -X POST "repos/<owner>/<repo>/security-advisories/<GHSA>/cve"
 gh api "repos/<owner>/<repo>/security-advisories/<GHSA>" | jq '{state, cve_id}'
 ```
 
-Record the timestamp of the 202 on the advisory thread or in the tracking
-conversation; the +3d/+14d follow-ups in phase 8 are counted from it.
+Record the timestamp of the 202 in the durable record for this advisory batch
+(the release/announcement discussion or the tracking conversation — see the note
+at the end of phase 8 on why the advisory page itself cannot hold it); the
++3d/+14d follow-ups in phase 8 are counted from it.
 
 ## 7. Propagation verification
 
@@ -270,8 +272,11 @@ rm -rf "$TMP"
   curates on its own schedule; if the advisory is still missing at +14d, submit
   it directly (phase 8).
 
-Record the outputs (or the "not yet" results) on the advisory thread or the
-release PR so the next person can see how far propagation had got.
+Record the outputs (or the "not yet" results) in the durable record for this
+advisory batch — the release/announcement discussion or the release PR, not the
+advisory page, which accepts comments only while it is in draft/triage (see the
+note at the end of phase 8) — so the next person can see how far propagation had
+got.
 
 ## 8. Follow-ups at +3 days and +14 days, and escalation
 
@@ -291,7 +296,10 @@ what actually reaches the databases.
 - **+3 days**: rerun phase 7. Typical outcome: 7a is green (curated), 7b–7d are
   filling in. If `cve_id` is still null and 7a is still 0, check the advisory
   for a curation comment from GitHub asking for changes (they can request a
-  narrower range or a clearer description) and answer it.
+  narrower range or a clearer description). While the advisory is still in
+  draft/triage you can answer on the advisory; once it is published there is no
+  comment surface, so GitHub contacts you by email instead — watch the report
+  address on the repository.
 - **+14 days**: rerun phase 7. Everything should be green. If it is not:
 
   1. **PYSEC submission** — open a PR to
