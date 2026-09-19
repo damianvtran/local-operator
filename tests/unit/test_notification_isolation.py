@@ -541,6 +541,40 @@ def test_an_unreadable_or_selection_free_journal_fails_toward_notifying(tmp_path
     assert session_uses_test_hosting(directory) is False
 
 
+def test_the_harness_escape_waives_the_rule_and_can_only_enable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam CI forced, and the one direction it is allowed to move.
+
+    Three answers over ONE journal, in the order that matters. A plain reader
+    says True. The escape — the documented opt-in a suite whose SUBJECT is the
+    notification path needs, because the desktop legs can otherwise observe
+    nothing over a fixture-built store — says False. And it is read FRESH, so
+    clearing it puts the rule straight back.
+
+    The last arm is the safety property, not decoration: the escape cannot
+    silence anyone. It only ever answers "not a test session", and a process the
+    kill switch owns stays disabled with it set, because every leg asks the
+    switch first. That is what keeps a rig from putting a banner on the
+    operator's screen merely by setting it.
+    """
+    from local_operator.session import model_selection as selection
+    from local_operator.tui.notify import notifications_enabled
+
+    directory = _transcript_with_selection(tmp_path / "sessions" / "escape01", "test/test-model")
+    assert selection.session_uses_test_hosting(directory) is True
+
+    monkeypatch.setenv(selection.ENV_ALLOW_TEST_HOSTING_NOTIFY, "1")
+    assert selection.session_uses_test_hosting(directory) is False
+
+    monkeypatch.delenv(selection.ENV_ALLOW_TEST_HOSTING_NOTIFY)
+    assert selection.session_uses_test_hosting(directory) is True
+
+    monkeypatch.setenv(selection.ENV_ALLOW_TEST_HOSTING_NOTIFY, "1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    assert notifications_enabled() is False
+
+
 def test_the_composed_body_of_a_mock_session_is_the_banner_that_was_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

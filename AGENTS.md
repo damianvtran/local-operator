@@ -1350,6 +1350,20 @@ spell the switch literally, because they must act before any product import.
 The same applies to a manual QA run: that escape is for
 driving the real front end, never for opening a peer to hand work to.
 
+**The test-hosting rule is a SECOND gate, and a test whose subject is the
+notification path has to waive it.** `session_uses_test_hosting` suppresses any
+session whose journal records the mock wire, in every process that reads the
+store — the TUI observer, the machine-wide feed and the per-session bridge all
+ask it — so a suite that asserts a `notification` frame over a fixture-built
+store observes nothing until it sets
+`session.model_selection.ENV_ALLOW_TEST_HOSTING_NOTIFY`. That is a test/QA seam
+in the same shape as `ALLOW_NESTED_SESSION` above: it can only ever ENABLE (it
+answers "not a test session", so it cannot silence anyone), and the process kill
+switch still wins because every leg asks it first. Set it through
+`tests/notification_opt_in.notification_path_opt_in`, which clears both gates
+and restores them; the alternative — running those tests on a real provider —
+would make the reply non-deterministic and need network and credit.
+
 ## Who may merge: two tiers
 
 `main` is governed by a ruleset that requires **one approving review**, plus the
