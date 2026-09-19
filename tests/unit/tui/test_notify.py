@@ -773,7 +773,14 @@ def test_the_privacy_flag_governs_the_attached_session_toast_too(
     worse than one that is clearly scoped, because the copy reads as a
     guarantee.
     """
-    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default: False)
+    # Only the PRIVACY flag is turned off, not the notification gate: a blanket
+    # ``settings_get`` -> False also disables ``display.notifications``, and the
+    # toast this test asserts on would then never be written at all — leaving it
+    # asserting a privacy rule it had already silenced.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.settings_get",
+        lambda key, default: False if key == "display.notification_session_name" else default,
+    )
     notifier, sink = unfocused()
     notifier.set_label("Secret client migration")
     notifier.send("complete")

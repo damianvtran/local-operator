@@ -4406,6 +4406,25 @@ def client_for_spec(
         raise ValueError(f"Unknown provider: {spec.provider!r}")
     wire = definition.wire
     if wire == "mock":
+        # THE SUPPLY EDGE OF THE "test sessions never notify" RULE. This is the
+        # one choke point every mock stream passes — a session that BOOTS on
+        # the test hosting, and the mid-session `/model test/test-model` switch
+        # that turns a real conversation into a mock one, both build their
+        # client here. A mock session's reply is the canned "Hello from the
+        # mock provider!", and a notification body is a snippet of the
+        # session's last assistant line, so without this a test or a drive-by
+        # rig puts that sentence on the operator's lock screen (see
+        # `tui.notify.suppress_notifications_for_process`, which is also called
+        # earlier — at spec adoption in `model/configure.py` — so a process that
+        # knows it is a test surface never builds a notifier at all).
+        #
+        # Imported HERE rather than at module scope: `tui.notify` pulls the
+        # terminal/process plumbing, and this module is on the hot import path
+        # of every provider build — the mock branch is the only arm that wants
+        # it, and it pays for it once.
+        from local_operator.tui.notify import suppress_notifications_for_process
+
+        suppress_notifications_for_process(f"mock hosting ({spec.provider}/{spec.model_id})")
         return MockClient()
     if wire == "anthropic":
         base = spec.base_url or (definition.base_url if definition else None) or ANTHROPIC_API_URL

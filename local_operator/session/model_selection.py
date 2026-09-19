@@ -28,6 +28,19 @@ from local_operator.session.transcript import _iter_complete_lines_backward
 SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 SELECTION_VERSION = 2
 
+#: Memoised test-hosting verdicts for :func:`session_uses_test_hosting`, keyed on
+#: the journal's own ``(st_mtime_ns, st_size)`` (see that function's docstring for
+#: the measurements and for why the key is sound). Per-process rather than on
+#: disk: both callers are long-lived (the serve backend, a TUI's worker), and a
+#: durable copy would be derived state to invalidate for a scan that costs a
+#: ``stat`` once warm.
+_HOSTING_VERDICT_CACHE: dict[Path, tuple[tuple[int, int], bool]] = {}
+
+#: Bound on :data:`_HOSTING_VERDICT_CACHE`, in entries: a store has hundreds of
+#: sessions and the readers are long-lived, so the cache needs a ceiling even
+#: though a real tick touches the same handful of rows.
+_HOSTING_VERDICT_CACHE_MAX = 256
+
 
 @dataclass(frozen=True)
 class StoredModelSelection:
@@ -345,3 +358,168 @@ def refused_decision_only_selection(directory: Path) -> str | None:
                 provider = selector.split("/", 1)[0]
                 return provider if provider and is_decision_only(provider) else None
     return None
+
+
+def session_uses_test_hosting(directory: Path) -> bool:
+    """Whether this session's journal says it is CURRENTLY on the TEST hosting.
+
+    WHY A SECOND READER, given the process-wide kill switch in
+    ``tui.notify.suppress_notifications_for_process``: the switch silences the
+    process that RAN the mock, and a store outlives that process. A QA rig's
+    scratch store keeps its mock conversations, and every other reader of that
+    store — the machine-wide desktop feed, a bridge attached by the desktop
+    app, an operator's TUI looking at a per-rig config dir — would still
+    compose a banner whose body is a snippet of the session's last assistant
+    line, which for a mock session is always "Hello from the mock provider!".
+    That sentence on a lock screen is the reported symptom, and the mock exists
+    only for tests, so a stored session that is on it must not be announced.
+
+    THE NEWEST SELECTION WINS, which is the same rule every other reader of
+    this journal follows (:func:`read_model_selection`): a conversation that
+    switched onto the mock is a test surface from that point, and one that
+    switched off it is a real session again — for the store's benefit, since
+    the process that ran the mock has already silenced itself.
+
+    IT IS NOT CHEAP, which this docstring used to claim. The backward scan is
+    bounded by the NEWEST ``version == 2`` row, so a journal whose row is near
+    the tail answers in **0.6 ms** — but a journal with no valid v2 row, or one
+    written near the boot end, walks the whole file. Measured here (2026-09-19):
+    a 63.5 MB synthetic journal answers in 0.6 ms with the row at the tail and
+    **121-135 ms** with it at the boot end or absent, and the operator's real
+    store costs 57 ms / **745 ms** / 94 ms for its three largest journals
+    (265 / 108 / 80 MB). The callers ask once per CANDIDATE ROW PER TICK, so
+    the old "cheap, by construction" claim was wrong in exactly the shape that
+    matters: a serve backend doing this inline stalls its own event loop, and
+    a TUI doing it on the loop drops frames.
+
+    SO IT IS MEMOISED, on the journal's own ``(st_mtime_ns, st_size)`` — the
+    same key and the same argument ``resume.py`` makes for its ``origin.json``
+    verdict cache: a verdict read out of a file whose bytes and timestamp are
+    unchanged cannot differ from the next read of it. The key is the whole
+    truth about that claim, and it is worth being exact about what it covers:
+    every writer in this codebase moves the SIZE — a journal grows by appending,
+    and the only path that preserves an mtime is
+    ``transcript.Transcript._restore_mtime`` on a bookkeeping batch, which is
+    restoring the clock for a write that already grew the file. That path also
+    cannot restore ``st_mtime_ns`` EXACTLY — ``os.utime`` takes float seconds,
+    and the residual is sub-microsecond and of EITHER SIGN (measured at -97…+84
+    ns across ten files, -53 ns on the first) — so such an append re-scans once.
+    That is harmless, and not something to "fix" by making the restore precise:
+    the size half of the key has already invalidated the entry, and a key that
+    leaned on a precision-lossy mtime would be the weaker one. A hypothetical
+    EXTERNAL writer that rewrote the journal in place to the same byte length
+    AND restored the mtime to the nanosecond would serve a stale verdict; no
+    writer in this repository can do that, and the readers here are one
+    process's caches rather than a source of truth.
+
+    A steady poll therefore pays a ``stat`` per row (~0 ms) and re-scans only
+    when the journal actually changed. The cache is per-process and bounded
+    (:data:`_HOSTING_VERDICT_CACHE_MAX`), because both readers are long-lived
+    and nothing here is a source of truth.
+
+    THREE THINGS ARE NEVER CACHED, for the reason ``resume.py`` gives for not
+    caching an unreadable marker: they describe the MOMENT rather than the file.
+
+    * A MISSING journal, and one that exists but cannot be OPENED — a store
+      mid-write, an unmounted volume, EMFILE under descriptor pressure. Both
+      answer ``False`` (the tolerant direction below) and are re-derived next
+      time.
+    * A WALK THAT RAISED. The failure can land after the file opened — an
+      ``OSError(24)`` on a read under descriptor pressure, a volume that goes
+      away mid-scan — and memoising it would be the operator's banner back
+      again: the verdict for that file is then stuck at ``False`` for as long
+      as its bytes and timestamp stand, so a MOCK session stops being seen as
+      one and banners (review round 2, R2-1). ``_read_test_hosting`` reports
+      that case as ``None`` rather than as a bool, the caller answers ``False``
+      without memoising, and the next tick re-walks.
+
+    TOLERANT, AND FAILS TOWARD NOTIFYING. ``False`` for a missing, unreadable
+    or selection-free journal, and for an unusable row. Two reasons that is the
+    right direction: an unreadable transcript is not evidence of a test
+    session, and silencing a REAL session's completion is a worse failure than
+    bannering a test one — the operator's complaint is about noise, and a
+    "fix" that also mutes real work would be its own bug report. A mock
+    session written by any build in this release carries a v2 row (see
+    :func:`Session._persist_selected_model`), so the version gate loses nothing
+    in practice; a version-less legacy row is deliberately not enough to
+    silence a session.
+
+    ASYNC CALLERS MUST RUN IT OFF THE LOOP (``asyncio.to_thread``) on a cache
+    miss, which is why :data:`_HOSTING_VERDICT_CACHE` exists to make the miss
+    rare rather than to excuse it.
+
+    THE OTHER GATE MAY STILL DISAGREE, and cannot be made to here: a process
+    that ran the mock stays silenced for life (``tui.notify.
+    suppress_notifications_for_process``), so a session that switched OFF the
+    mock answers ``False`` from this reader while that process's switch still
+    says no. Every leg asks the switch first, so the safe answer wins; the
+    asymmetry and why it is not reconciled are spelled out on that helper.
+    """
+    path = directory / "transcript.jsonl"
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    key = (info.st_mtime_ns, info.st_size)
+    cached = _HOSTING_VERDICT_CACHE.get(directory)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    # A journal that exists but cannot be opened is a MOMENT, not a verdict —
+    # answered without caching, exactly as the docstring says.
+    try:
+        with path.open("rb"):
+            pass
+    except OSError:
+        return False
+    verdict = _read_test_hosting(directory)
+    if verdict is None:
+        # INDETERMINATE: the walk raised after the file opened. Answered the
+        # tolerant direction WITHOUT memoising it, because the alternative is
+        # the operator's banner back — a transient read failure memoised as
+        # "not a test session" stays that way for as long as the journal's bytes
+        # and timestamp stand, so a MOCK session stops being recognised as one
+        # and banners (review round 2, R2-1: one injected `OSError(24)` did
+        # exactly that). Nothing is lost by re-walking: the caller's own process
+        # switch still applies, and the next tick re-derives this.
+        return False
+    if len(_HOSTING_VERDICT_CACHE) >= _HOSTING_VERDICT_CACHE_MAX:
+        # Insertion-ordered, so the oldest insert is the first key: a plain FIFO
+        # bound is enough here (the callers touch the same handful of rows every
+        # tick, and a re-read costs one stat when an entry is evicted).
+        _HOSTING_VERDICT_CACHE.pop(next(iter(_HOSTING_VERDICT_CACHE)))
+    _HOSTING_VERDICT_CACHE[directory] = (key, verdict)
+    return verdict
+
+
+def _read_test_hosting(directory: Path) -> bool | None:
+    """The uncached read behind :func:`session_uses_test_hosting`.
+
+    ``None`` means INDETERMINATE — the journal could not be read, so this call
+    cannot say whether the session is on the test hosting. The caller answers
+    the tolerant direction and does NOT memoise it; the distinction is why this
+    has three answers rather than two (see the caller's docstring).
+
+    IT OPENS THE JOURNAL ITSELF, though the caller already did, because that
+    open cannot stand in for this one: the descriptor can go between the two —
+    the EMFILE window QA round 3 reproduced — and ``_settled_selection``
+    reports a failure to open as ``None``, the SAME answer it gives for a
+    journal that opens fine and simply has no v2 row. Only the second of those
+    is a verdict, so readability is re-established here instead of being folded
+    into the tolerant ``False`` that the caller would then memoise for the life
+    of the file.
+
+    The whole body is inside the ``try``: the import, the walk and the provider
+    lookup are one decision, and a raise from any of them is the same
+    INDETERMINATE. Only the provider lookup is unreachable today (a pure dict
+    lookup), but a guard that stops one statement short of the body it claims is
+    the shape that silently stops being true.
+    """
+    try:
+        from local_operator.providers.registry import is_mock_provider
+
+        with (directory / "transcript.jsonl").open("rb"):
+            pass
+        settled = _settled_selection(directory)
+        return settled is not None and is_mock_provider(settled.provider)
+    except Exception:  # noqa: BLE001 — a banner decision never fails on a store read
+        return None

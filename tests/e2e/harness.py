@@ -44,11 +44,57 @@ from local_operator.harness.types import (
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+from local_operator.tui.resume_click import DESKTOP_LAUNCH_REFUSED_ENV
+
+#: The notification kill switch every bespoke child-environment builder in this
+#: suite must re-assert, spelled ONCE so it cannot drift between them.
+#:
+#: WHY A CONSTANT RATHER THAN TRUSTING THE AMBIENT ENVIRONMENT. The builders
+#: here deliberately hand a child a FILTERED environment — dropping ``CMUX_*``
+#: and ``LOP_*`` so a runtime cannot address the operator's live panes or adopt
+#: their session — and several of them build the mapping with no reference to
+#: ``os.environ`` at all. Those children are real ``lop`` runtimes: with no kill
+#: switch one announces a parked gate through ``tui.notify.detached_notify``,
+#: which on darwin is a genuine ``osascript display notification``, and with a
+#: mock model it announces a completion whose body is the mock's own reply.
+#: Both have fired from this suite before.
+#:
+#: WHY NOT ``agent_shell.harness_child_env``, which carries the same gate: that
+#: helper is for a SCRIPT driving the real CLI, and it also injects the
+#: nested-session marker — a cell that boots a TUI or a runtime child must not
+#: have that waiver in its environment. So the pairs are separate on purpose,
+#: sourced from the product constants, and pinned together by
+#: ``tests/unit/test_notification_isolation.py``.
+#:
+#: ``tests/conftest.py`` also arms it at import time, which covers the builders
+#: that copy ``os.environ``; this mapping is for the ones that do not, and is
+#: guarded by ``tests/unit/test_notification_isolation.py``, which walks the
+#: ``env=`` builders under ``tests/e2e/`` and ``scripts/`` and fails on one that
+#: spawns a local-operator child without it.
+NO_NOTIFY_ENV: dict[str, str] = {
+    ENV_DISABLE: ENV_DISABLE_VALUE,
+    DESKTOP_LAUNCH_REFUSED_ENV: "1",
+}
+
 
 #: A model spec no provider is ever asked about. ``provider="test"`` keeps the
 #: pricing and discovery paths on their unknown-model branches instead of
 #: reaching the model registry over the network.
 TEST_MODEL = ModelSpec(provider="test", model_id="e2e-model", context_window=100_000)
+
+#: The spec for a cell that must NOT be on the test hosting.
+#:
+#: A session whose recorded selection is the test hosting is skipped by the
+#: notification surfaces on purpose (a test session is not news anybody can act
+#: on; see ``session.model_selection.session_uses_test_hosting``), so a cell that
+#: pins those surfaces' OWN contract — the frame counts, the dedupe — has to
+#: drive a session that is not test-hosted. ``openai`` is a real provider and
+#: the model id is deliberately one the registry has never heard of: every cell
+#: using this passes its own scripted stream, so no client is ever built for it,
+#: and an unknown model keeps the pricing and discovery paths offline exactly as
+#: ``TEST_MODEL`` does.
+E2E_ORACLE_MODEL = ModelSpec(provider="openai", model_id="e2e-oracle-model", context_window=100_000)
 
 #: How long the pilot may wait for the app to adopt its session before the
 #: test calls it a failure. Generous relative to the real cost (adoption is a
@@ -117,6 +163,7 @@ def build_session(
     *,
     tools: Iterable[Any] = (),
     cwd: Path | None = None,
+    model: ModelSpec = TEST_MODEL,
 ) -> Session:
     """A REAL session over a real transcript directory.
 
@@ -124,6 +171,10 @@ def build_session(
     with the gate armed every tool call would park waiting for a keypress the
     test is not sending, and the approval surface has its own dedicated unit
     coverage (``tests/unit/tui/test_approvals_ux.py``).
+
+    ``model`` exists for the cells that must NOT look like a test session to the
+    notification surfaces — see ``E2E_ORACLE_MODEL``. It changes nothing else:
+    the stream is scripted either way, so the spec is only ever read as a label.
     """
     # ``variables`` is wired the way ``session_factory`` wires it in
     # production. Without it ``session.variables`` is None, and a test driving
@@ -133,7 +184,7 @@ def build_session(
     from local_operator.variables import VariableStore
 
     return Session(
-        model=TEST_MODEL,
+        model=model,
         stream_fn=stream,
         tools=list(tools),
         transcript=Transcript(directory),

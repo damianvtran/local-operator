@@ -155,11 +155,27 @@ def harness_child_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     They declare themselves harnesses instead, which is what
     :data:`ALLOW_NESTED_SESSION_ENV` is for.
 
+    IT ALSO SILENCES THE CHILD'S NOTIFICATIONS, and that is the same rule rather
+    than a second one: a harness is a throwaway driver, its child is a session
+    nobody is watching, and the benches seed ``hosting: test`` — whose only
+    reply is ``Hello from the mock provider!``, a notification body being a
+    snippet of the session's own last assistant line. Without this the child
+    finishes its turn and puts that sentence on the operator's lock screen: 17
+    recorded banner attempts across scratch stores in two days, every one of them
+    a drive-by rig. The pair comes from
+    :data:`local_operator.tui.notify.ENV_DISABLE` so the switch has ONE
+    definition, and hence is a function-local import: ``tui.notify`` pulls the
+    terminal and settings modules in with it, and this module is imported from
+    the CLI's own startup path.
+
     A NEW script that drives the real CLI belongs here too, and an existing one
     that stops using it is the drift this helper exists to make visible.
     """
+    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+
     merged = dict(os.environ if env is None else env)
     merged[ALLOW_NESTED_SESSION_ENV] = "1"
+    merged[ENV_DISABLE] = ENV_DISABLE_VALUE
     return merged
 
 

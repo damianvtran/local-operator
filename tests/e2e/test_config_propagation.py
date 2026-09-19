@@ -33,6 +33,7 @@ from local_operator.session.session import Session
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.e2e.harness import (
+    NO_NOTIFY_ENV,
     ScriptedStream,
     build_session,
     dispose_quietly,
@@ -150,6 +151,13 @@ def _inherited_env() -> dict[str, str]:
 
     env = dict(os.environ)
     env.pop("NO_COLOR", None)
+    # The child is a real ``lop`` process. ``tests/conftest.py`` already armed
+    # the gate in this process's environment, so this is the explicit
+    # re-assertion the harness constant exists for: the mapping is COPIED here,
+    # and a future edit that starts filtering it would otherwise drop the gate
+    # silently — the sweep in ``tests/unit/test_notification_isolation.py``
+    # does not read inside a helper like this one.
+    env.update(NO_NOTIFY_ENV)
     root = str(Path(__file__).resolve().parents[2])
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = root if not existing else os.pathsep.join((root, existing))
