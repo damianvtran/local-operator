@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from local_operator import procstate
 from local_operator.interpreter import python_argv
 
 
@@ -479,8 +480,15 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         stdin=subprocess.DEVNULL,
         close_fds=True,
     )
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
+    # ``start_new_session`` is documented "(POSIX only)" and Windows SILENTLY
+    # ignores it — its ``_execute_child`` parameter is literally named
+    # ``unused_start_new_session`` — so a hand-rolled POSIX branch here looked
+    # like a detached worker on Windows while the child kept this console: a
+    # Ctrl-C and a console close both reached it, which is the property this
+    # call exists to get. ``procstate.detached_popen_kwargs`` owns the
+    # per-platform answer and the reasoning; this is the last call site that
+    # spelled its own.
+    popen_kwargs.update(procstate.detached_popen_kwargs())
 
     # Name the detached worker in the OS process listing, keyed by the job id
     # this call already prints to the user, so `ps` and `lop`'s own job output

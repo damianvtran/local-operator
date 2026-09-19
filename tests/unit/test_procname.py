@@ -156,6 +156,42 @@ class TestStaleness:
         assert not dead.exists(), "a dead pid's temp must be swept"
         assert mine.exists(), "a live pid's temp must be left alone"
 
+    def test_the_orphan_sweep_asks_procstate_and_never_signals(self, branded, monkeypatch):
+        """The sweep asks ``procstate.pid_alive``; it must never touch ``os.kill``.
+
+        THE C1-CLASS TRAP: ``os.kill(pid, 0)`` is a liveness probe on POSIX and
+        ``TerminateProcess`` on Windows, so a sweep written on it would KILL
+        whichever live process matched a stale temp entry's embedded pid — then
+        read the successful kill as "still running" and keep the entry as well.
+        This runs on every startup, so the blast radius is "any live process".
+
+        Pinned as a FORBIDDEN CALL rather than behind a platform branch: making
+        the signal fatal fails this test on macOS too, which is what stops the
+        probe being reintroduced on the platform where nobody would notice.
+        """
+        from local_operator import procstate
+
+        def _forbidden(pid: int, sig: int) -> None:  # pragma: no cover - the guard
+            raise AssertionError("the orphan sweep must not signal: os.kill is a KILL on Windows")
+
+        monkeypatch.setattr(os, "kill", _forbidden)
+        asked: list[int] = []
+
+        def _dead(pid: int) -> bool:
+            asked.append(pid)
+            return False
+
+        monkeypatch.setattr(procstate, "pid_alive", _dead)
+
+        orphan = branded.parent / f".{procname.BRAND}.999999.tmp"
+        orphan.write_bytes(b"orphan")
+        branded.unlink()  # force the replant path, which is where the sweep runs
+
+        assert procname.ensure_branded_interpreter() == branded
+
+        assert 999999 in asked, "the sweep must ask the shared liveness probe"
+        assert not orphan.exists()
+
     def test_replants_when_libpython_points_at_the_wrong_library(self, branded):
         """Trigger (c), second half: a LIVE symlink is not automatically CORRECT.
 

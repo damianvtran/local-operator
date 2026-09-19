@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from local_operator import procstate
 from local_operator.harness.types import Message, TextContent
 from local_operator.resume import (
     _TITLE_CUSTOM_TYPE,
@@ -60,7 +61,18 @@ def test_a_live_pid_marker_is_the_owner_of_the_session(tmp_path: Path, monkeypat
 
 
 def test_a_windows_live_marker_is_trusted_without_os_kill(tmp_path: Path, monkeypatch) -> None:
-    """Windows has no signal 0; probing would terminate the owning child."""
+    """Windows has no signal 0; probing would terminate the owning child.
+
+    The platform is flipped on ``procstate._PLATFORM``, which is the ONE name
+    the shared authority reads and the name its own docstring designates for
+    exactly this (see ``procstate``: "a test that flips the platform must patch
+    ONE name"). This test used to patch ``local_operator.resume.sys.platform``,
+    which stopped working the moment ``resume.live_runtime_pid`` stopped
+    spelling its own platform branch and delegated to ``procstate`` -- the very
+    drift the shared authority exists to prevent. Patching the authority also
+    makes the assertion stronger than it was: the probe now has to be asked
+    through the shared helper to observe win32 at all.
+    """
     import os
 
     session = tmp_path / "sessions" / "live00000002"
@@ -74,7 +86,7 @@ def test_a_windows_live_marker_is_trusted_without_os_kill(tmp_path: Path, monkey
         killed.append((pid, sig))
         raise AssertionError("os.kill must not run on win32")
 
-    monkeypatch.setattr("local_operator.resume.sys.platform", "win32")
+    monkeypatch.setattr(procstate, "_PLATFORM", "win32")
     monkeypatch.setattr(os, "kill", _kill)
     assert live_runtime_pid(tmp_path, "live00000002") == 4242
     assert killed == []

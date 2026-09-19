@@ -1,0 +1,28 @@
+# Dockerfile-local ignore file.
+#
+# Docker prefers `<path-to-Dockerfile>.dockerignore` over the context root's
+# `.dockerignore`, and that is exactly what is wanted here: the root file
+# excludes `tests/`, which is DROPPED for the server image but REQUIRED for
+# this one -- the probe boots the TUI against the app double the test suite
+# owns (`tests/unit/tui/test_app_pilot.py`), so a context without `tests/`
+# cannot run the one probe that matters most on a new OS.
+#
+# Everything below is build weight or host contamination, never source.
+.git
+.github
+.venv
+.worktrees
+__pycache__
+**/__pycache__
+*.egg-info
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+node_modules
+bench
+benchmarks
+docs/evidence
+static
+extension
+local_operator/mobile/web/node_modules

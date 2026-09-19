@@ -485,13 +485,22 @@ def _launch_once(argv: list[str], env: dict[str, str]) -> bool:
     """
     import subprocess
 
+    from local_operator import procstate
+
     try:
         process = subprocess.Popen(  # noqa: S603 — argv is constructed here, never from input
             argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
-            start_new_session=True,
+            # Detachment is platform-spelled, and `start_new_session=True` —
+            # which this passed unconditionally — is SILENTLY IGNORED on
+            # Windows (subprocess documents it "(POSIX only)" and names the
+            # Windows parameter `unused_start_new_session`), so the child the
+            # paragraph above relies on staying up would have stayed in this
+            # process's console. The helper is exactly `start_new_session=True`
+            # on POSIX, which is the only platform this rung runs on today.
+            **procstate.detached_popen_kwargs(),
         )
     except (OSError, ValueError):
         logger.debug("launcher %r could not be started", argv[:1], exc_info=True)

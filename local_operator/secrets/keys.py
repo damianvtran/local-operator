@@ -37,6 +37,16 @@ SECRETS_DIRNAME = "secrets"
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 
+#: Whether the mode bits this module sets ARE the confidentiality mechanism.
+#: On POSIX they are, and ``check_mode`` verifies them on every open. On
+#: Windows ``os.chmod`` can only toggle the read-only flag — CPython's docs:
+#: "All other bits are ignored" — so the protection there is the ACL the
+#: directory inherited, which lop neither sets nor reads back. Named rather
+#: than tested inline because two functions below make the same decision
+#: (``check_mode`` and ``at_rest_protection_note``), and a second copy of it is
+#: how the check would end up disagreeing with what ``status`` reports.
+_MODE_BITS_ARE_CONFIDENTIALITY = os.name != "nt"
+
 #: Bits that must be clear on the key file and the database: any permission
 #: for group or other. Checked on every open, not only at creation — a store
 #: whose mode was loosened after the fact is exactly the case worth catching.
@@ -222,11 +232,53 @@ def ensure_secrets_dir(base: Path | None = None) -> Path:
     The ``chmod`` runs even when the directory already existed: an operator who
     once created it by hand, or a umask that widened it at creation, should not
     leave the key sitting in a traversable directory forever.
+
+    ``mode=DIR_MODE`` is passed as well as chmod'ed, and the two are not
+    redundant on Windows: there ``os.chmod`` can only toggle the read-only flag
+    (CPython's docs: "All other bits are ignored"), so the mode argument is the
+    only thing that can *create* a directory ACL — where it is supported at all.
+    That is ``3.12.6`` and later on the 3.12 line (and 3.11.10+ / 3.13+), which
+    is CVE-2024-4030: before those versions the argument was silently ignored on
+    Windows and the directory took the inherited ACL. THIS PROJECT SUPPORTS
+    ``>= 3.12``, so on 3.12.0-3.12.5 a Windows store gets no ACL from either
+    call — the fact the sentence above this one used to overstate as "CPython
+    >= 3.13". Nothing here can repair that, which is why
+    :func:`at_rest_protection_note` reports the tier instead of claiming it.
+    On POSIX the argument is masked by the umask and the chmod that follows is
+    what makes the mode exact.
     """
     directory = secrets_dir(base)
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
     os.chmod(directory, DIR_MODE)
     return directory
+
+
+def at_rest_protection_note() -> str | None:
+    """What actually protects the key and the store here, or ``None`` on POSIX.
+
+    On POSIX the answer is the mode bits, which :func:`check_mode` verifies, so
+    there is nothing to say. On Windows the answer is the directory's *ACL* —
+    inherited from the profile, never created or verified by lop — and every
+    ``chmod`` in this subsystem is inert. Reporting that is the point: the
+    alternative is a tier line that reads like a POSIX store's while the
+    plaintext key sits under an ACL nobody checked (audit D9).
+
+    Returned as a sentence for ``lop secret status`` rather than raised,
+    because a Windows store is *usable*, not broken — this is a limit of the
+    at-rest guarantee, not a refusal. Nothing here claims the ACL is absent;
+    what is certain is that lop does not set it and cannot read it back, and
+    those are the two facts an operator cannot discover for themselves.
+    """
+    if _MODE_BITS_ARE_CONFIDENTIALITY:
+        return None
+    return (
+        "at rest, this store is protected by the access control list the secrets "
+        "directory inherited from your profile, not by a mode lop sets: Windows "
+        "chmod() cannot grant or restrict access, and lop neither verifies nor "
+        "creates that ACL. Keep the directory on a local disk owned by your "
+        "account — a shared or synced folder is readable by accounts lop cannot "
+        "see."
+    )
 
 
 def check_mode(path: Path) -> None:
@@ -236,9 +288,11 @@ def check_mode(path: Path) -> None:
     exposure has already happened; silently tightening it would hide from the
     operator that it was ever open. Windows reports POSIX bits that do not mean
     what they do on Unix, so the check is skipped there rather than producing a
-    failure nobody can act on.
+    failure nobody can act on — and the skip is not silent, because
+    :func:`at_rest_protection_note` is what ``lop secret status`` prints there
+    instead.
     """
-    if os.name == "nt":
+    if not _MODE_BITS_ARE_CONFIDENTIALITY:
         return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & _FORBIDDEN_MODE_BITS:

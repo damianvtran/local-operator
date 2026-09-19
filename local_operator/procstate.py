@@ -30,8 +30,369 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Iterable, Sequence
+import sys
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any, TypedDict
+
+# ---------------------------------------------------------------------------
+# Platform process primitives
+# ---------------------------------------------------------------------------
+#
+# WHY THIS SECTION EXISTS (cross-platform work, 2026-09-18). Four questions
+# below have a DIFFERENT ANSWER ON WINDOWS, and each was previously answered at
+# its own call site — twice in two cases, with the copies disagreeing. The
+# failure mode is not a wrong answer, it is a destructive one: ``os.kill(pid,
+# 0)`` on Windows is ``TerminateProcess``, so a liveness PROBE killed the
+# process it was asked about, silently, on a path that runs on every ``lop``
+# invocation. One implementation cited by every caller is the only shape that
+# keeps this right, which is why these live in the leaf module the rest of the
+# package already treats as the single answer to "what is this pid?".
+#
+# Nothing here imports the rest of the package: ``registry`` sits on the CLI
+# startup path and ``session_lease``/``resume`` must stay consultable without
+# the engine (see the module docstring).
+
+#: How this platform is spelled in a sentence a USER reads, as opposed to the
+#: identifier the runtime uses.
+#:
+#: ``sys.platform`` is ``win32`` there -- a CPython identifier that appears
+#: nowhere else an operator can see -- so a refusal that interpolates it tells
+#: them the feature "cannot run on win32", and an upgrade summary announces
+#: "(this host is win32)". The mapping was spelled in two modules and MISSING
+#: from the third message this branch added, which is the drift a single home
+#: exists to stop; ``secrets/peer.py`` and ``update.py`` both read THIS.
+#:
+#: A module constant rather than a function, because it is patched by tests and
+#: ``os.name`` cannot be: ``pathlib`` reads it at call time, so patching it to
+#: ``nt`` makes the next ``Path(...)`` a ``WindowsPath`` and the host that is
+#: running the test cannot construct one.
+PLATFORM_LABEL = "Windows" if os.name == "nt" else sys.platform
+
+
+#: The platform, read ONCE and through :func:`is_windows` rather than inline.
+#: ``sys.platform`` rather than ``os.name`` because a test that flips the
+#: platform must patch ONE name: patching ``os.name`` process-wide makes
+#: ``pathlib`` refuse to construct a path at all on the host running the test
+#: (``cannot instantiate 'WindowsPath' on your system``), which turns a
+#: platform test into a broken one.
+_PLATFORM = sys.platform
+
+
+def is_windows() -> bool:
+    """Whether this process is on Windows, spelled once for every branch.
+
+    The single home for the question: the process primitives below, the bash
+    tool's interpreter resolution and refusal, and anything else that must know
+    read THIS, so a platform branch cannot drift from another that disagrees.
+    """
+    return _PLATFORM == "win32"
+
+
+#: ``PROCESS_QUERY_LIMITED_INFORMATION``. The least right ``OpenProcess`` needs
+#: to ASK about a process, which is deliberate: the pid may be another user's,
+#: and a probe must never carry a right to touch what it is asking about.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+#: Windows' ``ERROR_INVALID_PARAMETER`` — ``OpenProcess``'s answer for a pid
+#: that is not a process. It is the ONLY error that means "gone": access
+#: denied (a pid owned by another account or a higher integrity level) means
+#: the pid may well be live, and reporting it dead would let a caller act on a
+#: process that is still working.
+_WINDOWS_ERROR_INVALID_PARAMETER = 87
+
+
+def pid_liveness(pid: int) -> bool | None:
+    """Whether ``pid`` is a live process: True, False, or None when unprovable.
+
+    THE WINDOWS BRANCH IS NOT AN OPTIMISATION, IT IS A CORRECTNESS FIX.
+    ``os.kill(pid, 0)`` is a liveness probe on POSIX and a KILL on Windows:
+    CPython's ``os_kill_impl`` takes the ``GenerateConsoleCtrlEvent`` path only
+    for ``CTRL_C_EVENT``/``CTRL_BREAK_EVENT`` and otherwise calls
+    ``TerminateProcess(handle, sig)`` — and the documented reading of that is
+    "any other value for sig will cause the process to be unconditionally
+    killed... and the exit code will be set to sig". Signal 0 is any other
+    value. A probe that reports ``True`` after killing its subject is the worst
+    possible shape: silent to the caller and destructive to the target. So
+    win32 asks the kernel the liveness question directly — ``OpenProcess`` —
+    exactly as :mod:`local_operator.session_lease` already did.
+
+    ``None`` means "could not prove either answer" (an unusable kernel32, or an
+    ``OpenProcess`` failure other than ERROR_INVALID_PARAMETER). It is
+    three-valued rather than a bool because the callers disagree about what to
+    do with doubt and both are right for their question: :func:`pid_alive`
+    fails CLOSED (a live process called dead is unrecoverable), while
+    ``session_lease`` reports the refusal honestly instead of guessing.
+    """
+    if pid <= 0:
+        return False
+    if is_windows():  # pragma: no cover - exercised on Windows hosts
+        return _windows_liveness(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Another account's process: it exists, and it cannot be a corpse of
+        # ours. Alive is also the safe direction for every caller.
+        return True
+    except OSError:
+        # ESRCH and EPERM are the two answers this probe can give, and both are
+        # caught above; anything else means the kernel did not answer the
+        # question at all. `None` says exactly that rather than inventing a
+        # verdict, and `pid_alive` reads it as the fail-closed "alive".
+        # Unreachable on POSIX for a valid int pid, so no macOS/Linux caller
+        # changes behaviour here.
+        return None
+    return True
+
+
+def _windows_liveness(pid: int) -> bool | None:  # pragma: no cover - Windows only
+    """``OpenProcess`` as the liveness primitive, in ``pid_liveness``'s tri-state.
+
+    Split out so the ERROR_INVALID_PARAMETER test and the ``CloseHandle``
+    discipline live in one place. Deliberately imports ``ctypes`` lazily: the
+    module is imported on the CLI startup path on every platform, and a
+    POSIX host must not pay for a Windows-only binding.
+    """
+    try:
+        import ctypes
+
+        # `getattr` for the same reason tools/eval.py uses it: the Windows
+        # bindings do not exist on a POSIX host, so the module must still
+        # import (and pyright must still understand it) everywhere.
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        last_error = getattr(ctypes, "get_last_error")
+        return False if last_error() == _WINDOWS_ERROR_INVALID_PARAMETER else None
+    except Exception:
+        # No kernel32 binding, or a call that raised: this is doubt, never
+        # evidence of death.
+        return None
+
+
+def pid_alive(pid: int) -> bool:
+    """Windows-safe "is this pid a running process?" — the shared probe.
+
+    Existence only: a zombie reads as alive here, because the zombie question
+    is POSIX-specific and needs its own probe (:func:`is_zombie`). Callers that
+    must not treat a corpse as a live owner ask that one AFTER this says alive.
+
+    Fails CLOSED: any doubt answers True. The two errors are not symmetric —
+    calling a live owner dead lets a second writer take a transcript a working
+    runtime is still appending to, while calling a dead one live only costs the
+    recovery of its claim.
+    """
+    return pid_liveness(pid) is not False
+
+
+def supports_loop_signals() -> bool:
+    """Whether ``asyncio``'s ``loop.add_signal_handler`` works on this platform.
+
+    Reported rather than probed, because the probe IS the failure:
+    ``asyncio.BaseEventLoop.add_signal_handler`` is a stub that raises
+    ``NotImplementedError``, and only the UNIX selector loop overrides it. The
+    Windows default policy installs the Proactor loop
+    (``windows_events._WindowsProactorEventLoopPolicy``), which takes the stub —
+    so a runtime that installs handlers unconditionally dies before it can
+    serve anything, and this codebase never calls
+    ``asyncio.set_event_loop_policy``. Callers branch on THIS and fall back to
+    ``signal.signal`` (which Windows supports for ``SIGINT``/``SIGBREAK``
+    only), rather than discovering the stub at runtime.
+    """
+    return not is_windows()
+
+
+def install_loop_signal_handlers(loop: Any, handlers: Mapping[int, Callable[[], None]]) -> bool:
+    """Ask ``loop`` to run ``handlers``; degrade to ``signal.signal`` where it will not.
+
+    ``loop.add_signal_handler`` IS UNIX-ONLY (``asyncio.unix_events`` overrides
+    it; ``BaseEventLoop``'s is a stub that raises ``NotImplementedError``), and
+    the Windows default policy installs the Proactor loop, which takes the stub.
+    Every server boot path here that installed handlers unconditionally
+    therefore died with a traceback before it could serve anything — on the one
+    platform where a foreground command is the only way to run the daemon.
+
+    The fallback is ``signal.signal``, which Windows does support for
+    ``SIGINT``/``SIGBREAK``. Its handler runs on the main thread OUTSIDE the
+    running loop, so it must hand the callback over with
+    ``call_soon_threadsafe`` instead of touching loop state from a signal
+    context; ``signal.signal`` also refuses anywhere but the main thread
+    (``ValueError``), which is a condition to survive rather than to propagate.
+
+    Returns True when the loop took at least one handler itself. Never raises:
+    every caller is booting a server, and a signal it could not install is not a
+    reason to fail to bind. A caller with an OPTIONAL signal (``SIGUSR1`` has no
+    Windows equivalent) filters it out of ``handlers`` with ``hasattr(signal,
+    ...)`` first — an absent constant is a name error here, and a deliberate
+    omission at the call site.
+    """
+    import signal as signal_module
+
+    installed = False
+    for sig, callback in handlers.items():
+        try:
+            loop.add_signal_handler(sig, callback)
+            installed = True
+            continue
+        except (NotImplementedError, RuntimeError, ValueError, AttributeError):
+            pass
+        try:
+            signal_module.signal(sig, lambda *_args, _cb=callback: loop.call_soon_threadsafe(_cb))
+        except (OSError, RuntimeError, ValueError):
+            # Unhandleable on this platform (or not the main thread). The
+            # caller's socket/stop path is still live, so carry on.
+            continue
+        installed = True
+    return installed
+
+
+def hard_kill_signal() -> int | None:
+    """``SIGKILL`` where it exists, ``None`` on Windows.
+
+    ``signal.SIGKILL`` is documented "Availability: Unix", so naming it in a
+    stop ladder raises ``AttributeError`` on Windows *before* any kill is
+    attempted — rung 3 fails on the platform where the ladder is needed most.
+    ``None`` is the honest answer, and the caller's job is then
+    :func:`terminate_process_tree`, which does what Windows actually offers.
+    """
+    import signal
+
+    return getattr(signal, "SIGKILL", None)
+
+
+class DetachedPopenKwargs(TypedDict, total=False):
+    """The ``Popen`` kwargs that detach a child. See :func:`detached_popen_kwargs`.
+
+    A TypedDict rather than ``dict[str, Any]`` so the KEYS are known to the
+    analyzer at every spread site: an opaque map made every ``Popen(...)`` call
+    that passed it unverifiable, and the type parameter pyright then inferred
+    (``str``, from a spread it could not see through) disagreed with the
+    declared ``Popen[bytes]`` of the runtime spawn.
+    """
+
+    start_new_session: bool
+    creationflags: int
+
+
+def detached_popen_kwargs() -> DetachedPopenKwargs:
+    """``Popen`` kwargs that REALLY detach a child, per platform.
+
+    On POSIX this is ``start_new_session=True`` (``setsid``): the child leaves
+    this process group, so a Ctrl-C in this terminal does not reach it and it
+    outlives us.
+
+    WINDOWS SILENTLY IGNORES ``start_new_session`` — ``Popen`` documents it
+    "(POSIX only)" and the Windows ``_execute_child`` parameter is literally
+    named ``unused_start_new_session``. No error is raised, so the flag looks
+    honoured while the child keeps the parent's console: ``CTRL_C_EVENT`` in
+    that console and a console close both reach it, which is precisely what
+    the callers pass the flag to prevent. The platform's equivalent is
+    ``DETACHED_PROCESS`` (no console inherited at all) plus
+    ``CREATE_NEW_PROCESS_GROUP`` (a group of its own, so a targeted
+    ``CTRL_BREAK_EVENT`` can still reach only it). ``CREATE_NO_WINDOW`` is
+    deliberately NOT used here: the documented behaviour is that it is ignored
+    when combined with ``DETACHED_PROCESS``, and it says nothing about console
+    inheritance, which is the property this function is about.
+
+    Returned as kwargs rather than a boolean so a caller merges them into its
+    own ``Popen``/``create_subprocess_*`` call and cannot half-apply them.
+    """
+    if is_windows():  # pragma: no cover - exercised on Windows hosts
+        creationflags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)) | int(
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        )
+        return {"creationflags": creationflags}
+    return {"start_new_session": True}
+
+
+def terminate_process_tree(pid: int, *, force: bool = False) -> bool:
+    """Stop ``pid`` and its descendants; True when a stop was DELIVERED.
+
+    POSIX signals the process GROUP when the pid leads one — a shell tool child
+    is spawned ``start_new_session``, so its pgid IS its pid — and signals the
+    pid alone when it does not, which is the case that matters: `killpg` there
+    would target the group the CALLER belongs to. ``force`` selects ``SIGKILL``
+    over ``SIGTERM``.
+
+    WINDOWS HAS NO SIGNAL TO DELIVER AND THE ``force`` FLAG CANNOT BE HONOURED:
+    a detached child has no console to receive ``CTRL_BREAK_EVENT``, and
+    ``TerminateProcess`` — what ``taskkill`` reaches for — is the only stop the
+    kernel offers. Both modes therefore terminate; ``force`` only decides
+    whether ``taskkill`` is given ``/F``, and the graceful rung on this platform
+    is the control socket's ``stop`` op, which the stop ladder tries first.
+    ``taskkill /T`` rather than ``TerminateProcess`` on the one pid because the
+    descendants are the point.
+
+    Never raises: a caller is on a stop path where an exception would abort the
+    ladder that is trying to make the process go away. False means "nothing was
+    there to stop" (the pid is already gone), not "the stop failed quietly".
+    """
+    if pid <= 0:
+        return False
+    if is_windows():  # pragma: no cover - exercised on Windows hosts
+        return _taskkill_tree(pid, force=force)
+    import signal
+
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        # The pid is gone, or is not one we may ask about. Signal the PID and
+        # let it report the same thing rather than inventing an answer.
+        #
+        # NOT ``pgid = pid`` (agent review round 2, recorded item): that makes
+        # the comparison below true and takes the ``killpg`` branch, which is
+        # the OPPOSITE of this comment -- and `killpg` on a pid we could not
+        # prove leads a group may signal the group THIS CALLER belongs to,
+        # killing the caller and its siblings. The comment stated the intent;
+        # the code did something else. None here means "signal the pid alone".
+        pgid = None
+    try:
+        if pgid == pid:
+            # The pid LEADS its own group: a shell command spawned
+            # `start_new_session` is exactly this, and killing only the leader
+            # would leave the children it spawned behind. `killpg` is what the
+            # callers did before this helper existed.
+            os.killpg(pgid, sig)
+        else:
+            # NOT a group leader. `killpg(getpgid(pid))` here would signal the
+            # group this caller itself belongs to — killing the caller and its
+            # siblings — which is how a stop helper becomes the incident. Signal
+            # the pid, which is the tree this process actually owns.
+            os.kill(pid, sig)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _taskkill_tree(pid: int, *, force: bool) -> bool:  # pragma: no cover - Windows only
+    """``taskkill`` the pid's tree; see :func:`terminate_process_tree`.
+
+    ``SystemRoot``-anchored rather than PATH-resolved, matching
+    ``tools.eval``'s last-resort killer: a hijacked PATH must not be able to
+    redirect a kill. ``taskkill`` exits 128 for "no such process", which is the
+    already-gone answer rather than a failure.
+    """
+    taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+    argv = [taskkill, "/PID", str(pid), "/T"]
+    if force:
+        argv.append("/F")
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            argv,
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _is_zombie_state(state: str) -> bool:
@@ -124,7 +485,7 @@ def zombie_states(pids: Iterable[int]) -> dict[int, bool]:
     would reach through a doomed ``/bin/ps`` fork, without the fork.
     """
     wanted = sorted({int(pid) for pid in pids if int(pid) > 0})
-    if not wanted or os.name == "nt":
+    if not wanted or is_windows():
         return {}
     if os.path.isdir("/proc"):
         # Linux: no subprocess needed, and no fork for the whole set.

@@ -60,6 +60,16 @@ def config_dir() -> Path:
     Tests monkeypatch the variable after the module is imported, and a module
     constant would freeze whatever the first importer saw — including, for a test
     session, the developer's real home directory.
+
+    **The same home dot-directory on every platform, Windows included, and that
+    is deliberate.** ``log_dir`` below asks ``%LOCALAPPDATA%`` for its root while
+    this one does not, which reads as an omission; it is not. On Windows
+    ``%APPDATA%`` is the roaming profile, so relocating credentials, the secret
+    store and session transcripts there would SYNC them between machines — the
+    opposite of what this directory is for. A single known root also means one
+    path for an operator to back up, one for every platform's docs to name, and
+    no migration for existing installs (audit D16). Do not "fix" this to match
+    ``log_dir``: logs are disposable and roam safely; these are not and do not.
     """
     override = os.environ.get(CONFIG_DIR_ENV)
     if override:

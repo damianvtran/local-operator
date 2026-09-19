@@ -65,10 +65,12 @@ class _Launcher:
 
     def __init__(self, outcomes: dict[str, int | None], monkeypatch) -> None:
         self.attempts: list[list[str]] = []
+        self.launch_kwargs: list[dict[str, object]] = []
         self.outcomes = outcomes
 
-        def fake_popen(argv, **_kwargs):
+        def fake_popen(argv, **kwargs):
             self.attempts.append(list(argv))
+            self.launch_kwargs.append(kwargs)
             outcome = self.outcomes.get(argv[0], 1)
 
             class _Process:
@@ -393,6 +395,30 @@ def test_a_configured_launch_command_is_used_verbatim_with_the_session_id(monkey
     assert resume_click.open_session("b" * 12) is True
     assert launcher.attempts == [["my-app", f"--open={'b' * 12}", "--new"]]
     assert no_viewer == []
+
+
+def test_the_launcher_is_spawned_detached_from_this_process(monkeypatch, no_viewer):
+    """A click handler macOS reaps must not take the launched app down with it.
+
+    Asserted as the PROPERTY and not as a literal kwarg, because on POSIX the
+    two spellings are identical by construction: ``start_new_session=True``
+    (what this rung always passed) IS ``procstate.detached_popen_kwargs()`` on
+    this platform — the flag is documented "(POSIX only)" and silently ignored
+    on Windows, which is the platform the shared helper exists for. So the
+    POSIX answer must not move, and on Windows the detachment must come from
+    ``creationflags`` instead.
+    """
+    from local_operator import procstate
+
+    monkeypatch.setattr(resume_click, "_configured_launch_command", lambda: ["my-app"])
+    launcher = _Launcher({"my-app": 0}, monkeypatch)
+
+    assert resume_click.open_session("d" * 12) is True
+    assert launcher.launch_kwargs, "the app is spawned, not run in-process"
+    if procstate.is_windows():
+        assert "creationflags" in launcher.launch_kwargs[0]
+    else:
+        assert launcher.launch_kwargs[0].get("start_new_session") is True
 
 
 def test_the_npm_bin_is_preferred_and_the_flag_shape_is_exact(monkeypatch, no_viewer):

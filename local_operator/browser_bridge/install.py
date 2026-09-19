@@ -1,8 +1,14 @@
-"""Install and supervise the browser bridge on macOS or Linux.
+"""Install and supervise the browser bridge on macOS, Linux or Windows.
 
 The unit re-enters this interpreter's package rather than pinning a checkout;
 updating the installed Local Operator package therefore updates the daemon on
 its next restart without rewriting supervisor configuration.
+
+Three supervisors, one per platform — a LaunchAgent plist on macOS, a
+``systemd --user`` unit on Linux, a Task Scheduler task on Windows — discovered
+and rendered by :mod:`local_operator.supervisors`. This module used to be the
+ONLY daemon whose supervisor knowledge was platform-correct, which is why the
+shared half moved there rather than being copied three more times.
 """
 
 from __future__ import annotations
@@ -12,7 +18,6 @@ import json
 import os
 import plistlib
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -22,7 +27,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from local_operator import launchd, procname
+from local_operator import launchd, procname, procstate, supervisors
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import (
     DEFAULT_PORT,
@@ -41,6 +46,23 @@ SYSTEMD_UNIT = "local-operator-browser.service"
 #: The config root the default label belongs to. Compared against the resolved
 #: root to decide whether this run is the default install or an isolated one.
 _DEFAULT_CONFIG_DIRNAME = ".local-operator"
+
+#: Whether this process is on Windows, read ONCE as a module constant.
+#:
+#: A named constant rather than an inline ``os.name`` read, for the reason
+#: every other platform branch in this tree gives (``secrets.keys``,
+#: ``group_reaper``, ``procstate``): a test can only flip an inline read by
+#: patching ``os.name`` PROCESS-WIDE, and ``pathlib`` picks its flavour from
+#: ``os.name`` at call time — so the next ``Path(...)`` anywhere in the test
+#: process becomes a ``WindowsPath`` and refuses to exist on the host running
+#: the test. Patching this name flips the branch and nothing else.
+_IS_WINDOWS = os.name == "nt"
+
+#: The host that can run the Windows log command. ``powershell.exe`` ships with
+#: every supported Windows; ``pwsh`` (PowerShell 7) is an optional install, so
+#: naming it would reintroduce the very defect the Windows ``logs_command``
+#: branch fixes — a command that is not on the machine.
+_WINDOWS_POWERSHELL = "powershell"
 
 
 def _passwd_home() -> Path:
@@ -221,7 +243,7 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
 #: product would still be pointing users at a file nothing writes. That is the
 #: exact defect being fixed, so the version gate is what keeps the emitted unit
 #: and :func:`log_location` telling the same story on every systemd.
-MIN_SYSTEMD_APPEND_VERSION = 240
+MIN_SYSTEMD_APPEND_VERSION = supervisors.MIN_SYSTEMD_APPEND_VERSION
 
 
 class _Detect:
@@ -238,17 +260,12 @@ def systemd_version() -> int | None:
     ``systemctl --version`` prints e.g. ``systemd 255 (255.4-1ubuntu8.17)``.
     Unknown degrades to "assume old", which is the safe direction: the unit
     stays loadable and the output goes to the journal.
+
+    Delegates to :mod:`local_operator.supervisors`, and stays a module-level
+    function here because this module's own tests patch it to exercise the
+    ``append:`` version gate.
     """
-    if not shutil.which("systemctl"):
-        return None
-    try:
-        result = subprocess.run(
-            ["systemctl", "--version"], capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    match = re.search(r"systemd\s+(\d+)", result.stdout or "")
-    return int(match.group(1)) if match else None
+    return supervisors.systemd_version()
 
 
 def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = _DETECT) -> str:
@@ -277,20 +294,47 @@ def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = 
     # detection happens to succeed. Caught by CI, whose Linux runners detect a
     # modern systemd and so silently took the redirect path.
     resolved = systemd_version() if isinstance(version, _Detect) else version
-    redirect = ""
+    post_lines: list[str] = []
     if resolved is not None and resolved >= MIN_SYSTEMD_APPEND_VERSION:
-        redirect = f"StandardOutput=append:{log_path()}\nStandardError=append:{log_path()}\n"
-    return f"""[Unit]
-Description=Local Operator browser bridge
+        post_lines = [
+            f"StandardOutput=append:{log_path()}",
+            f"StandardError=append:{log_path()}",
+        ]
+    # One renderer for all four daemons (see supervisors.render_systemd_unit);
+    # this call is the browser's parameterisation of it and its output is
+    # byte-for-byte what this function wrote before.
+    return supervisors.render_systemd_unit(
+        description="Local Operator browser bridge",
+        exec_start=command,
+        post_lines=post_lines,
+    )
 
-[Service]
-ExecStart={command}
-Restart=on-failure
-RestartSec=5
-{redirect}
-[Install]
-WantedBy=default.target
-"""
+
+def _logs_use_journal() -> bool:
+    """Whether this platform's daemon output goes to the journal, not a file.
+
+    One home for the decision because TWO callers ask it: :func:`logs_command`
+    (which argv to run) and :func:`logs_read_the_log_file` (whether a missing
+    file means anything). Kept private — callers ask their own question, not
+    this one.
+    """
+    return _supervisor() == "systemctl" and not _log_file_is_written()
+
+
+def logs_read_the_log_file() -> bool:
+    """Whether this platform's ``logs_command`` reads :func:`log_path` itself.
+
+    The CLI asks this to tell "the daemon has not run under a supervisor here"
+    (no file, and the command WOULD read one) apart from "the command reads
+    somewhere else entirely" (the journal, where an absent file says nothing).
+    It used to key on ``command_line[0] == "tail"``, which identified the case
+    only while every such platform ran ``tail`` — the Windows arm now runs
+    PowerShell's ``Get-Content`` against a file the scheduled task really
+    redirects into, so the literal name of one binary stopped being the
+    question. The question was always "does this command read the log file?",
+    and it is asked that way now.
+    """
+    return not _logs_use_journal()
 
 
 def logs_command(lines: int = 100, *, follow: bool = False) -> list[str]:
@@ -299,12 +343,34 @@ def logs_command(lines: int = 100, *, follow: bool = False) -> list[str]:
     Keeping this in one place is what stops the three surfaces disagreeing:
     on a systemd too old for ``append:`` the log file genuinely does not exist,
     and the honest answer is ``journalctl``, not a ``tail`` that cannot open it.
+
+    WINDOWS has no ``tail`` AT ALL (audit C9), so the command this used to
+    return on every non-systemd platform named an executable no machine there
+    has — and because ``lop browser logs`` RUNS this argv rather than printing
+    advice, the Windows surface failed with "cannot run `tail`" instead of
+    showing the log. The platform's equivalent is PowerShell's
+    ``Get-Content -Tail n [-Wait] <path>``, and the file it reads DOES exist
+    there: the scheduled task's action redirects the daemon's stdout/stderr
+    into :func:`log_path` (see ``supervisors.render_task_xml``).
     """
-    if _supervisor() == "systemctl" and not _log_file_is_written():
+    if _logs_use_journal():
         command = ["journalctl", "--user", "-u", systemd_unit(), "-n", str(lines)]
         if follow:
             command.append("-f")
         return command
+    if _IS_WINDOWS:
+        # ``Get-Content`` is a CMDLET, not an executable: ``CreateProcess``
+        # cannot start it, so the argv has to name the host that can run it.
+        # Handing back the bare cmdlet would move the failure one layer down
+        # (``subprocess.call`` -> FileNotFoundError) rather than fix it.
+        # ``-NoProfile`` keeps the operator's profile out of a diagnostic.
+        cmdlet = f"Get-Content -Tail {int(lines)}"
+        if follow:
+            cmdlet += " -Wait"
+        # Single-quoted because PowerShell is the language here; a path holding
+        # an apostrophe is escaped the way PowerShell escapes one.
+        cmdlet += " '" + str(log_path()).replace("'", "''") + "'"
+        return [_WINDOWS_POWERSHELL, "-NoProfile", "-Command", cmdlet]
     command = ["tail", "-n", str(lines)]
     if follow:
         command.append("-f")
@@ -330,6 +396,18 @@ def log_location() -> str:
 
 
 def _domain() -> str:
+    """``gui/<uid>`` — the launchd domain every caller feeds to ``launchctl``.
+
+    The platform guard lives INSIDE this function rather than at its call
+    sites, each of which is behind ``if kind == supervisors.LAUNCHCTL``. Two
+    reasons: ``os.getuid`` does not exist off POSIX, so this was an
+    ``AttributeError`` waiting for any caller whose arm was not checked; and a
+    guard that lives at the call site is invisible — to a reader, and to the
+    static scan that grades this branch — which cannot see that the ARM is
+    unreachable. Here the function is safe to call anywhere on its own merits.
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
     return f"gui/{os.getuid()}"
 
 
@@ -339,15 +417,50 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
 
 #: What to tell a user whose platform has no user-level service supervisor.
 #: One string shared by install/uninstall/start/stop/restart so the entry
-#: points cannot drift into describing the same machine differently.
-NO_SUPERVISOR_ERROR = (
-    "no supported user service supervisor found (launchctl on macOS, "
-    "systemctl --user on Linux); run `lop browser serve` in the foreground"
-)
+#: points cannot drift into describing the same machine differently. Composed
+#: by :mod:`local_operator.supervisors` (which lists every supervisor that
+#: WOULD work, on every platform) with this daemon's own foreground command.
+NO_SUPERVISOR_ERROR = supervisors.no_supervisor_error("lop browser serve")
+
+#: Task Scheduler task name (Windows). Per-config-root like ``label()`` and for
+#: the same reason: the user's task folder is a global namespace, so two roots
+#: sharing one name would evict each other.
+TASK_NAME = "Local Operator browser"
+
+
+def task_name() -> str:
+    """The Windows task name for this config root; the plain name for the default."""
+    suffix = _root_suffix()
+    return TASK_NAME if not suffix else f"{TASK_NAME}{suffix}"
+
+
+def _registration_name() -> str:
+    """How the supervisor answering here names this daemon's registration.
+
+    The ``status`` payload's ``supervisor`` field, and the one place the three
+    spellings are chosen. Keyed on :func:`_supervisor` — the capability — rather
+    than on ``sys.platform``, which is the convention every other branch in this
+    module already follows: the platform-only version named a launchd label on a
+    darwin without ``launchctl`` and a systemd unit on a Linux without systemd,
+    i.e. a registration that cannot exist.
+    """
+    kind = _supervisor()
+    if kind == supervisors.LAUNCHCTL:
+        return label()
+    if kind == supervisors.SYSTEMCTL:
+        return systemd_unit()
+    if kind == supervisors.SCHTASKS:
+        return task_name()
+    return "none"
+
+
+def task_record_path() -> Path:
+    """Our own copy of the registered task (Task Scheduler keeps the original)."""
+    return config_dir() / "browser-bridge-task.xml"
 
 
 def _supervisor() -> str | None:
-    """``"launchctl"``, ``"systemctl"``, or ``None`` when neither is usable.
+    """``"launchctl"``, ``"systemctl"``, ``"schtasks"``, or ``None``.
 
     Guarding on the BINARY rather than on ``sys.platform`` is the whole point.
     ``subprocess.run(..., check=False)`` suppresses a non-zero exit status but
@@ -357,33 +470,21 @@ def _supervisor() -> str | None:
     without systemd) and on win32, which fell into the same branch. Reproduced
     before this fix: ``start``, ``stop``, ``restart`` and ``uninstall`` all
     raised ``FileNotFoundError: 'systemctl'``.
+
+    The discovery itself lives in :func:`local_operator.supervisors.supervisor`
+    now that three other daemons need the same answer; this stays as the
+    module-level seam the tests patch.
     """
-    if sys.platform == "darwin" and shutil.which("launchctl"):
-        return "launchctl"
-    if sys.platform.startswith("linux") and shutil.which("systemctl"):
-        return "systemctl"
-    return None
+    return supervisors.supervisor()
 
 
 def _systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["systemctl", "--user", *args], capture_output=True, text=True, timeout=30
-    )
-
-
-#: systemd's message when there is no user D-Bus to talk to — the normal state
-#: over plain SSH without lingering.
-_NO_BUS_MARKERS = ("Failed to connect to bus", "No medium found", "XDG_RUNTIME_DIR")
+    return supervisors.systemctl_user(*args)
 
 
 def linger_remedy() -> str:
-    user = os.environ.get("USER") or "$USER"
-    return (
-        "systemd has no user session bus for this login (normal over plain "
-        "SSH). Enable lingering so the user manager starts at boot and "
-        f"survives logout:\n    loginctl enable-linger {user}\n"
-        "then re-run `lop browser install`."
-    )
+    """The shared "no user manager" remedy, plus THIS daemon's recovery command."""
+    return supervisors.linger_remedy() + "then re-run `lop browser install`."
 
 
 def _translate_systemctl_error(stderr: str) -> str:
@@ -391,12 +492,10 @@ def _translate_systemctl_error(stderr: str) -> str:
 
     The raw stderr was surfaced verbatim — truthful, but it left the user to
     discover ``loginctl enable-linger`` on their own, and nothing in the
-    product named it.
+    product named it. ``limit=300`` is this module's historical truncation,
+    kept so the messages this daemon prints do not change length.
     """
-    text = (stderr or "").strip()
-    if any(marker in text for marker in _NO_BUS_MARKERS):
-        return f"{text[:200]}\n\n{linger_remedy()}" if text else linger_remedy()
-    return text[:300]
+    return supervisors.translate_systemctl_error(stderr, remedy=linger_remedy(), limit=300)
 
 
 def enable_linger() -> bool:
@@ -414,20 +513,7 @@ def enable_linger() -> bool:
     down host), and an install that otherwise succeeded must not be reported as
     failed over it.
     """
-    binary = shutil.which("loginctl")
-    if not binary:
-        return False
-    user = os.environ.get("USER")
-    try:
-        result = subprocess.run(
-            [binary, "enable-linger", *([user] if user else [])],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
+    return supervisors.enable_linger()
 
 
 def health(port: int = DEFAULT_PORT, timeout: float = 3.0) -> dict[str, Any] | None:
@@ -745,6 +831,36 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
                     "error": _translate_systemctl_error(loaded.stderr),
                 }
             steps.append(f"enabled the systemd user service ({systemd_unit()})")
+    elif supervisor == "schtasks":
+        # Task Scheduler cannot redirect a task's stdout, so the log the other
+        # two platforms get from launchd/systemd is provided by the task's own
+        # command line (see supervisors.render_task_xml); log_path() stays the
+        # one place every log surface points at on every platform.
+        log_path().parent.mkdir(parents=True, exist_ok=True)
+        if not dry_run:
+            xml = render_task_xml(port)
+            # The record's parent may not exist yet on a first install (it is the
+            # config root itself), and an install must not fail on that.
+            task_record_path().parent.mkdir(parents=True, exist_ok=True)
+            task_record_path().write_text(xml, encoding="utf-8")
+            ok, detail = supervisors.create_task(task_name(), xml)
+            if not ok:
+                return {
+                    "ok": False,
+                    "steps": steps,
+                    "error": f"schtasks could not register the task: {detail}",
+                }
+            started = supervisors.schtasks(*supervisors.task_run_args(task_name()))
+            if started.returncode:
+                return {
+                    "ok": False,
+                    "steps": steps,
+                    "error": (
+                        "the task was registered but could not be started: "
+                        f"{((started.stderr or started.stdout) or '').strip()[:300]}"
+                    ),
+                }
+        steps.append(f"registered the scheduled task ({task_name()})")
     else:
         return {"ok": False, "steps": steps, "error": NO_SUPERVISOR_ERROR}
     if dry_run:
@@ -764,11 +880,17 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
 
 
 def _own_registration_exists() -> bool:
-    """Whether this config root has a supervisor file under its OWN name."""
-    if sys.platform == "darwin":
+    """Whether this config root has a supervisor registration under its OWN name."""
+    supervisor = _supervisor()
+    if supervisor == "launchctl":
         return plist_path().exists()
-    if sys.platform.startswith("linux"):
+    if supervisor == "systemctl":
         return systemd_path().exists()
+    if supervisor == "schtasks":
+        # The task's own store, not our record file: the record is evidence an
+        # install ran, and the question here is whether the task is registered.
+        registered, _running, _detail = supervisors.task_state(task_name())
+        return registered
     return False
 
 
@@ -1040,6 +1162,17 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
                 )
         else:
             steps.append("removed the systemd user service")
+    elif supervisor == "schtasks":
+        if not dry_run:
+            deleted, detail = supervisors.delete_task(task_name())
+            task_record_path().unlink(missing_ok=True)
+            if not deleted:
+                ok = False
+                steps.append(f"could not remove the scheduled task: {detail}")
+            else:
+                steps.append(f"removed the scheduled task ({task_name()})")
+        else:
+            steps.append("removed the scheduled task")
     elif not purge:
         # Nothing to unregister and nothing else asked for: say so rather than
         # claiming a removal that never happened.
@@ -1096,11 +1229,49 @@ def service_action(action: str) -> dict[str, object]:
     # something reloads it. Reload once, then retry, rather than making the
     # user discover `systemctl --user daemon-reload` themselves.
     unit = SYSTEMD_UNIT if adopted else systemd_unit()
+    if supervisor == "schtasks":
+        name = task_name()
+        if action in ("stop", "restart"):
+            # `/End` on a task that is not running exits non-zero, which for a
+            # stop is the state the caller asked for; only an unregistered task
+            # is a real failure, and its stderr says which it was.
+            ended = supervisors.schtasks(*supervisors.task_end_args(name))
+            if ended.returncode:
+                detail = ((ended.stderr or ended.stdout) or "").strip()
+                if "running" not in detail.lower():
+                    return {"ok": False, "error": detail[:300]}
+        if action in ("start", "restart"):
+            started = supervisors.schtasks(*supervisors.task_run_args(name))
+            return {
+                "ok": started.returncode == 0,
+                "error": ((started.stderr or started.stdout) or "").strip()[:300],
+            }
+        return {"ok": True, "error": ""}
     result = _systemctl_user(action, unit)
     if result.returncode and action in ("start", "restart") and systemd_path().exists():
         _systemctl_user("daemon-reload")
         result = _systemctl_user(action, unit)
     return {"ok": result.returncode == 0, "error": _translate_systemctl_error(result.stderr)}
+
+
+def render_task_xml(port: int = DEFAULT_PORT) -> str:
+    """The Windows Task Scheduler task for this daemon.
+
+    No ``environment``: this daemon's plist and unit record nothing either — the
+    config root travels in the task NAME (see :func:`task_name`) and in the log
+    path — so the Windows arm matches the other two rather than inventing a
+    third contract. The log IS set: Task Scheduler has no stdout redirection, so
+    without it a Windows user has no daemon output at all while every log
+    surface still points at ``log_path()``.
+    """
+    image = procname.supervised_image() or Path(sys.executable)
+    return supervisors.render_task_xml(
+        description="Local Operator browser bridge",
+        image=str(image),
+        argv=["-m", "local_operator.browser_bridge.daemon", "--port", str(port)],
+        log=log_path(),
+        user_id=supervisors.current_user_id(),
+    )
 
 
 def status(port: int | None = None) -> dict[str, object]:
@@ -1128,10 +1299,16 @@ def status(port: int | None = None) -> dict[str, object]:
         # The location the output is ACTUALLY readable from, which on a systemd
         # too old for `append:` is the journal, not a file that never exists.
         "log": log_location(),
-        # Which config root's supervisor registration this is reporting on.
-        # Without it two isolated daemons produce identical status output and
-        # there is no way to tell which instance you are talking to.
-        "supervisor": label() if sys.platform == "darwin" else systemd_unit(),
+        # Which supervisor REGISTRATION this is reporting on, spelled the way
+        # that supervisor names it: two isolated daemons otherwise produce
+        # identical status output with no way to tell which instance you are
+        # talking to. Chosen by the CAPABILITY (``_supervisor()``), not by
+        # ``sys.platform``: a darwin without ``launchctl`` has no label and a
+        # systemd-less Linux has no unit, and naming one anyway reported a
+        # registration that cannot exist. ``none`` is the honest answer for a
+        # host with no supervisor at all — which is a state this module's other
+        # branches already handle rather than assume away.
+        "supervisor": _registration_name(),
         "config_root": str(config_dir()),
         # Named, not merely folded into `installed`: this is the one thing that
         # explains why a daemon is running under a name the CLI would not

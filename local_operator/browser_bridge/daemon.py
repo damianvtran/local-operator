@@ -215,6 +215,23 @@ SERVER_GOING_DOWN_CLOSE_CODE = 1012
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
 
+#: Whether the mode bits :func:`_private_write` sets MEAN confidentiality here.
+#:
+#: On POSIX they are the whole argument: 0700 on the directory and 0600 on the
+#: record are what stop another local account reading the token hashes. On
+#: WINDOWS THEY ARE INERT — ``os.chmod`` there can only toggle the read-only
+#: flag (CPython's docs: "All other bits are ignored"), so the same call grants
+#: and restricts nothing (audit C8). Reading the platform ONCE into a named
+#: constant is deliberate rather than inline ``os.name``: it is the one name a
+#: test can flip, where patching ``os.name`` process-wide makes ``pathlib``
+#: build a ``WindowsPath`` and refuse on the host running the test.
+_MODE_BITS_ARE_CONFIDENTIALITY = os.name != "nt"
+
+#: Latched so the platform notice is emitted at most once per process:
+#: ``_private_write`` runs on every pairing, every revocation and every driver
+#: promotion, and a warning per write would be noise the reader learns to skip.
+_mode_notice_logged = False
+
 #: How many links with NO pairing may hold a socket at once before the oldest is
 #: retired. Every token-less dial is admitted, because that is how a second
 #: install asks to pair, and each one holds a socket, a label, a link entry and a
@@ -258,12 +275,63 @@ SUPERVISOR_BACKOFF_CAP_S = 30.0
 _WAIT_TICK_S = 0.5
 
 
+def _note_unrestricted_mode_once(path: Path) -> None:
+    """Say once that this platform's mode bits do not restrict the record.
+
+    WHY A LOG LINE AT ALL: every other protection on this file is real — the
+    write is temporary-then-``os.replace``, the token is stored hashed — so the
+    ONE inert step is exactly the one an operator would assume was doing the
+    work. The daemon's stderr is its log file, which ``lop browser logs``
+    reads, and that is the surface where this becomes visible rather than
+    silent. Said once, on the first write, because the sentence is about the
+    platform rather than about the write.
+    """
+    global _mode_notice_logged
+    if _mode_notice_logged:
+        return
+    _mode_notice_logged = True
+    logger.warning(
+        "browser bridge: %s holds a pairing token, and on this platform the "
+        "mode lop sets does not restrict it — Windows chmod() only toggles the "
+        "read-only flag, so 0600 is inert. What protects the file instead is "
+        "the access control list its directory inherited from your profile, "
+        "which lop neither creates nor verifies; keep that directory on a "
+        "local disk owned by your account.",
+        path,
+    )
+
+
 def _private_write(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    """Publish a JSON record as privately as this platform can.
+
+    The pairing record is the file that holds token hashes and the driver's
+    identity, so its protection is part of the gate rather than a nicety. The
+    write is temporary-then-``os.replace`` so a concurrent reader never sees a
+    half-written record (a full disk making a read fail as a write is the
+    defect class ``state.py`` documents).
+
+    ON WINDOWS THE MODES BELOW ARE INERT (:data:`_MODE_BITS_ARE_CONFIDENTIALITY`)
+    and are skipped rather than run for the look of it: ``os.chmod`` there only
+    toggles the read-only flag, so 0600 grants and restricts nothing, and a
+    reader of this function must not conclude the record is protected by it.
+    The ACL the config directory inherited from the profile is what protects
+    the file instead, ``mkdir(mode=...)`` is the one call that can create one
+    on Windows, and the limit is REPORTED rather than left to be discovered —
+    see :func:`_note_unrestricted_mode_once`.
+    """
+    # ``mode=`` as well as the chmod, and the two are not redundant: on POSIX
+    # the argument is masked by the umask and the chmod is what makes the mode
+    # exact, while on Windows it is the only thing that can create a directory
+    # ACL (the same reason ``secrets.keys.ensure_secrets_dir`` passes one).
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if _MODE_BITS_ARE_CONFIDENTIALITY:
+        os.chmod(path.parent, 0o700)
+    else:
+        _note_unrestricted_mode_once(path)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
     temporary.write_text(json.dumps(payload), encoding="utf-8")
-    os.chmod(temporary, 0o600)
+    if _MODE_BITS_ARE_CONFIDENTIALITY:
+        os.chmod(temporary, 0o600)
     os.replace(temporary, path)
 
 

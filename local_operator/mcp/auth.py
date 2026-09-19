@@ -734,7 +734,7 @@ async def open_browser_quietly(url: str) -> bool:
             return False
 
     try:
-        from local_operator import procname
+        from local_operator import procname, procstate
         from local_operator.interpreter import SAFE_PATH_FLAG
 
         # Named like every other process this product spawns: a user's OAuth
@@ -765,7 +765,12 @@ async def open_browser_quietly(url: str) -> bool:
             # Merged: the two streams are one diagnostic here, and a single
             # pipe cannot deadlock against itself the way two unread ones can.
             stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
+            # Detachment is platform-spelled, and `start_new_session=True` —
+            # which this passed unconditionally — is SILENTLY IGNORED on
+            # Windows (subprocess documents it "(POSIX only)"), so a login
+            # launched from a console this process is about to lose would have
+            # gone down with it.
+            **procstate.detached_popen_kwargs(),
         )
     except Exception:  # noqa: BLE001 — no browser is a degraded login, not a crash
         logger.debug("browser launcher failed to start", exc_info=True)
