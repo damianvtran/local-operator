@@ -94,7 +94,7 @@ async def _serve(tmp_path: Path, *, operator_cap: bytes | None) -> _Live:
     """
     root = config_dir()
     ConfigManager(root).set_config_value("tool_approval_mode", "ask")
-    session = FakeSession()
+    session = _AttachableSession()
     handle = ServingSessionHandle(
         session, asyncio.get_running_loop(), cwd=str(tmp_path), auto_approve=False
     )
@@ -940,6 +940,234 @@ async def test_a_real_detached_runtime_gets_the_capability_and_refuses_a_peer(
         # (3) THE GUARANTEE IS REPORTED IN THE CHILD'S OWN LOG.
         text = detachment._log_text(config_dir)
         assert "operator capability boundary on this host" in text, text[-2000:]
+    finally:
+        if child is not None:
+            detachment._reap(child, config_dir)
+        reset_operator_caps_for_tests()
+
+
+class _AttachableSession(FakeSession):
+    """A ``FakeSession`` a real follower can attach to.
+
+    ``AttachedSession`` — the client the desktop command route actually uses —
+    negotiates ``frontend_state``, so the runtime asks this session for a
+    frontend seed and a subscription. ``test_serving.FakeSession`` predates that
+    negotiation, and the double below adds the two members from the same store
+    ``test_server.FakeHandle`` uses, so the follower's dial completes for the
+    real reason rather than because the test switched frontend state off.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        from local_operator.session.frontend_state import (
+            FrontendModelSpec,
+            FrontendSessionState,
+            FrontendStateStore,
+        )
+
+        spec = FrontendModelSpec(provider="test", model_id="model", context_window=1_000_000)
+        self._frontend = FrontendStateStore(
+            FrontendSessionState(
+                session_id=self.session_id,
+                epoch="approval-seam",
+                cwd="/tmp",
+                conversation_title="seam",
+                selected_model=spec,
+                effective_model=spec,
+                context_window=1_000_000,
+            )
+        )
+
+    @property
+    def frontend_state_seed(self) -> Any:
+        return self._frontend.state
+
+    def subscribe_frontend(self, on_update: Any, *, display_window: bool = False) -> Any:
+        return self._frontend.subscribe(on_update)
+
+
+async def _never_take_over() -> Any:
+    raise AssertionError("a live owner must not be taken over in these tests")
+
+
+async def _follower(tmp_path: Path, record: Any) -> Any:
+    """A REAL ``AttachedSession`` on the record — the desktop route's own client.
+
+    ``POST /v1/desktop/sessions/{id}/commands`` does not dispatch a slash
+    itself: it calls ``bridge.remote.route_shared_slash(...)``, and
+    ``bridge.remote`` is exactly this object. So driving it here exercises the
+    desktop route's body — its op, its client, its presentation — without
+    standing up the FastAPI app and a bound bridge pool, which the desktop
+    suite covers separately.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    remote = await AttachedSession.connect(
+        record, "sess-1", config_dir=tmp_path, takeover_factory=_never_take_over
+    )
+    remote.subscribe(lambda _event: None)
+    return remote
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The desktop route's real code path, on a backend that did not spawn it.
+
+    ``DesktopSessionBridge`` engages a runtime for a session the app is asked to
+    open; for a session another process started (a terminal, launchd, a wake) the
+    pool attaches to THAT record and this process holds no capability for it, so
+    the loosening must be refused with the copy naming the remedies. Nothing here
+    weakens the app: reports and tightenings keep working (their own test is
+    above), and a backend that DID spawn the runtime keeps loosening, which is
+    the positive control that follows the shape of this one.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "sess-1").mkdir(parents=True, exist_ok=True)
+    reset_operator_caps_for_tests()  # nobody here spawned this runtime
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap())
+    remote = None
+    try:
+        remote = await _follower(tmp_path, live.record)
+        with pytest.raises(RuntimeError, match=_REFUSAL.split(" — ")[0]):
+            await remote.route_shared_slash("approvals", "auto")
+        assert live.handle._auto_approve is False
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_route_loosens_a_runtime_this_backend_did_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_cap: bytes
+) -> None:
+    """The POSITIVE CONTROL for the negative above, through the same path.
+
+    Without it, "the desktop route is refused" is satisfiable by a route that
+    refuses everything. Here this process DID start the runtime (the fixture
+    registers the capability against this process's pid, which is the record's),
+    so the app's own command route keeps loosening in one step — the operator's
+    criterion (2), on the client the desktop actually uses.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "sess-1").mkdir(parents=True, exist_ok=True)
+    live = await _serve(tmp_path, operator_cap=operator_cap)
+    remote = None
+    try:
+        remote = await _follower(tmp_path, live.record)
+        result = await remote.route_shared_slash("approvals", "auto")
+        assert live.handle._auto_approve is True, result
+        assert "auto" in json.dumps(result), result
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        await live.close(tmp_path)
+
+
+#: Modules allowed to name the capability at all. Every one of them either mints
+#: it, hands it over, demands it, presents it, or writes the sentence about it:
+#: anything else naming it is a place the value could come to rest — a record
+#: field, an `info` export, a projection, a log formatter.
+_CAPABILITY_MODULES = frozenset(
+    {
+        "local_operator/harness/approval.py",
+        "local_operator/mobile/attach_client.py",
+        "local_operator/mobile/daemon.py",
+        "local_operator/mobile/types.py",
+        "local_operator/session/runtime/launch.py",
+        "local_operator/session/runtime/process.py",
+        "local_operator/session/runtime/server.py",
+        "local_operator/tui/app.py",
+    }
+)
+
+
+def test_the_capability_name_appears_only_where_it_has_to() -> None:
+    """A source pin on the VALUE'S blast radius, not on a route.
+
+    The capability is a boundary only while it stays in memory. Every module in
+    the tree is checked for naming it, and the allowlist is the set that must:
+    the mint/handoff/comparison, the child's read, the seam that demands it, the
+    client that presents it, the HTTP boundary that drops it, the validator that
+    types it, and the TUI host that mints its own. A module `lop info` renders,
+    a serialization helper, or any other surface can therefore never quietly
+    start carrying it.
+
+    Read from the tree rather than from a list of imports, so a NEW module is
+    caught by being new rather than by being reviewed.
+    """
+    offenders: dict[str, int] = {}
+    for module in sorted((_TESTS_ROOT / "local_operator").rglob("*.py")):
+        relative = module.relative_to(_TESTS_ROOT).as_posix()
+        if relative in _CAPABILITY_MODULES:
+            continue
+        hits = module.read_text(encoding="utf-8").count("operator_cap")
+        if hits:
+            offenders[relative] = hits
+    assert offenders == {}, (
+        f"the operator capability is named in {sorted(offenders)}. It may only exist in the "
+        "handful of modules that mint, hand over, demand or present it: "
+        f"{sorted(_CAPABILITY_MODULES)}. "
+        "If a new module needs it, add it here deliberately — and check it is not a serializer, an "
+        "export, or a log path, which is where it would stop being a boundary."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+async def test_a_real_runtime_writes_the_capability_nowhere_it_could_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The not-at-rest claim on the REAL artifacts of a real spawn.
+
+    Holds a capability whose value this test knows, boots a real detached runtime
+    that received it, and then greps everything the child produced or published:
+    the discovery record, the child's own ``runtime.log``, and the stdio capture
+    the spawn keeps. Nothing may contain it — that is what "held only in memory"
+    has to mean for the claim to be worth anything.
+    """
+    from tests.unit.session.runtime import test_runtime_detachment as detachment
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _seed_real(config_dir)
+    detachment._isolate(monkeypatch, config_dir)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    reset_operator_caps_for_tests()
+
+    child = None
+    try:
+        child = launch_module._spawn_runtime(
+            _REAL_SESSION_ID, str(config_dir), defer_materialise=False
+        )
+        record = _wait_for_real_record(config_dir)
+        held = operator_cap_for(record.pid)
+        assert held is not None, "no capability was registered for the child we just spawned"
+        needle = held.hex()
+
+        record_file = config_dir / "run" / "mobile" / f"{record.pid}.json"
+        assert record_file.exists(), f"no record at {record_file}"
+        assert needle not in record_file.read_text(encoding="utf-8")
+
+        # The child's own log: give it a moment to have written its boot lines,
+        # bounded by the file appearing rather than by a wall-clock guess.
+        log_path = config_dir / "logs" / "runtime.log"
+        for _ in range(200):
+            if log_path.exists() and "session runtime started" in detachment._log_text(config_dir):
+                break
+            time.sleep(0.05)
+        log_text = detachment._log_text(config_dir)
+        assert "session runtime started" in log_text, log_text[-2000:]
+        assert needle not in log_text
+        # ...and the guarantee level IS reported there, so the file is a real
+        # artifact of this child rather than an empty one this assertion passes on.
+        assert "operator capability boundary on this host" in log_text, log_text[-2000:]
+
+        capture = getattr(child, "lop_capture_path", None)
+        if capture is not None and Path(capture).exists():
+            assert needle not in Path(capture).read_text(encoding="utf-8", errors="replace")
     finally:
         if child is not None:
             detachment._reap(child, config_dir)
