@@ -8635,9 +8635,8 @@ class BrowserParams(BaseModel):
         default="",
         description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
         "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view; for 'download', the control to click to start the "
-        "download (omit it when the page starts one on its own); for 'upload', "
-        "the file input to fill.",
+        "to bring into view; for 'download', the control that starts it; for "
+        "'upload', the file input to fill.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
     # One new field for the whole feature (the tool-surface ladder's rung 1):
@@ -8648,11 +8647,9 @@ class BrowserParams(BaseModel):
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "'upload' only: the local files to attach, one or more. Each must be a "
-            "real file the user can read; secrets and credential files are refused, "
-            "and so is a path inside the harness's own config directory. Absolute "
-            "paths work as written; relative ones resolve against the session's "
-            "working directory."
+            "'upload' only: the local files to attach, one or more. Credential "
+            "files and the harness's own config directory are refused; relative "
+            "paths resolve against the session's working directory."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -8686,8 +8683,7 @@ class BrowserParams(BaseModel):
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
         "(default 120, max 240); 'download' max seconds to wait for one to start "
-        "(default 120, max 600). Still pending after that? Tell the user, then "
-        "call await_access again.",
+        "(default 120, max 600).",
     )
 
 
@@ -11058,6 +11054,9 @@ async def _browser_download(
 
     kept: list[dict[str, Any]] = []
     refused: list[str] = []
+    # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
+    # symlink ENTRY is never settable there). Reported rather than implied.
+    unhardened: list[str] = []
     # The per-CALL cap is applied to the CANDIDATE list, BEFORE anything is
     # classified, renamed or audited (review round 1, R2). Truncating the kept
     # list after the loop deleted the extra files but left their `verdict=allow`
@@ -11172,7 +11171,12 @@ async def _browser_download(
         # directory is the real bound, and a failed chmod must not cost the file
         # it was protecting.
         if not files.chmod_private(final):
+            # NOT silent (review round 4): on Linux a symlink entry's own mode is
+            # not settable at all, and a tightened mode that did not happen is a
+            # claim the result must not imply. The 0700 session directory is
+            # still the bound, so this is a caveat rather than a failure.
             logger.warning("could not tighten the mode of the kept browser download %s", final)
+            unhardened.append(final.name)
         fact = files.stat_fact(final.name, final, declared_mime=declared)
         fact["sniffed"] = verdict.sniffed
         kept.append(fact)
@@ -11212,6 +11216,14 @@ async def _browser_download(
     if refused:
         lines.append("refused:")
         lines.extend(f"- {item}" for item in refused)
+    if unhardened:
+        lines.append(
+            "note: could not tighten the mode of "
+            + ", ".join(unhardened)
+            + " to 0600 (a symlink's own mode is not settable on this platform); the "
+            "0700 session directory is still the bound, but the file's own mode is "
+            "not private."
+        )
     text = "\n".join(lines)
     return _text(
         tool_call_id, "browser", text, details={"files": kept, "directory": str(directory)}
@@ -11448,8 +11460,19 @@ def _host_byte_count(raw: Any) -> tuple[int, str]:
     """
     if isinstance(raw, int) and not isinstance(raw, bool):
         return raw, ""
-    if isinstance(raw, str) and raw.strip().lstrip("+-").isdigit():
-        return int(raw.strip()), ""
+    if isinstance(raw, str):
+        text = raw.strip()
+        body = text[1:] if text[:1] in ("+", "-") else text
+        # `str.isdigit()` alone is not enough, and round 4 measured why: it is
+        # TRUE for Unicode digits `int()` rejects ("\u00b2"), and it says nothing
+        # about CPython's ~4300-digit limit on `int()` from a string ("9"*4301
+        # raises `ValueError`). `isascii()` plus the try/except closes both, so a
+        # value the host typed can never raise out of the tool.
+        if body.isascii() and body.isdigit():
+            try:
+                return int(text), ""
+            except ValueError:
+                pass
     from local_operator import browser_files as files
 
     # The offending value lands in the transcript and the audit row, so it goes
@@ -12467,41 +12490,39 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
+            # Footprint: this description rides in EVERY session's cache prefix, so
+            # the per-action detail lives in `guide://browser` (the playbook the
+            # model is pointed at below) and in the parameter descriptions, and
+            # this string carries only what a model needs to CHOOSE the tool and
+            # call it correctly. The context-budget guard measures the whole
+            # surface and it is why the download/upload sentence is one clause
+            # rather than the four the design first drafted (AGENTS.md,
+            # "tool-surface footprint ladder"; see the round-4 remediation).
             "Drive the user's REAL browser (the Local Operator desktop app's browser "
             "tab, their paired browser extension, or a cmux browser "
-            "panel): open/goto a URL, read page text, snapshot the "
-            "accessibility tree for click refs, click, type, scroll, read console "
-            "logs, screenshot, close. Cookies and logins persist across calls and "
+            "panel): open/goto a URL, read text, snapshot for click refs, click, type, "
+            "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
             "to, so this reaches authenticated pages a throwaway headless browser "
-            "cannot. 'scroll' pages the view (default: one screen down) and "
-            "reports whether more content remains; 'logs' returns the page's "
-            "console output and uncaught exceptions for debugging web apps. "
+            "cannot. "
             "Parallel "
             "sessions each drive their own tab: a fresh 'open' creates one NEW "
             "tab owned by this session; reuse it because later opens navigate it. "
-            "Before your final response, call 'close' unless the user explicitly "
-            "needs it left open for a pending or immediately continuing interaction. "
-            "'tabs' lists every agent-driven tab including other sessions' "
-            "(handles are redacted: awareness-only, it cannot "
-            "drive or close anything — except a tab the user handed over, listed in "
-            "full for 'open'), and 'close' ends only your own tab. "
+            "Before your final response, call 'close' unless the user needs it left "
+            "open for a pending interaction. "
+            "'tabs' lists agent-driven tabs including other sessions' "
+            "(awareness-only: only your own tab can be driven or closed). "
             "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
             "your turn with 'retain' and end that hold with 'release'. "
             "'scroll', 'logs' and "
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
-            "'download' saves what the page offers into this session's browser download "
-            "directory (private, 0700, owned by the harness, reported as an absolute path; "
-            "nothing executable is ever kept), and 'upload' attaches local files to a "
-            "page's file input. "
+            "'download' saves what the page offers into this session's private "
+            "download directory, and 'upload' attaches local files to a page's file "
+            "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt in the extension popup "
-            "or the app's browser tab, "
-            "and 'await_access' before navigating again. "
-            "Use it for every "
-            "screenshot and page interaction; never install or script a browser "
-            "engine instead."
+            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "it, and 'await_access' before navigating again. "
+            "Never install or script a browser engine instead."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write

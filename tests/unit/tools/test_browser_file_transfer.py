@@ -577,9 +577,15 @@ def test_the_mode_change_lands_on_the_entry_not_on_a_symlink_target(tmp_path: Pa
     An in-root symlink is a legitimate candidate (containment passes, because its
     target is inside the root), and the old `os.chmod` tightened the TARGET — a
     file this call did not land, does not report as an artifact, and did not
-    choose: the page wrote the link. The mode change belongs to the entry under
-    the name the sentence carries. The target here sits in a subdirectory so it is
-    not itself a candidate, which keeps the two modes independently observable.
+    choose: the page wrote the link. The target here sits in a subdirectory so it
+    is not itself a candidate, which keeps the two modes independently observable.
+
+    Platform-shaped on purpose (review round 4, item 3): a symlink's own mode is
+    NOT settable portably — Linux has no `lchmod` — so what is asserted on every
+    platform is the part that matters, that the TARGET is untouched, and the
+    entry's 0600 is asserted only where the platform can do it. The Linux branch
+    is executed rather than assumed by
+    `test_a_symlink_entry_without_lchmod_reports_that_it_could_not_be_tightened`.
     """
 
     def write_it(method: str, params: dict[str, Any]) -> None:
@@ -601,8 +607,54 @@ def test_the_mode_change_lands_on_the_entry_not_on_a_symlink_target(tmp_path: Pa
     )
     assert not result.is_error, result.text
     directory = Path(host.calls[0][1]["dir"])
+    entry = directory / "receipt.pdf"
     assert stat.S_IMODE((directory / "sub" / "target.pdf").stat().st_mode) == 0o644
-    assert stat.S_IMODE(os.lstat(directory / "receipt.pdf").st_mode) == 0o600
+    if hasattr(os, "lchmod"):
+        assert stat.S_IMODE(os.lstat(entry).st_mode) == 0o600
+        assert "could not tighten the mode" not in result.text
+    else:
+        # Linux: the mode could not be set, and the result SAYS so rather than
+        # implying a 0600 that is not there.
+        assert "could not tighten the mode of receipt.pdf" in result.text
+
+
+def test_a_symlink_entry_without_lchmod_reports_that_it_could_not_be_tightened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The LINUX branch, executed on macOS by removing the attribute.
+
+    macOS cannot reproduce the CI failure by itself, so the branch is driven
+    rather than reasoned about: with `os.lchmod` gone (as on Linux),
+    `chmod_private` must return False for a symlink entry, must NOT fall back to
+    `chmod` (that is the N8 bug — it would tighten whatever the link points at),
+    and the download result must carry the caveat instead of asserting a mode the
+    harness never set.
+    """
+    monkeypatch.delattr(os, "lchmod", raising=False)
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        directory = Path(params["dir"])
+        (directory / "sub").mkdir()
+        target = directory / "sub" / "target.pdf"
+        target.write_bytes(b"%PDF-1.4\n1 0 obj\n%%EOF\n")
+        target.chmod(0o644)
+        os.symlink(target, directory / "receipt.pdf")
+
+    host = FakeHost(methods=("download",), result={"armed": True}, on_call=write_it)
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    directory = Path(host.calls[0][1]["dir"])
+    assert bf.chmod_private(directory / "receipt.pdf") is False
+    assert "could not tighten the mode of receipt.pdf" in result.text
+    # The target is untouched — the whole point of refusing rather than falling back.
+    assert stat.S_IMODE((directory / "sub" / "target.pdf").stat().st_mode) == 0o644
 
 
 # --- upload: the gate runs before anything reaches a browser -----------------
@@ -1033,14 +1085,25 @@ def test_a_marker_that_sanitises_away_still_marks_the_attach_unverified(
 
 @pytest.mark.parametrize(
     "count",
-    [None, "abc", {}, "12.5", 12.5],
-    ids=["null", "non-numeric-string", "dict", "float-shaped-string", "json-float"],
+    [None, "abc", {}, "12.5", 12.5, "--12", "++5", "+-3", "\u00b2", "9" * 4301],
+    ids=[
+        "null",
+        "non-numeric-string",
+        "dict",
+        "float-shaped-string",
+        "json-float",
+        "double-sign",
+        "double-plus",
+        "plus-minus",
+        "superscript",
+        "4301-digits",
+    ],
 )
 @pytest.mark.parametrize("marker", [False, True], ids=["no-marker", "marker"])
 def test_a_malformed_host_byte_count_never_raises_out_of_the_tool(
     tmp_path: Path, count: Any, marker: bool
 ) -> None:
-    """Q-1: a count the host typed wrong is a typed answer, not an exception.
+    """Q-1 / round 4: a count the host typed wrong is a typed answer, not an exception.
 
     `bytes` is a field the host chooses the type of, and `int()` on it raised
     straight out of `_browser_upload`, so the loop's generic handler turned a
@@ -1050,6 +1113,11 @@ def test_a_malformed_host_byte_count_never_raises_out_of_the_tool(
     unverified attach it already was — a refusal there would say "the file input
     did not take the attach" over bytes the host reported setting, which is the
     double-send harm round 1's Q-1 exists to prevent.
+
+    The last four ids are round 4's: a sign the coercion did not strip (`--12`,
+    `++5`, `+-3` all reached `int()`), a Unicode digit `str.isdigit()` accepts and
+    `int()` rejects (`\u00b2`), and a digit string past CPython's ~4300-digit
+    `int()` limit. Every one of them escaped as `Tool raised:` before the guard.
     """
     deck = _uploadable(tmp_path)
     result = _flow(
@@ -1072,7 +1140,10 @@ def test_a_malformed_host_byte_count_never_raises_out_of_the_tool(
     if not marker:
         assert result.is_error, result.text
         assert "malformed byte count" in result.text
-        assert repr(count) in result.text
+        # A PREFIX of the offending value: the label is sanitised and capped like
+        # every other host-supplied string, so the 4301-digit shape arrives
+        # clipped with an ellipsis rather than in full.
+        assert repr(count)[:40] in result.text
         assert not (result.details or {}).get("files")
         return
     assert not result.is_error, result.text

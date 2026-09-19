@@ -238,7 +238,12 @@ Properties, each of which the design then depends on:
   artifact it keeps, because the host performs the write and therefore chooses
   the mode it lands with (an Electron/Chromium write lands 0644 by umask). It is
   best-effort — a chmod that failed must not cost the user the file it protects —
-  and bounded by the 0700 parent either way (§17.9).
+  and bounded by the 0700 parent either way (§17.9). One platform caveat, stated
+  rather than glossed: a symlink ENTRY's own mode is not settable on Linux (no
+  `lchmod`), so such an entry keeps the mode the host wrote and the download
+  result says so instead of implying a 0600 that was never applied — and the
+  harness never falls back to `chmod`, which would tighten whatever the link
+  points at (§17.12).
 - **Isolated per session**, which is what makes the *directory diff* a sound way
   to learn what landed (§5.3) with several sessions on one machine.
 - **Isolated per call** in time (the `<stamp>`), so two downloads of a file the
@@ -1686,3 +1691,16 @@ carry the per-finding answer.
 | **MINOR-1 / Q-2** — `MAX_READBACK_BYTES = 120` clipped the honest composed marker (~158-159 bytes: the extension caps the error TEXT at 120 *characters*, not the marker it composes around it) silently, on exactly the branch that carries the diagnostic | the ceiling is **200**, above the composed bound with headroom, and any clip is now **visible**: `readback_label` cuts the tail on a character boundary and appends `CLIP_MARK` (`…`). Both, because no fixed ceiling can bound an honest marker whose message is multibyte. The clip also stops using `_truncate_bytes`, which preserves a filename's EXTENSION — over a sentence it kept a fragment of the TAIL and dropped the middle |
 | **relabel** — the round-2 residual was labelled `R6` in §11.5, colliding with both an existing §11.5 residual and §17.10's R6 finding | relabelled **NR1**, with the list's numbering stated as its own |
 | **Q-3 (nit, pre-existing)** — `\ufeff` survives `_outside_text` (the shared door's bidi/zero-width set covers U+200B–U+200F, U+202A–U+202E, U+2066–U+2069) | **recorded, not fixed**: it is a property of the door that predates this PR, the delta's requirement was that the marker gets the sibling treatment and it does, and widening the shared regex is a change to `safe_name`'s inputs — which the conformance fixture replays in TypeScript — that this round has no reason to make |
+
+### 17.12 The round-4 CI round, and what each finding changed
+
+Round 4 is the CI round: three red jobs on `8456165c9`, none of them caused by
+that commit. `### Agent review remediation — round 4` on the PR carries the
+per-finding answer and the real gate output.
+
+| finding | what changed |
+|---|---|
+| **`context-budget` (over by 287 tokens)** — the feature's schema/prompt text pushed the start-of-session context past its budget | the budget was **NOT** raised: AGENTS.md's footprint ladder says the tool-surface cost is the thing to keep lean, so the added text was trimmed instead. The `browser` tool description loses the per-action prose the parameter descriptions and `guide://browser` already carry (the scroll/logs sentence, the long `tabs`/handover clause, the "never install a browser engine" clause the system prompt and the guide both state, and the long `request_access` walkthrough), and the download/upload sentence becomes one clause; `paths`, `selector` and `timeout_s` keep only what a caller must know. `python scripts/bench_context_budget.py --verbose` now reports **27,976 vs 28,000 (24 tokens of headroom)**, against 28,287 before |
+| **`test (3.12, 1)`** — `tests/unit/session/test_no_session_deletion.py` flagged `<path>.unlink` in `_unlink_quietly` and `<path>.rename` in `_browser_download` | allow-listed, with the reason the guard asks for: both paths are composed by `browser_files.session_dir()` as `<config_dir>/browser/downloads/<stamp>-<session8>/` — a SIBLING of `sessions/`, never a descendant — the candidate names come from listing THAT directory, the unlink removes one direct child ENTRY (never a resolved target, R1), and the rename has both sides inside it |
+| **`test (3.12, 4)` (Linux only)** — `chmod_private` returns False for a symlink entry where `os.lchmod` does not exist, so the entry keeps `0o120777` and the test's `== 0o600` failed | the behaviour is unchanged (falling back to `chmod` would tighten the link's TARGET — the N8 bug) and the fact is now VISIBLE: the download result carries `could not tighten the mode of <name> to 0600 …`, so a mode the harness did not set is never implied. The test is platform-shaped — the target untouched is asserted everywhere, the entry's 0600 only where `lchmod` exists — and the Linux branch is EXECUTED rather than reasoned about, by `monkeypatch.delattr(os, "lchmod")` |
+| **round-4 minor** — `_host_byte_count` was `isdigit()`-then-`int()` without a guard, so `"--12"`, `"++5"`, `"+-3"`, `"²"` and any digit string past CPython's ~4300-digit `int()` limit still escaped as `Tool raised:` in both marker shapes | the guard is `isascii()` + `isdigit()` + a `try/except` around `int()`: `isascii()` rejects the Unicode digits `isdigit()` accepts and `int()` refuses, and the `try` absorbs the digit-count limit. Ten shapes × two marker shapes now answer typed, and all ten fail against the pre-fix sources |

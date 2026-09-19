@@ -1035,18 +1035,24 @@ def chmod_private(path: Path) -> bool:
     claim the code does not enforce is the defect class review round 1 caught.
 
     The mode change must land on the ENTRY this call reports, which is why a
-    symlink entry takes ``lchmod`` and is skipped where the platform has none
+    symlink entry takes ``lchmod`` and is refused where the platform has none
     (review round 2, N8): ``os.chmod`` FOLLOWS the link, so on an in-root symlink
     artifact it tightened the target — a file this call neither landed nor names,
     and one the page chose. The containment check bounds the target to the
     session root, so this was never an escape; it is the same "the artifact it is
     about to report" rule R1 applies to the delete.
+
+    ``False`` therefore means two different things, and the caller reports both:
+    the mode could not be set at all, or this platform cannot set a SYMLINK's own
+    mode (Linux has no ``lchmod``; macOS does). Neither is a reason to fall back
+    to ``chmod`` — that would tighten whatever the link points at, which is the
+    bug this branch exists for.
     """
     if path.is_symlink():
         lchmod = getattr(os, "lchmod", None)
         if lchmod is None:
-            # Linux has no lchmod. Skipping leaves this one entry at the mode the
-            # host wrote; firing `chmod` here would tighten whatever it points at.
+            # Linux. The entry keeps the mode the host wrote; the 0700 session
+            # directory is still the bound, and the caller says so in the result.
             return False
         try:
             lchmod(path, PRIVATE_FILE_MODE)
