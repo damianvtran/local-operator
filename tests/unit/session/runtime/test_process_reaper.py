@@ -341,7 +341,10 @@ def test_the_runtime_child_logs_to_its_own_bounded_file_apart_from_the_daemon(
 
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
 
-    async def fake_amain() -> int:
+    async def fake_amain(**_kwargs: object) -> int:
+        # ``**kwargs`` because ``main`` passes the operator capability through
+        # to the real ``amain`` (issue #1310); a double that pins the signature
+        # would fail on a parameter this test is not about.
         return 0
 
     monkeypatch.setattr(process, "amain", fake_amain)
