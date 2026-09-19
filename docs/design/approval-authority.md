@@ -122,16 +122,21 @@ only be a forgery.
 | Desktop app | unchanged | works iff its backend spawned that runtime; else refused |
 | Phone relay | unchanged | works iff the relay spawned that runtime; else refused |
 | `lop` CLI / one-shot front ends | unchanged | only if this process spawned the runtime |
-| headless / `--yolo` / exec-control | unchanged | n/a (the gate is born `auto`) |
+| `lop exec --control` (supervised one-shot), supervisor answering from another process | unchanged | **refused** — deny works, approve does not. The run's runtime is started by the `lop exec` process, which has exited or is backgrounded, so no live console holds the capability. Remedy for the next run: `--yolo`, or `tool_approval_mode: auto`; for an interactively approved run, start it where the approver is |
+| headless / `--yolo` / exec-control without a parked gate | unchanged | n/a (the gate is born `auto`) |
 | tightening `auto → ask`, any route | unchanged | unchanged |
 
 Operator-visible regressions, stated plainly: a phone loses `/approvals auto`
 **and card approval** for sessions whose runtime another live process started; a
-pane attached to a background-started runtime cannot loosen it. The remedies are
-`lop sessions refresh`, `/approvals default auto` plus a new session, `--yolo`,
-or typing the command in the terminal that started it. Tightening, reporting and
-everything else are untouched — the routes that may loosen are a proper subset
-of the routes that may tighten.
+pane attached to a background-started runtime cannot loosen it; and **a
+supervised `lop exec --control` run cannot be APPROVED by a supervisor in
+another process** — only denied — because its runtime is started by the `lop
+exec` process and no live console holds the capability. The remedies are
+`--yolo` or `tool_approval_mode: auto` for the next run, `lop sessions refresh`,
+`/approvals default auto` plus a new session, or typing the command in the
+terminal that started it. Tightening, reporting and everything else are
+untouched — the routes that may loosen are a proper subset of the routes that
+may tighten.
 
 ## 4. The residual
 
@@ -146,7 +151,16 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
 
 - **background-spawned runtimes have no console**, so nothing may loosen them
   until someone attaches one that does (a wake supervisor's runtime is exactly
-  case 3 in the table);
+  case 3 in the table). `lop exec --control` is the surface where this is most
+  visible: its runtime is started by the `lop exec` process, so a supervisor in
+  another process keeps the safe direction (deny) and loses the other one
+  (approve). The spec that shaped this change asserted exec-control's gate is
+  born `auto` and therefore unaffected; measured on `1effded9`, it is not —
+  `tests/e2e/test_exec_startup_e2e.py::test_exec_supervisor_approval_ui` drives
+  a parked `--control` gate and now pins the new behaviour. Whether to accept
+  that, exempt `kind="exec"` (which would reopen the hole for the most
+  unattended surface), or hand a capability to a supervisor through the exec
+  ledger is the operator's call and is recorded as an open question on the PR;
 - **the phone relay's own password** remains the authority for reaching a
   runtime the relay started, over a remote transport — Stage 3 replaces it with
   a device-bound credential;
