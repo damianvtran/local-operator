@@ -494,25 +494,36 @@ def session_uses_test_hosting(directory: Path) -> bool:
 def _read_test_hosting(directory: Path) -> bool | None:
     """The uncached read behind :func:`session_uses_test_hosting`.
 
-    ``None`` means INDETERMINATE — the journal could not be read, so this call
-    cannot say whether the session is on the test hosting. The caller answers
-    the tolerant direction and does NOT memoise it; the distinction is why this
-    has three answers rather than two (see the caller's docstring).
+    ``None`` means INDETERMINATE — the journal could not be read at all, so this
+    call cannot say whether the session is on the test hosting. The caller
+    answers the tolerant direction and does NOT memoise it; the distinction is
+    why this has three answers rather than two (see the caller's docstring).
 
-    IT OPENS THE JOURNAL ITSELF, though the caller already did, because that
-    open cannot stand in for this one: the descriptor can go between the two —
-    the EMFILE window QA round 3 reproduced — and ``_settled_selection``
-    reports a failure to open as ``None``, the SAME answer it gives for a
-    journal that opens fine and simply has no v2 row. Only the second of those
-    is a verdict, so readability is re-established here instead of being folded
-    into the tolerant ``False`` that the caller would then memoise for the life
-    of the file.
+    IT RE-OPENS THE JOURNAL ITSELF, and it is worth being exact about how far
+    that reaches, because the descriptors here are three and not one: the
+    caller's pre-open is #1, this reopen is #2, and ``_settled_selection``'s own
+    open is #3. This reopen closes the #2 route — a descriptor that goes between
+    the caller's check and this function, the EMFILE window QA round 3
+    reproduced — so "the journal cannot be opened at all" is no longer answered
+    as a verdict and memoised for the life of the file.
 
-    The whole body is inside the ``try``: the import, the walk and the provider
-    lookup are one decision, and a raise from any of them is the same
-    INDETERMINATE. Only the provider lookup is unreachable today (a pure dict
-    lookup), but a guard that stops one statement short of the body it claims is
-    the shape that silently stops being true.
+    WHAT REMAINS OPEN, stated rather than implied (QA round 4, Q5): if the
+    WALK'S OWN open (#3) fails, ``_settled_selection`` still answers ``None`` —
+    the same answer it gives for a journal that opens fine and has no v2 row —
+    so that route is folded into the tolerant ``False`` and memoised. Closing it
+    properly means changing that conflation in ``_settled_selection``, whose
+    second caller (:func:`read_model_selection`) relies on ``None`` meaning
+    "fall back to the fold": a small design change with two call sites to
+    reconcile, deliberately not made here. What is honest about the current
+    shape is that the wrong ANSWER is pre-existing in the parent module while
+    the PERMANENCE is this PR's, which is why the route this reopen can close is
+    closed and the one it cannot is named.
+
+    The whole body is inside the ``try``: the import, the reopen, the walk and
+    the provider lookup are one decision, and a raise from any of them is the
+    same INDETERMINATE. Only the provider lookup is unreachable today (a pure
+    dict lookup), but a guard that stops one statement short of the body it
+    claims is the shape that silently stops being true.
     """
     try:
         from local_operator.providers.registry import is_mock_provider
