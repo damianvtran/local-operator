@@ -369,11 +369,15 @@ and 1170 s under load** on this fleet, and CI's 15 minutes also cover checkout,
 dependency install and that job's protocol-sync step — so a bound equal to CI's
 provision can fire on a merely loaded host and red a gate CI would pass. Timing
 out a legitimately slow host is the worse failure, so the local bound is twice
-CI's provision, and a bound that does fire says what it is: `rc=124` prints
-*"the BOUND (--timeout 1800s) firing, not the gate failing … re-run it; if it
-fires again, raise the bound"*. `make type-check BOUND_TIMEOUT=<seconds>` raises it
-for one run; `BOUNDED_GATE_TIMEOUT` in `scripts/ci_scope.py` is the same number
-for `make check-changed`, and a test asserts the two agree.
+CI's provision, and a bound that does fire says what it is **on either path**: the
+wrapper's own stderr prints *"that is the BOUND (1800s) firing, not the gate
+failing — re-run it, or raise it (`--timeout`, or `make type-check
+BOUND_TIMEOUT=<seconds>`)"* — which is the only line `make type-check` shows — and
+`make check-changed` adds *"rc=124 is the BOUND (--timeout 1800s) firing, not the
+gate failing … re-run it; if it fires again, raise the bound"* from
+`scripts/ci_scope.py`. `make type-check BOUND_TIMEOUT=<seconds>` raises it for one
+run; `BOUNDED_GATE_TIMEOUT` in `scripts/ci_scope.py` is the same number for
+`make check-changed`, and a test asserts the two agree.
 
 **Why a wrapper.** `pyright` is a Python wrapper around an npm/node analyzer, and
 node runs as a *separate* process. The fleet shows what goes wrong when the group
@@ -397,7 +401,8 @@ leaves.
 It also escalates where a bare bound does not: over a SIGTERM-ignoring tree,
 `timeout 3` fires at 3 s and then **waits the tree out** (30 s for a 30 s tree,
 measured; 300 s in an earlier run for a 300 s one), where the wrapper SIGKILLs the
-group after `--grace` and clears the same tree in 5 s. It keeps
+group after `--grace` and clears the same tree in 5 s **with `--grace 2`** (the
+shipped `--grace` default of 10 takes ~13 s for it). It keeps
 `timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
 start), reports **128 + signum** when a signal ends the run — forwarded by this
 wrapper, or delivered to the child by someone else, where `sys.exit` used to

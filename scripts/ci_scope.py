@@ -875,26 +875,30 @@ def _unwrap_bounded(tokens: Sequence[str]) -> list[str]:
     if "--" in rest:
         return rest[rest.index("--") + 1 :]
     # No separator: the wrapper was invoked without a command, so there is no tool
-    # to report. Counting flags instead used to slice into the command's own
-    # arguments — a `--grace` before the separator returned the token after it
-    # (`tests`), which would have compared a directory against ci.yml.
+    # to report. Counting flags instead sliced into the command's own arguments
+    # whenever the PAYLOAD carried a `--timeout`/`--grace` of its own — flags
+    # before the separator happened to come out right — which is how a directory
+    # (`tests`) once got compared against ci.yml.
     for flag in ("--timeout", "--grace"):
         if flag in rest:
             rest = rest[rest.index(flag) + 2 :]
     return rest
 
 
-def _command_bound(command: str) -> str:
-    """The bound a wrapped command carries, named in the fired-bound message.
+def _command_bound(command: str) -> str | None:
+    """The bound a WRAPPED command carries, or None when rc=124 is not that bound.
 
-    Reported from the COMMAND rather than from `BOUNDED_GATE_TIMEOUT`: a command
-    may carry its own (the Makefile's `BOUND_TIMEOUT`), and a message that quotes
-    the wrong number sends a developer to raise the bound that did not fire.
+    Reported from the COMMAND rather than from `BOUNDED_GATE_TIMEOUT` (the Makefile
+    carries its own), and `None` unless the command really does go through the
+    wrapper with a `--timeout`: rc=124 out of anything else is not this bound, and
+    a message that claims it is sends a developer to turn a knob that never fired
+    (review round 2, N3).
     """
     tokens = shlex.split(command)
-    if "--timeout" in tokens:
+    wrapped = any(Path(token).name == BOUNDED_WRAPPER_NAME for token in tokens)
+    if wrapped and "--timeout" in tokens:
         return f"--timeout {tokens[tokens.index('--timeout') + 1]}s"
-    return f"the configured {BOUNDED_GATE_TIMEOUT}s"
+    return None
 
 
 def run_jobs(jobs: Sequence[str], root: Path) -> int:
@@ -906,14 +910,15 @@ def run_jobs(jobs: Sequence[str], root: Path) -> int:
             proc = subprocess.run(command, shell=True, cwd=str(root), check=False)
             if proc.returncode != 0:
                 print(f"!!! {job} failed (rc={proc.returncode}): {command}")
-                if proc.returncode == 124:
+                bound = _command_bound(command)
+                if proc.returncode == 124 and bound is not None:
                     # This is the BOUND firing, not the gate failing, and the
                     # difference decides what a developer does next: on a loaded
                     # host a whole-tree pyright can legitimately exceed the bound,
                     # and re-running (or raising it) is the fix — never reading it
                     # as a red.
                     print(
-                        f"    rc=124 is the BOUND ({_command_bound(command)}) firing, not the gate "
+                        f"    rc=124 is the BOUND ({bound}) firing, not the gate "
                         "failing: the gate was still working. Re-run it; if it fires again, "
                         "raise the bound (`make type-check BOUND_TIMEOUT=<seconds>`, or "
                         f"BOUNDED_GATE_TIMEOUT in scripts/{Path(__file__).name} for "
