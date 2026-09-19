@@ -1311,7 +1311,12 @@ def test_a_narrow_frame_keeps_the_qualifier_on_the_row_it_qualifies(width: int) 
     the ROW carries the same fact again. What must not happen is the row going
     quiet: a reader on a narrow terminal has to see that this session is not
     answering, ahead of the uptime and the memory figure they can do without.
+
+    This is the row the whole visual change is about: it used to draw the same
+    ``✗`` in the same ``danger`` ink as a session whose last turn failed.
     """
+    from local_operator.tui.widgets.session_picker import WEDGED_MARKER
+
     rows = [
         line
         for line in _lines(_snapshot(sessions=_quiet_owner_sessions()), width=width)
@@ -1320,7 +1325,10 @@ def test_a_narrow_frame_keeps_the_qualifier_on_the_row_it_qualifies(width: int) 
     assert len(rows) == 1, rows
     assert "not answering" in rows[0], rows[0]
     assert "last heartbeat 4m ago" in rows[0], rows[0]
-    assert "✗" in rows[0], rows[0]
+    # Symbolic, not a literal: this row's glyph is ``WEDGED_MARKER``, which moved
+    # off ``✗`` precisely because a stale beat is not a failed turn, so pinning
+    # the character here is what let the two states share one mark.
+    assert WEDGED_MARKER in rows[0], rows[0]
     # The jargon is gone from the row: the state token survives only where a
     # machine reads it (the export's brackets and the JSON), never as the word
     # a person is given for what they are looking at.
@@ -1335,7 +1343,8 @@ def test_below_the_note_floor_the_words_survive_even_though_the_age_does_not(
 
     56 cells is the body width a 70-column terminal leaves this card, and
     ``_NOTE_MIN`` sheds EVERY meta below 60 — so the row degraded to a bare
-    ``✗`` beside a truncated name, which is the unqualified state D1 rejected.
+    state glyph beside a truncated name, which is the unqualified state D1
+    rejected.
     The words are the irreducible fact and now have their own rung; the age and
     the memory figure are the optional details and are still shed.
     """
