@@ -135,32 +135,64 @@ def run(
         stream.write("[run_bounded] no command was given\n")
         return EXIT_NOT_STARTED
     started = time.monotonic()
-    try:
-        proc = subprocess.Popen(list(argv), start_new_session=True)
-    except OSError as exc:
-        # A gate that never ran must never look green (#423's lesson).
-        stream.write(f"[run_bounded] could not start {argv[0]!r}: {exc}\n")
-        return EXIT_NOT_STARTED
-    pgid = os.getpgid(proc.pid)
-
     # A signal to this wrapper has to reach the group: the child leads its own
     # session, so the terminal's SIGINT goes to the wrapper alone and an
     # unforwarded Ctrl-C would leave the analyzer running.
+    #
+    # The handlers are installed BEFORE the child is spawned, and they forward
+    # through a slot the spawn fills in. Installing them afterwards leaves a
+    # window in which a signal kills the wrapper outright — default disposition —
+    # and nothing forwards it or reaps the group; that window was measured on the
+    # Linux CI leg as `rc=-15` with an empty stderr, i.e. a wrapper that died
+    # before it could report anything.
+    state: dict[str, int] = {}
     stop: dict[str, int] = {"signum": 0}
 
     def _forward(signum: int, _frame: object) -> None:
         stop["signum"] = signum
+        pgid = state.get("pgid")
+        if pgid:
+            _signal_group(pgid, signum)
 
     previous = {sig: signal.signal(sig, _forward) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        proc = subprocess.Popen(list(argv), start_new_session=True)
+    except OSError as exc:
+        # A gate that never ran must never look green (#423's lesson).
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        stream.write(f"[run_bounded] could not start {argv[0]!r}: {exc}\n")
+        return EXIT_NOT_STARTED
+    # The group id IS the child's pid: `start_new_session=True` makes the child a
+    # session leader, so its process group is its own. Asking the kernel
+    # (`os.getpgid`) instead RACES a command that exits quickly — measured: the
+    # simplest gate, `python -c "print(...)"`, raised `ProcessLookupError` from
+    # `getpgid` on most runs, because the pid was already gone and a session
+    # leader's group dissolves with it. That turned a passing gate into `rc=1`,
+    # which is the worst thing a wrapper like this can do.
+    pgid = state["pgid"] = proc.pid
+
     rc: int
     try:
         deadline = None if timeout is None else started + timeout
         while True:
             status = proc.poll()
-            if status is not None:
-                rc = status
-                break
             signum = stop["signum"]
+            if status is not None:
+                # A forwarded signal ends the child as well, and the child's
+                # status then arrives as `-signum` (Python renders that as 241).
+                # The wrapper reports the SIGNAL instead, the way a shell does, so
+                # a caller reading `128 + signum` sees the same code either way,
+                # and it says so — a gate that was signalled must not look like a
+                # gate that failed on its own.
+                if signum:
+                    stream.write(
+                        f"[run_bounded] signal {signum} received — process group "
+                        f"{pgid} signalled (rc={128 + signum})\n"
+                    )
+                    stream.flush()
+                rc = 128 + signum if signum else status
+                break
             if signum:
                 _reap(pgid, grace, proc.poll, stream, reason=f"signal {signum} received")
                 proc.wait()
@@ -178,7 +210,16 @@ def run(
         # The ordinary-exit half of the defect: the leader is gone, and anything
         # it spawned is still holding its heap. SIGKILL, because there is nothing
         # left to negotiate with — the gate has already finished.
-        if _signal_group(pgid, signal.SIGKILL):
+        #
+        # Several passes, because a child forked in the instant the leader exited
+        # can land after the kernel resolved the previous one. Bounded and cheap:
+        # the whole sweep is a quarter of a second, against a gate that has
+        # already finished.
+        reaped = False
+        for _ in range(5):
+            reaped = _signal_group(pgid, signal.SIGKILL) or reaped
+            time.sleep(_POLL_SECONDS)
+        if reaped:
             stream.write(
                 f"[run_bounded] reaped processes left behind in group {pgid} "
                 "after the gate exited\n"

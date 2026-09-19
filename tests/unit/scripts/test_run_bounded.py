@@ -22,10 +22,11 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterable, Iterator, Sequence
 
 import pytest
 
@@ -42,14 +43,36 @@ def _marker(token: str) -> str:
     return f"run-bounded-test-{token}-{uuid.uuid4().hex}"
 
 
-def _pids_carrying(token: str) -> list[int]:
+def _pids_carrying(token: str, *, exclude: Iterable[int] = ()) -> list[int]:
     """Every process whose command line carries the token, including orphans.
 
     `pgrep -f` is the same instrument the leak was observed with, and it sees
-    re-parented processes that a `ps --ppid` walk would miss.
+    re-parented processes that a `ps --ppid` walk would miss. `exclude` exists
+    because the WRAPPER's own command line contains the whole inner command — and
+    so the token — which otherwise satisfies a "has it started yet?" wait before
+    the wrapper has done anything. Measured on the Linux CI leg: that wait passed,
+    the test signalled a wrapper still installing its handlers, and the wrapper
+    died by signal (-15) with nothing on stderr.
     """
     result = subprocess.run(["pgrep", "-f", token], capture_output=True, text=True, check=False)
-    return [int(line) for line in result.stdout.split() if line.strip()]
+    skip = set(exclude)
+    return [
+        pid
+        for pid in (int(line) for line in result.stdout.split() if line.strip())
+        if pid not in skip
+    ]
+
+
+def _wait_for_pid_carrying(
+    token: str, *, exclude: Iterable[int], timeout: float = 20.0
+) -> list[int]:
+    """Token-carrying pids other than `exclude`, once one exists."""
+    deadline = time.monotonic() + timeout
+    found = _pids_carrying(token, exclude=exclude)
+    while not found and time.monotonic() < deadline:
+        time.sleep(0.1)
+        found = _pids_carrying(token, exclude=exclude)
+    return found
 
 
 def _wait_until_gone(token: str, timeout: float = 15.0) -> list[int]:
@@ -84,13 +107,30 @@ def reap_markers() -> Iterator[list[str]]:
 
 
 def _wrapper(args: Sequence[str], *, timeout_s: float = 60.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(WRAPPER), *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-        check=False,
-    )
+    """Run the wrapper with its output in FILES, not pipes.
+
+    `capture_output=True` reads until EOF, and EOF needs every holder of the pipe
+    write end to be gone — including a descendant the sweep is in the middle of
+    reaping. That couples the assertion to pipe lifetimes rather than to the
+    behaviour under test, which is whether the process GROUP survived (measured:
+    it made this test hang for 60 s on one run whose group reap had raced). A
+    file is read after the fact and cannot block.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "stdout"
+        err_path = Path(tmp) / "stderr"
+        with out_path.open("w") as out, err_path.open("w") as err:
+            result = subprocess.run(
+                [sys.executable, str(WRAPPER), *args],
+                stdout=out,
+                stderr=err,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode, out_path.read_text(), err_path.read_text()
+        )
 
 
 def _spawning_inner(token: str, *, linger: bool) -> list[str]:
@@ -105,6 +145,25 @@ def _spawning_inner(token: str, *, linger: bool) -> list[str]:
     )
     tail = "import time; time.sleep(600)" if linger else "pass"
     return [sys.executable, "-c", f"{plant}; {tail}"]
+
+
+def test_handlers_are_installed_before_the_child_is_spawned():
+    """A signal in that window used to kill the wrapper with nothing reaped.
+
+    Measured on the Linux CI leg: the test signalled a wrapper whose handlers
+    were not yet installed, and it died by signal (`rc=-15`) with an EMPTY stderr
+    — a wrapper that could not report, let alone reap the group. Structural
+    rather than behavioural, because the window is a few milliseconds wide and
+    cannot be hit on demand.
+    """
+    source = (REPO / "scripts" / "run_bounded.py").read_text()
+    body = source[source.index("def run(") : source.index("def main(")]
+
+    assert "signal.signal(" in body, "the wrapper installs no signal handler at all"
+    assert body.index("signal.signal(") < body.index("subprocess.Popen("), (
+        "the signal handlers must be installed BEFORE the child is spawned, or a "
+        "signal in that window kills the wrapper and nothing forwards it"
+    )
 
 
 def test_a_command_runs_with_its_own_status_and_untouched_stdout(reap_markers):
@@ -164,26 +223,31 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers):
     """
     token = _marker("signal")
     reap_markers.append(token)
-    wrapper = subprocess.Popen(
-        [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    # Wait for the grandchild to exist before signalling, so the signal cannot
-    # win a race against the spawn and pass vacuously.
-    deadline = time.monotonic() + 15.0
-    while not _pids_carrying(token) and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert _pids_carrying(token), "the grandchild never started"
-
-    wrapper.send_signal(signal.SIGTERM)
-    try:
-        returncode = wrapper.wait(timeout=30)
-    finally:
-        if wrapper.poll() is None:  # pragma: no cover - only on a wedged wrapper
-            wrapper.kill()
-    stderr = wrapper.stderr.read() if wrapper.stderr else ""
+    # Files, not pipes: see `_wrapper` for why a pipe turns a raced reap into a
+    # 60-second hang rather than a readable failure.
+    with tempfile.TemporaryDirectory() as tmp:
+        err_path = Path(tmp) / "stderr"
+        with err_path.open("w") as err:
+            wrapper = subprocess.Popen(
+                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                text=True,
+            )
+            # Wait for the inner command (or its grandchild) to exist before
+            # signalling: the wrapper's OWN command line carries the token too, so
+            # it is excluded or the wait passes while the wrapper is still
+            # installing its handlers.
+            assert _wait_for_pid_carrying(
+                token, exclude={wrapper.pid}
+            ), "the inner command never started"
+            wrapper.send_signal(signal.SIGTERM)
+            try:
+                returncode = wrapper.wait(timeout=30)
+            finally:
+                if wrapper.poll() is None:  # pragma: no cover - wedged wrapper
+                    wrapper.kill()
+        stderr = err_path.read_text()
 
     assert returncode == 128 + signal.SIGTERM, f"rc={returncode}, stderr={stderr!r}"
     assert "signal 15" in stderr
