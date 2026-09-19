@@ -20297,14 +20297,23 @@ class OperatorApp(App[None]):
         # message was never touched, while its own row said `esc takes it back`
         # (UX round 2, U3, at the incident's own shape: `subagents_running=3`).
         #
-        # A RECALL THAT HAPPENED RETURNS: the press has done what the row
-        # promised — an inert undo of the user's own words — and falling through
-        # to the stop ladder made it also abort the turn in flight, which is what
-        # ENDS a drain (its liveness is in-flight work), booted the successor
-        # three seconds later and put every other queued message out of the
-        # recall's reach (UX round 2, U1). A press that recalled nothing still
-        # means what Esc always means.
-        if self._withdraw_queued_prompt(self._interaction) == "withdrawn":
+        # A PRESS THE RECALL USED RETURNS, and "used" includes the MISS: falling
+        # through to the stop ladder made the same key that answered about the
+        # queued message also abort the turn in flight, which is what ENDS a
+        # drain (its liveness is in-flight work), boots the successor and puts
+        # every other queued message out of the recall's reach (UX round 2, U1).
+        #
+        # THE MISS IS NOT THE SAME AS THE DECLINE, and the difference is what the
+        # app has just said. ``"missed"`` means the successor's batch already has
+        # the row — the notice reads "the next runtime already has that message",
+        # i.e. it WILL run — so stopping the turn is the press acting against the
+        # sentence it just printed. Measured on the real flow: with the press,
+        # ``end_cause='user-stop'``, an extra ``interrupted`` row, and the
+        # message's answer never arrives; without it, ``end_cause='completed'``
+        # and the answer lands (UX round 4). ``"declined"`` and ``""`` still fall
+        # through: nothing was said about a run, the composer is the obstacle, and
+        # Esc keeps the meaning it has everywhere else in this method.
+        if self._withdraw_queued_prompt(self._interaction) in ("withdrawn", "missed"):
             return
         if not children:
             self._recall_queued_steers()

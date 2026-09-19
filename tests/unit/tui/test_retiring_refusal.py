@@ -1101,13 +1101,26 @@ async def test_a_bind_with_an_empty_queue_replays_no_transcript(
     the join path the operator's requirement is about. With nothing queued there
     is nothing to settle, so nothing may be read.
     """
+    from local_operator.paths import config_dir
     from local_operator.session import transcript as transcript_mod
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
     session = _queued_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         await _boot(pilot, app)
         assert app._interaction is not None
+        # THE SEED IS WHAT MAKES THIS CELL A TEST. Without a durable row the
+        # session directory does not exist yet, and `_handover_admitted_ids`'s
+        # own `is_file()` guard returns before any construction — so the
+        # assertion below holds on a tree with the empty-queue guard DELETED, and
+        # round 3 shipped exactly that vacuous cell (agent review round 4, QA
+        # Q-2). A real journal on disk makes the guard the only thing standing
+        # between the bind and a whole-journal replay.
+        _durable_row_for(app, "seed-row")
+        assert (
+            config_dir() / "sessions" / str(session.session_id) / TRANSCRIPT_FILENAME
+        ).is_file(), "the seed must have created the journal this cell is about"
         built: list[tuple[Any, ...]] = []
         real = transcript_mod.Transcript
 
@@ -1131,3 +1144,35 @@ async def test_a_bind_with_an_empty_queue_replays_no_transcript(
         await pilot.pause()
         assert built, "a queued message must still be settled from the transcript"
         assert app._interaction.turn.queued_prompts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_recall_that_missed_does_not_stop_the_turn() -> None:
+    """UX U1 (round 4): the losing press must not kill the turn it just spoke about.
+
+    The miss is the arm this delta widened: the successor's batch already has the
+    row, the notice says so ("the next runtime already has that message"), and
+    that sentence means the message WILL run. Falling through to the stop ladder
+    then aborted the turn in flight on the same press — measured on the real flow
+    as ``end_cause='user-stop'``, an extra ``interrupted`` row, and an answer that
+    never arrives.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        # The successor's batch took it: the spool no longer holds the row, which
+        # is what makes this press a MISS rather than a recall.
+        session.streaming = True
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert QUEUED_PROMPT_MISSED_NOTICE in [n._text for n in _notices(app)], [
+            n._text for n in _notices(app)
+        ]
+        assert (
+            session.aborts == []
+        ), f"the losing recall stopped the turn it said would run: {session.aborts}"

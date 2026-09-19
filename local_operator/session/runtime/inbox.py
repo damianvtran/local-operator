@@ -406,10 +406,22 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
 
     The verify is what retires the lie QA reproduced at 4/120 trials: the marker
     alone cannot tell the difference, because a marker appended after the drain's
-    read is a marker the drain never sees. The residue is the window between this
-    call's append and its verify when the lock is contended by a THIRD holder
-    (two recalls at once, or a stalled drain) — stated rather than claimed to be
-    closed, and strictly narrower than the shape it replaces.
+    read is a marker the drain never sees.
+
+    THE RESIDUE IS MEASURED AND ITS SHAPE IS CONTENTION, NOT "A THIRD HOLDER".
+    ``_NonBlockingLock`` gives up after roughly 50 ms (ten 5 ms attempts) and
+    proceeds UNLOCKED — that is the file's deliberate discipline, not a corner —
+    so a recall that loses the lock appends and verifies while a drain may hold
+    the batch it read and not yet consumed; the verify then re-reads the same
+    not-yet-taken bytes and answers True. Measured thresholds, by the round that
+    filed it: 0 lies in 40 trials at ≤50 ms of contention, 1 in 12 at 60 ms, 12
+    in 12 at 120 ms (QA); 4 in 1,600 stalled trials (UX); deterministic with a
+    400 ms post-decision tail (reviewer). So the honest statement is: correct at
+    the lock's own retry budget, degrading once a holder outlives it, and NOT
+    the "a drain always gets there first" this docstring used to imply — the
+    sentence mattered because it read like a closure. Closing it properly means
+    either a blocking lock or a shared/exclusive discipline for appenders, which
+    is a change to this file's write model rather than to the recall.
 
     ``False`` means the row was not in the spool when this was called, and the
     overwhelmingly likely reason is that the successor drained it — the message
@@ -491,8 +503,17 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
 
     Read and removal happen under one non-blocking lock so a concurrent
     appender cannot have its row consumed-but-not-delivered. Rows that arrive
-    while the caller is delivering are NOT lost: the file is emptied here, and
-    a later append creates it again for the next open.
+    while the caller is delivering usually survive — the file is emptied here
+    and a later append creates it again — but "NOT lost" is stronger than the
+    mechanism holds, and QA measured the gap: with a FORCED window (a writer
+    held inside the read-then-consume interval), 8 of 48 acked rows were lost on
+    both this head and `4177803f0`, i.e. the claim was already false before this
+    PR and is not repaired by it (PR #1319, QA round 4). It is recorded rather
+    than fixed because closing it means changing the appender's deliberate
+    proceed-unlocked discipline, which is a change of its own with its own
+    review. The same shape is what `_replace_remainder`'s "the NEXT open drains"
+    note below assumes; an unlocked appender's already-open descriptor points at
+    the inode a replace orphans, so that row is gone rather than deferred.
 
     **The crash contract is at-least-once, not exactly-once.** The file is
     truncated after it is read, so a runtime killed between the read and its
