@@ -1011,9 +1011,14 @@ def _tolerant(token_class: str) -> str:
     return token_class + r"+(?:\x27\x22" + token_class + r"+)*"
 
 
+#: The PEM header phrase, as a compiled test rather than a substring: `"BEGIN"` alone
+#: matches prose (`"private_key": "BEGINNER guide"`) and the file's own marker words.
+_PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY")
+
+
 def _anchored_key_value_guard(match: Match[str]) -> bool:
-    """Only a value that CARRIES a PEM header is a key, not every `private_key` field."""
-    return "BEGIN" in match.group(2).upper()
+    """Only a value that CARRIES a PEM header phrase is a key, not every `private_key`."""
+    return _PEM_HEADER_PHRASE.search(match.group(2).upper()) is not None
 
 
 CREDENTIAL_SHAPES: tuple[Shape, ...] = (
@@ -1048,7 +1053,41 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # marker, so an ordinary `"private_key": "projects/x/keys/k1"` stays readable.
         # An unterminated string masks to the end of the input and its claim is
         # withheld by ``_is_truncated_pem`` (no END marker to find).
-        re.compile(r'(?i)("?private[_-]?key"?\s*:\s*")([^"]*)'),
+        # The CLOSING QUOTE is required here, and that is load-bearing: without it the
+        # value group ran to the end of the input and swallowed whatever followed —
+        # `…<BODY>\nNORMAL, more text\n` lost that line (M6-2, returned as an over-mask).
+        # The unquoted/truncated spelling is the next rule's job, and it stops at the
+        # first non-credential line.
+        re.compile(r'(?i)("?private[_-]?key"?\s*:\s*")([^"]*)"'),
+        None,
+        2,
+        guard=_anchored_key_value_guard,
+    ),
+    Shape(
+        "gcp-service-account-value-open",
+        # The anchored spelling with NO closing quote — a truncated JSON string, how a
+        # tool prints a value it cut off. Masking "the remainder" was wrong and the
+        # manager's round-7 direction said so: the remainder is not all credential, and
+        # `…<BODY>\nNORMAL, more text\n` lost that whole line (M6-2 returned as an
+        # over-mask). This rule masks the maximal run of CREDENTIAL-SHAPED lines and
+        # stops before the first line that is not one: a line is credential-shaped when,
+        # stripped, it is empty, a PEM header/footer, or solely `[A-Za-z0-9+/=]` plus at
+        # most one trailing comma. `NORMAL, more text`, `", "other": "value"}` and prose
+        # are not, so they survive byte-identical.
+        #
+        # Not "stop at the first newline": that would publish the rest of a key whose
+        # body is bare newline-separated base64, which is every real PEM.
+        re.compile(
+            r'(?i)("?private[_-]?key"?\s*:\s*")'
+            r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}"
+            r"(?:"
+            r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+            r"(?:[A-Za-z0-9+/=]+,?"
+            r"|-{1,4}[\x27\x22]?-{1,4}(?:BEGIN|END)[ A-Z0-9]*PRIVATE KEY"
+            r"-{1,4}[\x27\x22]?-{1,4})?"
+            r"(?=\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$)"
+            r")*)"
+        ),
         None,
         2,
         guard=_anchored_key_value_guard,
@@ -1655,7 +1694,7 @@ _INCOMPLETE_MASK_RE = re.compile(
     # closing quote and brace, and masking it damaged a body the client hands to a
     # human (measured on `test_error_body_redaction`). Only word characters and the
     # symbols a credential is spelled with may extend a mask.
-    r"\[redacted\](['\"])([\w.~+/=@%$!:,-]+(?:['\"][\w.~+/=@%$!:,-]+)*)"
+    r"\[redacted\](['\"])([\w.~+/=@%$!:-]+(?:['\"][\w.~+/=@%$!:-]+)*)"
     r"(?=['\"]?(?:[\s,;:)\]}&?=<>|]|$))"
 )
 
@@ -1670,7 +1709,7 @@ _INCOMPLETE_MASK_LEFT_RE = re.compile(
     # the operator (and this session's own notice) needs to see, and swallowing it
     # also left the quoting unbalanced. An env-var-style name — capitals, digits and
     # underscores — is excluded; a token prefix like `github` or `dckr_` is not.
-    r"(?:(?<=[\s,;:(\[=])|^)(?![A-Z][A-Z0-9_]*\b)([\w.~+/=@%$!:,-]+)(['\"])\[redacted\]"
+    r"(?:(?<=[\s,;:(\[=])|^)(?![A-Z][A-Z0-9_]*\b)([\w.~+/=@%$!:-]+)(['\"])\[redacted\]"
 )
 
 
@@ -1794,7 +1833,12 @@ def has_shape_anchor(text: str) -> bool:
 #: BEGIN marker and leave the value rule's guard looking at a value with no key material
 #: in it, which is how the whole body stayed published after the rule was added (M6-1).
 _MULTILINE_LABELS = frozenset(
-    {"pem-private-key", "gcp-service-account-key", "gcp-service-account-value"}
+    {
+        "pem-private-key",
+        "gcp-service-account-key",
+        "gcp-service-account-value",
+        "gcp-service-account-value-open",
+    }
 )
 _MULTILINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label in _MULTILINE_LABELS)
 _LINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label not in _MULTILINE_LABELS)
@@ -1838,7 +1882,15 @@ def _apply_guarded(shape: Shape, text: str, hits: list[ShapeHit]) -> str:
         # assignment keeps its name and separator, a URL-valued name keeps the
         # name, and the credential inside the value is what goes.
         pieces.append(text[cursor : match.start()])
-        pieces.append(match.group(0)[: match.start(group) - match.start(0)] + REDACTION_MARKER)
+        # Keep the text AFTER the credential too: a rule may end its match on a
+        # delimiter it must not eat (the closing quote of a JSON value). Dropping it
+        # silently unquoted the output (`…[redacted], "other": "value"}`).
+        matched = match.group(0)
+        pieces.append(
+            matched[: match.start(group) - match.start(0)]
+            + REDACTION_MARKER
+            + matched[match.end(group) - match.start(0) :]
+        )
         cursor = match.end()
         search_from = match.end()
         matched = True
