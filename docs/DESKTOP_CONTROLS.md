@@ -459,6 +459,19 @@ header operation. Reads of public prices do not require a Radient login. UI-owne
 OIDC/refresh/keytar effects must be removed by the frontend implementation, not run
 alongside this path.
 
+Every refusal of that proxy answers `{"code", "message", "details"}` in `detail`,
+and `code` is what separates the remedies: `radient_no_credential` (nothing is
+stored) and `radient_credential_refused` (Radient refused this account's sign-in —
+including a grant the store knows is dead, which carries
+`details.reason = "grant_invalid"`) both mean "sign in to Radient again", while
+`radient_upstream_failed` means "retry" (`details.reason` distinguishes a transient
+refresh failure from an outage, and `details.upstream_status` carries the answer
+when there was one). A refusal from the desktop plane itself — this app's own
+bearer — carries no `radient_` code, and that absence is how a client tells
+"re-pair the app" from "sign in again". A bearer the store already considers due
+for a refresh is never spent upstream: the proxy answers the classified refusal
+rather than relaying Radient's 401 for a token it knows is stale.
+
 The old Google integration UI writes GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN and
 GOOGLE_TOKEN_EXPIRY_TIMESTAMP via `use-oidc-auth.ts`; no builtin backend reader or
 Gmail/Calendar/Drive client consumes those keys. The only other UI references are
