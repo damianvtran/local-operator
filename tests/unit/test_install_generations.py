@@ -1370,6 +1370,216 @@ class TestPruning:
             session_dir(root, "doomed1")
         ]
 
+    @staticmethod
+    def _publish_session(root: Path, pid: int, session_id: str, install_root: str) -> None:
+        """One live session record naming ``install_root``, written by the product's writer."""
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import SessionRecord
+
+        registry.publish(
+            SessionRecord(
+                pid=pid,
+                kind="daemon",
+                session_id=session_id,
+                conversation_name=session_id,
+                cwd="/",
+                model_label="m",
+                control_port=0,
+                control_key="k",
+                install_root=install_root,
+            ),
+            root,
+        )
+
+    @pytest.mark.parametrize("namespace", ["boot", "reaped", "live"])
+    @pytest.mark.parametrize("listing", ["0.json", "zzz.json"])
+    def test_a_malformed_record_beside_a_good_one_costs_only_itself(
+        self, home: Path, namespace: str, listing: str
+    ) -> None:
+        """A torn record must not hide the good one beside it (round 1 BLOCKER).
+
+        THE BUG THIS PINS, in the direction QA measured. Both readers rescued an
+        unreadable entry with ``except (OSError, ValueError)``, while every record
+        parser raises ``TypeError`` for a wrong-typed field and for a payload
+        missing a required key — the shape both ``server/registry.py`` and the
+        reaped sidecar's retention window make ordinary. The ``TypeError`` escaped
+        the per-entry rescue, the reader's outer handler swallowed it, and the WHOLE
+        namespace read as empty: measured as ``referenced roots read: 0`` with the
+        good record's tree REMOVED, in EITHER listing order (``boot-malformed-early``
+        and ``-late``), and unattested, because the same traversal feeds
+        ``note_doomed_runtimes``.
+
+        SO THE ASSERTION IS PER RECORD, not per namespace: the good root comes
+        back, and the malformed entry buys the KEEP rule rather than a deletion —
+        the tree IT might have named is not removed either, which is why nothing is
+        removed at all here (see
+        ``test_an_unreadable_record_keeps_the_tree_it_might_name``).
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.journal import BootRecord
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME, RUN_DIRNAME
+
+        generations = [_install(f"0.53.{index}") for index in range(4)]
+        good = generations[0]
+        good_root = str(good / "tools" / "local-operator")
+        root = home / ".local-operator"
+        if namespace == "boot":
+            registry.publish(
+                BootRecord(pid=4242, session_id="ba", install_root=good_root),
+                root,
+                HOST_RUN_DIRNAME,
+            )
+            malformed = root / HOST_RUN_DIRNAME / listing
+            payload = '{"pid": 222, "parent_pid": {"a": 1}}'
+        elif namespace == "reaped":
+            dead_pid = 2**22 + 91
+            self._publish_session(root, dead_pid, "mf", good_root)
+            # The reap is the reader's sibling step, and the sidecar it lands in is
+            # the namespace a pre-upgrade record survives in for a day.
+            registry.scan(root)
+            malformed = root / RUN_DIRNAME / registry.REAPED_DIRNAME / listing
+            payload = '{"pid": 999}'
+        else:
+            self._publish_session(root, os.getpid(), "mflive", good_root)
+            malformed = root / RUN_DIRNAME / listing
+            payload = '{"pid": 999}'
+        malformed.parent.mkdir(parents=True, exist_ok=True)
+        malformed.write_text(payload, encoding="utf-8")
+
+        referenced = update_mod.referenced_install_roots()
+        roots = {Path(path).resolve() for path in referenced}
+        assert (
+            good / "tools" / "local-operator"
+        ).resolve() in roots, "one malformed record must not hide the good one beside it"
+
+        plan = update_mod.prune_generations(keep=0, referenced=referenced)
+
+        assert good.is_dir(), "the good record's tree must be kept"
+        assert good not in plan.removed
+        assert plan.removed == (), "an unreadable record keeps the tree it might name"
+        assert malformed.exists(), "a prune must not delete a record it could not read"
+        assert update_mod._UNREADABLE_RECORD_REASON in {
+            decision.reason for decision in plan.decisions
+        }, plan.decisions
+
+    @pytest.mark.parametrize(
+        ("namespace", "payload"),
+        [
+            # An unparseable live record: not JSON at all, so nothing but the file
+            # itself says a runtime was there.
+            ("live", "{ this is not json"),
+            # A ``lop serve`` record with the same defect.
+            ("serve", "{ this is not json"),
+            # JSON, but not a record of that kind — the parser's ``None``.
+            ("reaped", "[not, a, record]"),
+            # JSON object, wrong shape: a torn boot record.
+            ("boot", "{}"),
+        ],
+    )
+    def test_an_unreadable_record_keeps_the_tree_it_might_name(
+        self, home: Path, namespace: str, payload: str
+    ) -> None:
+        """Q3, in all four namespaces: REMOVE becomes KEEP, deliberately.
+
+        A record that cannot be read may name any candidate tree, and the read that
+        would have said which is the one that failed — so no candidate is deleted on
+        the strength of it. THIS IS A BEHAVIOUR CHANGE AND IS MEANT AS ONE: the code
+        this replaced deleted the tree, in all four namespaces (the live-namespace
+        half pre-existing), because an unreadable entry simply fell out of the root
+        list and the prune read the omission as proof.
+
+        WHY THE UNSAFE DIRECTION IS NOT THE DEFAULT: a tree removed while a runtime
+        imports from it kills that runtime mid-turn, and the runtime cannot record
+        anything afterwards (that is the 2026-09-18 shape, and the reason this whole
+        change set exists). An unreadable record is the one case where "no root
+        here" and "no root" are different answers, and the direction that keeps a
+        tree costs disk — the direction that deletes it costs a session.
+
+        THE CONTROL AT THE END IS PART OF THE TEST: with the file removed the same
+        prune removes, so a PASS cannot come from a prune that never deletes.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import (
+            HOST_RUN_DIRNAME,
+            RUN_DIRNAME,
+            SERVE_RUN_DIRNAME,
+        )
+
+        generations = [_install(f"0.54.{index}") for index in range(4)]
+        root = home / ".local-operator"
+        directory = {
+            "live": root / RUN_DIRNAME,
+            "serve": root / SERVE_RUN_DIRNAME,
+            "reaped": root / RUN_DIRNAME / registry.REAPED_DIRNAME,
+            "boot": root / HOST_RUN_DIRNAME,
+        }[namespace]
+        directory.mkdir(parents=True, exist_ok=True)
+        unreadable = directory / "corrupt.json"
+        unreadable.write_text(payload, encoding="utf-8")
+
+        referenced = update_mod.referenced_install_roots()
+        assert referenced.complete is False, "an entry that cannot be read is not a read"
+
+        plan = update_mod.prune_generations(keep=0, referenced=referenced)
+
+        reasons = {decision.reason for decision in plan.decisions}
+        assert update_mod._UNREADABLE_RECORD_REASON in reasons, plan.decisions
+        assert plan.removed == (), plan.decisions
+        assert all(generation.is_dir() for generation in generations)
+
+        unreadable.unlink()
+        assert update_mod.referenced_install_roots().complete is True
+        after = update_mod.prune_generations(
+            keep=0, referenced=update_mod.referenced_install_roots()
+        )
+        assert after.removed, "the KEEP must be the record's doing, not a prune that never removes"
+
+    def test_a_failed_removal_withdraws_the_attestation_it_staged(self, home: Path) -> None:
+        """MINOR 2: an act that did not complete must not leave a marker saying it did.
+
+        ``_remove_tree`` can report the tree still there — a read-only generation, a
+        link or a loop inside it — and the plan then says KEPT. The marker staged
+        just before the attempt says the opposite, and it is keyed to the live RUN,
+        so it would narrate any LATER death of that same runtime as this prune's
+        doing. The prune's own report is what the operator read; the evidence has to
+        agree with it.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.journal import BootRecord
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME, session_dir
+
+        generations = [_install(f"0.55.{index}") for index in range(3)]
+        doomed = generations[0]
+        root = home / ".local-operator"
+        session_dir(root, "kept1").mkdir(parents=True)
+        # The snapshot is taken FIRST and the record published after it, which is the
+        # only shape that both removes this tree and attests for it: the ~1.2 s boot
+        # window (``test_a_prune_attests_before_it_removes_a_runtime_tree``).
+        referenced = update_mod.referenced_install_roots()
+        registry.publish(
+            BootRecord(
+                pid=4243,
+                session_id="kept1",
+                install_root=str(doomed / "tools" / "local-operator"),
+            ),
+            root,
+            HOST_RUN_DIRNAME,
+        )
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(update_mod, "_remove_tree", lambda _path: False)
+            plan = update_mod.prune_generations(
+                keep=0, referenced=referenced, actor=update_mod.ACTOR_PRUNE
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert plan.removed == ()
+        assert doomed in {decision.path for decision in plan.decisions}
+        assert (
+            registry.read_stop_marker(session_dir(root, "kept1")) is None
+        ), "a marker for a removal that did not happen is a false attribution"
+
     def test_prune_reports_what_it_kept_and_why(self, home: Path) -> None:
         """D3: the one command whose whole job is a retention decision must explain it."""
         _install("0.52.0")

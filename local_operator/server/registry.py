@@ -460,12 +460,19 @@ def unpublish(pid: int, root: Path | None = None) -> None:
     session_registry.unpublish(pid, root, SERVE_RUN_DIRNAME)
 
 
-def scan(root: Path | None = None) -> list[tuple[ServeRecord, str]]:
+def scan(root: Path | None = None, *, reap: bool = True) -> list[tuple[ServeRecord, str]]:
     """Every serve record, classified ``live`` / ``wedged`` / ``stale``.
 
     The classification is the shared one, asked for this namespace and this
     record type — ``stale`` means the pid is gone and the file has just been
     reaped, ``wedged`` means the pid lives but its heartbeat stopped, and only
     ``live`` is a daemon to talk to.
+
+    ``reap`` is passed straight through for the ONE caller that must not sweep:
+    ``update.referenced_install_roots`` reads this namespace to decide whether a
+    tree is still named, and the shared scan DELETES a record it cannot parse — so
+    a reader-mode pass leaves a torn record for the next reader to see instead of
+    turning it into a clean namespace and an unprotected tree. Every other caller
+    wants the default, which is what this function has always done.
     """
-    return session_registry.scan(root, SERVE_RUN_DIRNAME, ServeRecord.from_json)
+    return session_registry.scan(root, SERVE_RUN_DIRNAME, ServeRecord.from_json, reap=reap)
