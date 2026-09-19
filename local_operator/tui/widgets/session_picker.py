@@ -617,7 +617,20 @@ WEDGED_MARKER = "≈"
 #: rejected for ``≈`` — is not in it. The capacity rule exists to stop the
 #: cluster reading as one blob; three shapes this different are not that
 #: failure, and the render that settled it is the mixed-state column frame
-#: attached to the change that added ``≈``.
+#: captured for the change that added ``≈`` — re-renderable in one command with
+#: the rig named in the PR (``~/workspace/lop-wedged/column_shot.py``), and
+#: reproduced independently by three review rounds. It is NOT attached to that
+#: PR: GitHub's asset-upload endpoint answers 404 to a token and this harness has
+#: no file-picker path, so the frame is named rather than embedded. Review round
+#: 1 (F5/D1/U5) caught this comment asserting an attachment that did not exist;
+#: the fix is here, in the claim, because the substance was never the problem.
+#:
+#: ``≈`` is also not new to this UI, which a fourth candidate's author should
+#: weigh rather than rediscover: ``session_panel.py`` already renders it twice
+#: (``≈ estimated tokens``), where it means "about, not exact". No collision —
+#: different surface, and the panel's use is inside a prose qualifier rather
+#: than a one-cell state column — but it is the second precedent for the glyph
+#: and the reason it reads as a measure rather than an alarm.
 #:
 #: The fallback, should a later round judge the class too crowded in a rendered
 #: frame, is to keep the SHAPE and drop the ink to ``muted`` — that is what

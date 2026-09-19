@@ -734,16 +734,42 @@ _PAYLOAD_OPS = {
 #: ``wedged`` (peaking at 52.5 s) while the process was alive and idle (see
 #: ``mobile/tui_handle._on_app`` for the hop that produced it).
 #:
-#: Deliberately a CLOSED set of four, and every member is a request that can only
-#: make a bad situation better: ``ping`` answers health, and ``stop``/``abort``/
-#: ``steer`` are the three ways a user regains control of a turn. A heavier op
-#: admitted pre-sync would let a client act on a connection that is not yet
-#: authoritative about the state it is acting on — which is why ``prompt``,
-#: ``slash``, ``snapshot``, ``history_page``, ``job_trajectory``,
-#: ``new_conversation`` and ``resume_session`` are REFUSED until the sync lands
-#: (they get the ordinary error frame, never a silent run), and why the negative
+#: Deliberately a CLOSED set, and every member is a request that can only make a
+#: bad situation better: ``ping`` answers health, and ``stop``/``abort``/
+#: ``steer``/``cancel`` are the ways a user regains control of a turn. A heavier
+#: op admitted pre-sync would let a client act on a connection that is not yet
+#: authoritative about the state it is acting on, so the gate is an ALLOWLIST:
+#: everything outside this set and :data:`_SYNC_LOCAL_OPS` is REFUSED until the
+#: sync lands (``prompt``, ``slash``, ``snapshot``, ``history_page``,
+#: ``job_trajectory``, ``new_conversation``, ``resume_session`` and the rest),
+#: each getting the ordinary error frame rather than a silent run. The negative
 #: test for exactly that lives beside the positive one.
-_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer"})
+#:
+#: ``cancel`` was ADDED in review round 1 (F2), and it belongs for the same
+#: reason ``abort`` is here: it is a way a user regains control of a turn, not a
+#: way to act on state. Its ``immediate`` mode literally routes to ``abort``
+#: (``_dispatch_payload``), and the graceful mode asks the session to stop at
+#: its next tool boundary — so refusing it pre-sync would deny a supervisor the
+#: ability to stop a runaway turn on a session that is still mid-bind, which is
+#: precisely the situation the priority set exists for. The design named it
+#: (``DESIGN-BACKEND.md`` §P2); this is that set.
+_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
+
+#: Ops exempt from their connection's op CHAIN. A different question from
+#: :data:`_SYNC_PRIORITY_OPS`: that set decides what may run before the sync
+#: lands (ADMISSION), this one decides what may run without waiting for an
+#: earlier op to finish (ORDERING).
+#:
+#: ``ping`` alone, and the argument is that its answer cannot depend on session
+#: state: it reports that the runtime's loop is alive and serving. Chaining it
+#: made it report something else entirely — measured over a real socket (review
+#: round 1, UX U3), a ``ping`` sent after a parked ``steer`` on the SAME
+#: connection went unanswered for 8-15 s, so the one request a surface speaks to
+#: ask "are you there" was queued behind a mutation. Everything else keeps its
+#: place in the chain, because ordering is what stops two mutations interleaving
+#: and only a liveness probe has no state to be ordered against.
+_UNCHAINED_OPS = frozenset({"ping"})
+
 
 #: Connection-LOCAL ops admitted alongside the priority set above. These are not
 #: a widening of it: each one mutates only this connection's own relay state and
@@ -950,6 +976,16 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    #: The chain of ops this connection has ADMITTED: each waits for the one
+    #: before it, so ordering is preserved, and none of them parks the reader —
+    #: which is what lets a ``ping`` be answered while a mutation is still in
+    #: flight. See ``RuntimeServer._dispatch_frame`` for the measured failure
+    #: the shape fixes (a parked ``steer`` made the whole connection mute).
+    op_chain: asyncio.Task[None] | None = None
+    #: Strong references to those tasks. A bare ``create_task`` can be collected
+    #: mid-await, which would leave an op half-run and its reply never written —
+    #: the same reason ``RuntimeServer._event_sends`` exists.
+    op_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     # Job ids whose trajectory deltas this connection wants (``watch_job``).
     # Empty by default and per-connection by necessity: the snapshot ships no
     # trajectories at all (they overflow ``_MAX_LINE_BYTES``), so a viewer
@@ -1336,6 +1372,10 @@ class RuntimeServer:
         #: admission rather than on an older one's completion.
         self._in_flight_requests = 0
         self._in_flight_idle: asyncio.Event | None = None
+        #: Frontend binds abandoned by a connection that died mid-bind, held
+        #: until they land so their release callback can still fire (nothing
+        #: awaits them any more — see ``_release_when_landed``).
+        self._abandoned_binds: set[asyncio.Task[Any]] = set()
         # N authenticated connections keyed by id(writer): one daemon (a new
         # daemon dial evicts the old — that IS its reconnect story) plus up to
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
@@ -2150,14 +2190,32 @@ class RuntimeServer:
             conn.audit_history = bool(frame.get("display_history_audit")) and (
                 "display-history-audit-v1" in self._record.capabilities
             )
-            outcome = (
-                subscribe_frontend(on_update, display_window=True)
-                if window_requested
-                else subscribe_frontend(on_update)
-            )
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
-            subscription = cast(FrontendSubscription, outcome)
+
+            async def bind() -> Any:
+                outcome = (
+                    subscribe_frontend(on_update, display_window=True)
+                    if window_requested
+                    else subscribe_frontend(on_update)
+                )
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                return outcome
+
+            # THE BIND IS NOT CANCELLABLE ONCE IT IS RUNNING. The subscription is
+            # created INSIDE the awaited handle call — on the app's loop, one
+            # message before the reply that carries it back here — so cancelling
+            # this task mid-bind can land on either side of that registration.
+            # Shielding lets it land, and the handler below releases what it
+            # registered; without both halves a cancelled bind leaks a
+            # subscriber the session keeps for the life of the app (review
+            # round 1, F3; reproduced: "store has subscribers AFTER the drop:
+            # True").
+            bind_task = asyncio.ensure_future(bind())
+            try:
+                subscription = cast(FrontendSubscription, await asyncio.shield(bind_task))
+            except asyncio.CancelledError:
+                self._release_when_landed(bind_task)
+                raise
             sync = subscription.sync
             # Trajectories are stripped here and re-fetched per job through
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
@@ -2254,6 +2312,53 @@ class RuntimeServer:
             # connection is gone and the gate no longer matters, and the
             # cancellation case, where ``_drop_client`` has already removed it.
             conn.frontend_sync_pending = False
+
+    def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
+        """Release a viewer subscription whose connection died MID-BIND.
+
+        THE LEAK THIS CLOSES (review round 1, F3). ``_drop_client`` cancels this
+        connection's bind task, and the comment there argued a cancelled bind
+        could not leave a subscription behind, because "a bind that is still
+        parked in its handle call has not received a subscription yet, and
+        everything between receiving one and recording it is synchronous". The
+        premise is false: the subscription is REGISTERED inside the awaited
+        handle call, so a cancel that lands after that registration and before
+        ``conn.frontend_unsubscribe`` is written leaves a subscriber nothing
+        will ever release. The argument is now structural instead — the bind is
+        shielded, so the cancel cannot abort it half-registered, and THIS runs
+        on the cancellation path.
+
+        A DONE-CALLBACK rather than an await, and the difference matters twice
+        over. `_drop_client` runs from the reader loop and from shutdown, so
+        awaiting the bind there would park the teardown — and the loop with it —
+        for as long as the abandoned hop takes, up to a whole hop budget. And a
+        callback cannot be skipped: a second cancellation (the reader's own
+        teardown racing the first) would interrupt an await at exactly the
+        moment the release has to happen, while a callback registered on the
+        task survives it.
+
+        The task is held in ``self._abandoned_binds`` until it lands, because
+        nothing else awaits it now: an unreferenced task can be collected
+        mid-flight and then its release never fires.
+        """
+        self._abandoned_binds.add(bind_task)
+
+        def release(completed: asyncio.Task[Any]) -> None:
+            self._abandoned_binds.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.debug("frontend bind failed after its connection went away", exc_info=error)
+                return
+            unsubscribe = getattr(completed.result(), "unsubscribe", None)
+            if callable(unsubscribe):
+                try:
+                    unsubscribe()
+                except Exception:  # noqa: BLE001 — connection cleanup must finish
+                    logger.debug("late frontend unsubscribe failed", exc_info=True)
+
+        bind_task.add_done_callback(release)
 
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -2531,20 +2636,114 @@ class RuntimeServer:
                 except ValueError:
                     continue
                 conn.last_seen = time.monotonic()
-                # ADMITTED BEFORE IT RUNS, and released when it settles however
-                # it settles: this span is what ``_shutdown_impl`` waits on so
-                # the reply to an admitted request is written before the socket
-                # it belongs to is closed.
-                self._admit_request()
-                try:
-                    await self._on_request(frame, conn)
-                finally:
-                    self._release_request()
+                self._dispatch_frame(conn, frame)
         except (ConnectionResetError, BrokenPipeError):
             self._drop_client(conn, reason="reader reset")
             return
         finally:
             self._drop_client(conn, reason="reader eof")
+
+    def _dispatch_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """Run one admitted request OFF this connection's reader loop.
+
+        WHY THE READER NO LONGER AWAITS IT. The reader used to
+        ``await self._on_request(...)``, which made a connection strictly serial
+        — right for ORDERING (two mutations must not interleave) but wrong for
+        LIVENESS: while one op is parked inside a hop into the session's loop,
+        the reader cannot read the next frame, so everything else that client
+        sent waits behind it. Measured over a real socket (review round 1, UX
+        U3): a parked ``steer`` left ``ping`` on that same connection unanswered
+        for 8-15 s — the one request a surface speaks to ask "are you there",
+        queued behind a mutation. New connections were never affected (a fresh
+        dial, its ping and its refusals all answered in 0.00 s), so "always
+        connectable" held while "prioritize the health check" did not.
+
+        ORDERING IS PRESERVED BY CHAINING, not by concurrency: each op waits for
+        the one admitted before it, so a connection's frames still run one at a
+        time and in arrival order. What changes is only that the READER stays
+        free while it waits, and therefore keeps answering whatever else that
+        client sends.
+
+        The chain link is waited on with :func:`asyncio.wait`, which REPORTS a
+        task's outcome rather than raising it: the earlier op's failure is its
+        own business (``_on_request`` answers its own errors with an error
+        frame), and an ordering link must never be an error channel that takes
+        the next request down with it.
+
+        ``ping`` is exempt from the chain (see :data:`_UNCHAINED_OPS`): a health
+        check queued behind a mutation answers the wrong question, and measured
+        (review round 1, UX U3) it did exactly that — 8-15 s of silence on a
+        connection whose only sin was a parked ``steer``. An exempt op also does
+        NOT become the chain head, and that is load-bearing rather than tidiness:
+        the head is what the next mutation waits on, so letting a ping (which
+        finishes at once) take it would let the mutation admitted after the ping
+        overtake the one still in flight — reproduced before this line existed,
+        where a parked ``steer`` was overtaken by the next ``steer`` because a
+        ``ping`` had been admitted in between. The head therefore stays with the
+        last CHAINED op, and the chain is transitive: waiting on the head is
+        waiting on everything admitted before it.
+
+        Cancellation is deliberately NOT propagated to these tasks. An op parked
+        on a dead connection is left to unwind on its own, exactly as before
+        this change (``_drop_client``'s ``phone_watchers`` note depends on that:
+        an evicted daemon parked inside ``_on_request`` returns on its own), and
+        ``conn.op_tasks`` holds the strong references meanwhile.
+        """
+        # ``isinstance`` FIRST, and it is load-bearing rather than defensive: a
+        # frame that parses as a bare JSON scalar (``12345``, ``null``,
+        # ``"str"`` — reachable when an oversized line is discarded and its
+        # surviving TAIL happens to parse) reaches here as an int/None/str, and
+        # ``.get`` on one raises. That exception would escape the reader loop's
+        # ``ConnectionResetError``/``BrokenPipeError`` handler and take the
+        # connection down — the exact session death
+        # ``test_a_junk_scalar_frame_does_not_kill_the_connection`` exists to
+        # prevent, which the reader loop already guards against INSIDE
+        # ``_on_request``. This check must therefore never become a second,
+        # crashing gate in front of it: a non-dict frame is chained like any
+        # other and left to the dispatch to reject.
+        chained = not (isinstance(frame, dict) and frame.get("op") in _UNCHAINED_OPS)
+        previous = conn.op_chain if chained else None
+
+        async def run() -> None:
+            if previous is not None:
+                await asyncio.wait({previous})
+            # ADMITTED BEFORE IT RUNS, and released when it settles however it
+            # settles: this span is what ``_shutdown_impl`` waits on so the
+            # reply to an admitted request is written before the socket it
+            # belongs to is closed.
+            self._admit_request()
+            try:
+                await self._on_request(frame, conn)
+            finally:
+                self._release_request()
+
+        task = asyncio.create_task(run())
+        if chained:
+            conn.op_chain = task
+        conn.op_tasks.add(task)
+        task.add_done_callback(lambda completed: self._op_settled(conn, completed))
+
+    def _op_settled(self, conn: _ClientConn, completed: asyncio.Task[None]) -> None:
+        """Retire a dispatched op and consume its outcome.
+
+        The strong reference goes away here, and an exception is LOGGED rather
+        than left for the garbage collector: ``_on_request`` answers its own
+        failures with an error frame, so anything that escapes it is a bug in
+        the dispatch path, and an unretrieved task exception would surface much
+        later as an asyncio "never retrieved" warning naming no connection.
+        """
+        conn.op_tasks.discard(completed)
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            logger.warning(
+                "session runtime: an admitted request failed outside its own "
+                "error frame for %s client %s",
+                conn.kind,
+                conn.writer.get_extra_info("peername"),
+                exc_info=error,
+            )
 
     def _drop_client(self, conn: _ClientConn, *, reason: str = "unspecified") -> None:
         """Remove one connection from the registry and close its socket.
@@ -2636,7 +2835,17 @@ class RuntimeServer:
         # subscription yet, and everything between receiving one and recording
         # it in ``conn.frontend_unsubscribe`` is synchronous — so there is no
         # interleaving in which a cancelled bind leaves a live subscription
-        # behind that nothing releases.
+        # behind that nothing releases. THAT ARGUMENT WAS WRONG, and the shape
+        # it describes is only the easy half (review round 1, F3): the
+        # subscription is registered INSIDE the awaited call, so a cancel that
+        # lands after the registration and before ``frontend_unsubscribe`` is
+        # written used to leak a subscriber for the life of the app
+        # (reproduced: "store has subscribers AFTER the drop: True"). The
+        # guarantee now comes from both halves of the bind — it is shielded, so
+        # the cancel cannot abort it half-registered, and its cancellation path
+        # calls ``_release_when_landed`` to release whatever did register. The
+        # ordering below still holds: cancel first, then remove the record of
+        # the subscription, so nothing is released twice.
         sync_task = conn.frontend_sync_task
         conn.frontend_sync_task = None
         if sync_task is not None and sync_task is not asyncio.current_task():
