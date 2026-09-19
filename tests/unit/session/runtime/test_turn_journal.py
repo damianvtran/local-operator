@@ -34,6 +34,11 @@ import pytest
 from local_operator import update
 from local_operator.session.attention import _classify_orphaned_run
 from local_operator.session.runtime import journal, registry
+from local_operator.session.runtime.types import (
+    BUILD_DRAIN_OVERDUE_CAUSE,
+    BUILD_DRAIN_PROGRESS_S,
+    bound_text,
+)
 
 #: A child that opens a real journal row, records a real tool boundary, writes
 #: its boot record, and then blocks. The test SIGKILLs it: nothing in this
@@ -338,6 +343,37 @@ def test_a_recorded_signal_survives_a_later_writer_without_one(tmp_path: Path) -
     assert row is not None
     assert row.exit_cause == "SIGKILL", row.exit_cause
     assert journal.death_verdict(row)[1] == "runtime-shutdown"
+
+
+def test_a_recorded_bound_outranks_the_install_inference(tmp_path: Path) -> None:
+    """Q-2/R3: the row's own last word is narrated ahead of an inference.
+
+    Measured before this: a runtime that cut its turn under the drain's progress
+    bound left ``exit_cause`` naming the bound, and the successor narrated
+    ``install-mid-update`` instead. That sentence is true — the install HAS moved,
+    which is why the drain latched — but it is also the sentence every ordinary
+    build handover leaves, so the fact the operator needs (this turn was cut by a
+    bound rather than waited out) was invisible in the one account that outlives the
+    process. ``lop sessions`` loses the record ~97 ms after the escalation, so that
+    row is all there is.
+    """
+    directory = _session_directory(tmp_path, "sess-overdue")
+    writer = journal.TurnJournal(directory, "sess-overdue", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn(command_id="cmd-over")
+    writer.note_exit(BUILD_DRAIN_OVERDUE_CAUSE)
+
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert row.exit_cause == BUILD_DRAIN_OVERDUE_CAUSE
+    assert journal.install_moved(row), (
+        "the fixture must be one where the inference WOULD have won, or this test "
+        "proves nothing about the ordering"
+    )
+    kind, cause, reason = journal.death_verdict(row)
+    assert kind == "error"
+    assert cause == BUILD_DRAIN_OVERDUE_CAUSE, cause
+    assert "no movement" in reason, reason
+    assert bound_text(BUILD_DRAIN_PROGRESS_S) in reason, reason
 
 
 def test_a_non_signal_exit_cause_is_recorded_verbatim(tmp_path: Path) -> None:
