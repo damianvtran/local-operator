@@ -16,6 +16,7 @@ from local_operator.helpers import (  # Added import
     parse_agent_action_xml,
     parse_replacements,
     remove_think_tags,
+    retention_label,
     setup_cross_platform_environment,
 )
 
@@ -1439,3 +1440,17 @@ def test_extract_initial_think_tags(text, expected_thinking, expected_remaining)
 def test_parse_replacements(replacements_str, expected_output):
     """Test the parse_replacements function."""
     assert parse_replacements(replacements_str) == expected_output
+
+
+def test_retention_label_is_one_implementation_for_two_namespaces() -> None:
+    """NIT 1 (review round 3): the two ``_ttl_label``s are now one function.
+
+    ``journal`` labels ``registry.REAPED_MAX_AGE_S`` for the boot-record reaper and
+    ``update`` labels its own ``_PARTIAL_TTL_S`` for the crash-debris rule; each had
+    grown a private ``_ttl_label`` beside its constant, spelled two different ways
+    (if/return against a conditional expression) and free to drift from the constant
+    it described. Both call this now, so the label follows the policy.
+    """
+    assert retention_label(24 * 60 * 60.0) == "24h"
+    assert retention_label(3600.0) == "1h"
+    assert retention_label(1800.0) == "30m"
