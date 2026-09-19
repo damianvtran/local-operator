@@ -508,7 +508,13 @@ _VENDOR_FIXED_PREFIXES: tuple[str, ...] = (
 #: The third discriminator, an underscore-joined lowercase phrase, is checked by
 #: :func:`_vendor_tail_guard` rather than by the charset: a look-behind cannot
 #: express it (Python requires fixed width), and a guard runs only on a match.
-_VENDOR_TAIL = r"[A-Za-z0-9_+/=\-]{12,}(?![A-Za-z0-9.])"
+#: The tail is what distinguishes a token from a name. Eight characters rather than
+#: twelve: pre-existing callers of this pass treat `tvly-ABC123XYZ` (a 9-character
+#: tail) as a credential, and a longer floor published it. The all-letter 8-19
+#: escape window is closed by the GUARD instead — an underscore-joined lowercase
+#: run is a name (`npm_config_update_notifier`) — and the lookahead keeps a
+#: filename (`pypi-local-operator.json`) readable.
+_VENDOR_TAIL = r"[A-Za-z0-9_+/=\-]{8,}(?![A-Za-z0-9.])"
 
 _VENDOR_PATTERN = re.compile(
     r"\b(?:"
@@ -1543,14 +1549,19 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
 #: `,;:)]}&?=<>|`), so a quote that genuinely delimits a value
 #: (`password: "[redacted]"`) is left where it is and nothing else is touched.
 _INCOMPLETE_MASK_RE = re.compile(
-    r"\[redacted\](['\"])([^\s'\"]+(?:['\"][^\s'\"]+)*)" r"(?=['\"]?(?:[\s,;:)\]}&?=<>|]|$))"
+    # The run is CREDENTIAL MATERIAL, not punctuation: `"}` after a mask is a JSON
+    # closing quote and brace, and masking it damaged a body the client hands to a
+    # human (measured on `test_error_body_redaction`). Only word characters and the
+    # symbols a credential is spelled with may extend a mask.
+    r"\[redacted\](['\"])([\w.~+/=@%$!:,-]+(?:['\"][\w.~+/=@%$!:,-]+)*)"
+    r"(?=['\"]?(?:[\s,;:)\]}&?=<>|]|$))"
 )
 
 
 #: The mirror case: a mask whose LEFT side is a readable run followed by a quote
 #: (``_authToken=npm_abcd'[redacted]``). The run is credential material the rule
 #: could not see, and it is masked for the same reason as the tail.
-_INCOMPLETE_MASK_LEFT_RE = re.compile(r"(?<=[\s,;:(\[=])(['\"])([^\s'\"]+)\[redacted\]")
+_INCOMPLETE_MASK_LEFT_RE = re.compile(r"(?<=[\s,;:(\[=])(['\"])([\w.~+/=@%$!:,-]+)\[redacted\]")
 
 
 def _close_partial_masks(text: str) -> str:
