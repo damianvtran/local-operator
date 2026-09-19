@@ -3,7 +3,7 @@
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/queued_prompt_shot.py OUT.svg [queued|settled|signal|refused] [COLSxROWS]
+        scripts/queued_prompt_shot.py OUT.svg [queued|settled|signal|refused|updating] [COLSxROWS]
 
 The two modes are the two outcomes a draining runtime can give the owner's own
 prompt, and the pair is the point of the frame:
@@ -19,6 +19,15 @@ prompt, and the pair is the point of the frame:
   queue after the message had run (design round 1, D2/D3/D4).
 * ``settled`` — the same send, after the successor has announced the message.
   The marker is gone, which is the end of the queued state.
+* ``updating`` — the window the 2026-09-19 incident is about: an IDLE runtime
+  moving to the build on disk, which QUEUES the message instead of refusing it
+  (``types.UPDATING``). The frame is the fix's user-visible half, and it differs
+  from ``signal``/``queued`` in both halves of the screen: the notice says the
+  update is happening and the message will go as soon as the new build is up
+  (rather than that a new message will not start a turn), and the row beneath the
+  message says the same thing in the marker. Paint the pair before and after and
+  the difference is the report: "leaving; your message is back in the composer"
+  versus "updating; your message is queued".
 * ``signal`` — the SIGNALLED departure with a queued message: no sentence on the
   frame may claim a newer build, and the marker names no build at all (design
   round 1, D1 — the receipt used to hardcode "switching to a newer build" for a
@@ -43,6 +52,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from local_operator import buildwatch  # noqa: E402
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
 isolate_capture()
@@ -52,6 +62,7 @@ from local_operator.session.runtime.types import (  # noqa: E402
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
 )
+from local_operator.update import BuildStamp  # noqa: E402
 
 try:  # the receipt this change adds, absent in the tree a "before" comes from
     from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT  # noqa: E402
@@ -68,6 +79,13 @@ from local_operator.tui.widgets.transcript import (  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 MESSAGE = "now summarise the build staleness fix"
+
+
+#: The pair the window publishes on the record and the frame — built through the
+#: production formatter so the frame names exactly what the runtime names.
+UPDATE_PAIR = buildwatch.update_pair_text(
+    BuildStamp(version="0.59.9", source_ref=""), BuildStamp(version="0.59.11", source_ref="ead71b6")
+)
 
 
 class _ShotSession(FakeSession):
@@ -144,8 +162,14 @@ async def main() -> None:
         app._append_block(reply)
         await pilot.pause()
 
-        # The standing notice, from the app's own entry point for the frame.
-        app._on_runtime_draining(LEAVING_ON_SIGNAL if mode == "signal" else LEAVING_FOR_BUILD)
+        # The standing notice, from the app's own entry point for the frame. The
+        # window frame is the idle rung's: ``draining`` false and a pair, which is
+        # the shape the app answers with the updating sentence rather than the
+        # drain's.
+        if mode == "updating":
+            app._on_runtime_draining("", UPDATE_PAIR)
+        else:
+            app._on_runtime_draining(LEAVING_ON_SIGNAL if mode == "signal" else LEAVING_FOR_BUILD)
         await pilot.pause()
 
         editor.focus()
@@ -154,6 +178,13 @@ async def main() -> None:
         await pilot.press("enter")
         if mode == "refused":
             await _settle(pilot, lambda: bool(editor.text))
+        elif mode == "updating":
+            # The window QUEUES the owner's own prompt (``SPOOL_RECEIPT_PROMPT``),
+            # so nothing comes back and the row stands — the same shape as the
+            # drain's ``queued``, one state earlier and one second shorter.
+            await _settle(
+                pilot, lambda: any(QUEUED_ROW_TEXT in b._rows(40) for b in _user_rows(app))
+            )
         else:
             await _settle(
                 pilot, lambda: any(QUEUED_ROW_TEXT in b._rows(40) for b in _user_rows(app))
