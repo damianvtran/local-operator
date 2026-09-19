@@ -433,6 +433,7 @@ _CALL_COLUMNS = (
     "purpose",
     "duration_ms",
     "ttft_ms",
+    "first_reasoning_ms",
     "preparation_ms",
     "outcome",
     "usage_reported",
@@ -469,6 +470,16 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("purpose", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("duration_ms", "REAL NOT NULL DEFAULT -1"),
     ("ttft_ms", "REAL NOT NULL DEFAULT -1"),
+    # How long after the stream started the model's FIRST reasoning fragment
+    # arrived, or -1 when the turn never reasoned at all. Its own column rather
+    # than a refinement of ``ttft_ms``: the two measure different waits on the
+    # same call (first thing the model said vs first thing the user could see),
+    # and 86.5% of deepseek-flash turns reason, so this is the wait the operator
+    # actually sits through on the first visible motion of a reasoning model.
+    # ``ttft_ms`` keeps its name and meaning untouched so historical comparisons
+    # survive. A turn that never reasoned reads -1 — the same "no sample"
+    # sentinel as its neighbours, never a fabricated 0 ms.
+    ("first_reasoning_ms", "REAL NOT NULL DEFAULT -1"),
     ("preparation_ms", "REAL NOT NULL DEFAULT -1"),
     ("outcome", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("usage_reported", "INTEGER NOT NULL DEFAULT 1"),
@@ -846,6 +857,7 @@ def _row_values(
         snapshot.purpose,
         snapshot.duration_ms,
         snapshot.ttft_ms,
+        snapshot.first_reasoning_ms,
         snapshot.preparation_ms,
         snapshot.outcome,
         int(snapshot.usage_reported),
@@ -2895,7 +2907,12 @@ class AnalyticsStore:
             # column is judged independently — the old statements each re-scanned
             # the session to drop rows whose OWN column was the "no sample"
             # ``-1`` sentinel, and a shared ``AND x >= 0`` would silently start
-            # requiring all three samples at once. An absent column (a
+            # requiring all three samples at once. ``first_reasoning_ms`` is
+            # deliberately NOT one of them: it is a recorded column with its own
+            # reader's job to come, and widening this tuple would shift the
+            # positional ``fields`` projection below (the oracle in
+            # ``test_session_report_equivalence`` pins the equivalence of the
+            # whole report key for key). An absent column (a
             # pre-timing ledger) still reads count 0 with NULL mean/min/max
             # rather than a fabricated 0 ms.
             timing_columns = [

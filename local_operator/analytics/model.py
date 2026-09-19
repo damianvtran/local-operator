@@ -222,6 +222,14 @@ class CallSnapshot:
     purpose: str = "unknown"
     duration_ms: float = -1
     ttft_ms: float = -1
+    # Stream start to the first REASONING fragment, -1 when the turn never
+    # reasoned. Distinct from ``ttft_ms`` (first text or tool-call delta) because
+    # they measure the two different waits a reasoning model imposes; both are
+    # kept so a change that surfaces reasoning shows up as ``ttft_ms`` staying
+    # put while ``first_reasoning_ms`` becomes the number the user experiences as
+    # first motion. Chained after ``ttft_ms`` rather than inserted before it so
+    # the positional writer in ``store.py`` keeps its existing field order.
+    first_reasoning_ms: float = -1
     preparation_ms: float = -1
     outcome: str = "unknown"
     usage_reported: bool = True

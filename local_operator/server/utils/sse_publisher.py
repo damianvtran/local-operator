@@ -54,6 +54,7 @@ _AGENT_EVENT_NAMES: Dict[str, str] = {
     "turn_start": EventName.TURN_START,
     "turn_end": EventName.TURN_END,
     "message_update": EventName.MESSAGE_DELTA,
+    "reasoning_delta": EventName.REASONING_DELTA,
     "tool_execution_start": EventName.TOOL_START,
     "tool_execution_update": EventName.TOOL_DELTA,
     "tool_execution_end": EventName.TOOL_END,
