@@ -33,6 +33,7 @@ import time
 from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -911,3 +912,76 @@ def _sweep_candidates(node: pytest.Item, home: Path | None) -> list[Path]:
     candidates = [home / ".local-operator"] if isinstance(home, Path) else []
     candidates.extend(node.stash.get(_SWEEP_ROOT_KEY, ()))
     return candidates + [root for root in _temp_roots(node) if root not in set(candidates)]
+
+
+# ---------------------------------------------------------------------------
+# The approval gate's operator capability (issue #1310)
+# ---------------------------------------------------------------------------
+#
+# ``RuntimeServer`` demands a per-session capability for an authority-INCREASING
+# control request (`/approvals auto`, an approved card) and refuses one that does
+# not present it. A test that builds a registrant IN THIS PROCESS is that
+# runtime's console — its record carries ``os.getpid()``, which is the key
+# ``AttachClient.connect`` resolves against — so it gets one from the fixture
+# below. These live in the ROOT conftest rather than a package one because the
+# same shape appears in ``tests/e2e`` (an assembled TUI answering a gate on a
+# runtime this process built: ``test_reload_gate_delivery_e2e.py``).
+#
+# Tests that do NOT take ``operator_cap`` keep the capability-free registrant, and
+# those are the ones that pin the refusal.
+
+
+def _capability_api() -> (
+    tuple[Callable[[], bytes], Callable[[int, bytes], None], Callable[[], None]]
+):
+    """``(mint, remember, reset)`` from the approval module.
+
+    Imported here rather than at module scope for the same reason the rest of
+    this file touches nothing but the stdlib and pytest: it is loaded for every
+    collection in the suite, and ``harness.approval`` is a product module.
+    """
+    from local_operator.harness.approval import (
+        mint_operator_cap,
+        remember_operator_cap,
+        reset_operator_caps_for_tests,
+    )
+
+    return mint_operator_cap, remember_operator_cap, reset_operator_caps_for_tests
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operator_caps() -> Iterator[None]:
+    """The operator capability table is process-global (issue #1310).
+
+    Autouse, and reset at BOTH ends, because the failure mode of a leak is a
+    later test whose ``AttachClient`` presents a capability the runtime it dials
+    never received: that reads as a flake in whichever test happened to run
+    next, not in the one that leaked. One entry per spawned runtime is the
+    production shape, so nothing legitimate depends on surviving a test.
+    """
+    _mint, _remember, reset = _capability_api()
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture
+def operator_cap() -> Iterator[bytes]:
+    """The capability for an IN-PROCESS registrant, registered as this process's.
+
+    A test that builds ``RuntimeServer(handle, kind="tui")`` directly is both
+    the runtime and the console, and its record carries ``os.getpid()`` — the
+    same key ``AttachClient.connect`` resolves against — so wiring the value
+    under this process's pid is what makes a follower in the test capable of an
+    authority-increasing op, exactly as the process that spawned a detached
+    runtime is. Pass the returned value to the registrant:
+
+    ``RuntimeServer(handle, kind="tui", operator_cap=operator_cap)``
+
+    Tests that do NOT take this fixture keep the capability-free registrant, and
+    are the ones that pin the refusal.
+    """
+    mint, remember, _reset = _capability_api()
+    capability = mint()
+    remember(os.getpid(), capability)
+    yield capability
