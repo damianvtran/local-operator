@@ -242,7 +242,6 @@ def _classification_consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_RECOMMENDATIONS,
         DEFAULT_MAX_STATE_CHARS,
         DEFAULT_MODEL,
-        DEFAULT_NOTICE,
         DEFAULT_TIMEOUT_MS,
         DEFAULT_VENDOR,
     )
@@ -257,7 +256,6 @@ def _classification_consumer_defaults() -> dict[str, object]:
         "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
         "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
         "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
-        "classification.notice": DEFAULT_NOTICE,
     }
 
 
@@ -290,6 +288,10 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
+    "classification.notice": (
+        "retired: the row gates a render path that was deleted outright, so it has no "
+        "reader to compare a default against"
+    ),
 }
 
 

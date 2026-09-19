@@ -437,8 +437,9 @@ SECTIONS: tuple[Section, ...] = (
         # bought: the help paints on the SELECTED row's detail line, clipped
         # from 78 columns down, so at rest the page said "Resource
         # recommendations" twice and never the word a tip sent the user to look
-        # for (design round 2, D11). The runtime's own message is separate and
-        # unchanged: it says "Suggestion added…".
+        # for (design round 2, D11). The runtime used to have its own message as
+        # well ("Suggestion added…"); that line is deleted — the layer is silent
+        # in the chat — so the title is now the only name on screen.
         "Smart hints",
         Scope.NEW_SESSIONS,
         "Advisory skills, guides and MCP servers a decision model may suggest "
@@ -2131,21 +2132,10 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         gated_by="classification.auto",
     ),
-    Setting(
-        key="classification.notice",
-        path=("classification", "notice"),
-        section="classification",
-        label="↳ notice",
-        kind=Kind.BOOL,
-        default=True,
-        # ON by default, unlike the master switch: the notice is the only place
-        # the spend and the vendor are visible, and a user who turned the layer on
-        # asked for that. It appears once per message and only when the model
-        # actually recommended something.
-        help="Needs recommendations on. Names vendor, resources, cost.",
-        choices=_bool_choices("show the one-line notice", "stay silent"),
-        gated_by="classification.auto",
-    ),
+    # ``classification.notice`` used to sit here. The layer no longer renders a line
+    # into the transcript at all (the operator asked for it gone: it is an internal
+    # resource-selection step, and it was landing under the reply), so the switch has
+    # nothing left to gate — see the retired row below.
     # -- fork ---------------------------------------------------------------
     #
     # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.
@@ -2647,6 +2637,22 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.READONLY,
         default=50,
         help="Deprecated. Superseded by the compaction engine.",
+    ),
+    Setting(
+        key="classification.notice",
+        path=("classification", "notice"),
+        section="retired",
+        label="Smart hints notice",
+        kind=Kind.READONLY,
+        default=True,
+        # RETIRED RATHER THAN DELETED, by this section's own rule above: a user who
+        # set it deserves to see that it is inert rather than to find the row gone
+        # and guess whether the layer stopped using it or stopped existing. The
+        # surface it gated was removed outright instead of being left behind a false
+        # switch — the per-call cost line the guide points at is at INFO in the
+        # session log, so the diagnostic is not lost, and nothing draws into the
+        # transcript any more.
+        help="Deprecated. The layer is silent in the chat; see the session log.",
     ),
     Setting(
         key="desktop.launch_command",

@@ -1,8 +1,10 @@
 """When a queued notice reaches the transcript, and when it is thrown away.
 
 ``Session.queue_notice`` exists so a line raised while a turn's PROMPT is being
-built — which is where the classification layer raises its resource line — does not
-land in the answer's slot (design round 1, D1). Two properties make that work, and
+built does not land in the answer's slot (design round 1, D1). Its first caller was
+the classification layer's resource line, and that line is GONE (the layer no longer
+writes into the transcript); the facility is kept, so these tests are now the only
+exercise of it until a new producer arrives. Two properties make it work, and
 neither was pinned by a test until round 3: the line goes out AFTER the answer has
 been persisted, and a turn that dies before producing an answer discards its queue
 rather than leaving it for the next message to inherit (review round 3, MINOR 2 —
@@ -72,8 +74,7 @@ def _queue_once(session: Any, line: str) -> Any:
     """A ``system_blocks_provider`` that queues ONE notice on its first call.
 
     Queued from the prompt build on purpose: that is the sync seam the knowledge hook
-    runs in, inside the turn, with ``_turn_lock`` held — exactly where
-    ``_select_knowledge_block`` emits the classification notice. A line queued from
+    runs in, inside the turn, with ``_turn_lock`` held. A line queued from
     outside a turn would take the immediate branch instead and prove nothing.
     """
     state = {"queued": False}

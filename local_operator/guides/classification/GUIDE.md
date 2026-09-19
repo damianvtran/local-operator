@@ -31,8 +31,8 @@ lop config edit classification.auto true
 ```
 
 The same switch is `/settings → Smart hints` in the TUI — the tips, this guide and that
-page all use that name for it, while the runtime's own message says *Suggestion added…*
-and the config file calls it the classification layer. The section is scoped to NEW
+page all use that name for it, while the config file calls it the classification layer.
+The section is scoped to NEW
 sessions, so an edit lands on the next session you start — which is also when the
 decision vendor is resolved. In the file every key is `values.classification.<key>`;
 the CLI spells it `classification.<key>`, which is what `lop config list` prints:
@@ -47,7 +47,10 @@ the CLI spells it `classification.<key>`, which is what `lop config list` prints
 | `maxStateChars` | `6000` | cap on the serialized state |
 | `maxCandidates` | `12` | candidates sent per kind |
 | `maxRecommendations` | `3` | resources added per message |
-| `notice` | `true` | the one-line "Suggestion added…" notice |
+
+Nothing this layer does is drawn into the chat: a suggestion changes the prompt, not
+the transcript. The `notice` key is retired — it gated a one-line message in the chat
+that has been removed — and it may still appear in `lop config list` as inert.
 
 ## The cascade, and a login for each leg
 
@@ -86,9 +89,11 @@ Measured against a real skill library, mostly on the OpenRouter leg:
 - **$0 on a repeat**: answers are cached per session, and a hit reports no spend.
 
 None of that is the turn's latency: a turn waits at most `waitMs` (50 ms) and then stops
-waiting, and the answer rides the NEXT message, where the notice says which message each
-suggestion was chosen for. A slow or dead leg therefore cannot delay a turn — our own
-added wall-clock is that wait, plus tens of milliseconds once on a first message.
+waiting. The call keeps running, and an answer that arrives while that turn is still
+going is added to the turn's NEXT model step, so the model can still use it for the
+same question; an answer whose turn has already ended rides the next message. A slow
+or dead leg therefore cannot delay a turn — our own added wall-clock is that wait,
+plus tens of milliseconds once on a first message.
 
 ## Which leg served the call
 
@@ -107,7 +112,8 @@ leg's default. A cache hit keeps the vendor and reports `-` for the tokens and t
 because it spent nothing.
 
 Two other lines answer the rest. `classification: no recommendation within 50 ms; the
-turn continues without one and the answer rides the next user message` (INFO) is the
+turn continues without one (an answer that arrives later is delivered to this turn's
+next step, or — if the turn ends first — to the next user message)` (INFO) is the
 ordinary result whenever the vendor outruns the budget. `classification: no
 recommendation (skipped=…)` (DEBUG) names why: `no-vendor` (no leg held a credential),
 `circuit-open`, `timeout`, `error`, `empty-roster` (nothing installed) or `disabled`
