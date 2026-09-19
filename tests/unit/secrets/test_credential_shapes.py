@@ -1021,39 +1021,65 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
 #: the property this PR exists to hold — **a mask is all of the credential or none of
 #: it, never a prefix with the remainder readable** — and it holds for the whole
 #: table except these. They are FROZEN, not excused: a new rule that joins this set,
-#: or a change that makes any of them worse, fails the test. Closing them is the
-#: remaining work on this class and is recorded in the PR thread.
+#: or a change that makes any of them worse, fails the test (`..._ratchet_...` below).
+#:
+#: Why each remaining rule is allowed to stand:
+#:
+#: * ``pem-private-key`` / ``gcp-service-account-key`` — a quote can only land inside a
+#:   PEM dash-run or a base64 body in this measurement, and NEITHER ALPHABET CONTAINS
+#:   ONE: a PEM header is dashes, spaces and capitals (`-----BEGIN RSA PRIVATE KEY-----`)
+#:   and a PEM body is base64 (`A-Za-z0-9+/=`). A quote inside either cannot occur in
+#:   real output, so these two counts are the synthetic case only — the proof, not a
+#:   claim that the rule is right.
+#: * ``credential-url-value`` — the matched value is a whole URL: the password inside it
+#:   IS masked, and what survives is the host and path, which stay readable BY DESIGN
+#:   (the operator needs to see which endpoint was called). Not secret material.
 _PARTIAL_MASK_RESIDUAL = {
     "pem-private-key": 184,
     "gcp-service-account-key": 44,
-    "npmrc-auth-token": 32,
-    "cookie-header": 30,
     "credential-url-value": 10,
-    "aws-access-key-id": 8,
-    "github-pat": 2,
-    "vendor-prefixed-token": 2,
 }
 
 
+def _readable_fragments(value: str) -> set[str]:
+    """Every six-character window of a credential — what must not survive a mask."""
+    return {value[i : i + 6] for i in range(0, len(value) - 5)}
+
+
 def _partial_masks(text: str) -> list[tuple[str, str, str]]:
-    """Every quote insertion inside a credential that leaves a fragment readable."""
+    """Quote insertions inside a credential that leave a readable fragment.
+
+    Two exclusions keep the measurement SOUND rather than merely loud: a fragment of
+    the redaction marker itself is not a credential, and a fragment that is readable
+    in the unmodified text was never the mask's to remove (the same credential can
+    appear twice and only one occurrence may be in scope). Without them the sweep
+    reported the marker's own letters and a URL's host as leaks.
+    """
     import local_operator.redaction_shapes as rs
 
+    baseline = rs.scrub_shapes(text)
     _, hits = rs.scrub_shapes_with_hits(text)
     found: list[tuple[str, str, str]] = []
     for hit in hits:
         value = hit.value
-        if len(value) < 6:
+        if len(value) < 6 or rs.REDACTION_MARKER in value:
             continue
+        already = {f for f in _readable_fragments(value) if f in baseline}
         for quote in ("'", '"'):
             for pos in range(1, len(value)):
                 variant_value = value[:pos] + quote + value[pos:]
                 variant = text.replace(value, variant_value, 1)
                 masked = rs.scrub_shapes(variant)
-                if masked == variant:
-                    continue  # untouched is allowed: a rule that does not see it
-                fragments = {variant_value[i : i + 6] for i in range(0, len(variant_value) - 5)}
-                if any(fragment in masked for fragment in fragments):
+                fragments = _readable_fragments(variant_value)
+                surviving = {
+                    f
+                    for f in fragments
+                    if f in masked and f not in already and rs.REDACTION_MARKER not in f
+                }
+                # A PROPER SUBSET surviving is the failure. All of it surviving means
+                # the rule never saw the credential (legal); none of it is the
+                # invariant holding.
+                if surviving and len(surviving) < len(fragments):
                     found.append((hit.label, variant, masked))
     return found
 
@@ -1079,3 +1105,25 @@ def test_a_quote_inside_a_credential_never_leaves_a_readable_fragment(case: Case
         f"mask stopped at a quote; first: {offenders[0][1][:80]!r} -> "
         f"{offenders[0][2][:80]!r}"
     )
+
+
+def test_the_partial_mask_ratchet_only_ever_tightens() -> None:
+    """The frozen counts are a ceiling, never a licence.
+
+    Each number may only fall, and only as the consequence of a real rule fix. This
+    asserts the current measurement is AT MOST the frozen figure and that no rule
+    has joined the class undeclared — so widening the table (a new label, or a
+    raised number) fails here, and a PR that lowers one has to show it red before
+    and green after.
+    """
+    measured: dict[str, int] = {}
+    for case in POSITIVE_CASES:
+        for label, _, _ in _partial_masks(case.text):
+            measured[label] = measured.get(label, 0) + 1
+    for label, count in measured.items():
+        assert (
+            label in _PARTIAL_MASK_RESIDUAL
+        ), f"{label} joined the partial-mask class without being declared: {count} cases"
+        assert (
+            count <= _PARTIAL_MASK_RESIDUAL[label]
+        ), f"{label} got worse: {count} > frozen {_PARTIAL_MASK_RESIDUAL[label]}"

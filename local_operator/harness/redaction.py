@@ -27,8 +27,10 @@ value appears.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
+import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -59,6 +61,30 @@ _WHITESPACE = re.compile(r"\s+")
 _HIT_REPORTER: ContextVar[Any] = ContextVar("shape_hit_reporter", default=None)
 
 
+def _hold(report: Any) -> Any:
+    """Hold a sink WEAKLY when it is a bound method.
+
+    The sink is a session's own method, and a ``ContextVar`` value is COPIED into
+    every derived context — a child task, a subagent run, a ``to_thread`` worker.
+    Holding the bound method strongly therefore kept the session alive through
+    contexts that outlive it: measured as a disposed child Session that was never
+    collectable and a child holding its parent (``tests/unit/session/
+    test_launch_subagent.py``, three weakref assertions). The reporter is
+    best-effort by contract — a hit report must never break a mask — so a sink
+    that has been collected is simply no sink.
+    """
+    if inspect.ismethod(report):
+        return weakref.WeakMethod(report)
+    return report
+
+
+def _resolve(report: Any) -> Any:
+    """The callable behind :func:`_hold`, or ``None`` once it has been collected."""
+    if isinstance(report, weakref.WeakMethod):
+        return report()
+    return report
+
+
 @contextmanager
 def shape_hit_reporting(report: Any) -> Iterator[None]:
     """Publish ``report`` as the sink for shape hits observed during the block.
@@ -71,7 +97,7 @@ def shape_hit_reporting(report: Any) -> Iterator[None]:
     become a rotation ticket is never filed at all. Measured: 0 incidents and 0
     live notices for the output-only shape.
     """
-    token = _HIT_REPORTER.set(report)
+    token = _HIT_REPORTER.set(_hold(report))
     try:
         yield
     finally:
@@ -87,7 +113,7 @@ def set_shape_hit_reporter(report: Any) -> Any:
     as long as the session does, so the token is kept only for symmetry with
     :func:`reset_shape_hit_reporter` (used by tests).
     """
-    return _HIT_REPORTER.set(report)
+    return _HIT_REPORTER.set(_hold(report))
 
 
 def reset_shape_hit_reporter(token: Any) -> None:
@@ -99,7 +125,7 @@ def report_shape_hits(labels: list[str]) -> None:
     """Hand shape labels to the session's incident queue, if one is attached."""
     if not labels:
         return
-    reporter = _HIT_REPORTER.get()
+    reporter = _resolve(_HIT_REPORTER.get())
     if reporter is None:
         return
     try:
