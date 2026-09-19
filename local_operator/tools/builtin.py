@@ -79,6 +79,7 @@ from rich.cells import cell_len
 from local_operator.agent_shell import AGENT_SHELL_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -119,6 +120,14 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
+from local_operator.redaction_shapes import (
+    PEM_BODY_LINE_RE,
+    PEM_END_LINE_RE,
+    PEM_HEADER_LINE_RE,
+    REDACTION_MARKER,
+    credential_dump_notice,
+    scrub_secrets_with_hits,
+)
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_SCHEME,
@@ -1942,6 +1951,41 @@ class BashParams(BaseModel):
     )
 
 
+#: What the live card shows while the pipe is holding an unterminated line.
+#:
+#: ``(empty)`` is the SETTLED answer — "there never will be output" — and the live
+#: card asserted it at every 500 ms emit while bytes were actively arriving and
+#: being withheld. The card's own word for the open case is
+#: :data:`local_operator.tui.widgets.tool_card.LIVE_HEADER_PENDING`, which this
+#: mirrors rather than imports (the tool layer must not depend on the TUI layer);
+#: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
+_LIVE_PENDING_TEXT = "no output yet"
+
+#: What the live view carries once the pipe filter has faulted. The text is
+#: withheld rather than guessed at: a filter that cannot vouch for the bytes must
+#: not paint them.
+_WITHHELD_LIVE_OUTPUT = (
+    "[live output withheld: this session's credential filter could not read its sink]"
+)
+
+#: A PEM armour header, and a base64 body line. Only a header opens the streaming
+#: mask, and only body lines are masked inside it — see
+#: ``_PipeRedactor._mask_open_key_block``.
+# The prefix grammar and the body-line test are the SHAPE TABLE's (`redaction_shapes`),
+# imported rather than restated: this layer masks BEFORE the table runs, so a divergence
+# between the two classifiers is a silent leak — which is exactly what happened when the
+# table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
+# published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+_PEM_HEADER_LINE = PEM_HEADER_LINE_RE
+_PEM_BODY_LINE = PEM_BODY_LINE_RE
+_PEM_END_LINE = PEM_END_LINE_RE
+
+#: How many lines a streamed PEM block may mask before the state resets. A real
+#: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
+#: short of "the rest of the command's output".
+_PEM_STREAM_LINE_LIMIT = 512
+
+
 class _BashOutput:
     """Bound retention while the pipe is drained, keeping both diagnostic ends.
 
@@ -1959,6 +2003,11 @@ class _BashOutput:
         self.head = bytearray()
         self.tail: deque[bytes] = deque()
         self.tail_bytes = 0
+        #: Bytes the pipe filter is holding back right now — an unterminated
+        #: line, or an open key block. Reported so the live card can say "no
+        #: output yet" instead of the settled "``(empty)``" while a command is
+        #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
+        self.withheld = 0
 
     @property
     def retained_bytes(self) -> int:
@@ -1999,21 +2048,71 @@ class _BashOutput:
         )
 
 
+#: How much undecided text the pipe filter holds before it releases its oldest
+#: bytes anyway (``_PipeRedactor._release_point``).
+#:
+#: A CONSTANT rather than a function of the pattern table, deliberately: a bound
+#: derived from the longest possible match would silently change (or grow
+#: unbounded) the next time a rule is added, and this one has to hold whatever
+#: the table says. 8 KiB is chosen to be comfortably larger than any credential
+#: shape the table spans — the widest is a PEM block, whose 2048-bit body is
+#: under 2 KiB — while staying small enough that a command printing one enormous
+#: line still publishes most of it promptly.
+_PIPE_DEFERRAL_LIMIT = 8192
+
+
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
 
     Redacting each read independently leaks a secret split across reads. Keep
-    enough undecided text for the longest injected credential, and never cut
-    through a complete match. UTF-8 decoding is incremental for the same
-    reason. Retained output and live job tails receive the same safe bytes.
+    enough undecided text that a known credential VALUE cannot be split across
+    two reads, and never cut through a complete match. UTF-8 decoding is
+    incremental for the same reason. Retained output and live job tails receive
+    the same safe bytes.
 
     Accepts a credential MAP (the historic caller) or a plain sequence of
     values. The sequence form is what carries §6 registrations — values a child
     fetched through ``lop secret get``, which have a name nowhere in this
     process, so there is no map to put them in.
+
+    **Why the release point moved, and what it costs.** Holding back a fixed
+    window sized from the longest KNOWN value is enough to keep that value whole
+    across a chunk boundary, and it is nothing at all against a SHAPE: a DSN or
+    an ``AWS_SECRET_ACCESS_KEY=`` line that a child prints in two reads was
+    painted live and then never re-read, because the live stream is the one
+    surface no later pass rewrites. So the release point is now the last line
+    terminator in hand, and every complete line goes out with
+    :func:`~local_operator.redaction_shapes.scrub_secrets` over it — values and
+    shapes both. Shapes are line-anchored, so a partial SENTENCE cannot carry a
+    shape across the boundary; a partial LINE can, and no longer does.
+
+    **Bounded, and stated rather than implied.** ``pending`` is capped at
+    :data:`_PIPE_DEFERRAL_LIMIT` bytes: a child that prints 10 MB with no
+    newline (one enormous JSON blob, a progress bar with no terminator) is
+    released in cap-sized pieces rather than accumulating, so memory does not
+    grow with the command's output. The cap is a CONSTANT, not a function of the
+    longest possible match — a bound derived from the pattern table would be
+    wrong the moment a rule was added. The residual is the obvious one: a shape
+    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
+    the cap, is split across two releases and not matched here. Both are
+    contained by the result path, which scrubs the finished text in one piece.
+
+    Trailing partial lines are therefore withheld until they complete. That is
+    a real trade for a line-oriented surface, taken deliberately: a credential
+    painted live is unrecoverable, while a partial line's bytes arrive as soon
+    as its newline does — or at the cap, or at end-of-stream, whichever comes
+    first.
     """
 
     def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
+        #: An open PEM block, whether its marker is already out, and how many
+        #: lines it has covered (the bound that keeps a stream from holding the
+        #: state forever).
+        self._in_key_block = False
+        self._key_block_marker_sent = False
+        self._key_block_lines = 0
+        #: Whether this filter has withheld its output after a fault.
+        self._withheld = False
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -2038,8 +2137,134 @@ class _PipeRedactor:
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
+        """Release what is safe to paint; never raise, and never lose the stream.
+
+        FAIL CLOSED BY DRAINING, and that is the contract rather than an
+        implementation detail: a raise here used to kill the reader, which lost the
+        command's output silently AND — once the child filled its pipe — wedged the
+        command itself. The withheld marker goes out once, a sticky flag records it,
+        and the reader keeps draining so the child is never blocked on a full pipe.
+        """
+        try:
+            return self._feed_scrubbed(chunk, final=final)
+        except Exception:  # noqa: BLE001 — see the docstring: draining IS the guard
+            if not self._withheld:
+                self._withheld = True
+                return _WITHHELD_LIVE_OUTPUT.encode("utf-8")
+            return b""
+
+    def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
         text = self.pending + self.decoder.decode(chunk, final=final)
-        cut = len(text) if final else max(len(text) - self.lookbehind, 0)
+        cut = self._release_point(text, final=final)
+        ready, self.pending = text[:cut], text[cut:]
+        ready = self._mask_open_key_block(ready)
+        scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
+        # REPORT FROM HERE. This filter is the only layer that sees a credential
+        # that exists only in a command's OUTPUT — the production case this
+        # feature was written for — and it masks the bytes before the result
+        # exists, so the loop's hook later finds nothing to match and files
+        # nothing. Without this call the size of the incident that motivated the
+        # whole change is: zero notices, zero rotation tickets.
+        report_shape_hits([hit.label for hit in hits if hit.complete])
+        return scrubbed.encode("utf-8")
+
+    def _mask_open_key_block(self, ready: str) -> str:
+        """Mask the BODY of an open ``-----BEGIN … KEY-----`` block, line by line.
+
+        Why it exists: the release point defers a whole key block until its
+        terminator or the cap, which is the right unit for the table but leaves
+        the live view publishing key material when the block is larger than the
+        cap — an 8192-bit RSA body is ~6.4 KiB against an 8 KiB cap.
+
+        Why it is written this way — three constraints, each paid for:
+
+        * only a PEM HEADER opens the state (``-----BEGIN [A-Z0-9 ]+-----``). A
+          bare ``-----BEGIN`` in prose (``head -n 5 key.pem``, a doc quoting an
+          armour header, ``grep BEGIN``) used to open it and then swallow
+          everything after it — in the live view AND in the settled result, which
+          is built from the same sink. Round 2 measured both.
+        * a line is masked only when it is base64 BODY. Prose after a stray
+          header is released verbatim and CLOSES the state, so no ordinary line
+          can be eaten by it.
+        * the state is bounded by lines, so a stream that never terminates a
+          block cannot hold it open for the rest of the command's output.
+        """
+        if self._in_key_block:
+            out: list[str] = []
+            for line in ready.splitlines(keepends=True):
+                if self._key_block_lines > _PEM_STREAM_LINE_LIMIT:
+                    # Bound reached: stop masking, release, and reset.
+                    self._in_key_block = False
+                    out.append(line)
+                    continue
+                self._key_block_lines += 1
+                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                    self._in_key_block = False
+                    self._key_block_marker_sent = False
+                    out.append(line)
+                    continue
+                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                    if not self._key_block_marker_sent:
+                        self._key_block_marker_sent = True
+                        out.append(REDACTION_MARKER + "\n")
+                    continue
+                # Not body: prose. Release it and close the state.
+                self._in_key_block = False
+                self._key_block_marker_sent = False
+                out.append(line)
+            return "".join(out)
+        begin = _PEM_HEADER_LINE.search(ready)
+        if begin is None:
+            return ready
+        self._in_key_block = True
+        self._key_block_lines = 0
+        self._key_block_marker_sent = False
+        # Keep the rest of this chunk: it is the block's first lines, and they go
+        # through the same line loop as everything else. Replacing it with a
+        # marker here DROPPED whatever followed the header in the same read.
+        # NO INJECTED SEPARATOR. This used to splice a real newline in after the
+        # header, which rewrote the ESCAPED spelling a JSON service-account value
+        # uses (`\\n`) and left the table unable to match the body — the marker was
+        # masked and the key published, silently, because a withheld claim means no
+        # notice either (QA's Q4-F1). The text after the header is passed through
+        # unchanged; a real newline there is stripped by ``lstrip`` only when it is
+        # really a newline.
+        # NO SEPARATOR REWRITING: stripping the leading newline here (or splicing one in,
+        # as an earlier round did) changes the bytes the shape table is about to read, and
+        # a rewritten separator is a shape the table cannot match. The remainder is
+        # passed through exactly as read.
+        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :])
+
+    def _release_point(self, text: str, *, final: bool) -> int:
+        """Where the decidable prefix ends: after the last newline, capped."""
+        if final:
+            return len(text)
+        # BOTH terminators: a progress bar rewrites its line with ``\r`` and may
+        # not emit ``\n`` until it is done, and a shape cannot straddle either
+        # one, so releasing at ``\r`` is free and keeps a long build's output
+        # visible while it runs.
+        cut = max(text.rfind("\n"), text.rfind("\r")) + 1
+        # An UNTERMINATED private-key block defers the WHOLE block, not just to
+        # the last newline: a PEM body is the credential and it spans lines, so
+        # releasing up to the last newline would publish the key material and
+        # hold back only the ``-----END`` line. The block is held until its END
+        # arrives (or the cap below forces it through, which is the documented
+        # residual for a block larger than the cap).
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin >= 0:
+            end = text.find("-----END", begin)
+            if end < 0 or end >= cut:
+                cut = begin
+        # The cap is applied LAST and wins over every hold above: bounded memory
+        # is the property that must not depend on what the child prints, so a
+        # command that opens a PEM block and never closes it cannot pin the
+        # buffer forever.
+        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
+            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+        # Never cut through a KNOWN value. The newline rule above already
+        # prevents that for any value without a newline in it, which is every
+        # credential in practice; this keeps the guarantee for the ones with
+        # one, and for the cap-forced cut above.
         while True:
             previous_cut = cut
             for secret in self.secrets:
@@ -2048,10 +2273,7 @@ class _PipeRedactor:
                     cut = start
             if cut == previous_cut:
                 break
-        ready, self.pending = text[:cut], text[cut:]
-        for secret in self.secrets:
-            ready = ready.replace(secret, "[redacted]")
-        return ready.encode("utf-8")
+        return cut
 
 
 def _bash_progress_line(
@@ -2148,6 +2370,24 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     redact = getattr(store, "redact", None)
     if not callable(redact):
         return text
+    # ``redact_with_hits`` when the store has it: the live stream, the peek
+    # buffer and the abort receipt are the surfaces that paint a credential
+    # BEFORE any result exists, so they have to file the incident themselves —
+    # there is no later hook that will see the pre-mask text.
+    # Cast rather than probed: ``getattr`` yields ``object``, and the two names this
+    # looks for are the store's own public surface (``VariableStore.redact_with_hits``
+    # and its ``redact``), so a Callable annotation is the honest description.
+    hits_aware = cast(
+        Callable[[str], tuple[str, list[str]]] | None,
+        getattr(store, "redact_with_hits", None),
+    )
+    if callable(hits_aware):
+        try:
+            scrubbed, labels = hits_aware(text)
+            report_shape_hits(labels)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("hit-aware redaction failed on a live surface", exc_info=True)
     try:
         redacted = redact(text)
     except Exception:
@@ -2428,7 +2668,11 @@ async def execute_bash(
         # the guard keeps the reader honest instead of asserting.
         if stream is None:
             return
-        redactor = _PipeRedactor(_stream_redaction_values(store, injected))
+        # The sentinel means "this session's own redaction sink could not be
+        # read" and must never be treated as an ordinary list of secrets; the
+        # loop checks it before every feed, and so must the construction site.
+        initial = _stream_redaction_values(store, injected)
+        redactor = _PipeRedactor([] if initial is _REDACTION_SEAM_BROKEN else initial)
         withheld = False
         try:
             while True:
@@ -2466,6 +2710,7 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
+                sink.withheld = len(redactor.pending)
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -2512,6 +2757,10 @@ async def execute_bash(
             ),
             context,
         )
+        if not stdout and not stderr and (stdout_chunks.withheld or stderr_chunks.withheld):
+            # Bytes are arriving and being held; ``(empty)`` would tell the
+            # operator the opposite of what is happening.
+            stdout = _LIVE_PENDING_TEXT
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=_bash_output_summary(stdout, stderr))],
@@ -2828,7 +3077,13 @@ async def execute_bash(
             tool_call_id,
             "bash",
             f"aborted ({(signal.reason or 'aborted') if signal else 'aborted'}): "
-            f"{params.command}\n{_redact_tool_text(partial, context)}",
+            # The COMMAND line is scrubbed as well as the output. A command can
+            # carry a credential (`curl -u svc:pw`, `-ppw`, a DSN in an argument)
+            # and this receipt is a tool result like any other; the loop's
+            # ``redact_tool_result`` covers the product path, and a direct caller
+            # of ``execute_bash`` had this one unredacted.
+            f"{_redact_tool_text(params.command, context)}\n"
+            f"{_redact_tool_text(partial, context)}",
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -2862,6 +3117,24 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    # ONE advisory line when the command is shaped like a credential dump, so the
+    # model learns the safer form at the moment it needs it rather than after the
+    # secret is already in the transcript. It rides the RESULT, not the stream:
+    # the stream is bytes from the child, and this is the harness talking.
+    #
+    # The notice carries no value from the command (see ``credential_dump_notice``)
+    # and is appended here, before the footer, so a spilled transcript's
+    # expansion hints stay at the end where the model looks for them.
+    # The advisory goes SECOND, immediately under the exit code — not last,
+    # which is where it was. The operator reads a result through the tool card,
+    # which keeps the HEAD of at most 40 lines, so a notice at the end of a long
+    # result was the first thing dropped: measured, a 200-line command whose last
+    # line held the credential settled with "… 169 more lines" and no advisory
+    # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
+    # survive both truncations.
+    notice = credential_dump_notice(params.command)
+    if notice:
+        parts.insert(1, notice)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 

@@ -29,6 +29,13 @@ containing "key", which is far too common in legitimate config
 matching so a Unicode homoglyph cannot slip a credential past it.
 Over-matching is the safe direction: it hides more, never less.
 
+Redaction has TWO passes, and both matter here: the values this session KNOWS
+(above) and the credential SHAPES anything may print — a DSN, a connection
+string, an ``AWS_SECRET_ACCESS_KEY=`` line, a PEM block, an issuer-prefixed
+token. ``VariableStore.redact`` composes them, and that one callable is what
+every model-visible surface reads; see :mod:`local_operator.redaction_shapes`
+for what the shape pass does and does not guarantee.
+
 Session credentials (``/credential``, ``ask`` with ``secret=true``) are a
 fourth, memory-only source that inverts that rule on purpose. The operator
 hands the process a secret the agent must USE and must never READ: the name
@@ -42,6 +49,7 @@ override would.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
@@ -49,6 +57,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+# The shared credential-shape table. STDLIB-ONLY and leaf, deliberately: this
+# module sits on the CLI startup path (``tests/unit/test_import_graph.py`` pins
+# that) and the shape pass has to be reachable from the result path without
+# dragging a session or a provider layer in behind it.
+from local_operator.redaction_shapes import (
+    ShapeHit,
+    is_registerable_component,
+    scrub_secrets_with_hits,
+)
 
 #: Environment variables only surface to the agent when opted in with this
 #: prefix. Everything else in the process env stays invisible.
@@ -58,6 +76,8 @@ ENV_ALLOW_PREFIX = "LOCAL_OPERATOR_"
 #: targets credential KINDS (secret/token/password/.../api_key), not the bare
 #: token "key" which is far too common in legitimate config names. The
 #: matching is deliberately loose — over-matching only hides more.
+logger = logging.getLogger(__name__)
+
 _SECRET_RE = re.compile(
     r"(?i)(secret|token|password|passwd|credential|authorization|bearer|"
     r"api[_-]?key|apikey|[_-]key$|^key([_\-.]|$))"
@@ -281,6 +301,15 @@ class VariableStore:
         self._env = env
         self._config_values = dict(config_values or {})
         self._cwd = cwd or os.getcwd()
+        # PER STORE, never class-level: a mutable default in the class body is shared by
+        # every VariableStore in the process (`.add()` cannot create an instance
+        # attribute), so one session's registered credentials were scanned in another's
+        # results and the 64-value cap ran out process-wide — containment silently
+        # stopping for every session, with the warning logged once on nobody's behalf.
+        # Two consequences surfaced it: a red CI shard where an earlier test had filled
+        # the shared set, and the cross-session coupling the design note forbids.
+        self._shape_registrations: set[str] = set()
+        self._shape_registration_cap_logged = False
         # Insertion-ordered so the prompt block and ``/credential`` listing
         # agree. Values live only here: never serialized, never listed, never
         # returned by ``get``/``read``.
@@ -458,5 +487,107 @@ class VariableStore:
         return dropped
 
     def redact(self, text: str) -> str:
-        """Replace every stored credential or registered value with ``[redacted]``."""
-        return redact_secret_values(text, self.redaction_values())
+        """Remove every known credential, then every credential SHAPE, from ``text``.
+
+        **The ONE callable that makes coverage universal.** This is what
+        ``session/session.py`` hands to the harness loop as
+        ``redact_tool_result``, and what ``tools/builtin._redact_tool_text``
+        reads for the live surfaces that run before a result exists (the bash
+        stream, a background job's peek buffer, the abort receipt). Widening it
+        here is therefore what covers every agent, subagent, fork, exec and
+        headless run at once — a per-surface scrubber is one a new surface can
+        forget, which is exactly how a credential printed by ``kubectl exec …
+        env`` reached a transcript in full.
+
+        Two passes, in this order:
+
+        1. values the session KNOWS — session credentials and registered
+           redactions (:meth:`redaction_values`), replaced byte-for-byte;
+        2. credential SHAPES (:mod:`local_operator.redaction_shapes`) — a
+           credential recognised by how it is SPELLED, which is the only thing
+           that can catch a secret this session was never told. A remote host's
+           environment is precisely that set.
+
+        Values the shape pass MATCHES are registered back into (1) —
+        :meth:`_register_shape_hits` — so the same secret is contained for the
+        rest of the session even in a later form the table does not know.
+
+        WHAT THIS STILL DOES NOT GUARANTEE: an opaque value with none of the
+        table's spellings around it (a bare tenant id, a pasted fragment, a
+        secret whose name the table does not recognise) passes through. That
+        residual is stated in the shapes module rather than implied away here.
+        """
+        scrubbed, _ = self.redact_with_hits(text)
+        return scrubbed
+
+    def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
+        """:meth:`redact`, plus the LABELS of the shapes that fired.
+
+        Labels only, never values: the caller of this is the session's incident
+        path, which puts what happened in the transcript, and a notice that
+        carried the credential would be the leak it exists to report.
+
+        Values are registered for containment here rather than by the caller, so
+        every path that masks also contains — including the live-text path that
+        never sees this return value.
+        """
+        scrubbed, hits = scrub_secrets_with_hits(text, self.redaction_values())
+        if not hits:
+            return scrubbed, []
+        self._register_shape_hits(hits)
+        # Containment takes EVERY hit; the NOTICE takes only the complete ones.
+        # A hit whose credential is still partly readable is a rotation ticket the
+        # operator would act on by NOT rotating — the fault `_only_fully_masked`
+        # exists to prevent — while the value it matched is exactly what the
+        # session should still contain.
+        ordered: dict[str, None] = {}
+        for hit in hits:
+            if hit.complete:
+                ordered.setdefault(hit.label, None)
+        return scrubbed, list(ordered)
+
+    #: How many DETECTED components one session may register. A bound, not a
+    #: budget: every registration is a value the exact-value pass scans for in
+    #: every later result of the session, so an unbounded set is a per-result cost
+    #: that grows with the session's age. On reaching it, detections keep being
+    #: counted and noticed — the ticket still fires — and only the CONTAINMENT
+    #: stops. Counted in registered values, not matches: a URI contributes two.
+    MAX_DETECTED_REGISTRATIONS = 64
+
+    def _register_shape_hits(self, hits: Sequence[ShapeHit]) -> None:
+        """Register each matched credential as a value to scrub, for this session.
+
+        Containment rather than tidy bookkeeping: the shape pass catches a
+        DSN's password once, and the SAME secret can reappear later in a form
+        the table has no rule for (quoted alone, concatenated into another
+        command's line). Registering it means the exact-value pass — which runs
+        first on every later result — catches that too.
+
+        Only §6 registrations are written, the same sink the broker uses, so a
+        matched value never becomes injectable into a child's environment or
+        readable by ``read_variable``: registering a value for SCRUBBING must
+        never make it readable, which is the distinction ``_credentials`` and
+        ``_redactions`` draw. The floor is the shapes module's — a matched value
+        shorter than that is not registered, because a short value registered
+        process-wide rewrites ordinary text (the measured failure on
+        ``mcp.redaction``'s three-character value).
+        """
+        for hit in hits:
+            # The FLOOR and the placeholder rule govern REGISTRATION only; the hit
+            # itself is recorded for every mask (see ``_run_shapes``), so a short
+            # credential still produces its notice.
+            if not is_registerable_component(hit.value):
+                continue
+            if hit.value in self._shape_registrations:
+                continue
+            if len(self._shape_registrations) >= self.MAX_DETECTED_REGISTRATIONS:
+                if not self._shape_registration_cap_logged:
+                    self._shape_registration_cap_logged = True
+                    logger.warning(
+                        "shape registration cap reached (%d values); detections keep "
+                        "being counted and noticed, containment stops here",
+                        self.MAX_DETECTED_REGISTRATIONS,
+                    )
+                continue
+            self._shape_registrations.add(hit.value)
+            self.register_redaction(hit.value)

@@ -52,6 +52,7 @@ import logging
 import threading
 from contextlib import suppress
 
+from local_operator.redaction_shapes import DETECTED_COMPONENT_FLOOR
 from local_operator.variables import VariableStore
 
 #: Redaction-only store: values to scrub, never to inject or advertise.
@@ -83,7 +84,9 @@ logger = logging.getLogger(__name__)
 #: the value itself). In practice MCP credentials are long opaque tokens; the
 #: alternative — rewriting every occurrence of a three-character value — protects
 #: nothing and corrupts every log line in the process.
-MIN_SCRUBBED_LENGTH = 8
+# Imported from the shapes module rather than restated: one floor, shared with the
+# shape pass and the registration cap, so the two cannot drift apart.
+MIN_SCRUBBED_LENGTH = DETECTED_COMPONENT_FLOOR
 
 
 def scrub(text: str) -> str:

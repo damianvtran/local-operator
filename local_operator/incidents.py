@@ -795,6 +795,47 @@ def format_credential_message(
     )
 
 
+def format_shape_incident_message(tool: str, labels: "list[str]", summary: str = "") -> str:
+    """Render the credential-SHAPE notice injected into the model's context.
+
+    The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
+    and the reason it is its own formatter rather than a
+    :func:`classify_incident` category: nothing FAILED. A tool returned a
+    credential in a shape the table recognises, the harness masked it before the
+    model could read it, and the only jobs this text has are to say so (so the
+    model does not reason about a value it cannot see, or re-run the command
+    hoping for a different result) and to make the event visible to the operator.
+
+    ``labels`` are shape NAMES, never values — a notice that carried the
+    credential would be the leak it exists to report. The summary is the one the
+    harness built, already scrubbed and bounded.
+
+    The last sentence is the point of the whole path: the operator has to rotate
+    the credential. Today a miss is discovered by accident, from a transcript,
+    weeks later; this row is what turns it into a ticket.
+    """
+    shapes = ", ".join(labels) if labels else "credential-shaped content"
+    tool_name = tool or "a tool"
+    where = f" The call was: {summary}." if summary else ""
+    # "was about to reach you ... and was masked" rather than "the result
+    # carried": the same notice serves a credential in a tool's OUTPUT and one
+    # TYPED INTO a call's arguments, and only the first of those is a result.
+    # A notice that misnamed the surface would send an operator looking in the
+    # wrong place.
+    # The FIRST row carries the action. The row is six lines in the card and the
+    # head is all most readers take: it used to open with the mechanism (``a
+    # credential in a shape the harness recognises (dsn-password)``), which put
+    # "rotate it" in the fourth line. The bracketed head stays — the harness's
+    # notice-row rules key on it, and a row that paints as the user's own words
+    # would be worse than a jargon-first one.
+    return (
+        f"[credential redaction] rotate it — a credential ({shapes}) reached "
+        f"{tool_name} and was masked before you saw it.{where} Treat it as "
+        "compromised: the operator has to rotate it. Do not re-run the command to "
+        "read the value; it is contained for the rest of this session."
+    )
+
+
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     """Render the MCP-recovery text injected into the model's context.
 
