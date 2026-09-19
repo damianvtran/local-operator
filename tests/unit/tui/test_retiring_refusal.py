@@ -442,7 +442,7 @@ async def test_each_trigger_keeps_its_own_sentence_at_the_notice_seam(
             fired.append(leaving)
             windows.append(updating)
 
-        facade._drain_callback = drain
+        facade.set_drain_callback(drain)
         facade._on_retiring_frame(
             {"op": "retiring", "reason": "shutdown-drain", "to": "", "draining": True}
         )
@@ -563,7 +563,10 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
         fired.append(leaving)
         windows.append(updating)
 
-    facade._drain_callback = drain  # type: ignore[method-assign]
+    # ``set_drain_callback``, not a direct attribute write: the facade resolves
+    # whether the host takes the ``updating`` keyword when the callback is SET, so a
+    # cell that bypasses the setter is testing a state the runtime cannot produce.
+    facade.set_drain_callback(drain)
 
     facade._on_retiring_frame({"op": "retiring", "draining": True, "leaving": LEAVING_ON_SIGNAL})
     assert fired == [LEAVING_ON_SIGNAL], fired
@@ -1205,3 +1208,53 @@ async def test_a_recall_that_missed_does_not_stop_the_turn() -> None:
         assert (
             session.aborts == []
         ), f"the losing recall stopped the turn it said would run: {session.aborts}"
+
+
+def test_a_one_argument_drain_callback_still_hears_the_phrase() -> None:
+    """Agent review round 1 (NIT 3): the keyword must not cost an old host its notice.
+
+    The frame callback is passed ``updating=`` through a ``Callable[..., Any]`` inside
+    a blanket ``except Exception``, so a host whose callback predates the keyword would
+    raise ``TypeError`` INSIDE that guard and lose the whole notice — including the
+    drain sentence it used to receive — with nothing but a ``logger.debug`` to show for
+    it. The pre-change behaviour for such a host is the phrase and no window, which is
+    what it now gets.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    facade = AttachedSession.__new__(AttachedSession)
+    fired: list[str] = []
+
+    def drain(leaving: str) -> None:
+        fired.append(leaving)
+
+    facade.set_drain_callback(drain)
+    frame = {
+        "op": "retiring",
+        "reason": "stale-build",
+        "to": "0.55.6@46a4e9b",
+        "draining": True,
+        "updating": "0.55.6 → 0.59.11@ead71b6",
+    }
+    facade._on_retiring_frame(frame)
+
+    assert fired == [LEAVING_FOR_BUILD], fired
+
+
+def test_the_callback_probe_reads_the_signature_it_needs() -> None:
+    """The three shapes a host can present, and the answer for each."""
+    from local_operator.session.attached import AttachedSession, _accepts_updating
+
+    def one(_leaving: str) -> None: ...
+
+    def keyword(_leaving: str, *, updating: str = "") -> None: ...
+
+    def splatted(**kwargs: Any) -> None: ...
+
+    assert _accepts_updating(keyword) is True
+    assert _accepts_updating(splatted) is True
+    assert _accepts_updating(one) is False
+    # The state, not just the answer: ``set_drain_callback`` is what the facade calls.
+    facade = AttachedSession.__new__(AttachedSession)
+    facade.set_drain_callback(one)
+    assert facade._drain_callback_takes_updating is False

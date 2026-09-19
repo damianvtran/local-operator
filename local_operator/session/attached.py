@@ -883,6 +883,32 @@ def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
     return True
 
 
+def _accepts_updating(callback: Any) -> bool:
+    """Whether ``callback`` can be handed the ``updating`` keyword.
+
+    ASKED BEFORE THE CALL, because the call is inside a blanket ``except Exception``
+    (agent review round 1, NIT 3). The drain callback is a HOST's function — in this
+    tree always the app's own ``_on_runtime_draining``, but the seam is a public one
+    (``session/protocol.py``), and a host written against the one-argument contract
+    would raise ``TypeError`` into the guard that exists to keep a viewer's failure
+    from breaking the pump. It would then lose the WHOLE notice — including the drain
+    sentence it used to receive — and report nothing but a ``logger.debug``.
+
+    ``VAR_KEYWORD`` counts as accepting it: a host that takes ``**kwargs`` is not
+    surprised by one more. An unreadable signature reads as NO, which degrades to the
+    pre-change behaviour rather than to silence.
+    """
+    if callback is None:
+        return False
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins, partials, C callables
+        return False
+    if "updating" in parameters:
+        return True
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -990,6 +1016,11 @@ class AttachedSession:
         #: The drain/window callback: the frame's leaving PHRASE, plus the update
         #: window's build pair as a keyword ("" when the frame carries no window).
         self._drain_callback: Callable[..., Any] | None = None
+        #: Whether ``_drain_callback`` accepts that keyword, resolved once when it is
+        #: set: the call site is inside a blanket exception guard, so the answer has
+        #: to be known BEFORE the call rather than discovered by catching a TypeError
+        #: (see :func:`_accepts_updating`).
+        self._drain_callback_takes_updating: bool = False
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -6199,8 +6230,13 @@ class AttachedSession:
         be painted with the build's notice; design round 4, D9: the frames that
         carry no key at all). Only a frame that establishes NEITHER trigger
         reaches the host as ``""``.
+
+        ``updating`` (the window's build pair) is passed as a KEYWORD and only to a
+        callback that accepts it — see :func:`_accepts_updating`. A host written
+        against the one-argument contract keeps receiving every phrase it used to.
         """
         self._drain_callback = callback
+        self._drain_callback_takes_updating = _accepts_updating(callback)
 
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
@@ -6242,10 +6278,18 @@ class AttachedSession:
             # anything, it is moving — so before this key it never reached the host
             # at all, and the one handover that QUEUES the operator's message was
             # the one they were told nothing about (``types.UPDATING``).
-            callback(
-                drain_phrase_for_frame(frame),
-                updating=str(frame.get("updating") or ""),
-            )
+            #
+            # PASSED ONLY WHEN THE CALLBACK CAN TAKE IT (agent review round 1, NIT 3).
+            # The call sits inside a blanket ``except Exception``, so a host whose
+            # callback predates the keyword would take a ``TypeError`` there and lose
+            # the ENTIRE notice — including the drain sentence it used to get — with
+            # nothing but a ``logger.debug`` to show for it. A one-argument host now
+            # gets the phrase and no window, which is exactly the pre-change behaviour.
+            phrase = drain_phrase_for_frame(frame)
+            if self._drain_callback_takes_updating:
+                callback(phrase, updating=str(frame.get("updating") or ""))
+            else:
+                callback(phrase)
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 

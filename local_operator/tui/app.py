@@ -165,10 +165,9 @@ from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
-    UPDATE_FAILED,
     UPDATING,
-    UPDATING_DONE,
     bound_text,
+    update_phrase,
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
@@ -785,66 +784,25 @@ QUEUED_PROMPT_DECLINE_NOTICE = "queued message kept — clear the composer, esc 
 #: disagree about what has been said here (UX round 1, U2).
 QUEUED_ELSEWHERE_NOTICE = "a message is queued for the next runtime — it runs when the session does"
 
-#: The sentences an UPDATE WINDOW earns, keyed by the PHASE TOKEN rather than by
-#: the phrase — the one structural difference from :data:`_DRAIN_NOTICES` below, and it
-#: is forced rather than chosen: every updating sentence carries a build pair, so a
-#: table keyed by the sentence could not be written (``types.UPDATING`` carries that
-#: argument in full). The sentence itself is composed in one place
-#: (``types.update_phrase``) and the pair is named by the runtime's own record and
-#: frame — this table is the INK and the wording, which is what a surface owns.
+#: THE UPDATE WINDOW'S SENTENCE IS NOT COMPOSED HERE, and that is a correction rather
+#: than a relocation (design review round 1, D5). This module used to hold its own
+#: copy — "updating to the newer build; your message is queued … " — while
+#: ``types.update_phrase`` composed a different one, so the sentence the operator read
+#: was not the sentence under test, and the notice was the one surface that could have
+#: named WHICH build was arriving while ``lop sessions`` and the phone already did.
+#: The vocabulary lives in ``types`` and the frame's own pair is passed through, so
+#: the notice, the fleet cell and the incident row are one sentence with three
+#: renderings (the phase tables the pin walks, ``_UPDATING_SHORT`` and
+#: ``update_short``, all read the same three tokens).
 #:
-#: WHY THIS EXISTS AT ALL, when ``_DRAIN_NOTICES`` already says a session is leaving:
-#: the two say OPPOSITE THINGS about the message in the composer. The drain notice
-#: tells the operator a new message will not start a turn; an updating notice tells
-#: them it has already been taken and will run when the successor is up, which is the
-#: operator's own words ("TUI/UI should queue the message while the update is
-#: happening and indicate that the session runtime is currently updating, the message
-#: will be sent momentarily once the update is complete"). Painting the drain's
-#: sentence over a window would send them to re-send a message that is queued.
-#:
-#: WHICH SURFACE PAINTS WHICH PHASE, stated because only one of the three arrives on
-#: a frame and an entry nothing can reach is worse than no entry:
-#:
-#: * ``UPDATING`` — painted HERE, from the ``retiring`` frame's ``updating`` key,
-#:   which is the only moment a viewer has the runtime's own word for it;
-#: * ``UPDATING_DONE`` — the app already announces this fact, one surface over
-#:   (:meth:`OperatorApp._announce_refresh_completed`, shipped with the eager
-#:   refresh and gated on the build actually moving), so this entry is the FLEET's
-#:   copy of the same phase: the record's ``updated`` field and the rows built from
-#:   it. Duplicating a second notice here would say it twice;
-#: * ``UPDATE_FAILED`` — the runtime kept the build it loaded, so there is no frame
-#:   to paint: the phase is published on the record (``update_failed``) and as an
-#:   incident row, and the surfaces that read a record render it. NOT YET PAINTED IN
-#:   THE TUI, and the entry is here so the copy exists in one place when it is.
-UPDATING_NOTICE = (
-    "this session is updating to the newer build; your message is queued and will be "
-    "sent as soon as the new build is up"
-)
-
-#: The window CLOSED and the successor is running it — said once, on the frame that
-#: carried the phase, so the operator learns the queued message is on its way rather
-#: than guessing from a session that quietly started answering.
-UPDATED_NOTICE = "this session finished updating; your queued message is running now"
-
-#: The window FAILED: the runtime kept the build it loaded and is serving again, so the
-#: one thing the operator needs is that this is reportable rather than a hang.
-#: ``update failed`` and not ``update cancelled``: nothing cancelled it, the bound did.
-UPDATE_FAILED_NOTICE = (
-    "the update did not finish — this session is still running the build it loaded, and "
-    "your messages are running on it"
-)
-
-#: The fallback: a phase this build cannot place. It claims only that a move is
-#: happening and promises nothing about the message, because a phase nobody here can
-#: name is not evidence that anything was queued.
-UPDATING_NOTICE_OTHER = "this session is moving to a different build"
-
-#: Which sentence an update window earns, keyed by the phase the frame carries.
-_UPDATING_NOTICES: dict[str, str] = {
-    UPDATING: UPDATING_NOTICE,
-    UPDATING_DONE: UPDATED_NOTICE,
-    UPDATE_FAILED: UPDATE_FAILED_NOTICE,
-}
+#: THE OTHER TWO PHASES ARE NOT PAINTED HERE, and the pin asserts reachability rather
+#: than the presence of table entries it walks (agent review round 1, MINOR 3): only
+#: ``UPDATING`` ever arrives on a frame — an applied update is announced one method
+#: over by :meth:`OperatorApp._announce_refresh_completed`, and a failed one leaves the
+#: runtime SERVING, so there is no frame to carry it and the record plus the incident
+#: row are where it is read (design review round 1, D1 fixed that on the fleet and
+#: info surfaces). A table of sentences nothing can reach is what the reviewer
+#: measured; a call site that renders the phase it is given is what replaced it.
 
 #: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
 #: ``leaving`` phrase the runtime publishes on its record and now sends in the
@@ -18269,7 +18227,7 @@ class OperatorApp(App[None]):
         # window and then latched a drain sends both, and only the window's sentence
         # is true of the message the operator just sent (it is queued, not refused).
         notice = (
-            _UPDATING_NOTICES.get(UPDATING, UPDATING_NOTICE_OTHER)
+            update_phrase(UPDATING, updating)
             if updating
             else _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
         )
