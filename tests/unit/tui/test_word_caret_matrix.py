@@ -27,6 +27,29 @@ expectation. So a cell cannot rot: if the meaning of `up` with a picker open
 changes, the chord's expectation changes with it automatically, and a chord
 that stops matching its arrow fails no matter which layer broke it.
 
+WHY THE CELLS OF A GROUP SHARE ONE APP. A boot is what a pilot test costs, not
+a keystroke: measured in this worktree, `run_test` to a ready session is ~0.74 s
+against ~0.13 s for arranging a state and settling one act, and 14 of the 15
+seconds the original arms spent per cell were boot. The cross product is 180
+cells and the equivalence property is checked against TWO apps per cell — the
+chord and its plain-arrow oracle — so the module as first written booted 775
+`OperatorApp`s for 303 tests and spent ~570 s of its 572 s doing it (the file's
+recorded weight, and the largest single item in `tests/durations.json`). Each
+group below (one state, one history value) now boots ONE app and drives every
+cell of the group through it, and the whole module now boots 73: 23 for the
+group and single-cell tests, and 50 for the parity test (five per group — four
+fresh ``_run`` boots and one shared app). with `_SharedApp.run` restoring the composer
+between arms and ASSERTING the restored state against the fingerprint the
+group's own boot produced; a reset that missed anything fails there by name.
+The matrix, the oracle and every cell are unchanged — the group tests still run
+each cell's two arms and still compare chord against arrow — and
+`test_the_matrix_still_covers_the_whole_cross_product` pins the cell count that
+`--collect-only` no longer shows. `test_the_shared_app_still_behaves_like_a_boot_of_its_own`
+is what keeps the reuse honest: it re-runs the first and last cell of every
+group on a boot of its own and requires identical observations, because a
+restructured test that cannot fail on the bug it was written to catch is a
+regression.
+
 Encoding notes (verified against textual 8.2.8, see `test_word_caret.py`):
 
 - CSI-modifier is the only encoding with a spelling for every chord.
@@ -39,10 +62,13 @@ Encoding notes (verified against textual 8.2.8, see `test_word_caret.py`):
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 from textual import events
+from textual._wait import wait_for_idle
 from textual._xterm_parser import XTermParser
 
 from local_operator.tui.app import OperatorApp
@@ -113,6 +139,15 @@ def _encode(encoding: str, chord: str) -> str | None:
 
 
 ENCODINGS = ("csi", "meta", "esc_prefixed")
+
+#: Cells one (state, history) group carries in the full matrix, and in the
+#: escape-pending axis. PINNED as literals rather than derived, because they are
+#: the independent side of two checks: the coverage test compares them against
+#: the generated cells (so deleting a chord from every table turns it red), and
+#: each group test counts the arms it actually ran against them (so a truncated
+#: loop that silently checks fewer cells is caught too).
+CELLS_PER_GROUP = 18  # csi 8 + meta 2 + esc-prefixed 8
+ESCAPE_PENDING_CELLS_PER_GROUP = 10  # csi 8 + meta 2; the esc spelling is excluded by nature
 
 #: Composer states. Each is a setup coroutine plus the buffer it leaves behind.
 STATES: dict[str, dict[str, Any]] = {
@@ -194,26 +229,54 @@ def _observe(editor: Editor, stops: list[Any]) -> tuple[Any, ...]:
     )
 
 
+def _hold_pending_escape(app: OperatorApp) -> None:
+    """Deliver a REAL lone Escape that is still held when the act runs.
+
+    Posted WITHOUT yielding, so the escape is still held when the act runs.
+    Yielding here would let the one-turn deferral resolve first and the cell
+    would test nothing -- which is exactly the mistake that let F8 through,
+    reproduced one level up in the test itself.
+
+    Injected as bytes through the real parser rather than as a key name, because
+    a lone ``\\x1b`` only emerges after the parser's own ESCAPE_DELAY -- which is
+    exactly why the user's inter-key gap is spent inside the parser and not
+    inside the widget's window, and therefore why a real gap does not save you
+    from the bug.
+    """
+    parser = XTermParser()
+    driver = app._driver
+    assert driver is not None
+    for event in list(parser.feed("\x1b")) + list(parser.feed("")):
+        if isinstance(event, events.Key):
+            event.set_sender(app)
+            driver.send_message(event)
+
+
 async def _run(
     state: str,
     history: bool,
     act: Callable[[Any, OperatorApp], Any],
     escape_pending: bool = False,
+    idle: bool = False,
 ) -> tuple[Any, ...]:
-    """Arrange one matrix cell, apply ``act``, and report what a user would see.
+    """One matrix cell, run in a boot of its own.
 
-    ``escape_pending`` delivers a REAL lone Escape immediately before the act,
-    within the one-pump-turn window the coalescing holds it for. That axis
-    exists because the matrix could not previously express F8 (code round 3):
-    a self-contained CSI chord landing on a held escape was misread as that
-    escape's second half and cancelled it, silently dropping every meaning Esc
-    has. Every cell is run both ways, so the crossing cannot go dark again.
+    This is the reference the shared app is checked against, and it is kept for
+    exactly that reason: the parity test needs an unfaked boot to compare with,
+    and a harness that reimplemented the boot would only be checking itself.
+    The hot path no longer runs cells this way -- one boot per cell became one
+    boot per group (see ``_SharedApp``) -- with the arm's own semantics
+    unchanged: arrange, install the stop spy, hold an escape if this cell wants
+    one, act, settle, observe.
 
-    The escape is injected as bytes through the real parser rather than as a
-    key name, because a lone ``\\x1b`` only emerges after the parser's own
-    ESCAPE_DELAY -- which is exactly why the user's inter-key gap is spent
-    inside the parser and not inside the widget's window, and therefore why a
-    real gap does not save you from the bug.
+    ``idle`` is for the PARITY ARMS only (see
+    ``test_the_shared_app_still_behaves_like_a_boot_of_its_own``). It adds the
+    CPU-idle wait ``pilot.press`` already performs internally
+    (``App._press_keys`` → ``wait_for_idle``) after the act, so an arm whose key
+    is dispatched through the binding system is observed only once its action
+    has landed. The hot path keeps the zero-delay queue barriers ``_settle``
+    documents, and with them the rare load flake those barriers allow -- see the
+    flake note on the parity test.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     messages = MessageWaiter()
@@ -231,18 +294,10 @@ async def _run(
 
         app.post_message = _spy  # type: ignore[method-assign]
         if escape_pending:
-            # Posted WITHOUT yielding, so the escape is still held when the act
-            # runs. Yielding here would let the one-turn deferral resolve first
-            # and the cell would test nothing -- which is exactly the mistake
-            # that let F8 through, reproduced one level up in the test itself.
-            parser = XTermParser()
-            driver = app._driver
-            assert driver is not None
-            for event in list(parser.feed("\x1b")) + list(parser.feed("")):
-                if isinstance(event, events.Key):
-                    event.set_sender(app)
-                    driver.send_message(event)
+            _hold_pending_escape(app)
         await act(pilot, app)
+        if idle:
+            await wait_for_idle(0)
         await _settle(pilot, editor, messages)
         return _observe(editor, stops)
 
@@ -284,30 +339,35 @@ def _cells() -> list[tuple[str, bool, str, str]]:
     return out
 
 
-@pytest.mark.parametrize(
-    ("state", "history", "chord", "encoding"),
-    _cells(),
-    ids=lambda v: str(v),
-)
-@pytest.mark.asyncio
-async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
-    state: str, history: bool, chord: str, encoding: str
-) -> None:
-    """One cell of the matrix: option chord == plain arrow, whatever the state.
+def _groups() -> list[tuple[str, bool]]:
+    """The (state, history) groups the cross product partitions into.
 
-    The plain arrow is run in its own identical app and used as the oracle, so
-    this asserts equivalence rather than a remembered outcome.
+    One boot serves a whole group, so this is also the list of the boots the
+    module spends: one per group per test that walks the group.
     """
-    raw = _encode(encoding, chord)
-    assert raw is not None
+    return [(state, history) for state in STATES for history in (True, False)]
 
-    expected = await _run(state, history, _press_plain(CHORDS[chord]))
-    actual = await _run(state, history, _feed_bytes(raw))
 
-    assert actual == expected, (
-        f"{encoding} {chord} in {state} (history={history}) diverged from plain "
-        f"{CHORDS[chord]}:\n  plain={expected}\n  chord={actual}"
-    )
+def _cells_for(state: str, history: bool) -> list[tuple[str, str]]:
+    """One group's (chord, encoding) cells, in ``_cells``'s own order."""
+    return [(chord, encoding) for (s, h, chord, encoding) in _cells() if (s, h) == (state, history)]
+
+
+def _spellable_cells(
+    encodings: Sequence[str] = ENCODINGS, chords: Sequence[str] = tuple(CHORDS)
+) -> list[tuple[str, str]]:
+    """Every (chord, encoding) pair these terminals can actually spell.
+
+    ``_encode`` returning ``None`` is a fact about the terminal, not a gap in
+    coverage: no encoding here has a meta spelling of a vertical arrow, so those
+    pairs are absent from the matrix rather than skipped inside it.
+    """
+    return [
+        (chord, encoding)
+        for encoding in encodings
+        for chord in chords
+        if _encode(encoding, chord) is not None
+    ]
 
 
 def _escape_pending_cells() -> list[tuple[str, bool, str, str]]:
@@ -326,14 +386,276 @@ def _escape_pending_cells() -> list[tuple[str, bool, str, str]]:
     ]
 
 
-@pytest.mark.parametrize(
-    ("state", "history", "chord", "encoding"),
-    _escape_pending_cells(),
-    ids=lambda v: str(v),
-)
+def _fingerprint(editor: Editor, app: OperatorApp, stops: list[Any]) -> dict[str, Any]:
+    """Every piece of state a cell can leave behind, as one comparable mapping.
+
+    A reset that silently missed one of these is the failure mode the shared app
+    has to survive: the next cell would run from a state no user can reach, and
+    both of its arms would share that wrong state, so ``chord == arrow`` would
+    still hold and the cell would still pass. Comparing the reset against the
+    group's own boot is what turns a miss into a failure that names the field.
+
+    NAMED FIELDS rather than a reflected snapshot of ``vars()``: the objects here
+    carry layout, paint and window internals that differ between two boots of the
+    same code and mean nothing to a cell, so a reflected comparison would be
+    noise. The list is therefore curated for meaning, and the parity test is the
+    backstop for anything it does not name.
+
+    The pickers' row lists are deliberately absent: ``_sync_picker`` re-derives
+    them from the buffer, so a stale row set shows up here as the buffer, mode or
+    query that produced it.
+    """
+    return {
+        "text": editor.text,
+        "cursor": editor.cursor_location,
+        "selection": editor.selected_text,
+        "shell_mode": editor.shell_mode,
+        "history": tuple(editor._history),
+        "history_index": editor._history_index,
+        # The buffer a history step restores on its way OUT of navigation. A
+        # fresh boot has it empty; the reset has to empty it too, or the next
+        # cell that leaves history navigation gets a previous cell's buffer.
+        "draft_stash": editor._draft,
+        "pending_escape": editor._pending_escape is not None,
+        "picker_open": editor._picker.is_open(),
+        "picker_mode": str(editor._picker.mode),
+        "picker_selected": editor._picker.selected_index,
+        "picker_dismissed": editor._picker.is_dismissed(),
+        # The command picker's filter text, read through its own private because it
+        # has no public accessor (the model picker's `query_text` is the one that
+        # does). Present because of what review round 1 found in its sibling: a
+        # field that LOOKS checked and is not is worse than one that is absent, and
+        # a query surviving a reset would filter the next cell's list by the
+        # previous cell's word.
+        "picker_query": editor._picker._query,
+        "picker_key": editor._picker_key_at_last_sync,
+        "argument_command": editor._argument_command,
+        "argument_subcommand": editor._argument_subcommand,
+        "skill_requested": editor._skill_choices_requested,
+        "file_requested": editor._file_choices_requested,
+        "model_open": editor._model_picker.is_open(),
+        "model_selected": editor._model_picker.selected_index,
+        "model_query": editor._model_picker.query_text(),
+        "model_dismissed": editor._model_picker.is_dismissed(),
+        "stops": len(stops),
+        # The two ladders the app carries ACROSS presses rather than within one:
+        # the armed "esc again" stop offer, and the screen stack a cell can push
+        # without popping. Neither is in `_observe`, and both are inherited by
+        # the next cell if a reset forgets them.
+        #
+        # `stop_offered` reads a state this matrix cannot ARM, and that is
+        # deliberate rather than a gap: the offer is only raised by an Escape
+        # that reports subagents still running (`app._stop_offered_at` is set on
+        # `_running_subagents(...) > 0`), and every state in ``STATES`` carries a
+        # ``FakeSession`` with `running_children == 0`. Arming it would add a
+        # subagent-presence axis to the cross product -- a different feature's
+        # cells with different stop semantics -- not a state a chord could leave
+        # behind here. It stays in the fingerprint because a reset that FAILED to
+        # clear it (it is cleared on the non-escalating path) is exactly the kind
+        # of cross-cell carry-over this comparison exists to catch.
+        "stop_offered": app._stop_offered_at is not None,
+        "screens": len(app.screen_stack),
+    }
+
+
+async def _reset(pilot: Any, editor: Editor) -> None:
+    """Return the composer to the state a fresh boot leaves it in.
+
+    Each line is a state a cell can move, and each one is here because leaving
+    it would survive the buffer swap that follows:
+
+    - ``clear_content`` is what ``/clear`` does -- buffer, history-navigation
+      index, attachments, armed-secret latch -- so the buffer is emptied through
+      the product's own funnel rather than by assigning ``text``.
+    - ``set_shell_mode`` is bang-mode's own leave path; the mode is not a
+      property of the buffer, so emptying the buffer does not leave it.
+    - ``_cancel_escape`` drops a held escape action without running it, through
+      the composer's own seam for it. Carried into the next cell it would let a
+      stop from the previous cell's Escape be counted against this one's, which
+      is precisely the axis the F8 test measures.
+    - ``close()`` on either picker drops its rows AND zeroes the highlight and
+      window offset pointing into them. That is the part a bare buffer swap
+      leaves behind: ``_apply`` only re-zeroes those on a MODE change, so a list
+      reopened into the same mode would inherit the previous cell's highlight.
+    - ``set_query("")`` clears the MODEL picker's filter text, which ``close()``
+      deliberately leaves alone (a reopen inherits it). It is the picker's own
+      seam and the one documented NOT to change open/closed state, so it cannot
+      reopen a list. This one is easy to miss because it is invisible while the
+      list is closed and the cells still pass: it was found by the fingerprint
+      itself once the field below stopped being a bound method (review round 1,
+      M1 -- the model-picker groups failed the reset the moment the query was
+      really read).
+    - ``_draft`` is the buffer a history step restores when it leaves
+      navigation; a fresh boot has it empty.
+
+    Nothing here is trusted to be complete: ``_SharedApp.run`` compares the
+    result against the group's boot fingerprint and fails by field name.
+    """
+    editor.clear_content()
+    editor.set_shell_mode(False)
+    editor._cancel_escape()
+    editor._picker.close()
+    editor._model_picker.close()
+    editor._model_picker.set_query("")
+    editor._draft = ""
+    # One turn so the messages these calls post (the picker close, the shell-mode
+    # change) are delivered BEFORE the fingerprint is read.
+    await pilot.pause()
+
+
+class _SharedApp:
+    """One booted app, driving every cell of one ``(state, history)`` group.
+
+    The group's first arrange runs on the state the BOOT left, so the
+    fingerprint every later arm is checked against is one a real boot produced
+    rather than another reset's output -- a reset compared against a reset would
+    agree with itself while both drifted.
+
+    What this cannot prove by construction is that the shared app still behaves
+    like a boot of its own in the parts ``_fingerprint`` does not name. That is
+    measured, not assumed: see
+    ``test_the_shared_app_still_behaves_like_a_boot_of_its_own``.
+    """
+
+    def __init__(
+        self,
+        pilot: Any,
+        app: OperatorApp,
+        editor: Editor,
+        messages: MessageWaiter,
+        stops: list[Any],
+    ) -> None:
+        self._pilot = pilot
+        self._app = app
+        self._editor = editor
+        self._messages = messages
+        self._stops = stops
+        self._state = ""
+        self._history = False
+        self._baseline: dict[str, Any] = {}
+
+    async def arrange_group(self, state: str, history: bool) -> None:
+        """Arrange the group's state and record what every later reset must reproduce."""
+        self._state, self._history = state, history
+        await _arrange(self._pilot, self._editor, state, history)
+        self._stops.clear()
+        self._baseline = _fingerprint(self._editor, self._app, self._stops)
+
+    async def run(
+        self,
+        act: Callable[[Any, OperatorApp], Any],
+        escape_pending: bool = False,
+        idle: bool = False,
+    ) -> tuple[Any, ...]:
+        """Reset to the group's state, apply ``act``, and report what a user would see.
+
+        The reset is asserted before the act rather than after: a cell that
+        started from a state the boot never produced is not a cell of this
+        matrix, whatever it then observes.
+
+        ``idle`` is for the PARITY ARMS only and is OFF on the hot path: it adds
+        the CPU-idle wait ``pilot.press`` already performs internally
+        (``App._press_keys`` → ``wait_for_idle``) between the act and the
+        observation, so an arm whose key is dispatched through the binding system
+        is read only once its action has landed. It costs a 20 ms sleep per arm,
+        which is why the 774 hot arms do not pay it -- they keep the zero-delay
+        queue barriers ``_settle`` documents and the rare load flake those
+        barriers allow.
+        """
+        await _reset(self._pilot, self._editor)
+        await _arrange(self._pilot, self._editor, self._state, self._history)
+        self._stops.clear()
+        restored = _fingerprint(self._editor, self._app, self._stops)
+        drift = {
+            key: (self._baseline[key], restored[key])
+            for key in self._baseline
+            if restored[key] != self._baseline[key]
+        }
+        assert not drift, (
+            "app reuse leaked state into the next cell: the reset did not reproduce the "
+            f"state this app's boot produced for {self._state} (history={self._history}). "
+            f"Field: (boot, after reset)\n  {drift}"
+        )
+        if escape_pending:
+            _hold_pending_escape(self._app)
+        await act(self._pilot, self._app)
+        if idle:
+            await wait_for_idle(0)
+        await _settle(self._pilot, self._editor, self._messages)
+        return _observe(self._editor, self._stops)
+
+
+@asynccontextmanager
+async def _boot_shared(state: str, history: bool) -> AsyncIterator[_SharedApp]:
+    """Boot ONE app for a group, with the stop spy installed for its whole life.
+
+    The spy is the app's own ``post_message``, so installing it once per boot
+    instead of once per arm is the same observation with a fraction of the
+    wrapping -- and ``_SharedApp.run`` clears the stop list before each act, so
+    a cell still counts only its own stops.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    messages = MessageWaiter()
+    async with app.run_test(size=(100, 24), message_hook=messages.on_message) as pilot:
+        editor = await _boot(pilot, app, messages)
+        stops: list[Any] = []
+        original = app.post_message
+
+        def _spy(message: Any) -> bool:
+            if isinstance(message, StopRequested):
+                stops.append(message)
+            return original(message)
+
+        app.post_message = _spy  # type: ignore[method-assign]
+        shared = _SharedApp(pilot, app, editor, messages, stops)
+        await shared.arrange_group(state, history)
+        yield shared
+
+
+@pytest.mark.parametrize(("state", "history"), _groups(), ids=lambda v: str(v))
+@pytest.mark.asyncio
+async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
+    state: str, history: bool
+) -> None:
+    """One group of the matrix: option chord == plain arrow, whatever the state.
+
+    The plain arrow is run in its own arm of the SAME app and used as the
+    oracle, so this asserts equivalence rather than a remembered outcome. The
+    app is what a group's cells share; the arm is not -- ``run`` puts the
+    composer back in the group's boot state and fails the cell if it cannot.
+
+    Every failing cell in the group is reported, not just the first, so one
+    broken crossing does not hide the rest.
+    """
+    cells = _cells_for(state, history)
+    assert cells, f"no cells for {state} (history={history})"
+    failures: list[str] = []
+    arms = 0
+    async with _boot_shared(state, history) as shared:
+        for chord, encoding in cells:
+            raw = _encode(encoding, chord)
+            assert raw is not None
+
+            expected = await shared.run(_press_plain(CHORDS[chord]))
+            actual = await shared.run(_feed_bytes(raw))
+            arms += 2
+
+            if actual != expected:
+                failures.append(
+                    f"{encoding} {chord} in {state} (history={history}) diverged from plain "
+                    f"{CHORDS[chord]}:\n  plain={expected}\n  chord={actual}"
+                )
+    # Counted against a LITERAL, not against `len(cells)`: a loop that stopped
+    # early (a `break`, a `continue` added for one awkward case) would otherwise
+    # shrink the matrix while every remaining assertion still passed.
+    assert arms == 2 * CELLS_PER_GROUP, f"ran {arms} arms, not {2 * CELLS_PER_GROUP}"
+    assert not failures, f"{len(failures)} of {len(cells)} cells diverged:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize(("state", "history"), _groups(), ids=lambda v: str(v))
 @pytest.mark.asyncio
 async def test_a_self_contained_chord_never_swallows_a_pending_escape(
-    state: str, history: bool, chord: str, encoding: str
+    state: str, history: bool
 ) -> None:
     """The F8 axis: a real Esc held when the chord lands must still fire.
 
@@ -356,40 +678,59 @@ async def test_a_self_contained_chord_never_swallows_a_pending_escape(
     pin here is that a pending escape changes nothing about the chord and is
     itself preserved.
     """
-    raw = _encode(encoding, chord)
-    assert raw is not None
+    cells = [
+        (chord, encoding)
+        for (s, h, chord, encoding) in _escape_pending_cells()
+        if (s, h) == (state, history)
+    ]
+    assert cells, f"no escape-pending cells for {state} (history={history})"
+    failures: list[str] = []
+    arms = 0
+    async with _boot_shared(state, history) as shared:
+        for chord, encoding in cells:
+            raw = _encode(encoding, chord)
+            assert raw is not None
 
-    # THE CONTROL is the horizontal chord, and the choice matters. `alt+left`
-    # is never rewritten, is not in `ESCAPE_CHORD_KEYS`, and therefore never had
-    # F8 -- the code reviewer identified exactly that asymmetry as the tell. So
-    # "how a pending escape is disposed of in this state" is read off the chord
-    # that provably handles it correctly, and the chord under test must match.
-    #
-    # Reading it from a control rather than asserting a fixed outcome is what
-    # keeps this honest: Esc means four different things depending on state
-    # (stop, leave shell mode, dismiss either list), and in the picker states a
-    # dismissed list is legitimately re-opened by the following `_sync_picker`.
-    # Hand-writing those outcomes would have encoded a pre-existing behaviour as
-    # if it were this feature's contract.
-    control_raw = _encode(encoding, "shift+left" if "shift" in chord else "left")
-    assert control_raw is not None
-    control = await _run(state, history, _feed_bytes(control_raw), escape_pending=True)
-    control_baseline = await _run(state, history, _feed_bytes(control_raw))
+            # THE CONTROL is the horizontal chord, and the choice matters.
+            # `alt+left` is never rewritten, is not in `ESCAPE_CHORD_KEYS`, and
+            # therefore never had F8 -- the code reviewer identified exactly that
+            # asymmetry as the tell. So "how a pending escape is disposed of in
+            # this state" is read off the chord that provably handles it
+            # correctly, and the chord under test must match.
+            #
+            # Reading it from a control rather than asserting a fixed outcome is
+            # what keeps this honest: Esc means four different things depending
+            # on state (stop, leave shell mode, dismiss either list), and in the
+            # picker states a dismissed list is legitimately re-opened by the
+            # following `_sync_picker`. Hand-writing those outcomes would have
+            # encoded a pre-existing behaviour as if it were this feature's
+            # contract.
+            control_raw = _encode(encoding, "shift+left" if "shift" in chord else "left")
+            assert control_raw is not None
+            control = await shared.run(_feed_bytes(control_raw), escape_pending=True)
+            control_baseline = await shared.run(_feed_bytes(control_raw))
 
-    baseline = await _run(state, history, _feed_bytes(raw))
-    actual = await _run(state, history, _feed_bytes(raw), escape_pending=True)
+            baseline = await shared.run(_feed_bytes(raw))
+            actual = await shared.run(_feed_bytes(raw), escape_pending=True)
+            arms += 4
 
-    # Whatever the escape did to the control's state, it must also have done
-    # here: same shell mode, same picker states, same stop count.
-    control_effect = (control[3], control[4], control[5], control[-1] - control_baseline[-1])
-    actual_effect = (actual[3], actual[4], actual[5], actual[-1] - baseline[-1])
-    assert actual_effect == control_effect, (
-        f"{encoding} {chord} in {state} (history={history}) disposed of the pending "
-        f"escape differently from the never-rewritten horizontal chord:\n"
-        f"  control (option+left) effect={control_effect}\n"
-        f"  {chord} effect={actual_effect}\n"
-        f"  without escape={baseline}\n  with escape={actual}"
-    )
+            # Whatever the escape did to the control's state, it must also have
+            # done here: same shell mode, same picker states, same stop count.
+            control_effect = (
+                control[3],
+                control[4],
+                control[5],
+                control[-1] - control_baseline[-1],
+            )
+            actual_effect = (actual[3], actual[4], actual[5], actual[-1] - baseline[-1])
+            if actual_effect != control_effect:
+                failures.append(
+                    f"{encoding} {chord} in {state} (history={history}) disposed of the pending "
+                    f"escape differently from the never-rewritten horizontal chord:\n"
+                    f"  control (option+left) effect={control_effect}\n"
+                    f"  {chord} effect={actual_effect}\n"
+                    f"  without escape={baseline}\n  with escape={actual}"
+                )
     # The chord's own motion is NOT asserted equal to its no-escape baseline,
     # deliberately. A flushed escape legitimately changes the state the chord
     # then acts on -- with a command list open, Esc dismisses the list, so the
@@ -400,36 +741,45 @@ async def test_a_self_contained_chord_never_swallows_a_pending_escape(
     # What must hold is that the chord behaves like a plain arrow pressed in
     # that same post-escape state, which the no-escape axis already pins for
     # every state the escape can leave behind.
+    # Counted against a LITERAL, for the reason the equivalence axis states: a
+    # loop that stopped early must not be able to shrink this axis in silence.
+    assert (
+        arms == 4 * ESCAPE_PENDING_CELLS_PER_GROUP
+    ), f"ran {arms} arms, not {4 * ESCAPE_PENDING_CELLS_PER_GROUP}"
+    assert not failures, f"{len(failures)} of {len(cells)} cells diverged:\n" + "\n".join(failures)
 
 
-@pytest.mark.parametrize("encoding", ["csi", "meta"])
-@pytest.mark.parametrize("chord", list(CHORDS))
 @pytest.mark.asyncio
-async def test_a_pending_escape_still_stops_the_turn_after_a_chord(
-    chord: str, encoding: str
-) -> None:
+async def test_a_pending_escape_still_stops_the_turn_after_a_chord() -> None:
     """The F8 payload, stated absolutely rather than against an oracle.
 
     Belt and braces beside the equivalence test above: if the plain-arrow
     oracle were itself ever broken, the equivalence could hold while both sides
     lost the stop. This pins the stop count directly.
     """
-    raw = _encode(encoding, chord)
-    if raw is None:
-        pytest.skip(f"{encoding} has no spelling for {chord}")
+    cells = _spellable_cells(("csi", "meta"))
+    assert cells, "no self-contained spelling for any chord"
+    assert (
+        len(cells) == ESCAPE_PENDING_CELLS_PER_GROUP
+    ), f"{len(cells)} self-contained cells, not {ESCAPE_PENDING_CELLS_PER_GROUP}"
+    failures: list[str] = []
+    checked = 0
+    async with _boot_shared("resting", False) as shared:
+        for chord, encoding in cells:
+            raw = _encode(encoding, chord)
+            assert raw is not None
 
-    result = await _run("resting", False, _feed_bytes(raw), escape_pending=True)
-    stops = result[-1]
+            result = await shared.run(_feed_bytes(raw), escape_pending=True)
+            checked += 1
+            stops = result[-1]
+            if stops != 1:
+                failures.append(f"{encoding} {chord} swallowed the pending escape (stops={stops})")
+    assert checked == ESCAPE_PENDING_CELLS_PER_GROUP, f"ran {checked} arms, not all of them"
+    assert not failures, "\n".join(failures)
 
-    assert stops == 1, f"{encoding} {chord} swallowed the pending escape (stops={stops})"
 
-
-@pytest.mark.parametrize("encoding", ENCODINGS)
-@pytest.mark.parametrize("chord", ["up", "down"])
 @pytest.mark.asyncio
-async def test_a_vertical_chord_never_destroys_a_typed_slash_command(
-    chord: str, encoding: str
-) -> None:
+async def test_a_vertical_chord_never_destroys_a_typed_slash_command() -> None:
     """The exact regression that forced round 3, pinned on its own.
 
     Code round 2 F5 / ux round 2 U6: with a list open and history present, the
@@ -440,16 +790,147 @@ async def test_a_vertical_chord_never_destroys_a_typed_slash_command(
     Stated as an absolute rather than as an equivalence, so it still fails
     loudly if the plain-arrow oracle above were ever itself broken.
     """
-    raw = _encode(encoding, chord)
-    if raw is None:
-        pytest.skip(f"{encoding} has no spelling for {chord}")
-
     typed = STATES["model_picker"]["text"]
-    result = await _run("model_picker", True, _feed_bytes(raw))
-    text = result[1]
+    cells = _spellable_cells(ENCODINGS, chords=("up", "down"))
+    assert cells, "no spelling for a vertical chord"
+    assert len(cells) == 4, f"{len(cells)} vertical cells, not 4"
+    failures: list[str] = []
+    checked = 0
+    async with _boot_shared("model_picker", True) as shared:
+        for chord, encoding in cells:
+            raw = _encode(encoding, chord)
+            assert raw is not None
 
-    assert text == typed, f"{encoding} ⌥{chord} destroyed the typed command: {text!r}"
-    assert text not in HISTORY, "the buffer was overwritten from history"
+            result = await shared.run(_feed_bytes(raw))
+            checked += 1
+            text = result[1]
+            if text != typed:
+                failures.append(f"{encoding} ⌥{chord} destroyed the typed command: {text!r}")
+            if text in HISTORY:
+                failures.append("the buffer was overwritten from history")
+    assert checked == 4, f"ran {checked} arms, not all of them"
+    assert not failures, "\n".join(failures)
+
+
+@pytest.mark.parametrize(("state", "history"), _groups(), ids=lambda v: str(v))
+@pytest.mark.asyncio
+async def test_the_shared_app_still_behaves_like_a_boot_of_its_own(
+    state: str, history: bool
+) -> None:
+    """App reuse is only sound while it is indistinguishable from a fresh boot.
+
+    Every other test here runs its cells on an app that has already served other
+    cells. ``_SharedApp.run`` proves the reset reproduces the state the group's
+    own boot produced, but that is a comparison between two states of the SAME
+    app: it cannot see a way in which reuse itself differs, and the app carries
+    plenty a fresh boot has not been through -- a picker resync key, row caches,
+    an escape ladder, a transcript with blocks in it.
+
+    So the claim is measured against a real boot of its own, on the FIRST and
+    LAST cell of every group: the state before any reuse, and the state after a
+    whole group's worth of it. Both arms must agree exactly, observation for
+    observation. This is the check that keeps the restructure from becoming a
+    test that can no longer fail on what it was written to catch -- run
+    ``test_the_chord_is_indistinguishable_from_its_plain_arrow`` against the
+    #370 defect and these cells are what pins the reused path to the same
+    verdict.
+
+    WHAT IT DOES NOT PROVE, and why the arms here carry an idle wait the hot
+    path does not. This comparison is only as trustworthy as the barrier it
+    reads through, and the hot path's is deliberately weak: ``_settle`` uses
+    zero-delay queue barriers, so under extreme CPU starvation a key whose caret
+    action is dispatched through the binding system can still be pending when
+    the observation is taken -- measured on this host, that fires roughly once
+    per full-file run at load ~150-176, BOTH before and after the restructure,
+    and always with the chord arm unmoved while its plain arm moved. A genuine
+    reuse leak would print the same "disagree" message as that race, which is
+    what makes the race unacceptable HERE: a guard that cannot be told apart from
+    the thing it guards against is not a guard. So both sides of this comparison
+    wait for CPU idle after the act (``idle=True`` -- the same wait
+    ``pilot.press`` performs internally, ~20 ms an arm), and the 774 hot arms
+    keep the cheap barrier.
+
+    What is proven: for the first and last cell of every group, a reused app and
+    a boot of its own agree observation for observation, once both are read
+    through an idle-waiting barrier. What is not: anything about the MIDDLE of a
+    group (the reset's fingerprint assertion covers those), and nothing about the
+    hot arms' exposure to that starvation race, which this change neither causes
+    nor fixes.
+    """
+    cells = _cells_for(state, history)
+    assert cells, f"no cells for {state} (history={history})"
+
+    fresh: list[tuple[Any, ...]] = []
+    for chord, encoding in (cells[0], cells[-1]):
+        raw = _encode(encoding, chord)
+        assert raw is not None
+        fresh.append(await _run(state, history, _press_plain(CHORDS[chord]), idle=True))
+        fresh.append(await _run(state, history, _feed_bytes(raw), idle=True))
+
+    reused: list[tuple[Any, ...]] = []
+    async with _boot_shared(state, history) as shared:
+        for chord, encoding in (cells[0], cells[-1]):
+            raw = _encode(encoding, chord)
+            assert raw is not None
+            reused.append(await shared.run(_press_plain(CHORDS[chord]), idle=True))
+            reused.append(await shared.run(_feed_bytes(raw), idle=True))
+    assert len(fresh) == len(reused) == 4, "the parity comparison lost an arm"
+    assert reused == fresh, (
+        f"the shared app and a boot of its own disagree in {state} (history={history}):\n"
+        f"  boot   ={fresh}\n  shared ={reused}"
+    )
+
+
+def test_the_matrix_still_covers_the_whole_cross_product() -> None:
+    """The cross product IS the feature, so its size is pinned in one place.
+
+    Amortizing the boots moved these cells out of pytest ids and into loops
+    inside a group's test, which means ``--collect-only`` no longer counts them
+    and cannot be the evidence that none was dropped. This is that evidence.
+
+    EVERY EXPECTED VALUE HERE IS A LITERAL, deliberately not an expression over
+    the tables the cells are generated from. An expectation built from the same
+    mutable constants it checks cannot fail when one of them loses a member:
+    deleting the ``left`` chord from ``CHORDS``, ``_CSI``, ``_META`` and the
+    esc-prefixed table together leaves "csi spells every chord" true, and would
+    take 30 cells with it in silence. Written out, a vanished member shows up as
+    a count that no longer matches and as an axis set that no longer covers the
+    declaration.
+    """
+    # The declared axes, as literals.
+    assert len(STATES) == 5
+    assert len(CHORDS) == 8
+    assert set(ENCODINGS) == {"csi", "meta", "esc_prefixed"}
+
+    # The counts, per axis and in total: csi spells every chord, meta only the
+    # horizontal pair, and esc-prefixed spells everything (a bare ESC followed
+    # by the plain sequence).
+    assert len(_cells()) == 180
+    assert len(_escape_pending_cells()) == 100
+    assert len(_spellable_cells(("csi", "meta"))) == 10
+    assert len(_spellable_cells(ENCODINGS, chords=("up", "down"))) == 4
+
+    # ...and every MEMBER, so a chord, a state, a history value or an encoding
+    # dropped from any single table turns this red even if the totals above were
+    # edited to match.
+    assert {state for state, _, _, _ in _cells()} == set(STATES)
+    assert {history for _, history, _, _ in _cells()} == {True, False}
+    assert {chord for _, _, chord, _ in _cells()} == set(CHORDS)
+    assert {encoding for _, _, _, encoding in _cells()} == set(ENCODINGS)
+    assert set(_CSI) == set(CHORDS), "the CSI table must spell every chord"
+    assert set(_META) <= set(CHORDS), "the meta table is a subset of the chords"
+
+    # ...and every group carries the full set, which is what makes "no cell was
+    # dropped" a property of the groups rather than of a total: a partition
+    # that lost one cell from each group would still satisfy a total, and the
+    # escape-pending axis must lose exactly the esc-prefixed spelling.
+    assert len(_groups()) == 10
+    for group in _groups():
+        assert len(_cells_for(*group)) == CELLS_PER_GROUP, f"group {group} lost a cell"
+        escape = [cell for cell in _escape_pending_cells() if (cell[0], cell[1]) == group]
+        assert (
+            len(escape) == ESCAPE_PENDING_CELLS_PER_GROUP
+        ), f"group {group} lost an escape-pending cell"
 
 
 @pytest.mark.asyncio
