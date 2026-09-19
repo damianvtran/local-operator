@@ -129,6 +129,14 @@ _build_stagger_seconds = _buildwatch.build_stagger_seconds
 #: ``__main__``, so its own names are the stable seam for tests and for any
 #: reader, and the call site should not depend on the attribute being reachable.
 _handover_build = _buildwatch.handover_build
+#: The update window's bounds are read through ``_buildwatch`` at the CALL SITE
+#: rather than re-exported as names here, unlike the timings above: the tests and
+#: the e2e stage shorten them with ``monkeypatch.setattr(buildwatch, ...)``, and a
+#: module-level alias captured at import would keep applying the shipped bound
+#: while the test believed it had moved it. The two constants are re-exported
+#: because they are VALUES (nothing patches a value through this module).
+UPDATE_LOCK_S = _buildwatch.UPDATE_LOCK_S
+UPDATE_LOCK_HEARTBEAT_S = _buildwatch.UPDATE_LOCK_HEARTBEAT_S
 
 #: A runtime must not refuse the same newer build FOREVER. ``_should_refresh``
 #: only acts on an instant where nothing would be lost, so a session busy for
@@ -989,8 +997,34 @@ async def _refresh_for(
 
     ``retiring`` is announced AFTER the stagger, immediately before exit, so
     a viewer never waits on a runtime that is merely "about to" leave.
+
+    THE UPDATE WINDOW (2026-09-19). An idle runtime leaving is exactly the
+    runtime a person is typing into — the TUI has just told them it will switch
+    to the new version when next idle — so this rung opens a window BEFORE the
+    announce: ``SessionRecord.updating`` is published, the admission lock is
+    taken, and every admission that arrives from then on is SPOOLED for the
+    successor rather than refused (``serving.ServingSessionHandle.prompt``;
+    ``types.UPDATING`` carries the incident). The window closes one of two ways:
+
+    * the handover completes — the process exits, the marker stays, and the
+      successor's boot consumes it into ``record.updated`` (``_refresh_for`` does
+      NOT close the window on this arm, deliberately: an ``end_update`` before
+      ``_clean_exit`` would clear the marker the successor needs);
+    * the bound expires — ``UPDATE_LOCK_S`` with no heartbeat. The rung then
+      ABANDONS the handover rather than waiting on it: the lock is released, the
+      build this runtime loaded is KEPT, the failure is published with
+      ``types.UPDATE_FAILED_CAUSE``, and the messages this window queued are
+      drained back in and run HERE (``_abandon_update_window``). That last part is
+      what makes the queue safe: a receipt for a successor that never comes would
+      be the same broken promise, one layer down.
+
+    The bound is on the window's OWN work, and it is enforced by
+    ``asyncio.wait_for`` around the announce-plus-latch rather than by a clock read,
+    so a stalled viewer writer is the only way to reach it — which is the failure
+    mode the operator could not recover from without ``/stop`` + ``/resume``.
     """
     boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
+    pair = _buildwatch.update_pair_text(boot.label() if boot is not None else "", newer.label())
     delay = random.uniform(0, _build_stagger_seconds())  # noqa: S311 — jitter, not security
     logger.info(
         "session runtime: build on disk is %s but this process loaded %s; idle, retiring in "
@@ -1007,36 +1041,232 @@ async def _refresh_for(
     if _should_refresh(handle, boot) is None:
         logger.info("session runtime: work arrived during the refresh stagger; keeping")
         return False
-    announce = getattr(runtime, "announce_retiring", None)
-    if callable(announce):
-        try:
-            await cast(Callable[..., Awaitable[None]], announce)("stale-build", to=newer.label())
-        except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
-            logger.debug("retiring announcement failed", exc_info=True)
-    if stop.is_set():
-        return False
-    # The final check is the LATCH, not another sample: a retirement that acted
-    # on a sampled "idle" and then met a turn during the announce would abort
-    # work it had just decided not to disturb. ``begin_retire`` commits the
-    # runtime to leaving in one synchronous step, and from that instant the
-    # admission paths refuse, so no turn can open between here and the dispose.
-    begin_retire = getattr(handle, "begin_retire", None)
-    if callable(begin_retire):
-        if not begin_retire("runtime-retired", _build_pair(boot, newer)):
+
+    # THE WINDOW OPENS HERE — after the last cheap gate and BEFORE the announce,
+    # which is the order ``process._begin_drain`` documents: a reader must learn
+    # the runtime is moving before anything is deferred to its successor, or the
+    # first queued receipt arrives under a notice that says nothing is happening.
+    begin_update = getattr(handle, "begin_update", None)
+    opened = False
+    if callable(begin_update):
+        opened = bool(begin_update(pair, "stale-build"))
+        if not opened:
+            # Either another rung already holds the window (its move owns this
+            # rung's too) or this pair has already failed a window and the
+            # automatic rung has stopped retrying it. Both answers are "keep
+            # serving", and both are cheap: the next check asks again.
+            logger.info("session runtime: not opening an update window for %s; keeping", pair)
+            return False
+
+    async def _announce_and_latch() -> bool:
+        """The handover's awaits, so the window can be bounded around them.
+
+        Returns False when work turned up and the runtime is therefore keeping:
+        the caller closes the window on that arm too, because a window left open
+        over a runtime that did not leave queues for nobody.
+        """
+        announce = getattr(runtime, "announce_retiring", None)
+        if callable(announce):
+            try:
+                # The window's build pair reaches the frame through the RECORD
+                # (``RuntimeServer._announce_retiring_on_loop``), which the window
+                # published before this call — deliberately not as a keyword here:
+                # a peer runtime, or a reduced host, whose ``announce_retiring``
+                # predates the parameter would take a TypeError inside the guard
+                # meant for a viewer's writer, and lose the announcement entirely.
+                await cast(Callable[..., Awaitable[None]], announce)(
+                    "stale-build", to=newer.label()
+                )
+            except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
+                logger.debug("retiring announcement failed", exc_info=True)
+        if stop.is_set():
+            return False
+        # The final check is the LATCH, not another sample: a retirement that acted
+        # on a sampled "idle" and then met a turn during the announce would abort
+        # work it had just decided not to disturb. ``begin_retire`` commits the
+        # runtime to leaving in one synchronous step, and from that instant the
+        # admission paths refuse, so no turn can open between here and the dispose.
+        begin_retire = getattr(handle, "begin_retire", None)
+        if callable(begin_retire):
+            if not begin_retire("runtime-retired", _build_pair(boot, newer)):
+                logger.info("session runtime: work arrived while retiring was announced; keeping")
+                return False
+        elif _should_refresh(handle, boot) is None:
+            # A handle without the latch (an older or reduced host, e.g. the tests'
+            # stub handles): keep today's re-check rather than retiring unguarded.
+            # Refusing AFTER announcing is safe for the same reason it is for
+            # ``stopping``: ``retiring`` only latches the disconnect REASON in an
+            # attach client, and does nothing unless the socket then closes.
             logger.info("session runtime: work arrived while retiring was announced; keeping")
             return False
-    elif _should_refresh(handle, boot) is None:
-        # A handle without the latch (an older or reduced host, e.g. the tests'
-        # stub handles): keep today's re-check rather than retiring unguarded.
-        # Refusing AFTER announcing is safe for the same reason it is for
-        # ``stopping``: ``retiring`` only latches the disconnect REASON in an
-        # attach client, and does nothing unless the socket then closes.
-        logger.info("session runtime: work arrived while retiring was announced; keeping")
+        return True
+
+    bound = _buildwatch.update_lock_seconds()
+    pump = asyncio.ensure_future(
+        _pump_update_heartbeat(handle, interval=_buildwatch.update_lock_heartbeat_seconds())
+    )
+    try:
+        latched = await asyncio.wait_for(_announce_and_latch(), timeout=bound)
+    except asyncio.TimeoutError:
+        await _abandon_update_window(handle, runtime, pair, bound)
+        return False
+    finally:
+        pump.cancel()
+
+    if not latched:
+        if opened:
+            # Work arrived: the window closes and the messages it queued come
+            # back to the runtime that stayed, which is the only writer that owes
+            # them a turn now.
+            await _close_update_window(handle)
         return False
     logger.info("session runtime: retiring for %s", newer.label())
     await _clean_exit(handle, runtime, reason="retiring for " + newer.label())
     stop.set()
     return True
+
+
+async def _pump_update_heartbeat(handle: object, *, interval: float) -> None:
+    """Beat an open update window while the handover runs. Never raises.
+
+    A TASK RATHER THAN A BEAT BEFORE EACH AWAIT, and the reason is the awaits'
+    shape rather than taste: the window's long await is inside
+    ``RuntimeServer.announce_retiring``, which drains one writer per attached
+    viewer — a count this rung cannot see and would have to guess at to place
+    beats between. The pump is driven by the event loop's own turns, so if the
+    loop is BLOCKED the beats stop, the deadline passes, and the bound fires.
+    That is the intended failure mode: a loop that cannot turn is a runtime a
+    front end must stop waiting on.
+    """
+    beat = getattr(handle, "heartbeat_update", None)
+    if not callable(beat):
+        return
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            beat()
+    except asyncio.CancelledError:
+        # The window closed; a cancelled pump is the normal exit. Returning (as
+        # opposed to re-raising) keeps the caller's ``cancel()`` from surfacing
+        # as a task exception nobody awaits.
+        return
+
+
+async def _abandon_update_window(handle: object, runtime: object, pair: str, bound: float) -> None:
+    """The bound expired: keep the build this runtime loaded, and say so.
+
+    ORDER, and each step is one of the operator's requirements:
+
+    1. the window CLOSES — the lock is released and the record's ``updating`` is
+       cleared, so no admission is queued against a handover that is not coming
+       and no surface keeps reading "updating";
+    2. the messages the window QUEUED are drained back IN, so they run here, on
+       the build the operator still has — the alternative is a receipt for a
+       successor that never boots;
+    3. the failure is PUBLISHED, on the record and as an incident row carrying
+       ``types.UPDATE_FAILED_CAUSE``, which is what makes it reportable instead
+       of silent (the operator's "so that it can be reported as an issue");
+    4. the handle REMEMBERS the pair, so the automatic rung does not re-open the
+       same window on its next check and burn the bound again forever.
+
+    The runtime is never killed here — that is the whole contract. A failed
+    update leaves a working session on the build it loaded.
+    """
+    logger.warning(
+        "session runtime: the update window for %s held no heartbeat for %.1fs "
+        "(bound %.1fs); abandoning the handover and keeping %s",
+        pair or "the build on disk",
+        bound,
+        bound,
+        _loaded_build_label(runtime),
+    )
+    end = getattr(handle, "end_update", None)
+    if callable(end):
+        end()
+    remember = getattr(handle, "note_update_failed", None)
+    if callable(remember):
+        remember(pair, bound)
+    await _drain_inbox_into(handle)
+    note = getattr(runtime, "note_update_failed", None)
+    if callable(note):
+        try:
+            await cast(Callable[..., Awaitable[None]], note)(pair, bound)
+        except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
+            logger.warning("could not publish the failed update", exc_info=True)
+
+
+async def _close_update_window(handle: object) -> None:
+    """Close an open window whose runtime is KEEPING, and re-admit its spool.
+
+    The benign twin of :func:`_abandon_update_window`: work arrived, so the
+    handover is not happening and the messages the window queued belong to the
+    runtime that is still here. Nothing is published — a window that closed
+    because the runtime stayed is not a failure — and the marker goes, so a
+    successor booting much later does not report an applied update that never
+    happened.
+    """
+    end = getattr(handle, "end_update", None)
+    if callable(end) and not end():
+        return
+    await _drain_inbox_into(handle)
+
+
+def _loaded_build_label(runtime: object) -> str:
+    """The build label this runtime loaded, for the bound's log line. ``<unknown>``
+    when the stamp is unreadable — the same fallback ``_refresh_for`` logs with, and
+    the only honest answer for a process that cannot name its own install."""
+    boot = getattr(runtime, "_boot_build", None)
+    label = getattr(boot, "label", None)
+    return str(label()) if callable(label) else "<unknown>"
+
+
+def _session_dir_of(handle: object) -> "Path | None":
+    """The session directory this handle serves, or ``None`` for a bare handle.
+
+    The same two-hop read ``serving.ServingSessionHandle._session_directory``
+    makes, duplicated here rather than reached through the handle because this
+    runs at BOOT, before the handle is guaranteed to be the production one — and
+    the marker's consumption must not depend on which handle a host built.
+    """
+    session = getattr(handle, "_session", None)
+    transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
+    directory = getattr(transcript, "directory", None)
+    return directory if isinstance(directory, Path) else None
+
+
+def _consume_update_marker(handle: object) -> str:
+    """Read the handover marker and tell the handle an update APPLIED. ``""`` if none.
+
+    The successor's half of the window, and the only place the "it worked" fact
+    can be established: the predecessor is gone, and its record with it. Called
+    from ``amain`` right after the inbox drain — the drain is what makes good on
+    the queued messages, so the fact and the delivery are reported together, and
+    a reader that saw "updated" before the messages ran would be reading a
+    promise rather than a result.
+
+    ONE-SHOT: the marker is cleared here, so a runtime that boots twice (a crash
+    after the drain, before the socket) reports the update once. A marker that
+    could not be cleared is corrected on the next boot rather than double-counted.
+    """
+    directory = _session_dir_of(handle)
+    if directory is None:
+        return ""
+    from local_operator.session.runtime.inbox import (
+        clear_update_window,
+        read_update_window,
+    )
+
+    pair = read_update_window(directory)
+    if not pair:
+        return ""
+    clear_update_window(directory)
+    note = getattr(handle, "note_applied_update", None)
+    if callable(note):
+        note(pair)
+    else:  # a reduced host: the fact lands on the attribute the record reads
+        setattr(handle, "applied_update", pair)
+    logger.info("session runtime: an update applied at boot (%s)", pair)
+    return pair
 
 
 @dataclass
@@ -2407,6 +2637,15 @@ async def amain() -> int:
     # engaging caller's own prompt and deliver a note written minutes ago after
     # one written just now.
     await _drain_inbox_into(handle)
+
+    # THE HANDOVER MARKER, consumed here for the same reason the drain is: this is
+    # the successor's first act with a materialised session, and the fact it
+    # carries ("this boot IS an update that applied") is only true once the
+    # messages the window queued have actually been drained — which is the line
+    # above. Read-and-clear is one-shot, so a runtime that boots twice reports it
+    # once; the pair lands on the handle and ``RuntimeServer`` seeds the record
+    # with it, because the record does not exist yet at this point.
+    _consume_update_marker(handle)
 
     # The wake scheduler is armed HERE, after the inbox drain and before the
     # socket listens. A runtime the supervisor starts for an overdue wake has
