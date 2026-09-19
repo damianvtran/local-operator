@@ -3857,6 +3857,257 @@ class TestAuthBlockRevalidation:
         finally:
             store.close()
 
+    @pytest.mark.asyncio
+    async def test_a_grant_written_during_the_failing_connect_still_heals(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE unfalsifiable-block defect. Do not delete or weaken.
+
+        The marker was read AFTER the connect failed, so a peer's re-auth that
+        landed WHILE that connect was in flight was recorded as "the grant we
+        already failed on". The marker then never moves again — the new grant is
+        valid, so nobody re-obtains it — and the block is unfalsifiable: the
+        server stays dead for the life of the process against a perfectly good
+        credential, and every ``/mcp reauth`` in another session is a no-op
+        because the block being cleared is per-process in-memory state.
+
+        Observed on the operator's machine 2026-09-18: a session failed a
+        ``linear`` connect at 22:13:18 having read the marker for a grant
+        written at 22:11:06, blocked on it, and was still dead ten hours later
+        while a sibling session used the same row happily.
+
+        The window is not exotic. It is exactly as wide as an OAuth connect —
+        PRM/ASM discovery plus a token exchange, seconds — and a human who has
+        just been told "this server needs authorizing" is re-authing during it
+        BY CONSTRUCTION. This is the common case, not the race nobody hits.
+        """
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            from local_operator.mcp.auth import McpAuthRequiredError
+
+            # The peer's re-auth lands DURING the connect, before it fails —
+            # so the post-failure read would see the NEW grant and block on it.
+            async def failing_after_a_peer_reauth(name: str, cfg: Any, **_: Any):
+                # Stand in for the real ``_connect_server``: it records the
+                # attempt marker between its own OAuth refresh and opening the
+                # transport, so a stub that skips that seam would not exercise
+                # the path under test. No refresh happens here, so the marker
+                # is simply the grant on disk at dial time.
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                # …and NOW the peer's re-auth lands, mid-dial.
+                await self._write_fresh_grant(store)
+                raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", failing_after_a_peer_reauth)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager.auth_blocked("dd") is True
+
+            # The grant on disk is NEWER than the one this attempt actually
+            # used, so the very next tick owes it one attempt. Before the fix
+            # this returned [] forever: the block had been taken against a
+            # grant the failed connect never tried.
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", counting)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert attempts == ["dd"]
+            assert manager.get_connection_status("dd") == "connected"
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_healed_retry_is_still_exactly_one_per_grant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closing the window must not reopen the retry storm it guards.
+
+        Healing on a marker the attempt did not use is correct exactly once:
+        if that attempt ALSO fails, the block must re-take against the grant it
+        just tried, so a dead-but-newer grant still costs one connect per
+        change rather than one per 60 s tick in nine processes.
+        """
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            from local_operator.mcp.auth import McpAuthRequiredError
+
+            async def failing_after_a_peer_reauth(name: str, cfg: Any, **_: Any):
+                # Stand in for the real ``_connect_server``: it records the
+                # attempt marker between its own OAuth refresh and opening the
+                # transport, so a stub that skips that seam would not exercise
+                # the path under test. No refresh happens here, so the marker
+                # is simply the grant on disk at dial time.
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                # …and NOW the peer's re-auth lands, mid-dial.
+                await self._write_fresh_grant(store)
+                raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", failing_after_a_peer_reauth)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+
+            # The retry this earns also fails, and writes nothing new.
+            attempts: list[str] = []
+
+            async def still_failing(name: str, cfg: Any, **_: Any):
+                attempts.append(name)
+                raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", still_failing)
+            assert await manager.revalidate_auth_blocked() == []
+            assert attempts == ["dd"], "the newer grant earned exactly one attempt"
+
+            # …and now it is quiet again: same grant, no further connects.
+            for _ in range(5):
+                assert await manager.revalidate_auth_blocked() == []
+            assert attempts == ["dd"], "a re-block must not retry on an unchanged grant"
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_our_own_in_connect_refresh_is_not_a_peer_reauth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE self-write storm guard for the attempt marker. Do not weaken.
+
+        ``_connect_server`` proactively refreshes an OAuth grant BEFORE dialling
+        (``_ensure_oauth_fresh``), and a successful rotation moves
+        ``tokens_obtained_at``. So an attempt marker read before that refresh
+        describes a grant the dial never presented, and the row is newer than
+        the block the instant the connect fails — which every later poll reads
+        as "a peer re-authed", spending a refresh token per tick in every
+        running process. Against a provider running reuse detection that
+        revokes the whole token family: the exact storm ``_grant_marker``'s
+        ``updated_at`` discussion exists to prevent, reached through a
+        pre-refresh read instead.
+
+        Caught by agent review round 1 (blocker-1) on the first revision of this
+        feature and measured there at 30 connects over 30 polls, against 0 on
+        ``main``. The marker is therefore taken INSIDE ``_connect_server``,
+        after its own refresh and before the transport opens.
+
+        The shape below is the documented real one: our refresh rotates the
+        grant successfully, and the resource server still refuses the rotated
+        access token with a 401.
+        """
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.mcp.auth import McpAuthChallengeError, McpTokenStorage
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            storage = McpTokenStorage(TestAuthBlockRevalidation.URL, store)
+            attempts: list[int] = []
+
+            async def refresh_then_401(name: str, cfg: Any, **_: Any):
+                attempts.append(len(attempts) + 1)
+                i = len(attempts)
+                # Exactly what ``_refresh_oauth_token_locked`` persists on a
+                # successful rotation…
+                storage.store_refresh_result(
+                    OAuthToken(
+                        access_token=f"A{i}",
+                        refresh_token=f"R{i + 1}",
+                        token_type="Bearer",
+                        expires_in=28800,
+                    ),
+                    presented_refresh_token=f"R{i}",
+                )
+                # …then the marker seam, in the real code's order: after the
+                # refresh, before the transport.
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                raise McpAuthChallengeError(
+                    TestAuthBlockRevalidation.URL,
+                    status_code=401,
+                    oauth_available=True,
+                    has_stored_grant=True,
+                )
+
+            monkeypatch.setattr(manager, "_connect_server", refresh_then_401)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager.auth_blocked("dd") is True
+            after_block = len(attempts)
+
+            for _ in range(30):
+                await manager.revalidate_auth_blocked()
+            assert len(attempts) == after_block, (
+                "our own refresh was mistaken for a peer's re-auth: "
+                f"{len(attempts) - after_block} extra connects over 30 polls"
+            )
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+
+class TestAttemptMarkerUnknownSemantics:
+    """``None`` (the store was unreadable) is not "the caller did not say".
+
+    Review round 1, minor-1. ``_block_on_auth`` used one value for both, so an
+    attempt whose pre-connect read FAILED fell through to a read taken after
+    the connect failed — the exact post-failure read this feature removes. A
+    peer re-authing during such an attempt would then be recorded as the grant
+    we failed on, and the block would be unfalsifiable again for that case.
+    """
+
+    URL = TestAuthBlockRevalidation.URL
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_pre_attempt_read_does_not_become_a_post_failure_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recorded ``None`` keeps the good marker; it never re-reads the store."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        store = TestAuthBlockRevalidation._real_store(tmp_path, obtained_at=1000.0)
+        manager = TestAuthBlockRevalidation._oauth_manager(tmp_path, store)
+        try:
+            # A first ordinary failure establishes a known-good marker.
+            async def failing(name: str, cfg: Any, **_: Any):
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                raise McpAuthRequiredError(TestAttemptMarkerUnknownSemantics.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", failing)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            good = manager._auth_grant_marker.get("dd")
+            assert good == (1000.0, False)
+
+            # Now the attempt's own read fails (store hiccup) AND a peer
+            # re-auths mid-dial. The block must keep the good marker rather
+            # than adopt the peer's grant off a post-failure read.
+            async def failing_unreadable(name: str, cfg: Any, **_: Any):
+                manager._attempt_grant_marker[name] = None  # the read failed
+                await TestAuthBlockRevalidation._write_fresh_grant(store)
+                raise McpAuthRequiredError(TestAttemptMarkerUnknownSemantics.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", failing_unreadable)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager._auth_grant_marker.get("dd") == good, (
+                "an unreadable pre-attempt read fell through to a post-failure "
+                "read and adopted the peer's grant"
+            )
+
+            # …and because the peer's grant was never adopted, the next tick
+            # still owes this server its one attempt.
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", counting)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert attempts == ["dd"]
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
 
 class TestAuthBlockClearsWhereverAServerHeals:
     """Review round 1, blocker-1: an auth block must not outlive its condition.
