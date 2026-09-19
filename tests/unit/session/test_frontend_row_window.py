@@ -1046,3 +1046,292 @@ def test_the_end_event_the_relay_records_is_a_row_the_cache_can_stamp() -> None:
     ).model_dump(mode="json")
     assert "type" in row
     assert _is_row_shaped(row)
+
+
+# ---------------------------------------------------------------------------
+# Released rows: identity survives, the tick stops paying for it
+#
+# The window memo above makes a tick cost the DELTA for a child that is still
+# working. It does nothing for a child that has FINISHED: ``comms.job_rows()``
+# re-adds every settled child the execution ledger already swept (through
+# ``_ChildRecord.job_ref``, deliberately -- the publish is a follower's only
+# handle on a swept child), so a long session's roster only grows, and every
+# one of those rows was rebuilt, re-validated and re-frozen on every 50 ms
+# tick even though nothing about it can change again.
+#
+# Measured on the operator's own wedged session: 48 rows, 42 hours, the loop
+# pinned at 100 % of a core with the roster generation not advancing. These
+# pin the two halves of the fix -- the row is projected without its window and
+# stamped ``roster_released``, and it is then reused by identity rather than
+# rebuilt.
+# ---------------------------------------------------------------------------
+
+
+def _settled(job: AsyncJob, *, ago: float = 3600.0) -> AsyncJob:
+    """The job as the ledger leaves it once retention has let it go."""
+    job.status = "completed"
+    job.settled_at = __import__("time").time() - ago
+    return job
+
+
+def _released_session(jobs: list[Any], *, retention_ms: float = 5 * 60_000) -> Any:
+    """A session whose manager publishes a retention window, as a live one does."""
+    session = _session(jobs)
+    session.jobs.retention_ms = retention_ms
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: list(jobs),
+        nodes=lambda: [],
+        node=lambda _job_id: None,
+    )
+    return session
+
+
+def test_a_released_row_keeps_its_identity_and_says_it_was_released() -> None:
+    """Released means "not a current member", never "gone"."""
+    live, done = _job("child-live"), _settled(_job("child-done"))
+    session = _released_session([live, done])
+    store = _store([live, done])
+    store.refresh_jobs(session)
+
+    rows = {row.id: row for row in store.state.jobs}
+    assert set(rows) == {"child-live", "child-done"}, "a released child vanished from the roster"
+    assert rows["child-done"].roster_released is True
+    assert rows["child-done"].status == "completed"
+    assert rows["child-done"].label == "child-done"
+    # The live child is untouched by any of this.
+    assert rows["child-live"].roster_released is False
+    assert len(rows["child-live"].trajectory) == ROWS
+
+
+def test_a_released_row_sheds_the_retained_window_it_can_no_longer_change() -> None:
+    """The per-ROW half: a settled child stops carrying 500 rows on every tick."""
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.trajectory == (), "a released row still carried its retained window"
+    # The rows are not lost -- they are on disk in the child's own transcript,
+    # which is what the subagent page reads. The COUNT still rides along so the
+    # page can say how many events there were.
+    assert row.trajectory_length == ROWS
+
+
+def test_a_running_child_is_never_released_whatever_its_stamps_say() -> None:
+    """``retention_expired`` refuses a running row; this must inherit that."""
+    running = _job("child-live")
+    running.settled_at = 0.0  # an ancient stamp, but it is still running
+    session = _released_session([running])
+    store = _store([running])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.roster_released is False, "a RUNNING child was released"
+    assert len(row.trajectory) == ROWS
+
+
+def test_a_settled_child_inside_the_window_is_not_released_yet() -> None:
+    """Retention is a window, and a child that just finished is still in it."""
+    fresh = _settled(_job("child-done"), ago=1.0)
+    session = _released_session([fresh])
+    store = _store([fresh])
+    store.refresh_jobs(session)
+
+    assert store.state.jobs[0].roster_released is False
+    assert len(store.state.jobs[0].trajectory) == ROWS
+
+
+def test_a_released_row_is_reused_by_identity_across_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-JOB half, and the one the wedge actually turned on.
+
+    Shedding the window removes the per-row cost; this removes the per-row-ROW
+    cost that remained -- validating and freezing a fresh ``JobState`` for every
+    settled child, on every tick, forever. Asserted by IDENTITY rather than by
+    timing, per this file's header: the same object, not an equal rebuild.
+    """
+    done = [_settled(_job(f"child-{index}")) for index in range(4)]
+    live = _job("child-live")
+    session = _released_session([live, *done])
+    store = _store([live, *done])
+    store.refresh_jobs(session)
+
+    # Read CANONICAL state, not the ``state`` property: that one deep-copies
+    # every row on the way out by design (it must never share an owning model),
+    # so it can never answer an identity question about what the store holds.
+    before = {row.id: row for row in store._state.jobs if row.roster_released}
+    assert len(before) == 4, "the settled children were not released"
+
+    # A tick driven by the LIVE child appending, which is what a real tick is.
+    _trajectory(live).append(_row(ROWS))
+    store.refresh_jobs(session)
+
+    after = {row.id: row for row in store._state.jobs if row.roster_released}
+    assert set(after) == set(before)
+    for job_id, row in after.items():
+        assert row is before[job_id], f"{job_id} was rebuilt on a tick it cannot have changed"
+
+
+def test_a_released_row_is_rebuilt_when_its_terminal_facts_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memo is a fingerprint, not a latch: a changed row must not be served stale."""
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    store = _store([done])
+    store.refresh_jobs(session)
+    first = store.state.jobs[0]
+
+    done.result_text = "the answer the child came back with"
+    store.refresh_jobs(session)
+    second = store.state.jobs[0]
+
+    assert second is not first, "a released row was served from a stale memo"
+    assert second.result_text == "the answer the child came back with"
+
+
+def test_a_released_row_keeps_the_lineage_its_transcript_page_needs() -> None:
+    """A swept child's page is reachable ONLY through the lineage on its row.
+
+    ``_with_lineage`` is what stamps ``session_id``/``session_dir``, and the
+    released projection has to run it too -- skipping it is what
+    ``test_a_swept_child_keeps_its_durable_identity_on_the_roster`` catches at
+    the session level, pinned here at the unit the projection lives in.
+    """
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [done],
+        nodes=lambda: [],
+        node=lambda _job_id: SimpleNamespace(
+            session_id="abcdef123456",
+            live=False,
+            session_dir=Path("/tmp/sessions/abcdef123456"),
+            parent_job_id="parent-0",
+            launch_message_id="subagent-launch:child-done",
+            launch_prompts=None,
+            attempt_aliases=(),
+        ),
+    )
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.roster_released is True
+    assert row.session_id == "abcdef123456"
+    assert row.session_dir == "/tmp/sessions/abcdef123456"
+    assert row.parent_job_id == "parent-0"
+
+
+def test_a_host_that_publishes_no_retention_window_releases_nothing() -> None:
+    """Fail CLOSED: an unknown window costs the old work, never a wrong release."""
+    done = _settled(_job("child-done"))
+    session = _session([done])  # no ``retention_ms`` on the manager at all
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [done], nodes=lambda: [], node=lambda _job_id: None
+    )
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.roster_released is False
+    assert len(row.trajectory) == ROWS
+
+
+def test_a_paused_child_is_not_released_however_long_it_has_been_parked() -> None:
+    """A pause is mechanically a cancel; the roster window exempts it deliberately."""
+    parked = _settled(_job("child-paused"))
+    parked.status = "cancelled"
+    session = _released_session([parked])
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [parked],
+        nodes=lambda: [SimpleNamespace(job_id="child-paused", status="paused")],
+        node=lambda _job_id: None,
+    )
+    store = _store([parked])
+    store.refresh_jobs(session)
+
+    assert store.state.jobs[0].roster_released is False, "a PAUSED child was released"
+
+
+def test_an_unresolved_failure_is_not_released_on_the_quiet_clock() -> None:
+    """Retention is a timer on quiet resolutions, not on unfinished business."""
+    failed = _settled(_job("child-failed"))
+    failed.status = "failed"
+    session = _released_session([failed])
+    store = _store([failed])
+    store.refresh_jobs(session)
+
+    assert store.state.jobs[0].roster_released is False, "a FAILED child was released"
+
+
+def test_the_released_flag_does_not_ride_the_wire_when_it_is_false() -> None:
+    """One key per row at roster scale is what the attach frame guard measures."""
+    live, done = _job("child-live"), _settled(_job("child-done"))
+    session = _released_session([live, done])
+    store = _store([live, done])
+    store.refresh_jobs(session)
+
+    payload = sync_wire_payload(
+        FrontendSync(epoch=store.state.epoch, sequence=store.state.sequence, snapshot=store.state)
+    )
+    rows = {row["id"]: row for row in payload["snapshot"]["jobs"]}
+    assert "roster_released" not in rows["child-live"], "the default bought wire bytes"
+    assert rows["child-done"]["roster_released"] is True, "the informative value was dropped"
+
+
+def test_a_released_row_holds_only_frozen_containers() -> None:
+    """A released row must obey the SAME immutability contract as any other.
+
+    The near-miss this pins. ``_released_row`` freezes, but ``_with_lineage``
+    runs after it and re-stamps ``launch_prompts`` (a ``dict``),
+    ``attempt_aliases`` and ``todos`` (``list``s) straight off the comms node,
+    so the row it returns is not frozen however frozen its input was. An
+    earlier draft MARKED that result frozen instead of freezing it -- and since
+    ``_freeze_job`` early-returns on a marked row, the raw containers then
+    survived every later tick: ``_public_job`` shares a non-``BaseModel`` field
+    by reference, so canonical state was reachable and mutable through the
+    public ``state`` accessor, and the row raised on ``hash()``.
+
+    Asserted on the CONTAINER TYPES rather than on behaviour because that is
+    the invariant: the earlier released-row tests all passed against the broken
+    version, since an empty ``dict`` and an empty ``_FrozenMapping`` compare
+    equal and only a NON-EMPTY one can tell them apart.
+    """
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [done],
+        nodes=lambda: [],
+        node=lambda _job_id: SimpleNamespace(
+            session_id="abcdef123456",
+            live=False,
+            session_dir=Path("/tmp/sessions/abcdef123456"),
+            parent_job_id="parent-0",
+            launch_message_id="subagent-launch:child-done",
+            # Non-empty on purpose: the empty case cannot distinguish a raw
+            # container from a frozen one.
+            launch_prompts={"subagent-launch:child-done": "go do a thing"},
+            attempt_aliases=["older-attempt"],
+        ),
+    )
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store._state.jobs[0]
+    assert row.roster_released is True
+    assert isinstance(row.launch_prompts, module._FrozenMapping), "launch_prompts was not frozen"
+    assert isinstance(row.attempt_aliases, module._FrozenSequence), "attempt_aliases was not frozen"
+    # The whole point of the frozen containers: the row is a value, so it
+    # hashes and can be shared without a defensive copy.
+    assert isinstance(hash(row), int)
+
+    # And it STAYS frozen: ``_freeze_job`` early-returns on a row it recognises,
+    # so a row that slipped through unfrozen once would never be repaired.
+    _trajectory(done)  # the released row sheds its window; the job still has one
+    store.refresh_jobs(session)
+    again = store._state.jobs[0]
+    assert isinstance(again.launch_prompts, module._FrozenMapping)
+    assert isinstance(again.attempt_aliases, module._FrozenSequence)

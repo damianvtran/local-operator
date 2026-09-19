@@ -14,6 +14,7 @@ import json
 import os
 import time
 import uuid
+import weakref
 from collections import deque
 from collections.abc import (
     Callable,
@@ -24,6 +25,7 @@ from collections.abc import (
     MutableSequence,
     MutableSet,
     Sequence,
+    Sized,
 )
 from dataclasses import dataclass
 from enum import StrEnum
@@ -46,6 +48,7 @@ from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 from local_operator.harness.intent import ACTIVITY_RESPONDING, ACTIVITY_THINKING
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY as _TRAJECTORY_SEQ_KEY
+from local_operator.harness.jobs import roster_expired as _roster_expired
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -1520,6 +1523,13 @@ def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
     from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
     tens of bytes on the handful of rows that carry it.
 
+    ``roster_released`` is the same shape of saving and was measured the same
+    way: ``"roster_released": false`` is ~25 bytes on every row that is still a
+    current roster member, and on the ``ran all year`` guard's 200 rows that
+    alone put the frame 4 KB over the line. Only ``true`` carries information —
+    a row without the key reads as a current member, which is what a follower
+    predating the field already assumes.
+
     Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
     attach snapshot in :func:`sync_wire_payload` — because the two serialize job
     rows by different routes and a saving in one does not reach the other.
@@ -1530,6 +1540,291 @@ def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_prompts", None)
     if not job.get("cut_off_cause"):
         job.pop("cut_off_cause", None)
+    if not job.get("roster_released"):
+        job.pop("roster_released", None)
+
+
+def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
+    """ "Has the roster window released this row?", bound to the live manager.
+
+    Returns a callable rather than a bool so the window, the clock and the
+    paused set are read ONCE per tick instead of once per job — this runs on
+    the session loop under a 50 ms coalescer.
+
+    Reads its window from ``manager.retention_ms`` and its intent from the
+    comms records, the same two sources ``tui/app.py``'s owner-side filter
+    uses, and applies the shared :func:`roster_expired` predicate rather than
+    re-deriving one. ``bool`` is rejected the way that filter rejects it
+    (``isinstance(True, int)`` is true, and a stray ``True`` would impose a
+    1 ms window that released the whole roster).
+
+    Total and silent: an unreadable manager, a host that supplies no window, or
+    a row of an unexpected shape answers "not released". Failing closed here
+    only costs the old per-tick work; failing OPEN would stamp a live child as
+    released and stop publishing its trajectory, which is a correctness bug.
+    """
+    retention_ms = getattr(manager, "retention_ms", None)
+    if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
+        return lambda _job: False
+    window = float(retention_ms)
+    now = time.time()
+    # Same projection ``paused_child_ids`` reads for the dock: a pause is
+    # recorded on ``_ChildRecord.paused`` and surfaces as ``node.status ==
+    # "paused"``. Read through the public ``nodes()`` view rather than the
+    # records, so this stays a consumer of that projection rather than a second
+    # interpretation of the record. (Not imported from the panel: that is a TUI
+    # widget, and the session layer must not depend on it.)
+    paused_ids: set[str] = set()
+    nodes = getattr(comms, "nodes", None)
+    try:
+        rows: Any = nodes() if callable(nodes) else ()
+        for node in rows if isinstance(rows, Iterable) else ():
+            if str(getattr(node, "status", "")) == "paused":
+                paused_ids.add(str(getattr(node, "job_id", "") or ""))
+    except Exception:  # noqa: BLE001 — presentation must not fail on a lookup
+        paused_ids = set()
+
+    def released(job: Any) -> bool:
+        try:
+            return _roster_expired(
+                job,
+                window,
+                paused=str(getattr(job, "id", "") or "") in paused_ids,
+                now=now,
+            )
+        except Exception:  # noqa: BLE001 — see the docstring: fail closed
+            return False
+
+    return released
+
+
+#: Fields a RELEASED row keeps. Identity, lineage, terminal outcome and
+#: accounting — everything a viewer needs to resolve the child's page, price it
+#: and say how it ended. Deliberately no ``trajectory``: a released child is
+#: settled, its rows are on disk in its own transcript (which is what the
+#: subagent page reads), and the in-memory window is the whole cost this
+#: projection exists to stop paying on every tick.
+_RELEASED_ROW_FIELDS = (
+    "id",
+    "type",
+    "status",
+    "queued",
+    "label",
+    "agent",
+    "intent",
+    "error_text",
+    "result_text",
+    "model_label",
+    "context_window",
+    "start_time",
+    "started_at",
+    "settled_at",
+    "session_id",
+    "parent_job_id",
+    "registrant_id",
+    "agent_id",
+    "agent_role",
+    "effort",
+    "prompt",
+    "restored",
+    "attempt_aliases",
+    "launch_message_id",
+)
+
+
+def _released_row(job: Any) -> "JobState":
+    """One roster row for a child the window has released — identity, no window.
+
+    Built field by field rather than through :meth:`JobState.from_job` because
+    ``from_job``'s cost IS the retained window, and skipping that is the point.
+    Usage travels through the same helpers a normal row uses so a released
+    child's spend still prices identically.
+
+    Callers on the tick path go through :class:`_ReleasedRows`, which memoises
+    the result — this function is the builder, not the hot path.
+    """
+    values: dict[str, Any] = {"roster_released": True}
+    for name in _RELEASED_ROW_FIELDS:
+        value = getattr(job, name, None)
+        if value is not None:
+            values[name] = value
+    # Stated explicitly BECAUSE the window is shed: ``_derive_trajectory_length``
+    # defaults the count from the rows present, which is zero here, and a page
+    # that reads zero says "no activity" for a child whose transcript is intact.
+    # The count is the one thing about the window a released row must keep.
+    retained = getattr(job, "trajectory", None)
+    values["trajectory_length"] = len(retained) if isinstance(retained, Sized) else 0
+    usage = getattr(job, "usage", None)
+    if isinstance(usage, dict):
+        usage = Usage.model_validate(usage)
+    if usage is not None:
+        values["usage"] = usage
+    descendants = []
+    for component in list(getattr(job, "descendant_usage", None) or []):
+        if isinstance(component, dict):
+            descendants.append(FrontendUsage.model_validate(component))
+        elif isinstance(component, Usage):
+            descendants.append(FrontendUsage.model_validate(component.model_dump(mode="json")))
+        elif isinstance(component, FrontendUsage):
+            descendants.append(component)
+    values["descendant_usage"] = descendants
+    direct_cost, unknown = cost_summary(
+        (usage.cost_components or [usage]) if usage is not None else [],
+        model_label=str(getattr(job, "model_label", None) or ""),
+    )
+    values["direct_cost"] = direct_cost
+    values["direct_cost_knowledge"] = _cost_knowledge(direct_cost, unknown)
+    return _freeze_job(JobState.model_validate(values))
+
+
+class _ReleasedRows:
+    """Per-job memo of a RELEASED child's row, so a tick stops rebuilding it.
+
+    WHY THIS EXISTS, and why it is the half that actually bounds the tick.
+    Dropping a released child's retained window (:func:`_released_row`) removes
+    the per-ROW cost, but the per-JOB cost remained: ``_jobs`` runs on a 50 ms
+    coalescer and was still validating and freezing a fresh ``JobState`` for
+    every settled child on every tick. Measured on a 100-row roster that is the
+    entire residual — ``_freeze_job`` plus ``model_copy`` plus
+    ``model_validate``, none of which the child can influence any more.
+
+    THE INVARIANT, and why the memo is sound rather than a bet. A released row
+    is one the roster window has let go: it is SETTLED (``retention_expired``
+    refuses a ``running`` row outright) and its window has already elapsed, so
+    no writer will touch it again — its status, outcome text and accounting are
+    final. Retention only ever moves forward, so a row cannot come BACK from
+    released; the one path that revives a child id is a resume, which registers
+    a NEW job whose identity the fingerprint below does not match.
+
+    The fingerprint is therefore not a guess about equality, it is a statement
+    of what a released row is made of: the fields :data:`_RELEASED_ROW_FIELDS`
+    projects that could differ between two rows sharing an id. A resumed
+    attempt changes ``start_time``/``settled_at``; a re-registered id changes
+    ``status`` or the terminal text. Any mismatch rebuilds rather than reuses.
+
+    Entries are dropped for jobs that leave the roster (:meth:`retain`) and on
+    an epoch change (:meth:`rebind`), for the same reasons
+    :class:`_TrajectoryWindows` does both: a memo that outlives its subject
+    pins it, and a new lineage may reuse an id.
+    """
+
+    __slots__ = ("_by_job", "_epoch")
+
+    def __init__(self, epoch: str) -> None:
+        self._by_job: dict[str, tuple[tuple[Any, ...], JobState]] = {}
+        self._epoch = epoch
+
+    def rebind(self, epoch: str) -> None:
+        """Bind to the store's current lineage, dropping the previous one's rows."""
+        if epoch != self._epoch:
+            self._epoch = epoch
+            self._by_job.clear()
+
+    def clear(self) -> None:
+        """Forget every row; the next tick rebuilds each released child once."""
+        self._by_job.clear()
+
+    def retain(self, job_ids: Iterable[str]) -> None:
+        """Drop every entry for a job no longer on the roster, so none is pinned."""
+        live = set(job_ids)
+        for job_id in [key for key in self._by_job if key not in live]:
+            del self._by_job[job_id]
+
+    @staticmethod
+    def _fingerprint(job: Any, comms: Any) -> tuple[Any, ...]:
+        """Everything a released row is built FROM, so a change cannot be missed.
+
+        The job half is the terminal facts :data:`_RELEASED_ROW_FIELDS` projects.
+        The comms half is what :func:`_with_lineage` stamps on top — it reads the
+        NODE, not the job, so a fingerprint over the job alone would serve a
+        stale row when the graph moves (a resume folding attempts, a child's
+        plan appearing). ``todos`` rides along as a length rather than a value:
+        it is derived from ``TODO_STORE`` per tick, and the count is what
+        changes when the plan does.
+        """
+        node = None
+        try:
+            node = comms.node(job_id) if (job_id := str(getattr(job, "id", "") or "")) else None
+        except Exception:  # noqa: BLE001 — a graph that cannot answer is "no lineage"
+            node = None
+        return (
+            str(getattr(job, "status", "") or ""),
+            getattr(job, "settled_at", None),
+            getattr(job, "start_time", None),
+            getattr(job, "started_at", None),
+            str(getattr(job, "error_text", "") or ""),
+            str(getattr(job, "result_text", "") or ""),
+            bool(getattr(job, "restored", False)),
+            getattr(node, "parent_job_id", None),
+            getattr(node, "session_id", None),
+            str(getattr(node, "session_dir", "") or ""),
+            str(getattr(node, "launch_message_id", "") or ""),
+            tuple(getattr(node, "attempt_aliases", ()) or ()),
+            bool(getattr(node, "live", False)),
+            len(getattr(node, "launch_prompts", ()) or ()),
+        )
+
+    def adopt_from(self, jobs: Iterable[Any]) -> None:
+        """Point each entry at the row canonical state holds for that job.
+
+        The same move :meth:`_TrajectoryWindows.adopt_from` makes, for the same
+        reason. ``mutate`` does not necessarily install the object this memo
+        handed out: when ``_jobs_equal`` proves the roster unchanged it keeps
+        the STATE's existing rows, so the memo would go on serving an equal but
+        DISTINCT object and every downstream identity check would fail. Once
+        the reducer has decided, the state's row for a released job is provably
+        the current one, so adopting it makes the next tick's reuse an identity.
+
+        The adopted row is put through ``_freeze_job`` rather than merely
+        marked. Every row reaching canonical state on this path has already
+        been frozen, so in practice this is the early return — but MARKING an
+        unfrozen row would record it as frozen without doing the walk, and
+        ``_freeze_job``'s early return would then make that permanent. The
+        asymmetry matters: freezing something already frozen costs an identity
+        check, while marking something unfrozen is an invariant violation that
+        never heals. Take the cheap side.
+
+        Gated on the row still being released, so a row that went back to being
+        rebuilt in full is left alone rather than silently adopted.
+        """
+        for job in jobs:
+            entry = self._by_job.get(getattr(job, "id", ""))
+            if entry is None or entry[1] is job:
+                continue
+            if not getattr(job, "roster_released", False):
+                continue
+            self._by_job[job.id] = (entry[0], _freeze_job(job))
+
+    def row(self, job_id: str, job: Any, comms: Any = None) -> "JobState":
+        """The released row for ``job``, rebuilt only when its fingerprint moves.
+
+        Lineage is applied INSIDE the memo rather than by the caller: stamping it
+        afterwards would rebuild the row on every tick and give back exactly the
+        cost this class exists to remove.
+        """
+        mark = self._fingerprint(job, comms)
+        entry = self._by_job.get(job_id)
+        if entry is not None and entry[0] == mark:
+            return entry[1]
+        built = _released_row(job)
+        if comms is not None:
+            # FREEZE the result, never merely mark it. ``_with_lineage`` stamps
+            # through ``model_copy`` and the values it takes off the comms node
+            # are raw containers -- ``launch_prompts`` a ``dict``,
+            # ``attempt_aliases`` and ``todos`` ``list``s -- so the row it hands
+            # back is NOT frozen however frozen its input was. Marking it here
+            # (an earlier version of this line did) recorded it as frozen
+            # without doing the walk, and because ``_freeze_job`` early-returns
+            # on a marked row the under-frozen containers then survived every
+            # later tick: mutable state shared straight out of ``_public_job``,
+            # and a row that raises ``TypeError`` on ``hash()``.
+            #
+            # Re-freezing is cheap and self-marking: every value already frozen
+            # comes back by identity through ``_freeze_value``, so this costs
+            # the handful of fields lineage actually restamped.
+            built = _freeze_job(_with_lineage(built, comms))
+        self._by_job[job_id] = (mark, built)
+        return built
 
 
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
@@ -1593,8 +1888,65 @@ def _capped_overlap_tail(old: Sequence[Any], trajectory: Sequence[Any]) -> list[
     return list(trajectory[overlap:])
 
 
+#: Job rows this module has already frozen, by object identity.
+#:
+#: ``_freeze_job`` is not identity-stable — it always returns a fresh
+#: ``model_copy`` — so a row that is already frozen is rebuilt every time it
+#: passes through. That is invisible for a row built once per tick, and it is
+#: the whole cost for a RELEASED row that :class:`_ReleasedRows` memoised
+#: precisely so it would NOT be rebuilt: ``mutate`` re-froze it on the way in
+#: and threw the memo's work away.
+#:
+#: Keyed by ``id()`` and held through a weak VALUE reference, for two reasons
+#: that both bite. ``JobState`` is ``frozen=True``, so pydantic gives it a
+#: value-based ``__hash__`` that raises ``TypeError`` on a row whose fields
+#: include a list (``trajectory``, ``descendant_usage``) — a ``WeakSet`` is not
+#: available at all. And identity is what this needs to answer anyway: the
+#: question is "is this the very object I froze", not "does it equal one".
+#:
+#: The weak reference is what makes ``id()`` safe. A raw id set would be a
+#: correctness bug, not just a leak: ids are reused after collection, so a
+#: fresh unfrozen row could land on a dead entry's id and be waved through
+#: unfrozen. Holding a weakref and comparing the REFERENT closes that — a
+#: recycled id finds a dead (or different) referent and rebuilds.
+#:
+#: Not a flag on the model: stamping one would need a real field (wire
+#: surface, follower compatibility) or a mutation ``frozen=True`` forbids.
+_FROZEN_JOBS: "dict[int, weakref.ReferenceType[JobState]]" = {}
+
+
+def _is_frozen_job(job: "JobState") -> bool:
+    """Whether THIS object is one :func:`_freeze_job` produced."""
+    reference = _FROZEN_JOBS.get(id(job))
+    return reference is not None and reference() is job
+
+
+def _mark_frozen_job(job: "JobState") -> None:
+    """Record ``job`` as frozen, and drop the entry when it is collected."""
+    key = id(job)
+
+    def _release(_reference: Any, key: int = key) -> None:
+        _FROZEN_JOBS.pop(key, None)
+
+    try:
+        _FROZEN_JOBS[key] = weakref.ref(job, _release)
+    except TypeError:  # pragma: no cover — a model that cannot be weak-referenced
+        pass
+
+
 def _freeze_job(job: "JobState") -> "JobState":
-    """Detach the owning model and freeze every nested canonical value."""
+    """Detach the owning model and freeze every nested canonical value.
+
+    Returns an already-frozen row UNCHANGED, by identity. Re-freezing one is a
+    no-op in effect — every nested value hits ``_freeze_value``'s
+    ``_FrozenSequence``/``_FrozenMapping`` arm and comes back as itself — so the
+    only thing the rebuild produced was a new shell and the garbage to collect
+    it. Skipping it is what lets a memoised released row survive ``mutate``
+    with its identity intact, which in turn is what makes ``_jobs_equal``
+    recognise an unchanged tick without walking the row.
+    """
+    if _is_frozen_job(job):
+        return job
     values = {
         name: _freeze_value(value)
         for name, value in job.__dict__.items()
@@ -1606,7 +1958,9 @@ def _freeze_job(job: "JobState") -> "JobState":
     )
     for name, value in (job.model_extra or {}).items():
         values[name] = _freeze_value(value)
-    return job.model_copy(update=values)
+    frozen = job.model_copy(update=values)
+    _mark_frozen_job(frozen)
+    return frozen
 
 
 #: Context key for the sync-frame dump, read by
@@ -1674,6 +2028,33 @@ class JobState(BaseModel):
     output_tail: str = ""
     output_seq: int = 0
     restored: bool = False
+    #: Whether the roster window has RELEASED this row — identity only, no
+    #: longer a current roster member.
+    #:
+    #: THE IDENTITY-VS-MEMBERSHIP SPLIT, deferred on PR #732 and closed here.
+    #: ``_jobs`` resolves rows through ``comms.job_rows()``, which hands back
+    #: ``_ChildRecord.job_ref`` for children the execution ledger already
+    #: swept. That is CORRECT and deliberate — the publish is a viewer's only
+    #: handle on a swept child, and simply filtering those rows out drops the
+    #: viewer to zero rows and breaks its transcript page (measured by QA on
+    #: #732, which is why the owner-side filter in ``tui/app.py`` was never
+    #: mirrored here).
+    #:
+    #: So the row keeps travelling and says what it is instead. A consumer that
+    #: needs MEMBERSHIP ("what is on the roster right now") filters on this
+    #: flag; a consumer that needs IDENTITY ("resolve this child's page")
+    #: ignores it and still finds the row. Nothing is hidden from a viewer that
+    #: could see it before.
+    #:
+    #: It is also what makes a long session's tick cost bounded: a released row
+    #: is settled and can never emit again, so ``_jobs`` stops rebuilding and
+    #: re-freezing it every tick (see ``_RELEASED_ROW_FIELDS``). Without that a
+    #: 42-hour session accumulated 48 rows whose retained windows were re-frozen
+    #: on a 50 ms coalescer until the loop could not keep up.
+    #:
+    #: Absent on a runtime that predates it (``extra='allow'``): an older
+    #: follower sees today's behaviour, every row unflagged, never a crash.
+    roster_released: bool = False
     # Canonical lineage (U5): the runtime's subagent-comms tree is not itself
     # serializable, but its one fact — who launched whom — is. Stamping the
     # parent's job id (and the child's session/role for the page header) lets
@@ -3937,6 +4318,11 @@ class FrontendStateStore:
         #: paths that invalidate it. Owned here rather than by the job manager
         #: because it is a property of what this store last froze.
         self._trajectory_windows = _TrajectoryWindows(self._state.epoch)
+        #: Memo of each RELEASED child's row -- see :class:`_ReleasedRows`. Kept
+        #: beside the window memo and invalidated on exactly the same paths,
+        #: because it answers the other half of one question: what a roster tick
+        #: must rebuild.
+        self._released_rows = _ReleasedRows(self._state.epoch)
 
     @property
     def state(self) -> FrontendSessionState:
@@ -4115,6 +4501,7 @@ class FrontendStateStore:
         # only ever one of the two, but `replace` is shared, so both are cleared
         # here rather than in two conditioned branches.
         self._trajectory_windows.clear()
+        self._released_rows.clear()
         self._follower_windows.reset(state.epoch)
 
     def replace_and_notify(self, state: FrontendSessionState) -> None:
@@ -4578,6 +4965,7 @@ class FrontendStateStore:
             # starts from no memo at all. Cleared BEFORE the rows are read below,
             # or the payload it installs could be built from a reused window.
             self._trajectory_windows.clear()
+            self._released_rows.clear()
         selected = getattr(session, "model", None)
         effective = getattr(session, "effective_model", None) or selected
         last_usage = None
@@ -4587,7 +4975,7 @@ class FrontendStateStore:
                 last_usage = restore()
             except Exception:
                 last_usage = None
-        jobs = self._jobs(session, self._retained_windows())
+        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             cost = _job_subtree_cost(job, default_model_label=_label(selected))
@@ -4793,9 +5181,11 @@ class FrontendStateStore:
             payload.update(changes)
             self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
             self._trajectory_windows.adopt_from(self._state.jobs)
+            self._released_rows.adopt_from(self._state.jobs)
         else:
             self.mutate(**changes)
             self._trajectory_windows.adopt_from(self._state.jobs)
+            self._released_rows.adopt_from(self._state.jobs)
         return self.state
 
     def _spend_of(self, session: Any) -> SessionSpend:
@@ -5019,7 +5409,7 @@ class FrontendStateStore:
         cadence the page that needs it already refreshes on, at a fraction of
         the cost.
         """
-        jobs = self._jobs(session, self._retained_windows())
+        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
@@ -5030,6 +5420,7 @@ class FrontendStateStore:
         # After the reducer has decided, so the memo hands back the object the
         # state actually holds -- see :meth:`_TrajectoryWindows.adopt_from`.
         self._trajectory_windows.adopt_from(self._state.jobs)
+        self._released_rows.adopt_from(self._state.jobs)
         return update
 
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
@@ -5533,14 +5924,34 @@ class FrontendStateStore:
         self._trajectory_windows.rebind(self._state.epoch)
         return self._trajectory_windows
 
+    def _released_memo(self) -> _ReleasedRows:
+        """The released-row memo, bound to the store's CURRENT state lineage.
+
+        Rebound on the way out for the same reason as :meth:`_retained_windows`:
+        a new epoch may reuse a job id, and a row built for the previous lineage
+        must not be handed back for it.
+        """
+        self._released_rows.rebind(self._state.epoch)
+        return self._released_rows
+
     @staticmethod
-    def _jobs(session: Any, windows: _TrajectoryWindows | None = None) -> list[JobState]:
+    def _jobs(
+        session: Any,
+        windows: _TrajectoryWindows | None = None,
+        released: "_ReleasedRows | None" = None,
+    ) -> list[JobState]:
         """One roster row per job, reusing frozen retained windows when given a memo.
 
         ``windows`` is the caller's :class:`_TrajectoryWindows`; omitting it keeps
         the plain rebuild (every row copied and frozen) that a one-off reader
         wants. The two refresh paths pass it, which is what makes a roster tick
         cost the delta rather than the retained window.
+
+        Rows the roster window has RELEASED are stamped ``roster_released`` and
+        projected without their retained trajectory (:func:`_released_row`), so
+        a long session's tick cost stops growing with the children it has
+        already finished. They keep travelling — see
+        :attr:`JobState.roster_released` for why dropping them is not an option.
         """
         manager = getattr(session, "jobs", None)
         try:
@@ -5555,11 +5966,32 @@ class FrontendStateStore:
             graph_rows = graph_jobs()
             if isinstance(graph_rows, Sequence):
                 rows = graph_rows
+        # The window and the paused set come from the LIVE manager and the comms
+        # record, exactly as ``tui/app.py``'s owner-side filter reads them: one
+        # source for the rule, so the dock and the canonical roster cannot drift
+        # into two answers about the same child.
+        released_of = _released_predicate(manager, comms)
         values: list[JobState] = []
         seen: set[str] = set()
+        released_seen: set[str] = set()
         for job in rows:
             try:
                 job_id = str(getattr(job, "id", "") or "")
+                if released_of(job):
+                    # Settled and out of the window: it can never emit again, so
+                    # neither its retained rows nor its row itself are rebuilt.
+                    # Lineage is stamped INSIDE the memo, not skipped: a swept
+                    # child's ``session_id``/``session_dir`` are the only route
+                    # its page has to a transcript that outlives the process
+                    # (``test_a_swept_child_keeps_its_durable_identity_on_the_roster``).
+                    seen.add(job_id)
+                    released_seen.add(job_id)
+                    values.append(
+                        _with_lineage(_released_row(job), comms)
+                        if released is None
+                        else released.row(job_id, job, comms)
+                    )
+                    continue
                 value = JobState.from_job(
                     job,
                     window=(
@@ -5579,6 +6011,10 @@ class FrontendStateStore:
                 continue
         if windows is not None:
             windows.retain(seen)
+        if released is not None:
+            # Only the RELEASED ids: a row that went back to being rebuilt in
+            # full (or left the roster) must not keep a memo entry pinning it.
+            released.retain(released_seen)
         nodes = getattr(comms, "nodes", None)
         if callable(nodes):
             known = {job.id for job in values}
