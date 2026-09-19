@@ -27,6 +27,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
     assert [guide.name for guide in guides] == [
         "agents",
         "browser",
+        "classification",
         "configuration",
         "credentials",
         "extensions",
@@ -80,6 +81,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
+        (
+            "turn on the smart agent hints and check which vendor served the call",
+            "classification",
+        ),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -250,6 +255,31 @@ def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
     assert "close failed and the handle was dropped" in browser
     assert "Before a subagent's terminal handoff" in agents
     assert "put child disposal in `finally`" in agents
+
+
+def test_classification_guide_names_the_switch_the_logins_and_the_log_line() -> None:
+    """The facts a reader cannot infer from the code they are standing in.
+
+    The switch is off by default and the section is new-session-scoped, so an
+    agent asked "why are there no hints" needs the exact key; the cascade is
+    three legs with three separate logins, and the guide is the only place that
+    says which command buys which one. The provider ids are asserted against the
+    live registry rather than merely spelled, because a renamed leg would
+    otherwise leave the guide advertising a login that no longer exists — the
+    one failure mode this guide can have that costs a user a round trip.
+    """
+    from local_operator.providers.registry import known_provider_ids
+
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://classification")
+
+    assert body is not None
+    assert "lop config edit classification.auto true" in body
+    assert "values.classification" in body
+    assert "classification: vendor=" in body
+    for leg in ("radient", "typesafe", "openrouter"):
+        assert leg in known_provider_ids()
+        assert f"lop login {leg}" in body
 
 
 def test_configuration_guide_names_the_real_instructions_file() -> None:

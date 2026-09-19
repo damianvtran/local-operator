@@ -1332,13 +1332,17 @@ def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
     of its own (see ``TIP_ROTATE_INTERVAL_S``): under 8 s the row turns over
     while it is being read, over 15 s a short session only ever sees one.
     """
-    # The ceiling moved 12 -> 15 when the three KEYED tips were added, and the
-    # reason is recorded in full on the pool itself: those three teach the only
-    # affordances with no second discovery route (a remappable key has no
-    # picker, unlike every slash command in the pool). The dilution argument
+    # The ceiling moved 12 -> 15 when the three KEYED tips were added, and
+    # 15 -> 17 when the classification layer's off switch and login commands
+    # were, and the reason for each is recorded in full on the pool itself: those
+    # entries teach facts with no second discovery route (a remappable key has no
+    # picker, unlike every slash command in the pool, and a layer that ships ON,
+    # spends per new message and is silent whenever it has nothing to say stays
+    # invisible to a user who never goes looking for a setting they have not
+    # heard of). The dilution argument
     # still governs everything else — a further slash-command tip takes a slot
     # rather than adding one.
-    assert 8 <= len(TIPS) <= 15
+    assert 8 <= len(TIPS) <= 17
     assert len(set(TIPS)) == len(TIPS)
     # Measured on the RENDERED sentence, not the template: a keyed entry stores
     # `{key}` and is what the user reads only after substitution, so measuring
