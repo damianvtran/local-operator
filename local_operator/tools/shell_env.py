@@ -64,11 +64,15 @@ to have inherited:
   the non-interactive contract the ``bash`` tool documents at its definition.
 * ``LOCAL_OPERATOR_AGENT_MAY_DELEGATE`` — whether the session running the
   command holds ``task``, and so whether a `lop` it starts may open a session
-  (``agent_shell.py``). Signed in BOTH directions from the same spawn site: an
-  empty value is the "no", because in ``inherit`` mode a marker copied from the
-  parent's environment would otherwise outlive the session it described. The
-  third grant, and here for the same reason as the other two — it is a value the
-  harness decides to hand over, not one the child happens to have inherited.
+  (``agent_shell.py``). Signed in THREE arms from the same spawn site: ``1`` when
+  the session may delegate; the EMPTY value when the name is inherited and must
+  be cleared, because in ``inherit`` mode a marker copied from the parent's
+  environment would otherwise outlive the session it described; and NOT WRITTEN
+  AT ALL otherwise, so a session that never had the allowance is not handed its
+  spelling — the name is the mechanism, and an absent marker reads as "no"
+  exactly as an empty one does. The third grant, and here for the same reason as
+  the other two — it is a value the harness decides to hand over, not one the
+  child happens to have inherited.
 * the session credential store's ``credential_env()`` — the value the agent is
   meant to *use* without being able to *read* it. The store is the grant; this
   module does not second-guess it.

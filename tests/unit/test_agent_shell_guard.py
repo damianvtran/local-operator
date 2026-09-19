@@ -966,62 +966,125 @@ def _stdout_block(result: ToolResult) -> str:
 
 #: A command that asks the GUARD what it thinks, in the child itself. Reading the
 #: variable's raw value would answer a weaker question now that the writer signs
-#: it in both directions — an empty `= ` and an absent name are the same verdict,
-#: and only the reader can say so.
+#: it in three arms — an empty `= ` and an absent name are the same verdict, and
+#: only the reader can say so.
 _READER_PROBE = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
     "from local_operator.agent_shell import may_delegate_from_shell as m; print(m())"
 )
 
+#: Three reads of the CHILD's own state, because they are three questions and the
+#: middle one is what R2-1 turned on:
+#:
+#: * ``RAW`` — the marker's raw value, ``<ABSENT>`` when the name is not in the
+#:   child's environment AT ALL. An empty value and an absent name are the same
+#:   VERDICT (see `_READER_PROBE`) and opposite DISCLOSURES, and only this read
+#:   answers the disclosure.
+#: * ``NO_ENV_CHILD`` — the same read taken from a GRANDCHILD spawned with no
+#:   ``env=``, which is the shape `exec_mode`'s detached ``--background`` worker
+#:   uses. It proves the chain the fix has to hold one hop further down: a
+#:   worker that inherits its parent's environment inherits the CLEARED answer,
+#:   not the allowance.
+#: * ``GUARD`` — the verdict `may_delegate_from_shell` reaches in that child, so
+#:   a test cannot pass on the injection dict while the policy between the dict
+#:   and the child disagrees with it.
+_ENV_PROBE_SOURCE = """
+import os, subprocess, sys
+from local_operator.agent_shell import MAY_DELEGATE_ENV as k, may_delegate_from_shell as m
+
+v = os.environ.get(k)
+print("RAW=" + ("<ABSENT>" if v is None else repr(v)))
+_nested = "import os;v=os.environ.get({k});print('<ABSENT>' if v is None else repr(v))"
+child = subprocess.run(
+    [sys.executable, "-c", _nested.format(k=repr(k))], capture_output=True, text=True
+)
+print("NO_ENV_CHILD=" + child.stdout.strip())
+print("GUARD=" + str(m()))
+"""
+_ENV_PROBE = f"{shlex.quote(sys.executable)} -c " + shlex.quote(_ENV_PROBE_SOURCE)
+
+
+async def _child_state(context: ToolContext | None) -> tuple[str, str, str]:
+    """(raw marker value, no-``env=`` grandchild's value, guard verdict) in the child."""
+    result = await builtin.execute_bash(
+        "bash-allow", {"command": _ENV_PROBE}, AbortSignal(), None, context
+    )
+    lines = dict(line.split("=", 1) for line in _stdout_block(result).strip().splitlines())
+    return lines["RAW"], lines["NO_ENV_CHILD"], lines["GUARD"]
+
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["inherit", "allowlist"])
 async def test_the_bash_tool_signs_the_allowance_where_the_guard_reads_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    """`execute_bash` is the ONE writer of the second marker, in every shape.
+    """`execute_bash` is the ONE writer of the second marker, in THREE arms, in
+    both `shell_env` modes.
 
-    Each shape is a different bug, and the two that matter are the ones a naive
-    test cannot see:
+    Each arm is a different bug, and the third is the one round 2 found a naive
+    writer creating:
 
-    * an inherited marker (R1-1). The ``bash`` child's environment starts as a
-      copy of this process's own in the default ``inherit`` mode, so a writer
-      that only SET the variable would leave a session reading ``True`` on an
-      allowance nobody granted it. That is not a hypothetical state: an allowed
-      `lop exec` runs `lop` — and, for `--background`, a detached worker spawned
-      with no ``env=`` — as a child of the shell that exported the marker, so
-      the session it opens starts life carrying it. `monkeypatch.setenv` is what
-      puts the process in exactly that state here, which is why the assertion
-      has to be "the reader says False", not "the name is absent".
-    * a duck-typed context (Q1). `context is None` and "a ToolContext-shaped
-      object without the field" are different inputs, and a bare attribute read
-      turns the second into an ``AttributeError`` out of ``execute_bash`` — every
-      `bash` call through it, not just the export.
+    * HELD — the session holds `task`. The child gets ``1``, and so the guard in
+      the `lop` it starts admits it: without this arm the fix would be a blanket
+      deny.
+    * INHERITED, NOT HELD (R1-1) — the ``bash`` child's environment starts as a
+      copy of this process's own in the default ``inherit`` mode, so a writer that
+      only SET the variable leaves a session reading ``True`` on an allowance
+      nobody granted it. Not hypothetical: an allowed `lop exec` runs `lop` — and,
+      for `--background`, a detached worker spawned with no ``env=`` — as a child
+      of the shell that carries the marker. Hence the assertion on BOTH the raw
+      value and the no-``env=`` grandchild: the clear has to be what a worker
+      inherits, not just what the immediate child sees.
+    * NEVER HAD IT, NOT HELD (R2-1) — the name must be ABSENT, not empty. The
+      marker's NAME is the mechanism, which is why `agent_shell.refusal_message`
+      never names it; writing the empty value unconditionally would export the
+      spelling into every ``bash`` child, and a `coder`-shaped session running
+      `env` is then one inference from `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop
+      exec`. An absent name is also a verdict the guard already reaches
+      (``_on(get(k, ""))``), so nothing is lost by omitting it — and this is the
+      arm a test written against the guard's verdict alone cannot see.
 
-    Driven over the real handler and the real interpreter, and the answer is
-    taken from the GUARD in the child rather than from the injection dict on the
-    way there: the shell-environment policy sits between the two, and it is the
-    half a test of the dict would miss.
+    Both `shell_env` modes, because the policy sits between the injection dict
+    and the child: in `allowlist` the marker is named back in `inherit` on
+    purpose, which is the shape where the policy's own re-grant is what the
+    injection has to beat. Driven over the real handler and the real interpreter,
+    and every answer is read from the child itself.
     """
+    from local_operator.tools import shell_env
 
-    async def reader_says(context: ToolContext | None) -> str:
-        result = await builtin.execute_bash(
-            "bash-allow", {"command": _READER_PROBE}, AbortSignal(), None, context
-        )
-        return _stdout_block(result).strip()
+    policy = shell_env.ShellEnvironmentPolicy(
+        mode=mode, inherit=(MAY_DELEGATE_ENV,) if mode == shell_env.MODE_ALLOWLIST else ()
+    )
+    monkeypatch.setattr(shell_env, "load_policy", lambda: policy)
 
-    assert await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=True)) == "True"
-    assert await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=False)) == "False"
+    def context_allowing(allowed: bool) -> ToolContext:
+        return ToolContext(cwd=str(tmp_path), may_delegate=allowed)
 
-    # R1-1: the marker is INHERITED from this process's environment.
+    # NEVER HAD IT: the name is absent from the child AND from the worker it
+    # spawns, and both read "no".
+    monkeypatch.delenv(MAY_DELEGATE_ENV, raising=False)
+    assert await _child_state(context_allowing(False)) == ("<ABSENT>", "<ABSENT>", "False")
+
+    # HELD: signed `1`, all the way down.
+    assert await _child_state(context_allowing(True)) == ("'1'", "'1'", "True")
+
+    # INHERITED, NOT HELD: cleared — a clear, not a blanket deny, so the same
+    # inherited value is still honoured when the context says the session holds
+    # `task`.
     monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
-    assert (
-        await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=False)) == "False"
+    assert await _child_state(context_allowing(False)) == (
+        "''",
+        "''",
+        "False",
     ), "an inherited allowance must be CLEARED, not merely not re-set"
-    # …and the same inherited value is still honoured when the context says so,
-    # which is what keeps the clear a clear rather than a blanket deny.
-    assert await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=True)) == "True"
+    assert await _child_state(context_allowing(True)) == ("'1'", "'1'", "True")
 
     # No context at all: the same call the loop makes when a host has no session.
-    assert await reader_says(None) == "False"
+    # Fail closed in both directions — the (loop with no host) shape and the
+    # (inherited marker) shape read the same way, which is the point of clearing
+    # rather than merely not setting.
+    assert await _child_state(None) == ("''", "''", "False")
+    monkeypatch.delenv(MAY_DELEGATE_ENV, raising=False)
+    assert await _child_state(None) == ("<ABSENT>", "<ABSENT>", "False")
 
 
 @pytest.mark.asyncio

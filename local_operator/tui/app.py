@@ -24190,10 +24190,14 @@ class OperatorApp(App[None]):
             # outside a turn), so nothing else derives it — and leaving it at the
             # default would give one session two answers to one question, which
             # is the drift `tests/unit/session/test_tool_context_parity.py`
-            # exists to catch. Derived from the live inventory exactly as
-            # `Session._build_tool_context` derives it; `getattr` twice because
-            # this path also runs before a session exists, and a duck-typed host
-            # object may carry neither attribute.
+            # exists to catch. The TEST is the same one `Session._build_tool_context`
+            # applies — `task` in the live inventory — but the read is WIDER here:
+            # that derivation reads `self._tools` and `tool.name` directly, while
+            # both hops below go through `getattr` with a default, because this path
+            # also runs before a session exists and a duck-typed host object may
+            # carry neither attribute. A missing attribute therefore reads as "no
+            # `task`" (the fail-closed answer) rather than raising on a bang command
+            # the guard has no bearing on.
             may_delegate=any(
                 getattr(tool, "name", None) == "task"
                 for tool in (getattr(session, "_tools", None) or ())
