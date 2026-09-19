@@ -121,6 +121,9 @@ from local_operator.imaging import (
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.redaction_shapes import (
+    PEM_BODY_LINE_RE,
+    PEM_END_LINE_RE,
+    PEM_HEADER_LINE_RE,
     REDACTION_MARKER,
     credential_dump_notice,
     scrub_secrets_with_hits,
@@ -1931,8 +1934,14 @@ _WITHHELD_LIVE_OUTPUT = (
 #: A PEM armour header, and a base64 body line. Only a header opens the streaming
 #: mask, and only body lines are masked inside it — see
 #: ``_PipeRedactor._mask_open_key_block``.
-_PEM_HEADER_LINE = re.compile(r"-----BEGIN [A-Z0-9 ]{2,}-----")
-_PEM_BODY_LINE = re.compile(r"[A-Za-z0-9+/=]{16,}")
+# The prefix grammar and the body-line test are the SHAPE TABLE's (`redaction_shapes`),
+# imported rather than restated: this layer masks BEFORE the table runs, so a divergence
+# between the two classifiers is a silent leak — which is exactly what happened when the
+# table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
+# published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+_PEM_HEADER_LINE = PEM_HEADER_LINE_RE
+_PEM_BODY_LINE = PEM_BODY_LINE_RE
+_PEM_END_LINE = PEM_END_LINE_RE
 
 #: How many lines a streamed PEM block may mask before the state resets. A real
 #: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
@@ -2152,12 +2161,12 @@ class _PipeRedactor:
                     out.append(line)
                     continue
                 self._key_block_lines += 1
-                if line.startswith("-----END"):
+                if _PEM_END_LINE.match(line.rstrip("\r\n")):
                     self._in_key_block = False
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_BODY_LINE.match(line.strip()):
+                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
                     if not self._key_block_marker_sent:
                         self._key_block_marker_sent = True
                         out.append(REDACTION_MARKER + "\n")

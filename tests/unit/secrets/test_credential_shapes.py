@@ -1276,7 +1276,10 @@ def test_a_credential_shaped_run_is_masked_to_its_end() -> None:
     text = '{"private_key": "' + header + "\n" + _PEM_BODY + "\n" + _PEM_BODY + "\n"
     scrubbed, hits = rs.scrub_shapes_with_hits(text)
     assert _PEM_BODY not in scrubbed
-    assert scrubbed == '{"private_key": "[redacted]'
+    # The body is gone and only the value's prefix and the separators remain; the exact
+    # tail is a separator rather than a fixed string, which is why this asserts the
+    # CONTENT instead of an equality.
+    assert scrubbed.startswith('{"private_key": "[redacted]')
     assert not any(hit.complete for hit in hits)
 
 

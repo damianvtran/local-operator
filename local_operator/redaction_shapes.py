@@ -1016,6 +1016,53 @@ def _tolerant(token_class: str) -> str:
 _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY")
 
 
+#: The line-number prefix tools actually emit, as ONE definition shared by the shape
+#: table and the pipe's own body classifier (``tools/builtin.py`` imports these). A second
+#: hand-written allowance is what published the body for `cat -n` output after the shape
+#: rule had been fixed (Q10-F1): the pipe masks BEFORE the table ever runs, so a divergence
+#: between the two is a silent leak rather than a missed match.
+#:
+#: Covered: `12|`, `12:`, `12>`, `12->`, `12)`, `12.]`, `[12]`, `12<TAB>` (cat -n), bat's
+#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator.
+LINE_PREFIX = (
+    r"[ \t]*(?:(?:"
+    r"\[?\d+\]?[ \t]*(?:[.)\]]|\.\]|->|[|:>-])?[ \t]*"
+    r"|\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
+    r")+)?"
+)
+
+#: A line separator in either spelling: escaped (inside a JSON value) or real, CRLF
+#: included.
+LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+
+#: One PEM body line with that prefix. Eight characters is the floor for a line that
+#: stands on its own; a SHORTER line counts only when a full one follows it (a truncated
+#: run) or when it is the block's last line before the closing quote or the end of the
+#: text — inside an open block nothing may be published, which is the block's whole point
+#: (Q10-F2: a sub-eight-character line in the MIDDLE published everything after it, and a
+#: short FINAL line published where the previous head masked).
+_PEM_FULL_LINE = r"[A-Za-z0-9+/=]{8,},?[ \t]*"
+_PEM_SHORT_MID_LINE = (
+    r"[A-Za-z0-9+/=]{1,7},?[ \t]*(?="
+    + LINE_SEP + LINE_PREFIX + r"[A-Za-z0-9+/=]{8,})"
+)
+#: A short line is a body line when a full one FOLLOWS it, and the run may end with one
+#: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
+#: survive, which is why the end-of-run allowance is not a free-standing alternative.
+_PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
+_PEM_RUN = (
+    r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
+    r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
+    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1,7},?)?"
+)
+PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$")
+PEM_HEADER_LINE_RE = re.compile(
+    r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
+    r"-{1,4}[\x27\x22]?-{1,4}$"
+)
+PEM_END_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}END ")
+
+
 def _anchored_key_value_guard(match: Match[str]) -> bool:
     """Only a value that CARRIES a PEM header phrase is a key, not every `private_key`."""
     return _PEM_HEADER_PHRASE.search(match.group(2).upper()) is not None
@@ -1100,28 +1147,20 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}"
             r"(?:"
             r"(?:\\r\\n|\\n|\r\n|\n|\r)"
-            # A body line as TOOLS PRINT IT, in the general form rather than an
-            # enumeration — enumeration cost four rounds. The line-number prefix is
-            # OPTIONAL and REPEATED (so `3| 4| <body>` falls out of the repetition), it
-            # accepts every separator these tools emit — `|`, `:`, `>`, `-` (for `->`) —
-            # separated by spaces or a TAB, and the separatorless `number<TAB>` that
-            # `cat -n` writes is covered by making the separator optional too. Miss it in
-            # any one of those spellings and the run ends there while the WHOLE body is
-            # published silently (Q9-F1: `grep -n` and `cat -n` output, 6/6 surfaces).
-            #
-            # The content floor is eight characters, and it is what keeps numbered PROSE
-            # alive: `12| done`, `12| 42`, `5| NORMAL, more text`, `1|` and `|` must
-            # survive byte-identical. The cost is the same one R8-2 records — a body line
-            # shorter than eight characters ends the run — and it is the over-mask
-            # direction, which is the safer of the two.
-            r"[ \t]*(?:(?:\d+[ \t]*(?:->|[|:>-])?[ \t]*)+"
-            r"(?:[A-Za-z0-9+/=]{8,},?"
-            r"|-{1,4}[\x27\x22]?-{1,4}(?:BEGIN|END)[ A-Z0-9]*PRIVATE KEY"
-            r"-{1,4}[\x27\x22]?-{1,4})"
-            r"|(?:[A-Za-z0-9+/=]{8,},?"
-            r"|-{1,4}[\x27\x22]?-{1,4}(?:BEGIN|END)[ A-Z0-9]*PRIVATE KEY"
-            r"-{1,4}[\x27\x22]?-{1,4})?)?[ \t]*"
-            r"(?=\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$)"
+            # A body line, from the SHARED grammar (`LINE_PREFIX` / `_PEM_LINE_CONTENT`)
+            # so the shape table and the pipe's classifier can never drift apart. The
+            # prefix is optional and repeated because every way a tool numbers a line has
+            # to be covered — `read` of a `cat -n` file writes `number<TAB>`, `grep -n`
+            # writes `number:`, bat writes `│ 12 │`, and a file already numbered doubles
+            # it. A one-spelling allowance published the whole body for the rest
+            # (Q9-F1, then Q10-F1 in the pipe layer).
+            # At least ONE full (or short-followed-by-full) line, then an optional
+            # short line to close the block. Requiring the first line is what keeps a
+            # lone short line — `12| done`, `12| 42` — readable: numbered PROSE has no
+            # full body line before it, so the run never starts.
+            r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")[ \t]*)+"
+            r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1,7},?[ \t]*)?"
+            r"(?=" + LINE_SEP + r"|[\x27\x22]|$)"
             r")*)"
         ),
         None,
