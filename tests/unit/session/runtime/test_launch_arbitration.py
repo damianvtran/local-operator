@@ -18,6 +18,7 @@ production ones.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import sys
@@ -68,6 +69,16 @@ def _draining_record() -> SessionRecord:
         control_key="k" * 16,
         leaving=LEAVING_FOR_BUILD,
     )
+
+
+def _healthy_record() -> SessionRecord:
+    """The same record with the drain's phrase absent — the control.
+
+    Without this pair the leaving check could pass by answering everything with
+    the leaving detail, which would be the same lie in the other direction: a
+    runtime that is not going anywhere would stop being reported ready.
+    """
+    return dataclasses.replace(_draining_record(), leaving="")
 
 
 #: Distinguishes "no ``cwd=`` was passed" from "``cwd=None`` was passed"; the
@@ -1373,32 +1384,38 @@ async def test_a_draining_record_is_never_reported_as_a_completed_errand(
     """
     record = _draining_record()
     for errand in (WarmErrand(), WakeErrand(schedule_id="wake1", occurrence_ms=1_700_000_000_000)):
-        try:
-            detail, _duplicate = await launch_module._deliver(record, SESSION_ID, errand)
-        except launch_module._OwnerDraining as exc:
-            # The honest answer: the session is leaving and a successor is owed.
-            # The engage converts this into the arbitration rungs, which is
-            # where a successor comes from — see the handover cell below.
-            assert str(exc), "the drain must report itself, not raise an empty signal"
-            continue
-        pytest.fail(
+        detail, _duplicate = await launch_module._deliver(record, SESSION_ID, errand)
+        assert detail == launch_module.LEAVING_DETAIL, (
             f"{type(errand).__name__} against a draining runtime answered {detail!r}; "
             "nothing delivers that errand, so this reports a completed handover "
             "for a message no runtime will run"
         )
+
+    # AND IT IS A DETAIL RATHER THAN A RAISE, which is the other half of the same
+    # finding and the half a raise got wrong: the caller's bind must still reach
+    # this record. It is LIVE and it is dialable, and the transcript it holds is
+    # the one a joiner reads — measured on the production bind path, raising here
+    # meant a cold viewer never dialled at all (agent review round 1, R1).
+    quiet = _healthy_record()
+    detail, _duplicate = await launch_module._deliver(quiet, SESSION_ID, WarmErrand())
+    assert detail == "runtime ready", detail
 
 
 @pytest.mark.asyncio
 async def test_a_successor_is_engaged_while_its_predecessor_drains(
     fleet: FakeRuntimeFleet, tmp_path: Path
 ) -> None:
-    """The handover the incident never got, end to end through the real loop.
+    """What the change actually ships, stated as the code behaves.
 
-    The engage must not report the draining runtime as ready, must not take the
-    predecessor's transcript claim early (one writer, always), and must start
-    the successor itself the moment that claim is released — the predecessor's
-    own ``_clean_exit`` ordering, which the fleet reproduces: record withdrawn,
-    then lease released.
+    The claim is NOT "a successor is engaged while its predecessor drains" — the
+    arbitration cannot do that and should not: the predecessor holds the
+    transcript claim for its whole life, so a candidate spawned against it would
+    be doomed, and only the lease decides who runs (agent review round 1, R5).
+    What ships is the pair of halves this cell asserts: the engage against a
+    draining record STOPS reporting it ready and returns immediately with the
+    leaving detail, and the successor is started by the next engage, the moment
+    the claim is released. That is also why the incident's message survives on
+    the spool rather than in a turn: the drain can outlast any engage envelope.
     """
     fleet.loop = asyncio.get_running_loop()
     await fleet.publish_draining_predecessor(SESSION_ID)
@@ -1412,16 +1429,29 @@ async def test_a_successor_is_engaged_while_its_predecessor_drains(
             deadline_s=20.0,
         )
     )
-    # Long enough for several passes of the open-ended grid. A draining runtime
-    # must not be reported ready, and the successor must not be started while
-    # its predecessor still holds the claim: a candidate spawned here would be
-    # doomed, because only the lease decides who runs.
-    await asyncio.sleep(0.3)
-    assert not engage.done(), "the engage reported success against a runtime that is leaving"
+    # RETURNED, not waited out. The old shape sat here for the whole 20 s
+    # envelope (and, in production, for the full 30 s deadline) because the
+    # record existed and the errand could never complete against it — the wait
+    # that became `ConnectionError("the runtime is reconnecting")` upstream
+    # before the bind's dial loop was ever entered (agent review round 1, R1).
+    outcome = await asyncio.wait_for(engage, timeout=5)
+    assert outcome.detail == launch_module.LEAVING_DETAIL, outcome.detail
+    assert outcome.spawned is False, "nothing may spawn against a live lease holder"
     assert fleet.spawns == 0, "a candidate was spawned against a live lease holder"
 
+    # The predecessor's own ``_clean_exit`` ordering, which the fleet
+    # reproduces: record withdrawn, then lease released.
     fleet.dispose_predecessor()
-    outcome = await asyncio.wait_for(engage, timeout=20)
+    outcome = await asyncio.wait_for(
+        engage_runtime(
+            SESSION_ID,
+            str(tmp_path),
+            WarmErrand(),
+            config_dir=tmp_path,
+            deadline_s=20.0,
+        ),
+        timeout=20,
+    )
 
     assert outcome.spawned is True, "the engage never started the successor"
     assert outcome.detail == "runtime ready", outcome.detail

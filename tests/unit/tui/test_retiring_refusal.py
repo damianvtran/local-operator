@@ -42,16 +42,23 @@ from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_S
 from local_operator.tui.app import (
     DRAIN_NOTICE,
     DRAIN_NOTICE_OTHER,
-    PROMPT_QUEUED_NOTICE,
+    QUEUED_PROMPT_MISSED_NOTICE,
+    QUEUED_PROMPT_TAKEN_BACK_NOTICE,
     RESTORE_SEAM,
     SIGNAL_DRAIN_NOTICE,
     OperatorApp,
     _is_retiring_refusal,
     _retiring_notice_text,
 )
+from local_operator.tui.events import UserMessageStart
 from local_operator.tui.session_presentation import DraftRecoveryNotice
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    QUEUED_ROW_TEXT,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -590,19 +597,74 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
 # answer it gives is a receipt rather than an exception — so the two behaviours
 # the refusal branch exists for are exactly WRONG here: there is nothing to hand
 # back (the successor has the message) and nothing to retract (the row stands for
-# a message that will run). What the operator cannot see without help is WHERE it
-# went, which is what these cells pin.
+# a message that will run).
+#
+# WHAT THE QUEUED STATE IS, AND WHERE IT ENDS (design round 1, D2/D3/D4; UX round
+# 1, U1/U3). The state is painted on the message's own row and taken down by the
+# successor's announcement of that message — one statement, with an end — rather
+# than as a receipt row below it, which could only accumulate one identical line
+# per send and could never stop asserting the queue after the message had run.
+# The cells below drive: the receipt (row marked, nothing handed back, no notice),
+# the settlement (marker off when the message is announced), and the recall
+# (withdrawn from the spool, or an honest "too late").
 
 
-def _queued_session() -> FakeSession:
-    """A session whose runtime queued the message for the build taking over."""
-    session = FakeSession()
+class _QueuedSession(FakeSession):
+    """A session whose runtime queued the message for the build taking over.
 
-    async def prompt(text: str, images: Any = None, **kwargs: Any) -> str:
+    It accepts ``message_id`` exactly as both in-tree sessions do. That keyword
+    is the correlation id the app mints, and it is the ONLY key that survives the
+    handover — a fake without it sends every cell down the id-less path, where no
+    marker can exist and no announcement can be matched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued_ids: list[str] = []
+
+    async def prompt(  # type: ignore[override] — the fake widens nothing but the return
+        self, text: str, images: Any = None, *, message_id: str = ""
+    ) -> Any:
+        self.prompts.append(text)
+        self.prompt_images.append(list(images or []))
+        self.queued_ids.append(message_id)
         return SPOOL_RECEIPT_PROMPT
 
-    session.prompt = prompt  # type: ignore[assignment]
-    return session
+
+def _queued_session() -> _QueuedSession:
+    return _QueuedSession()
+
+
+def _user_rows(app: OperatorApp) -> list[str]:
+    """Every painted row of every user block, marker rows included.
+
+    ``UserBlock.text()`` is the PROMPT, deliberately — the receipt rows are the
+    app talking and are excluded from a copy — so the marker has to be read off
+    the authored rows, which is what the frame paints.
+    """
+    rows: list[str] = []
+    for block in _blocks(app):
+        if isinstance(block, UserBlock):
+            rows.extend(block._rows(40))
+    return rows
+
+
+def _spool_row(app: OperatorApp, command_id: str, text: str) -> None:
+    """Write the row the draining runtime would have spooled for this message."""
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    session = app._session
+    assert session is not None, "the app has not booted a session"
+    directory = config_dir() / "sessions" / str(session.session_id)
+    assert append_inbox(
+        directory,
+        InboxLine(text=text, sender={}, source=SOURCE_USER, command_id=command_id, wake=True),
+    ), "the spool row could not be written"
 
 
 def _admitting_session() -> FakeSession:
@@ -616,11 +678,12 @@ def _admitting_session() -> FakeSession:
     return session
 
 
-async def _send_expecting_a_notice(pilot: Any, editor: Editor, text: str) -> None:
-    """Submit, then wait for the row the prompt worker paints.
+async def _send_queued(pilot: Any, editor: Editor, text: str, session: Any) -> None:
+    """Submit, then wait for the prompt worker to record the queued receipt.
 
     ``_send``'s own wait is on the composer refilling, which is precisely what
-    must NOT happen for a queued message.
+    must NOT happen for a queued message — so the wait is on the session having
+    seen the send, which is the fact the assertions below then read.
     """
     editor.text = text
     await pilot.pause()
@@ -628,40 +691,137 @@ async def _send_expecting_a_notice(pilot: Any, editor: Editor, text: str) -> Non
     for _ in range(100):
         await pilot.pause()
         await asyncio.sleep(0.01)
-        if _notices(pilot.app):
+        if session.queued_ids:
             return
+    raise AssertionError("the queued receipt never reached the session")
 
 
 @pytest.mark.asyncio
-async def test_a_queued_prompt_keeps_its_row_and_is_never_shown_as_refused() -> None:
-    """The receipt the drain hands back is not a refusal, and must not be read as one.
+async def test_a_queued_prompt_keeps_its_row_and_carries_the_queued_state() -> None:
+    """The receipt is not a refusal, and the state it leaves is ON the row.
 
     Everything the refusal branch does here would be a falsehood: the draft is
     not returned (the successor holds the message, and a composer copy invites
-    the user to send it twice), the echo row is not withdrawn (the message is
-    real and the successor runs it), and the standing row says where it went.
+    the user to send it twice) and the echo row is not withdrawn (the message is
+    real and the successor runs it).
+
+    AND NO NOTICE IS APPENDED (design round 1, D4/U3): the row itself carries
+    :data:`QUEUED_ROW_TEXT`, so three messages sent during one drain cost three
+    rows rather than three identical receipts plus the standing drain row.
     """
     session = _queued_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send_expecting_a_notice(pilot, editor, "deploy the fix")
+        await _send_queued(pilot, editor, "deploy the fix", session)
 
         assert editor.text == "", "a queued message was handed back as unsent"
         assert _user_texts(app) == ["deploy the fix"], "the row for a queued message was retracted"
+        assert _notices(app) == [], [n._text for n in _notices(app)]
+        rows = _user_rows(app)
+        assert QUEUED_ROW_TEXT in rows, rows
+        # The refusal's own copy must not appear anywhere: this message is not
+        # coming back, and the drain's sentence is the standing notice's job.
+        assert not [row for row in rows if "back in the composer" in row], rows
+        # Matched by IDENTITY against the constant the runtime answers with: the
+        # message id travelled with the send, which is what the settlement and
+        # the recall both key on.
+        assert session.queued_ids and session.queued_ids[-1], session.queued_ids
 
-        notices = _notices(app)
-        assert [n._text for n in notices] == [PROMPT_QUEUED_NOTICE], [n._text for n in notices]
-        # `note`, not the refusal's `warning`: nothing has gone wrong and nothing
-        # is being asked of the user (the drain notice it continues uses the same
-        # ink for the same reason).
-        assert (notices[0]._token, notices[0]._glyph) == ("muted", "\u00b7"), (
-            notices[0]._token,
-            notices[0]._glyph,
-        )
-        assert "queued" in notices[0]._text
-        # The refusal's own copy must not appear: this message is not coming back.
-        assert "back in the composer" not in notices[0]._text
+
+@pytest.mark.asyncio
+async def test_the_queued_marker_comes_down_when_the_successor_runs_the_message() -> None:
+    """D2: the state has an END, and the successor's own announcement is it.
+
+    The marker is the only evidence the message exists — it is in the spool and
+    in no transcript — so a marker that never comes down reads identically
+    before the successor has served the message and after it has. The
+    announcement is matched on the id the app sent, which is the same id the
+    successor's turn carries.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        message_id = session.queued_ids[-1]
+        assert QUEUED_ROW_TEXT in _user_rows(app)
+
+        app.post_message(UserMessageStart("deploy the fix", 0, message_id))
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if QUEUED_ROW_TEXT not in _user_rows(app):
+                break
+
+        assert QUEUED_ROW_TEXT not in _user_rows(app), _user_rows(app)
+        assert session.session_id  # the row, and only the marker, changed
+
+
+@pytest.mark.asyncio
+async def test_esc_takes_a_queued_prompt_back_out_of_the_spool() -> None:
+    """U1: the queued message is recallable, and the recall says what happened.
+
+    Enter committed the user's words to a process that may run them hours later,
+    so the cancel key has to be able to take them back — the neighbouring steer
+    channel already works this way (Esc lifts the newest queued steer into the
+    composer). The message lives in a FILE, which is why this needs no op: no
+    runtime has read the row, and that is exactly what makes it recallable.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        command_id = session.queued_ids[-1]
+        _spool_row(app, command_id, "deploy the fix")
+
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if editor.text:
+                break
+
+        assert editor.text == "deploy the fix", editor.text
+        assert _user_texts(app) == [], "the row for a withdrawn message stayed up"
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import peek_inbox
+
+        remaining = peek_inbox(config_dir() / "sessions" / str(session.session_id))
+        assert remaining == [], remaining
+        assert [n._text for n in _notices(app)] == [QUEUED_PROMPT_TAKEN_BACK_NOTICE], [
+            n._text for n in _notices(app)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_esc_says_so_when_the_successor_has_already_taken_the_message() -> None:
+    """U1: losing the race is an ANSWER, never a silent no-op.
+
+    Once the successor has drained the spool the row is gone and the message WILL
+    run. A recall that quietly did nothing would leave the user believing they had
+    taken it back — so the miss says exactly that, and the marker stays up because
+    the message is still queued, only out of reach.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if _notices(app):
+                break
+
+        assert editor.text == "", "a message already in the successor's hands was handed back"
+        assert [n._text for n in _notices(app)] == [QUEUED_PROMPT_MISSED_NOTICE], [
+            n._text for n in _notices(app)
+        ]
+        assert QUEUED_ROW_TEXT in _user_rows(app), "the message is still queued; only out of reach"
 
 
 @pytest.mark.asyncio

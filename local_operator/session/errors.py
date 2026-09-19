@@ -131,24 +131,32 @@ class RuntimeRetiring(ValueError, RuntimeError):
     HEAD_UNNAMED = "This session is leaving; it will not start a new turn."
     REFUSED = "The message was not admitted"
     TAIL = "send it again once the session is running again."
-    #: The tail for the departure that OWES A SUCCESSOR: a newer build is
-    #: already taking this session over, so the one act ``TAIL`` names — send it
-    #: again once the session is running again — is both unnecessary and the
-    #: exact operation the refusal just performed. That sentence is what the
-    #: incident left operators with: every prompt refused for 1 h 40 m by a
-    #: runtime that had announced a handover, each refusal ending in advice to
-    #: resend, and no runtime to resend to (memo §4.2 piece 3).
+    #: The tail for the departure that OWES A SUCCESSOR, reached on the refusal
+    #: paths: there was nowhere to spool the message (an unwritable inbox, an
+    #: attachment an inbox row cannot carry) or the exit was already committed.
+    #: The old tail — "send it again once the session is running again" — sent
+    #: the operator to perform the one operation the refusal had just refused,
+    #: and it is what the incident left them with for 1 h 40 m (memo §4.2 piece
+    #: 3). The old instruction stays; the DESTINATION is what changes.
     #:
-    #: IT PROMISES ONLY WHAT THE DEPARTURE ITSELF ESTABLISHES, which is why it
-    #: says the successor is STARTING rather than that it has the message: this
-    #: tail is reached on the refusal paths (there was nowhere to spool the
-    #: message, or the exit was already committed), so what the operator may
-    #: rely on is the handover, not the carriage of this particular message.
-    #: The viewer that put the message back in the composer says so where it is
-    #: true, exactly as it does for the fallback above.
-    TAIL_HANDOVER = "a newer build is starting here to carry on."
+    #: IT NAMES NO CARRIAGE, and that is a correction rather than a style
+    #: choice: this arm is exactly the one where the message was NOT carried
+    #: (QA round 1, Q-2 — the earlier "a newer build is starting here to carry
+    #: on" read as "your message is on its way" while the spool had failed, and
+    #: a front end that does not restore a draft would never re-send). Asking
+    #: for the re-send is the honest instruction here, and naming the build is
+    #: what makes it actionable (UX round 1, U5).
+    TAIL_HANDOVER = "send it again once the new build is up."
+    #: The tail for a message that IS carried — on the successor's spool — and
+    #: reaching a caller that cannot watch the turn it will run in: a loop's
+    #: ``prompt_and_wait`` correlates on an ``AgentEndEvent`` from THIS runtime,
+    #: and the successor writes that row after this process has exited. So the
+    #: refusal is the answer, and this is its honest tail: the deferral, named
+    #: as a deferral. Never sent over the wire — the spool receipt is what the
+    #: runtime answers with — so no ``error_*`` field carries it.
+    TAIL_QUEUED = "your message is queued and will run as soon as this session runs again."
 
-    def __init__(self, trigger: str = "", leaving: str = "") -> None:
+    def __init__(self, trigger: str = "", leaving: str = "", *, queued: bool = False) -> None:
         # ``HEAD`` is per-INSTANCE because the situation is: the same refusal
         # carries different sentences for the departures, and the far side
         # rebuilds whichever one the raiser's enumerated ``trigger`` names.
@@ -180,7 +188,12 @@ class RuntimeRetiring(ValueError, RuntimeError):
         # The tail is chosen off the SAME token as the head, for the reason
         # ``_HEADS`` gives below: one departure, one reading of it. A trigger
         # that names nothing keeps the tail this class has always carried.
-        self.TAIL = _TAILS.get(self.trigger, self.TAIL)
+        #
+        # ``queued`` outranks the token because it is a fact about THIS MESSAGE
+        # rather than about the departure, and the two sentences are not
+        # interchangeable: one asks for a re-send, the other says the message is
+        # already on its way.
+        self.TAIL = self.TAIL_QUEUED if queued else _TAILS.get(self.trigger, self.TAIL)
         super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
 
 

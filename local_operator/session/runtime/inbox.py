@@ -320,6 +320,84 @@ def peek_inbox(session_dir: Path) -> list[InboxLine]:
         return []
 
 
+def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
+    """Take one OWNER row back out of the spool. True if a row was removed.
+
+    THE RECALL PATH, and it belongs here rather than behind an op: the spool is
+    a file that an unrelated process already writes (``peer_send``'s cold
+    note), and the front end that painted the row is the one asking — so a
+    withdrawal needs no runtime, no session and no successor to exist yet.
+
+    HONEST ABOUT LOSING THE RACE. ``False`` means the row is no longer there,
+    and the overwhelmingly likely reason is that the successor drained it — so
+    the message IS going to run and the caller must say that rather than let the
+    user believe a recall worked. There is no third answer, and no retry: the
+    window closes on the successor's boot, which is not observable from here.
+
+    Keyed by the OWNER's own ``command_id``, which only a ``SOURCE_USER`` row
+    carries (``serving._spool_for_successor`` writes it for that source alone),
+    so a peer's message can never be withdrawn by this call even if ids were to
+    collide.
+
+    Locked and staged exactly like the other two writers here: ``LOCK_NB`` with
+    bounded retries (never a blocking flock — the app's paint path reads this
+    file), and the rewrite goes through ``os.replace`` so a concurrent reader
+    never sees a truncated spool.
+    """
+    if not command_id:
+        return False
+    path = inbox_path(session_dir)
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
+        return False
+    try:
+        with _NonBlockingLock(fd):
+            raw = _read_all(fd)
+            kept: list[bytes] = []
+            removed = False
+            for row in raw.splitlines():
+                if not row.strip():
+                    continue
+                try:
+                    payload = json.loads(row.decode("utf-8", "replace"))
+                except ValueError:
+                    kept.append(row)  # a torn line is somebody else's, never ours
+                    continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("source") == SOURCE_USER
+                    and payload.get("command_id") == command_id
+                ):
+                    removed = True
+                    continue
+                kept.append(row)
+            if not removed:
+                return False
+            # REWRITTEN IN PLACE, not staged through a temp file and
+            # ``os.replace``: this file is inside the session store, where a
+            # displacer has to be allow-listed (``tests/unit/session/
+            # test_no_session_deletion.py``), and the lock-free ``peek_inbox``
+            # reader already tolerates a torn final line — so the cheapest
+            # correct write here is truncate-and-write on the descriptor this
+            # call already holds. The drain cannot race it (same lock).
+            payload = b"".join(row + b"\n" for row in kept)
+            os.lseek(fd, 0, os.SEEK_SET)
+            written = 0
+            while written < len(payload):
+                written += os.write(fd, payload[written:])
+            os.ftruncate(fd, len(payload))
+            return True
+    except OSError:
+        logger.warning("inbox withdrawal failed for %s", session_dir.name, exc_info=True)
+        return False
+    finally:
+        os.close(fd)
+
+
 def drain_inbox(session_dir: Path) -> list[InboxLine]:
     """Consume every spooled message, in write order. Called once, at open.
 

@@ -1162,6 +1162,27 @@ class ExpandableActionBlock(TranscriptBlock):
             self._refresh_row()
 
 
+#: The receipt a prompt carries while its message is QUEUED FOR A RUNTIME THAT
+#: DOES NOT EXIST YET: the draining runtime spooled it rather than running it
+#: (``serving.ServingSessionHandle.prompt``), and the successor runs it when it
+#: boots — which may be minutes or hours later.
+#:
+#: ON THE ROW, NOT IN A NOTICE, and that is the deliberation rather than a
+#: preference: the queued state is a property of THIS MESSAGE, it has to END
+#: when the message runs, and a transcript-level row cannot do either (design
+#: round 1, D2/D3 — the receipt row can be taken down with its own message;
+#: a notice below it can only accumulate, one identical line per send, which is
+#: D4 and U3 measured). It wears the receipt ink the image receipt beside it
+#: already wears, because the app is talking here too.
+#:
+#: THE ESC CLAUSE IS AN OFFER THE RECALL CAN REFUSE, and the refusal has its own
+#: honest sentence (``RECALL_MISSED_NOTICE``): once the successor has drained
+#: the spool the message is out of reach, and the row saying otherwise for that
+#: brief window is why the press has to answer with the truth rather than
+#: silence.
+QUEUED_ROW_TEXT = "· queued for the next runtime \u2014 esc takes it back"
+
+
 class UserBlock(TranscriptBlock):
     """One user prompt behind a full-height rule in the gutter column.
 
@@ -1290,7 +1311,9 @@ class UserBlock(TranscriptBlock):
     #: is most crowded and the reader needs it most.
     MIN_BODY = 8
 
-    def __init__(self, text: str, attachments: int = 0, *, fold_width: int = 0) -> None:
+    def __init__(
+        self, text: str, attachments: int = 0, *, fold_width: int = 0, queued: bool = False
+    ) -> None:
         """``fold_width`` is the width this prompt is about to be given.
 
         This block wraps in ``__init__``, so unlike a streaming row there is no
@@ -1309,6 +1332,11 @@ class UserBlock(TranscriptBlock):
         #: renders a receipt, and keeping the base64 alive per row would hold
         #: the whole conversation's screenshots in the widget tree.
         self._attachments = attachments
+        #: Whether this prompt's message is on a draining runtime's spool — the
+        #: state that starts it is the spool receipt at submit, and the state
+        #: that ends it is the message's own announcement from the successor
+        #: (:meth:`set_queued`, and ``app.on_user_message_start``).
+        self._queued = queued
         #: Rendered index of the receipt row, or None when there is none. Set
         #: by `_build` at the width it actually wrapped at, so `copy_row_is_chrome`
         #: never has to re-derive it and cannot disagree with the frame.
@@ -1461,7 +1489,38 @@ class UserBlock(TranscriptBlock):
             self._receipt_row = len(rows) - 1
         else:
             self._receipt_row = None
+        if self._queued:
+            # MARKED, and not only stated below it: measured, this row was
+            # painted identically to a delivered one — same spine, same body ink
+            # — so the only thing separating "queued" from "sent" was prose two
+            # rows away and scrolling out of reach (design round 1, D3).
+            rows.append(QUEUED_ROW_TEXT)
+            self._receipt_row = len(rows) - 1
         return rows
+
+    def set_queued(self, queued: bool) -> None:
+        """Mark or unmark this prompt as queued for the next runtime.
+
+        The END of the state is the whole reason the marker lives on the row:
+        the successor announces the message under the id this surface sent, and
+        that announcement is what takes the marker down, so the row stops
+        asserting a state the message is no longer in (design round 1, D2).
+
+        A no-op when the flag is already what was asked, so the settlement path
+        can call it unconditionally.
+        """
+        if queued == self._queued:
+            return
+        self._queued = queued
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(self._build(self._built_width if self._built_width > 0 else None))
+        finally:
+            self._finalized = was_finalized
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_around(self)
 
     def retheme(self) -> None:
         """Re-ink rule, prose and receipt from the current ramp."""

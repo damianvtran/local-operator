@@ -1786,7 +1786,7 @@ async def continue_command(
     """
     from local_operator.session.runtime.launch import PromptErrand, engage_runtime
 
-    await engage_runtime(
+    outcome = await engage_runtime(
         command.session_id,
         str(Path.home()),
         PromptErrand(
@@ -1801,6 +1801,15 @@ async def continue_command(
     # turn it started. A record must exist now (engage_runtime only returns
     # once one answered), so a miss here is a runtime that died in the gap and
     # is reported as the same timeout the caller already handles.
+    #
+    # THE RECEIPT IS THE ENGAGE'S OWN DETAIL, never a hardcoded sentence. On a
+    # draining owner the runtime spools the message for the build that replaces
+    # it, and its answer is ``inbox.SPOOL_RECEIPT_PROMPT`` — a deferral. This
+    # used to return the literal "prompt admitted" over whatever the runtime
+    # said, so the phone was told the owner had the message and waited for a
+    # reply only another process would produce, after this one exited (agent
+    # review round 1, R2).
+    admitted_detail = outcome.detail or "prompt admitted"
     record, _ = await asyncio.to_thread(find_runtime_record, config_dir, command.session_id)
     if record is None:
         raise TimeoutError("Couldn’t continue this conversation. Try again.")
@@ -1813,4 +1822,4 @@ async def continue_command(
     except (ConnectionError, RuntimeError, TimeoutError) as exc:
         client.close()
         raise TimeoutError("Couldn’t continue this conversation. Try again.") from exc
-    return client, "prompt admitted"
+    return client, admitted_detail

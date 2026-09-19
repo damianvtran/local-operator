@@ -1635,10 +1635,19 @@ async def _drain_inbox_into(handle: object) -> int:
         return 0
     receive = cast(Callable[..., Awaitable[str]], probed)
     delivered = 0
+    # Rows of ONE batch carrying the same owner ``command_id``, which the
+    # ``drain_inbox`` contract makes reachable: the file is emptied by a read,
+    # so a crash between the read and its receipt re-delivers the batch, and a
+    # client retry can spool the same message twice. The durable index is the
+    # authority for the turn arm (see ``_run_owner_prompt``); this covers the
+    # rows whose delivery has not reached the transcript yet, i.e. one queued
+    # behind another in THIS loop.
+    seen_owner_ids: set[str] = set()
     for line in lines:
+        owner_row = getattr(line, "source", "") == SOURCE_USER
         try:
-            if getattr(line, "source", "") == SOURCE_USER:
-                await _run_owner_prompt(handle, line)
+            if owner_row:
+                await _run_owner_prompt(handle, line, seen=seen_owner_ids)
             elif callable(probed):
                 await receive(
                     line.text,
@@ -1650,13 +1659,26 @@ async def _drain_inbox_into(handle: object) -> int:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
         except Exception:  # noqa: BLE001 — one bad row is not the others' problem
-            logger.warning("spooled message could not be delivered", exc_info=True)
+            if owner_row:
+                # LOUDER, AND FOR A DIFFERENT REASON: the owner's message is
+                # the one whose receipt already told the user it would run, and
+                # it is in no transcript but this spool's — so a swallowed row
+                # is a message destroyed while the runtime said it was kept
+                # (QA round 1, Q-1). The row is named by its own id so an
+                # operator can find it.
+                logger.error(
+                    "spooled OWNER message %s could not be delivered",
+                    getattr(line, "command_id", "") or "<no id>",
+                    exc_info=True,
+                )
+            else:
+                logger.warning("spooled message could not be delivered", exc_info=True)
     if delivered:
         logger.info("delivered %d spooled message(s) at open", delivered)
     return delivered
 
 
-async def _run_owner_prompt(handle: object, line: Any) -> None:
+async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> None:
     """Run one spooled OWNER prompt on this runtime, at most once.
 
     The continuation of the drain's own promise: a runtime that latched a
@@ -1672,27 +1694,60 @@ async def _run_owner_prompt(handle: object, line: Any) -> None:
     receipt) and the identity it carries is the append-only one — so
     ``has_admitted_command`` answers here exactly as it does for a retried wire
     prompt on ``server._already_admitted``. Without this the second row
-    appended a second user turn.
+    appended a second user turn. ``seen`` closes the window the index cannot:
+    two rows of one batch carrying the same id, where the first is still
+    in flight (its append is behind a turn that is already running) when the
+    second is read.
 
-    Raises rather than swallowing: the caller's per-row handler logs and moves
-    on, which is the same best-effort contract the peer rows get.
+    MID-TURN IS THE ORDINARY CASE HERE, not an edge. The rows are delivered in
+    write order and a peer ``mailbox``+``wake`` row DRIVES A TURN, so an owner
+    row spooled after one lands while the session is streaming — where
+    ``Session.prompt`` rejects outright ("session is already streaming; use
+    steer() to inject mid-turn"). That rejection used to be swallowed with the
+    message inside it, while the receipt the user got said it would run and the
+    boot still counted the row as delivered (QA round 1, Q-1). The owner's own
+    words join the turn in flight instead, which is what the sibling first-turn
+    drain already does (``Session._run_spooled_owner_prompt``) and the strongest
+    thing this process can honestly do with them.
+
+    Raises rather than swallowing: the caller's per-row handler logs it by name
+    and moves on.
     """
     prompt = getattr(handle, "prompt", None)
     if not callable(prompt):
         raise RuntimeError("this handle cannot run a spooled prompt")
     run = cast(Callable[..., Awaitable[Any]], prompt)
     command_id = str(getattr(line, "command_id", "") or "")
+    if command_id:
+        if command_id in seen:
+            logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
+            return
+        seen.add(command_id)
     admitted = getattr(handle, "has_admitted_command", None)
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
         return
-    if command_id:
-        await run(line.text, command_id=command_id)
+    try:
+        if command_id:
+            await run(line.text, command_id=command_id)
+        else:
+            # No identity to deduplicate on, which only a writer older than the
+            # field can produce. It still runs: the message is the user's, and
+            # dropping it is worse than a duplicate it cannot be compared
+            # against.
+            await run(line.text)
         return
-    # No identity to deduplicate on, which only a writer older than the field
-    # can produce. It still runs: the message is the user's, and dropping it is
-    # worse than a duplicate it cannot be compared against.
-    await run(line.text)
+    except RuntimeError as error:
+        if "already streaming" not in str(error):
+            raise
+        steer = getattr(handle, "steer", None)
+        if not callable(steer):
+            raise
+        logger.info(
+            "spooled prompt %s arrived mid-turn; joining the turn in flight",
+            command_id or "<no id>",
+        )
+        await cast(Callable[..., Awaitable[Any]], steer)(line.text, command_id=command_id or None)
 
 
 def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:

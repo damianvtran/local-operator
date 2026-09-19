@@ -7567,16 +7567,15 @@ class AttachedSession:
                 #
                 # So it gets the typed refusal, which is the honest answer for a
                 # caller whose contract is "the owner's actual terminal outcome":
-                # this runtime will not run it. Which departure to name comes from
-                # the phrase THIS connection already heard on the ``retiring``
-                # frame — the same evidence ``serving._retiring_refusal`` supplies
-                # on the wire, from the other side — so a build drain is told about
-                # the handover (its tail no longer sends the user to re-send the
-                # message the successor already holds) and an unplaceable one keeps
-                # the sentence that names no departure.
+                # this runtime will not run it, and the message itself is queued
+                # (``queued=True`` selects that tail — the default one asks for a
+                # re-send, which would be false advice for a message already on
+                # the successor's spool).
                 from local_operator.session.errors import RuntimeRetiring
 
-                raise RuntimeRetiring(leaving=str(getattr(client, "_drain_phrase", "") or ""))
+                raise RuntimeRetiring(
+                    leaving=str(getattr(client, "_drain_phrase", "") or ""), queued=True
+                )
             outcome = await completed
             if outcome.error:
                 raise RuntimeError(outcome.error)
