@@ -139,12 +139,21 @@ check-changed: ## Run the CI gates this branch's diff can affect
 # holding 1-2 GB each, one alive 81 minutes after its parent died. The wrapper
 # puts the command in its own process group and signals the whole group on every
 # exit path — including the two a bare `timeout` cannot cover: a descendant alive
-# when the leader exits by itself, and a group that ignores SIGTERM (measured: a
-# bare `timeout` wedged for 300 s where the wrapper's SIGKILL escalation cleared
-# the same tree in ~8 s). 900 s mirrors this job's `timeout-minutes: 15` in
-# ci.yml, so the local bound is CI's bound.
+# when the leader exits by itself, and a group that ignores SIGTERM (measured over
+# a SIGTERM-ignoring tree: `timeout 3` fires at 3 s and then WAITS THE TREE OUT —
+# 30 s for a 30 s tree, 300 s in an earlier run for a 300 s one — where the
+# wrapper's SIGKILL escalation cleared the same tree in 5 s).
+#
+# The bound is generous on purpose: a whole-tree pyright measures 508 s quiet and
+# 1170 s under load on this fleet, so a bound mirroring ci.yml's
+# `timeout-minutes: 15` — which also covers checkout, install and the protocol-sync
+# step — would red a gate CI passes. Timing out a legitimately slow host is worse
+# than waiting for it, and the bound is overridable for a machine that needs more:
+# `make type-check BOUND_TIMEOUT=3600`.
+BOUND_TIMEOUT ?= 1800
+
 type-check: ## Run type checking with pyright
-	.venv/bin/python scripts/run_bounded.py --timeout 900 -- \
+	.venv/bin/python scripts/run_bounded.py --timeout $(BOUND_TIMEOUT) -- \
 		.venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace

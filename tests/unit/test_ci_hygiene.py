@@ -981,7 +981,7 @@ def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
 
 # ===========================================================================
 # Change-scope gating: the classifier in scripts/ci_scope.py, and the wiring in
-# ci.yml's `changes` job that reads it. Assertions A1-A15 of the design review.
+# ci.yml's `changes` job that reads it. Assertions A1-A17 of the design review.
 # ===========================================================================
 
 
@@ -1561,7 +1561,7 @@ def test_local_commands_are_safe_and_track_the_ci_steps_they_mirror() -> None:
 
 
 def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
-    """A17. The typed gate is bounded and reaped, and never narrowed.
+    """A16. The typed gate is bounded and reaped, and never narrowed.
 
     `pyright` is a Python wrapper around an npm/node analyzer that runs as a
     SEPARATE process, and the fleet measured what a group nobody reaps leaves
@@ -1577,9 +1577,9 @@ def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
     wrapper must exist — a typo in the path would otherwise surface only on a real
     run.
 
-    Mutations that must fail this: drop the wrapper from the command; change
-    `timeout-minutes: 15`; narrow the wrapped command; or point the command at a
-    wrapper path that is not there.
+    Mutations that must fail this: drop the wrapper from the command; drop the
+    bound below ci.yml's own provision; narrow the wrapped command; or point the
+    command at a wrapper path that is not there.
     """
     scope = _scope()
     command = scope.JOB_COMMANDS["type-check"][0]
@@ -1591,9 +1591,16 @@ def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
     assert isinstance(minutes, int), "type-check has no timeout-minutes to mirror"
     tokens = shlex.split(command)
     assert "--timeout" in tokens, tokens
-    assert float(tokens[tokens.index("--timeout") + 1]) == minutes * 60, (
-        f"the local bound {tokens[tokens.index('--timeout') + 1]!r} does not mirror "
-        f"ci.yml's timeout-minutes: {minutes}"
+    bound = float(tokens[tokens.index("--timeout") + 1])
+    assert bound >= minutes * 60, (
+        f"the local bound {bound!r} is TIGHTER than ci.yml's provision for this job "
+        f"({minutes} min, which also covers checkout, install and the protocol-sync "
+        "step) — host load alone would then red a gate CI passes, which is a worse "
+        "failure than a slow gate"
+    )
+    assert bound >= 1800.0, (
+        f"the local bound ({bound}s) leaves no headroom over the measured whole-tree "
+        "range (508 s quiet, 1170 s under load) on this fleet"
     )
     tool = scope._invoked_tool(command)
     assert tool == "pyright", "the drift assertion must see the wrapped tool, not the wrapper"
@@ -1604,8 +1611,71 @@ def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
         if Path(token).name == scope.BOUNDED_WRAPPER_NAME
     )
     inner = ci_scope._unwrap_bounded(tokens[wrapper_at + 1 :])
+    # The reader splits at the SEPARATOR, so a `--grace` in front of it does not
+    # shift the payload: counting flags instead returned the token after the last
+    # flag (`tests` here), which would have compared a directory against ci.yml.
+    assert scope._unwrap_bounded(
+        ["--timeout", "10", "--grace", "2", "--", ".venv/bin/python", "-m", "pyright", "tests"]
+    ) == [".venv/bin/python", "-m", "pyright", "tests"]
+    assert scope._unwrap_bounded(["--timeout", "10", "--grace", "2"]) == []
+    # The shapes that actually mis-sliced: a wrapper invoked with NO flags (the
+    # payload's own `--timeout` used to be treated as the wrapper's), and a payload
+    # carrying its own `--grace`. Both returned `[]`/`tests` through the flag-counting
+    # version, so these are the assertions that fail if it ever comes back.
+    assert scope._unwrap_bounded(["--", ".venv/bin/python", "-m", "pyright", "--timeout", "5"]) == [
+        ".venv/bin/python",
+        "-m",
+        "pyright",
+        "--timeout",
+        "5",
+    ]
+    assert scope._unwrap_bounded(["--timeout", "10", "--", "pyright", "tests", "--grace", "2"]) == [
+        "pyright",
+        "tests",
+        "--grace",
+        "2",
+    ]
     assert inner[-1] == ".", f"the bound wraps a whole-tree pyright, not a file list: {inner!r}"
     assert not any(token.endswith(".py") and "/" in token for token in inner), inner
+
+
+def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
+    """A17. The Makefile target is a SECOND copy of the command, so it is guarded.
+
+    `make type-check` spells the bounded pyright out itself; `JOB_COMMANDS` spells
+    it for `make check-changed`. Two spellings of one gate is exactly the drift
+    this file exists to prevent, and de-wrapping the recipe alone used to leave
+    both A16 and A11 green (review round 1, MINOR 2). The forms are compared with
+    the bound value abstracted, so a change to either the wrapper, the flags, the
+    payload or the bound fails here, and the two DEFAULTS are asserted equal so the
+    Makefile cannot quietly bound itself differently from the runner.
+
+    Mutations that must fail this: textually unwrap the recipe; change its
+    `BOUND_TIMEOUT` default; or narrow its payload to a file list.
+    """
+    scope = _scope()
+    job_tokens = shlex.split(scope.JOB_COMMANDS["type-check"][0])
+    job_tokens[job_tokens.index(str(scope.BOUNDED_GATE_TIMEOUT))] = "BOUND"
+
+    # Read from the file rather than through `make -n`: `make` would resolve the
+    # override and print whatever it was given, not the default a developer gets.
+    # `_makefile_recipe_blocks` keeps the target association a flat list loses.
+    recipe = _makefile_recipe_blocks()["type-check"].replace("\\\n", " ")
+    make_tokens = shlex.split(recipe)
+    assert "$(BOUND_TIMEOUT)" in make_tokens, make_tokens
+    make_tokens[make_tokens.index("$(BOUND_TIMEOUT)")] = "BOUND"
+
+    assert make_tokens == job_tokens, (
+        "the Makefile target and JOB_COMMANDS have drifted apart: "
+        f"make={' '.join(make_tokens)!r} job={' '.join(job_tokens)!r}"
+    )
+    default = re.search(r"^BOUND_TIMEOUT \?= (\d+)$", MAKEFILE.read_text(), re.MULTILINE)
+    assert default, "the Makefile has no BOUND_TIMEOUT default"
+    assert int(default.group(1)) == scope.BOUNDED_GATE_TIMEOUT, (
+        f"the Makefile bounds itself at {default.group(1)}s while the runner uses "
+        f"{scope.BOUNDED_GATE_TIMEOUT}s"
+    )
+    assert job_tokens[-1] == ".", "both spellings stay whole-tree"
 
 
 def test_ci_and_make_share_one_classifier_module() -> None:
