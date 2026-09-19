@@ -552,6 +552,50 @@ def test_an_in_place_install_attests_before_it_rewrites_the_tree(
     assert marker["pid"] == 4246
 
 
+def test_a_failed_in_place_install_withdraws_the_attestation_it_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR 2 on the install path: a failed install leaves no verdict behind.
+
+    The marker is staged before the installer runs, and a non-zero exit means the
+    upgrade did NOT happen — the caller raises ``UpdateError``, so the operator is
+    told it failed. The marker would say the opposite, for the whole RUN it is keyed
+    to: an unrelated crash an hour later would render as "its install was being
+    replaced in place". The report wins, and the artifact has to agree with it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4247,
+        kind="daemon",
+        session_id="pipfailed",
+        conversation_name="pipfailed",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+    monkeypatch.setattr(update_mod, "_run_installer", lambda *a, **k: 1)
+
+    with pytest.raises(UpdateError):
+        perform_upgrade(
+            target="0.28.0",
+            kind=InstallKind.PIP,
+            prefix=sys.prefix,
+            executable=sys.executable,
+        )
+
+    assert (
+        registry.read_stop_marker(session_dir(root, record.session_id)) is None
+    ), "an install that failed must not leave a verdict saying it took the tree"
+
+
 def test_perform_upgrade_refuses_editable_and_unknown() -> None:
     with pytest.raises(UpdateError, match="repo .venv"):
         perform_upgrade(target="0.28.0", kind=InstallKind.EDITABLE, run=lambda _: 0)

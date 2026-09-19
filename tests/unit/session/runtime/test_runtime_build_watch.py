@@ -19,6 +19,7 @@ never exit, production supplies no callback) is pinned in
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 
@@ -204,7 +205,11 @@ def test_the_watchers_share_one_build_rule() -> None:
     assert retire.buildwatch is buildwatch
     assert process.BUILD_CHECK_S == buildwatch.BUILD_CHECK_S
     assert process.BUILD_SETTLE_S == buildwatch.BUILD_SETTLE_S
-    assert retire.buildwatch.BUILD_CHECK_S == buildwatch.BUILD_CHECK_S
+    # NOTHING MORE TO PIN ON THE DAEMON'S SIDE (review round 1, NIT 1): the identity
+    # assertions above are what hold both readers on the one rule, and the line that
+    # used to sit here compared ``retire.buildwatch.BUILD_CHECK_S`` with
+    # ``buildwatch.BUILD_CHECK_S`` — the same object read twice, which could never
+    # redden for the drift it claimed to catch.
 
 
 def test_a_handle_without_the_idle_predicate_is_never_retired() -> None:
@@ -222,18 +227,123 @@ def test_a_handle_without_the_idle_predicate_is_never_retired() -> None:
     assert process._should_refresh(NoProbe(), BOOT) is None
 
 
-def test_the_watcher_never_signals_anyone(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_watcher_never_signals_anyone() -> None:
     """A structural pin for the symptom this change set is about: nothing kills.
 
     ``IdleHandle.request_stop`` raises, and the fall-through of every guard above
     is the graceful disposal, so the only way this path can end a runtime is by the
-    runtime leaving itself. Asserted by name rather than by behaviour because the
-    count of kill sites is what an investigation reads: ``grep -rn 'os.kill'`` over
-    this module must never grow one.
+    runtime leaving itself. The count of kill sites is what an investigation reads
+    (``grep -rn 'os.kill'`` over this module is how the 2026-09-18 sweep was looked
+    for), so the module is read as code rather than as text: an AST walk for
+    kill-SHAPED calls, in every spelling, reported with the line that holds one.
+
+    WHAT THIS REPLACED, and why (review round 1, MINOR 3). The text pin matched
+    three literal substrings over the source: a comment mentioning ``os.kill``
+    turned it red, while ``os.killpg``, ``Popen.kill``, ``Process.terminate``,
+    ``signal.raise_signal`` and ``subprocess.run(["kill", …])`` all stayed green —
+    brittle in the direction that costs a re-run and blind in the direction that
+    costs a runtime.
     """
     from pathlib import Path
 
-    source = (Path(process.__file__)).read_text(encoding="utf-8")
-    assert "os.kill" not in source
-    assert "signal.SIGKILL" not in source
-    assert "_signal_and_confirm" not in source
+    source = Path(process.__file__).read_text(encoding="utf-8")
+    sites = _kill_shaped_sites(source)
+    assert sites == [], "this module must not be able to end a process: " + "; ".join(sites)
+
+
+#: Method/function names that end a process, matched on the LAST component so that
+#: ``os.kill``, ``os.killpg``, ``Popen.kill()``, ``Process.terminate()``,
+#: ``Connection.send_signal()`` and ``signal.raise_signal()`` are one shape: a call
+#: whose name says what it does to a process.
+_KILL_CALLS = frozenset({"kill", "killpg", "terminate", "send_signal", "raise_signal"})
+
+#: Call names that SPAWN something, checked for a killer in their argv: a shell
+#: ``kill`` reaches the same place as ``os.kill`` while carrying none of its names,
+#: and this is the spelling a name-based pin cannot see.
+_SPAWN_CALLS = frozenset(
+    {"run", "call", "check_call", "check_output", "system", "popen", "Popen", "execv", "execvp"}
+)
+_KILLER_TOKENS = ("kill",)
+
+
+def _kill_shaped_sites(source: str) -> list[str]:
+    """Every ``line N: …`` in ``source`` that could end a process, or ``[]``.
+
+    Reads the module as CODE (review round 1, MINOR 3): a comment saying ``os.kill``
+    is not a kill site, and ``os.killpg`` is, whatever the text looks like. Three
+    spellings are covered because each is a way a runtime really dies here — the
+    signal call, the process-object method, and a spawned ``kill`` — and anything
+    the walk cannot see is reported as nothing rather than as a pass, which is why
+    the call SHAPES are listed above rather than a distance to the nearest ``kill``.
+    """
+
+    def called_name(node: ast.Call) -> str:
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return func.id if isinstance(func, ast.Name) else ""
+
+    def literals(node: ast.Call) -> list[str]:
+        """Every string constant in the call's own arguments, nested lists included."""
+        out: list[str] = []
+        for arg in [*node.args, *node.keywords]:
+            for inner in ast.walk(arg):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    out.append(inner.value)
+        return out
+
+    sites: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        # The control ladder's own SIGTERM/SIGKILL rungs: reaching into them from a
+        # build watch is exactly the coupling this pin forbids, however it is
+        # spelled (``control._signal_and_confirm`` or an imported bare name).
+        if isinstance(node, ast.Name) and node.id == "_signal_and_confirm":
+            sites.append(f"line {node.lineno}: references _signal_and_confirm")
+            continue
+        if isinstance(node, ast.Attribute) and node.attr == "_signal_and_confirm":
+            sites.append(f"line {node.lineno}: references _signal_and_confirm")
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        name = called_name(node)
+        if name in _KILL_CALLS:
+            sites.append(f"line {node.lineno}: calls {name}()")
+            continue
+        if name in _SPAWN_CALLS and any(
+            token in word for word in literals(node) for token in _KILLER_TOKENS
+        ):
+            sites.append(f"line {node.lineno}: spawns something called a killer ({name})")
+    return sites
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "import os\nos.kill(1, 0)\n",
+        "import os\nos.killpg(1, 0)\n",
+        "handle.kill()\n",
+        "child.terminate()\n",
+        "import signal\nsignal.raise_signal(signal.SIGKILL)\n",
+        "conn.send_signal(9)\n",
+        'import subprocess\nsubprocess.run(["kill", "-9", "1"])\n',
+        "control._signal_and_confirm(record, SIGTERM, 1.0)\n",
+    ],
+)
+def test_the_no_kill_pin_sees_every_spelling(snippet: str) -> None:
+    """The instrument finds what the text pin could not (review round 1, MINOR 3).
+
+    Each spelling here is a way a runtime really dies, and the pin it replaced —
+    three literal substrings over the source — was blind to all but the first.
+    Asserted on the WALKER rather than on the module, because the module is
+    supposed to be clean: a guard nobody has seen fail is not a guard.
+    """
+    assert _kill_shaped_sites(snippet) != [], snippet
+
+
+def test_the_no_kill_pin_ignores_prose() -> None:
+    """...and it does not redden on a COMMENT, which is what the text pin did.
+
+    The comment below names the exact call the pin exists to forbid; the module is
+    allowed to talk about it (this file does), and only a CALL is a site.
+    """
+    assert _kill_shaped_sites("# never call os.kill / signal.SIGKILL here\nx = 1\n") == []
