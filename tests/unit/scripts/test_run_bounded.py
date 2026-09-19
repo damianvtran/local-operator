@@ -206,6 +206,11 @@ def test_a_bound_kills_the_whole_group_not_just_the_leader(reap_markers):
 
     assert result.returncode == 124, "a fired bound reports timeout(1)'s status"
     assert "timeout after 1s" in result.stderr
+    # The bound is not a gate failure, and the developer reading this line is the
+    # one who needs the remedy — `make type-check` prints nothing else (review
+    # round 2, M3 / QA Q4).
+    assert "that is the BOUND" in result.stderr, result.stderr
+    assert "raise it" in result.stderr, result.stderr
     assert _wait_until_gone(token) == [], "the group outlived the bound"
 
 

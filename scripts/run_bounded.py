@@ -29,9 +29,11 @@ wrapper on their own:
 
 * a descendant still alive when the leader exits BY ITSELF — an ordinary exit is
   not a bound at all, and nothing else reaps the group;
-* a group that ignores SIGTERM, where a bare `timeout` waits it out (measured:
-  wedged for 300 s, while this wrapper's SIGKILL escalation cleared the same tree
-  in ~8 s).
+* a group that ignores SIGTERM, where a bare `timeout` waits it out (measured over
+  a SIGTERM-ignoring tree: `timeout 3` fires at 3 s and then waits the TREE out —
+  30 s for a 30 s tree, 300 s in an earlier run for a 300 s one — where this
+  wrapper's SIGKILL escalation clears the same tree in 5 s with `--grace 2`; the
+  shipped `--grace` default of 10 would take ~13 s for it).
 
 So the wrapper puts the command in its own session (`start_new_session=True`, so
 it leads a fresh process group its children inherit) and signals the GROUP on
@@ -44,7 +46,7 @@ platform this bites hardest.
 
 USAGE
 -----
-    python scripts/run_bounded.py --timeout 900 -- <command> [args…]
+    python scripts/run_bounded.py --timeout 1800 -- <command> [args…]
     python scripts/run_bounded.py -- <command> [args…]      # no bound, still reaped
 
 Run it through the interpreter (`.venv/bin/python scripts/run_bounded.py …`),
@@ -233,6 +235,17 @@ def run(
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 _reap(pgid, grace, proc.poll, stream, reason=f"timeout after {timeout:g}s")
+                # Say what this is and what to do about it, on THIS path too: the
+                # bound is a per-host judgement, a loaded host is the one that
+                # legitimately reaches it, and `make type-check` prints nothing
+                # else — a developer there would otherwise learn what happened but
+                # not what to do (review round 2, M3 / QA Q4).
+                stream.write(
+                    f"[run_bounded] that is the BOUND ({timeout:g}s) firing, not the gate "
+                    "failing — re-run it, or raise it (--timeout, or "
+                    "`make type-check BOUND_TIMEOUT=<seconds>`)\n"
+                )
+                stream.flush()
                 proc.wait()
                 rc = EXIT_TIMEOUT
                 break
@@ -278,7 +291,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=(
             "seconds before the whole process group is signalled (default: no "
-            "bound). CI's own bound for this gate is 15 minutes, so 900 mirrors it."
+            "bound). The local typed gate ships 1800 — twice ci.yml's 15-minute "
+            "provision, because a whole-tree pyright measures 508-1170 s on a "
+            "loaded host here and timing out a slow host is worse than waiting for "
+            "it — and `make type-check BOUND_TIMEOUT=<seconds>` raises it for one "
+            "run."
         ),
     )
     parser.add_argument(

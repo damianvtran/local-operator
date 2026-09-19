@@ -142,7 +142,8 @@ check-changed: ## Run the CI gates this branch's diff can affect
 # when the leader exits by itself, and a group that ignores SIGTERM (measured over
 # a SIGTERM-ignoring tree: `timeout 3` fires at 3 s and then WAITS THE TREE OUT —
 # 30 s for a 30 s tree, 300 s in an earlier run for a 300 s one — where the
-# wrapper's SIGKILL escalation cleared the same tree in 5 s).
+# wrapper's SIGKILL escalation cleared the same tree in 5 s with `--grace 2`; the
+# shipped `--grace` default of 10 takes ~13 s for it).
 #
 # The bound is generous on purpose: a whole-tree pyright measures 508 s quiet and
 # 1170 s under load on this fleet, so a bound mirroring ci.yml's
