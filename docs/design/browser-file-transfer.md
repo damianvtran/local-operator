@@ -582,7 +582,8 @@ told to use the browser and was not told why reached for playwright anyway
 | sniff disagrees with the name | kept, renamed, and said so: "saved as `x.pdf` (the server called it `x.zip`; content is PDF)" |
 | executable content | "refused and deleted: the file at `<path>` is a `<type>`. Nothing executable is ever kept." |
 | over cap | "refused: `<name>` is `<n>` bytes, over the `<cap>` limit" |
-| upload refused | the specific reason: "outside the workspace", "symlink to a credential file", "matches the credential deny-list", "`<n>` bytes over the limit", "not a regular file" |
+| upload refused | the specific reason: "that file is inside Local Operator's own config directory", "`<basename>` matches the credential deny-list (`<pattern>`)", "`<basename>` is inside a `<component>` directory, which holds credentials", "not a regular file", "`<n>` bytes over the `<cap>` limit", "`<path>` does not exist", "the file is empty" |
+| upload from outside the workspace | **NOT refused** — the approval row is MARKED `[outside workspace]` (§7.3) and the call proceeds. Corrected here in §17.7 #8: refusing it would refuse the file the user just downloaded into this session's own quarantine root, which is the feature's main use, and the containment rule this table implied has no counterpart in §9.2's check list. The controls are the config-root refusal, the credential deny-list on the RESOLVED path, and the cap — informed consent for the rest is the describer's job |
 
 ---
 
@@ -1565,6 +1566,7 @@ which needs the operator's own logged-in profile.
 | 5 | §9.4 leaves partial multi-file outcomes open | all-or-nothing: one refused path attaches nothing | a partial attach sends the page a set of files the caller never named, and the refusal sentence ("nothing was attached") is only true this way |
 | 6 | §4.1's stamped session directory | …with a `-2`, `-3`… suffix when the stamp collides | the stamp has one-second resolution, and two calls in the same second would share a directory — so the second call's before/after diff would be compared against the first call's files |
 | 7 | §6.1's `timeout_s` "extended by timeout_s to a hard ceiling of 600 s" | the wire key extends BOTH the daemon's budget and the client's timeout, clamped to the shared ceiling | the client would otherwise time out first and report an unreachable daemon while the daemon was healthy and about to deliver (§A3's class of mismatch) |
+| 8 | §7.4 lists "outside the workspace" among the reasons an upload is REFUSED | §7.4 is CORRECTED, not the code: an outside-workspace file is MARKED in the approval row (`_approval_description(..., "upload", ...)`, §7.3) and the call proceeds | found by PR B's QA (probe P15): the documented refusal read stronger than the behaviour. Refusing outside-workspace paths would refuse the file the user just downloaded into this session's own quarantine root, which is the feature's main use, and §9.2's check list never had a containment rule. The controls are the config-root refusal, the credential deny-list on the RESOLVED path, and the cap; informed consent for the rest is the describer's, exactly as §7.3 says |
 
 ### 17.8 Still unverified
 

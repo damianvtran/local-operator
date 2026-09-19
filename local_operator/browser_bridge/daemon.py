@@ -3847,6 +3847,12 @@ class BridgeService:
                 "extension_connected": connected,
                 "paired": self.link.paired,
                 "browser": self.link.browser,
+                # ADDITIVE, and a STRING only: the quarantine root a `download`
+                # writes into (design §4.4). The daemon does not stat it — this
+                # payload is polled by the popup, and a directory walk on a polled
+                # path is I/O for a number nobody reads there. The CLI, which runs
+                # on this machine already, prints the size.
+                "downloads_dir": str(browser_files.downloads_root()),
                 "current_url": self.link.current_url,
                 "current_title": self.link.current_title,
                 # Additive OPTIONAL fields (HTTP, not the WS protocol, so an old

@@ -15,7 +15,6 @@ guarantee — plus the fixture's own self-check.
 
 from __future__ import annotations
 
-import os
 import stat
 from pathlib import Path
 
@@ -385,3 +384,34 @@ def test_the_audit_writer_creates_its_directory_private() -> None:
     root = bf.downloads_root()
     assert root.is_dir()
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+
+def test_check_upload_does_not_confine_the_caller_to_the_workspace(tmp_path: Path) -> None:
+    """A deliberate NON-refusal, pinned so it cannot drift back (§7.4, §17.7 #8).
+
+    An earlier draft of the design listed "outside the workspace" among the
+    refusal reasons, and PR B's QA compared the sentence to the behaviour. The
+    behaviour is the one that is right: this session's own quarantine root is
+    outside the workspace, and so is the user's Downloads folder, so a
+    containment rule would refuse the file the user asked the agent to send. The
+    workspace is MARKED in the approval row (`[outside workspace]`, the `write`
+    convention) and the controls stay the config-root refusal, the credential
+    deny-list on the RESOLVED path, and the cap.
+    """
+    workspace = tmp_path / "workspace"
+    elsewhere = tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    deck = elsewhere / "deck.pptx"
+    deck.write_bytes(b"PK\x03\x04a deck")
+
+    resolved, reason = bf.check_upload(str(deck), cwd=str(workspace))
+    assert reason == "", "outside-workspace is not a refusal"
+    assert resolved == deck.resolve()
+
+    # The neighbouring refusal does NOT need the workspace to fire, and it still
+    # does: only the deny-list and the config root stop a resolved path.
+    key = elsewhere / ".ssh" / "id_rsa"
+    key.parent.mkdir()
+    key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    assert bf.check_upload(str(key), cwd=str(workspace))[0] is None
