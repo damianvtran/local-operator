@@ -27,7 +27,8 @@ import os
 import stat
 from pathlib import Path
 
-from local_operator.paths import O_BINARY, config_dir
+from local_operator.paths import config_dir
+from local_operator.procstate import O_BINARY
 from local_operator.secrets.crypto import KEY_BYTES, generate_master_key
 from local_operator.secrets.errors import InsecurePermissions, SecretStoreError
 

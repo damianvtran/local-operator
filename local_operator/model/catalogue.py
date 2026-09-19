@@ -63,7 +63,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from local_operator.paths import O_BINARY
+from local_operator.procstate import O_BINARY
 
 logger = logging.getLogger("local_operator.model.catalogue")
 

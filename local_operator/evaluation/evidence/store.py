@@ -55,8 +55,8 @@ from local_operator.evaluation.evidence.models import (
     UserSimulatorExchangePayload,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
-from local_operator.paths import O_BINARY
 from local_operator.evaluation.receipts import RedactionSet
+from local_operator.procstate import O_BINARY
 
 _LOCK = ".lock"
 _MANIFEST = "manifest.json"

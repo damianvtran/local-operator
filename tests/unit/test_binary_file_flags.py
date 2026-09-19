@@ -19,7 +19,7 @@ be just as unreliable, so these tests FORCE it: every payload here contains
 ``0x0A`` by construction, which makes the failure deterministic on any platform
 that translates and a no-op everywhere else.
 
-Off Windows ``paths.O_BINARY`` is ``0``, so ``flags | O_BINARY`` is
+Off Windows ``procstate.O_BINARY`` is ``0``, so ``flags | O_BINARY`` is
 bit-identical to ``flags`` -- these tests cannot change POSIX behaviour, they
 only stop the Windows arm from corrupting what it writes.
 """
@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from local_operator import paths
+from local_operator import procstate
 from local_operator.secrets import keys
 
 #: 32 bytes of the one value that text mode rewrites. Same length as a master
@@ -40,9 +40,9 @@ NEWLINE_PAYLOAD = b"\n" * 32
 def test_o_binary_is_a_no_op_off_windows() -> None:
     """The premise every other assertion rests on, checked rather than assumed."""
     if os.name == "nt":
-        assert paths.O_BINARY != 0, "Windows must have a real O_BINARY"
+        assert procstate.O_BINARY != 0, "Windows must have a real O_BINARY"
     else:
-        assert paths.O_BINARY == 0, "POSIX has no such mode, so the flag must vanish"
+        assert procstate.O_BINARY == 0, "POSIX has no such mode, so the flag must vanish"
 
 
 def test_write_private_file_preserves_a_newline_byte(tmp_path: Path) -> None:

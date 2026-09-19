@@ -19,23 +19,9 @@ import os
 import sys
 from pathlib import Path
 
-#: ``os.O_BINARY`` where the platform has it (Windows), ``0`` everywhere else.
-#:
-#: **Every ``os.open`` + ``os.write`` pair in this package must OR this into its
-#: flags**, and the reason is not style. On Windows ``os.open`` opens in the
-#: CRT's TEXT mode unless ``O_BINARY`` is given, and text mode TRANSLATES: a
-#: ``0x0A`` byte in the buffer handed to ``os.write`` is written as
-#: ``0x0D 0x0A``. Every caller here writes BYTES -- a master key, a sealed
-#: secret, a JSONL frame whose length a reader checks -- so the translation
-#: corrupts exactly the payloads that have to be byte-exact.
-#:
-#: It is INTERMITTENT, which is what kept it hidden: a 32-byte master key is
-#: only corrupted when the random key happens to CONTAIN ``0x0A`` (about one run
-#: in eight), so the Windows probe passed on most runs and then read back
-#: ``master.key is 33 bytes; a master key is 32`` on another. Off Windows this
-#: is ``0``, so ``flags | O_BINARY`` is bit-identical to ``flags`` and POSIX
-#: behaviour cannot change.
-O_BINARY = getattr(os, "O_BINARY", 0)
+# `O_BINARY` deliberately does NOT live here -- see
+# `local_operator.procstate.O_BINARY`. This module is on the runner core's
+# forbidden-import list, so anything the runner needs must live below it.
 
 #: Environment variable that relocates everything below. Tests set it to a
 #: tmp_path so a run can never touch a developer's real credentials, which is

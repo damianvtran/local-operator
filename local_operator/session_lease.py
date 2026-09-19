@@ -22,8 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
 
-from local_operator.paths import O_BINARY
-from local_operator.procstate import is_zombie, pid_liveness
+from local_operator.procstate import O_BINARY, is_zombie, pid_liveness
 
 LEASE_NAME = ".execution-lease"
 MIRROR_NAME = ".session.pid"

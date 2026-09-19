@@ -33,7 +33,7 @@ from uuid import uuid4
 
 from local_operator import procstate
 from local_operator.interpreter import python_argv
-from local_operator.paths import O_BINARY
+from local_operator.procstate import O_BINARY
 
 
 def logs_dir() -> Path:

@@ -54,7 +54,7 @@ import os
 import time
 from pathlib import Path
 
-from local_operator.paths import O_BINARY
+from local_operator.procstate import O_BINARY
 
 #: Beside the transcript, in the family the per-session sidecars already use
 #: (``.execution-lease``, ``.session.pid``). Dotted so a listing that walks a
