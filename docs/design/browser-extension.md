@@ -45,7 +45,13 @@ discovery pattern, the one-surface-per-session rule).
   as cmux owns a dedicated surface (`_cmux_new_surface`, builtin.py:4854
   documents why the one-surface rule exists). An explicit
   "attach to my current tab" affordance is future work.
-- Multi-tab sessions, downloads, file uploads, iframes-as-first-class targets.
+- Multi-tab sessions and iframes-as-first-class targets. Multi-tab ARRIVED in a
+  later PR (the surface registry and the ownership lifecycle); **downloads and
+  file uploads left this list** in PR #1323 — `upload` on both non-cmux hosts,
+  `download` on the desktop app's host only, because Chrome refuses an extension
+  the browser-level download commands that would let it choose a destination
+  (see `docs/design/browser-file-transfer.md`, whose errata section carries the
+  measurement).
 - Any remote (non-loopback) access.
 
 ## 2. What the existing code fixes in place
@@ -314,6 +320,11 @@ and for a debug log; nothing may gate on it being parsed.
 
 ### 4.3 Command catalog (daemon→extension = the session-leg methods, relayed)
 
+The catalog below predates the file-transfer methods; the `download`/`upload`
+rows and section 4.5 are where that change landed, and the counts elsewhere in
+this document are left as they were written (the docstrings and
+`local_operator/browser_bridge/protocol.py` are the live source).
+
 Every command carries `tab` (the daemon-issued surface token, section 5.1)
 except `open` and `status`.
 
@@ -328,6 +339,8 @@ except `open` and `status`.
 | `type` | `tab, ref \| selector, text` | `value, url, title` | Focus + replace-not-append (the cmux fill-vs-type lesson, builtin.py:5388-5392): select-all then `Input.insertText`. Returns the field's post-fill value; **Python** keeps the compare-not-echo check (builtin.py:5413-5429). |
 | `close` | `tab` | `{}` | `chrome.tabs.remove`; idempotent — an already-gone tab is success. |
 | `status` | — | `tab?, url?, title?, origin_mode` | Liveness probe; the bridge analogue of `_cmux_url_probe`-as-liveness (builtin.py:4998-5006). |
+| `upload` | `tab, ref \| selector, paths[]` | `inputs, accepted[], refused[]` | `DOM.setFileInputFiles` over the tab-scoped debugger session this extension already holds, followed by a READ-BACK of the input's `files` compared against what was set (the `type` rule, Python keeps the compare). The paths are absolute and were validated by PYTHON (`browser_files.check_upload`); the extension's own checks are defence in depth, and a refusal travels as `ok:true` with a `refused` list because an `ErrorCode` the extension emits can be dropped by an already-released daemon (section 4.4, `capability_unsupported`). |
+| `download` | — | — | **Not served by the extension, and not advertised by it.** Chrome refuses `Page.setDownloadBehavior` (`-32000 "Cannot not access browser-level commands"`) and `Browser.setDownloadBehavior` (`-32601`) to a tab-scoped `chrome.debugger` session, no browser target is attachable, and no `downloadWillBegin`/`downloadProgress` event is delivered — measured on Chrome 153.0.8010.53. The desktop app's host serves it (Electron's `will-download` + `setSavePath`); the harness answers a request on this host with a typed `capability_unsupported` naming where to go instead. |
 
 Session-leg-only methods (answered by the daemon itself, never relayed):
 `ping` (health), used by `lop browser status`.
@@ -352,6 +365,7 @@ Session-leg-only methods (answered by the daemon itself, never relayed):
 | `extension_unresponsive` | The socket is up and paired but the worker has stopped answering (§5.2). Latched, so `/health` also reports it for 60 s after the daemon severs the link — the state it is observed in and the state that follows it must not be byte-identical. |
 | `proto_mismatch` | Handshake version disagreement. |
 | `internal` | Anything unclassified; message carries the detail. |
+| `capability_unsupported` | The attached host did not advertise the requested method (section 4.5). **Daemon-to-session only**: an extension that EMITTED a code an already-released daemon does not know would have its frame dropped, so a host-side policy refusal is a RESULT (`ok:true` with a reason), and the daemon is the only emitter of this one. The copy separates FOUR remedies that must not be merged — no build of that host can serve it, this build predates it, the BRIDGE predates the advertisement (so the extension was never asked), and this build is current but stopped advertising. The third is what the bridge record's own `capabilities_known` stamp exists to identify: an empty `capabilities` list from a daemon that does not know the field says nothing about the extension, and its remedy is `lop browser restart`, not an extension toggle. |
 
 Timeout is expressed as `nav_timeout`/`internal` with `data.timeout_s` rather
 than a transport-level silence: the daemon's per-command deadline (section
@@ -372,6 +386,38 @@ never invents a code; it attaches a key:
 | `internal` | `tab_crashed` | The page died under us. |
 | `internal` | `timeout_s` | **Daemon-generated**: the command exhausted its budget. Nothing else sets this key, which is why it is the discriminator that stops a daemon-side timeout being reported as "update your extension". |
 | `internal` | `phase` | **Daemon-generated** on an `extension_unresponsive`: `gate` / `send` / `response` names where the link gave up, and `dropped` the state after the daemon severed it. |
+
+### 4.5 Capability advertisement, and why the proto window does not move
+
+The extension sends a `capabilities` event (`methods`, `version`) immediately
+after `hello`, and both host records carry the same list additively. It is an
+event rather than a `Hello` field because `Hello` is validated with
+`extra="forbid"`: a new field there is closed 4001 by every already-released
+daemon, while an unknown EVENT is dropped harmlessly. `PROTO_VERSION` and
+`MIN_SUPPORTED_PROTO` therefore stay at 1 — no existing frame's meaning changed.
+
+The daemon refuses to SEND a method a peer did not advertise, and the harness
+checks the record first (no socket call), so a pre-feature host produces a typed
+`capability_unsupported` instead of a command that burns its whole budget and
+returns a bare `internal`. The list is the extension's own dispatch table, so an
+advertised capability cannot drift from a served one.
+
+**An empty list needs its cause named, and the daemon stamps its own.** A
+record whose `capabilities` is empty can mean either "the extension advertised
+nothing" (toggle it) or "the bridge that wrote this record predates the
+advertisement" (restart it, `lop browser restart`) — opposite remedies, and the
+list alone cannot say which. So the daemon writes `capabilities_known: true` on
+its own record, which makes the field's ABSENCE name the writer: an older daemon
+drops the unknown key, and the harness reads that as "an old bridge" rather than
+as a mute extension. The same absence is what `lop browser status` prints as
+`bridge: predates the file-transfer actions`.
+
+**Policy decisions travel as RESULTS, not as new codes.** A refusal this side
+makes — a name-denied download, a credential-listed upload path — arrives as
+`ok:true` with a reason the harness renders. That is not a workaround for the
+dropped-code problem above; it is also the better shape, because the refusal
+carries a payload (what was refused, why, what is on disk) that `{code, message}`
+cannot express.
 
 ## 5. Extension architecture (Manifest V3)
 
