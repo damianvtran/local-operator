@@ -151,7 +151,13 @@ from local_operator.session.goal_loop import (
     _parse_loop_verdict,
 )
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
-from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
+from local_operator.session.runtime.types import (
+    BUILD_DRAIN_PROGRESS_S,
+    LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
+    LEAVING_ON_SIGNAL,
+    bound_text,
+)
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
@@ -697,6 +703,34 @@ SIGNAL_DRAIN_NOTICE = (
     "so a new message will not start a turn"
 )
 
+#: The notice for a runtime that gave up WAITING for the work in flight
+#: (``LEAVING_FOR_BUILD_OVERDUE``): a build handover that was forced rather than
+#: waited out, which is a different departure from :data:`DRAIN_NOTICE` in its
+#: second clause and the same one in its first.
+#:
+#: WHY IT MAY NOT REUSE THE ORDINARY BUILD SENTENCE. That sentence's promise —
+#: "it is finishing in-flight work first" — is exactly what this runtime has
+#: stopped doing: it denies the parked gates, hands the wakes over and cuts the
+#: turn. Painting it at that instant would reassure the operator about the one
+#: thing that is not true, in the sentence people act on when they decide the
+#: session is safe to leave alone (design round 1, D1; QA round 1, Q-1, which
+#: measured the frame rendering byte-identical to the unplaceable-phrase
+#: fallback).
+#:
+#: THE SENTENCE SAYS WHAT WAS OBSERVED, NOT WHY. "no movement has been reported"
+#: is the runtime's own evidence — the clock reads reports of movement and a
+#: foreground step reports nothing until it lands, so "stalled" would assert a
+#: cause the runtime cannot establish (agent review round 1, R1). The bound is
+#: rendered from the constant rather than typed, like the signal notice's.
+#: It stays a sentence about the HANDOVER, not about the cut turn's contents: the
+#: operator's question is whether their session is coming back, and the answer is
+#: the same one the ordinary build notice gives.
+OVERDUE_DRAIN_NOTICE = (
+    "this session is switching to a newer build without waiting any longer: no "
+    f"movement has been reported from the work in flight for {bound_text(BUILD_DRAIN_PROGRESS_S)}, "
+    "so a new message will not start a turn until the new build is up"
+)
+
 #: The notice for a draining frame whose trigger this build cannot name — a
 #: phrase written by a NEWER runtime than the app reading it. Kept separate from
 #: :data:`DRAIN_NOTICE` on purpose, and it is the whole point of the split: a
@@ -716,6 +750,7 @@ DRAIN_NOTICE_OTHER = (
 _DRAIN_NOTICES: dict[str, str] = {
     LEAVING_FOR_BUILD: DRAIN_NOTICE,
     LEAVING_ON_SIGNAL: SIGNAL_DRAIN_NOTICE,
+    LEAVING_FOR_BUILD_OVERDUE: OVERDUE_DRAIN_NOTICE,
 }
 
 

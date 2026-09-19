@@ -45,10 +45,12 @@ from local_operator.session.runtime.process import (
     _BUILD_OVERDUE_EXIT_REASON,
     _BUILD_OVERDUE_REASON,
     _Drain,
+    _drain_detail_at_exit,
     _drain_for,
     _reaper,
 )
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
@@ -90,9 +92,20 @@ class FakeTranscript:
 
 
 class FakeJob:
+    """A job row, with the two fields that separate a working job from a live id.
+
+    ``output_seq``/``latest_details`` are the real ``AsyncJob`` fields
+    (``harness/jobs.py``): the first is the live-output offset ``append_output``
+    counts up, the second carries the child relay's activity string. A double that
+    omitted them would make every job look silent and quietly delete the signal
+    this file exists to pin.
+    """
+
     def __init__(self, job_id: str, status: str = "running") -> None:
         self.id = job_id
         self.status = status
+        self.output_seq = 0
+        self.latest_details: dict[str, Any] = {}
 
 
 class FakeJobs:
@@ -226,6 +239,25 @@ def _settle_a_job(rig: SimpleNamespace) -> None:
     rig.session.jobs.rows.append(FakeJob(f"job-{len(rig.session.jobs.rows)}"))
 
 
+def _print_from_a_job(rig: SimpleNamespace, chunk: int = 64) -> None:
+    """A job's live output growing: what ``append_output`` does as chunks arrive.
+
+    The LAST row, because a test that settles a job first then prints is modelling
+    the ordinary shape — a job that has started WORKING, not one that has just been
+    admitted.
+    """
+    if not rig.session.jobs.rows:
+        _settle_a_job(rig)
+    rig.session.jobs.rows[-1].output_seq += chunk
+
+
+def _report_from_a_lane(rig: SimpleNamespace, progress: str = "responding") -> None:
+    """A lane's activity string moving: written by the child's own relay."""
+    if not rig.session.jobs.rows:
+        _settle_a_job(rig)
+    rig.session.jobs.rows[-1].latest_details = {"progress": progress}
+
+
 def _spool_a_message(rig: SimpleNamespace) -> None:
     with (rig.dir / "inbox.jsonl").open("a", encoding="utf-8") as handle:
         handle.write('{"text": "hello"}\n')
@@ -323,6 +355,132 @@ async def test_a_settling_job_resets_the_clock(rig) -> None:
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_is_printing_resets_the_clock(rig) -> None:
+    """A job whose child is WRITING OUTPUT is work, and it moves the clock (R1).
+
+    ``append_output`` advances the job's live-output offset as chunks arrive from
+    the pipe reader, so a background build or a mirrored bash child that keeps
+    printing separates from a child that is alive at 0.1% CPU having said nothing
+    for the whole bound. The first cut of this backstop could not tell those two
+    apart and force-cut both, which is the finding this signal answers.
+    """
+    assert await _tick(rig, T0) is False
+    _settle_a_job(rig)
+    assert await _tick(rig, T0 + 1) is False, "the row is seen here; the clock starts at it"
+
+    _print_from_a_job(rig)
+    # Observed at the NEXT tick, and measured from THERE: a hold longer than the
+    # bound survives on printing alone, one tick at a time.
+    assert await _tick(rig, T0 + BOUND - 1) is False
+    assert rig.runtime.retiring == []
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+
+
+@pytest.mark.asyncio
+async def test_a_lane_reporting_activity_resets_the_clock(rig) -> None:
+    """A lane's activity string is written by the CHILD's own event stream.
+
+    ``report_progress`` -> ``latest_details[\"progress\"]`` is coarse next to a step
+    boundary, but it is not a tick: it changes when the lane's relay sees its model
+    call or message move, so a lane parked inside a silent tool is distinguishable
+    from one that is responding.
+    """
+    assert await _tick(rig, T0) is False
+    _settle_a_job(rig)
+    assert await _tick(rig, T0 + 1) is False, "the row is seen here; the clock starts at it"
+
+    _report_from_a_lane(rig)
+    assert await _tick(rig, T0 + BOUND - 1) is False
+    assert rig.runtime.retiring == []
+    assert await _tick(rig, T0 + BOUND - 1 + BOUND) is True
+
+
+@pytest.mark.asyncio
+async def test_a_job_row_that_never_changes_cannot_hold_the_drain_open(rig) -> None:
+    """The other half of the same signal, and the half that must not be silent.
+
+    A row is not movement; only a CHANGE to one is. A child that has died leaves
+    its row's status, output offset and activity frozen, so a drain held behind it
+    still reaches the bound and is released — the failure was the drain waiting for
+    a predicate that never clears, and no new signal may reintroduce it by
+    reporting a constant as if it were a heartbeat.
+    """
+    assert await _tick(rig, T0) is False
+    _settle_a_job(rig)
+    _print_from_a_job(rig)
+    _report_from_a_lane(rig)
+    assert await _tick(rig, T0 + 1) is False, "the whole footprint is seen here"
+
+    assert await _tick(rig, T0 + 1 + BOUND) is True
+    assert rig.handle.denials == 1
+
+
+@pytest.mark.asyncio
+async def test_every_probe_reads_a_field_the_real_classes_still_have() -> None:
+    """R4's second half: the doubles must not be the ONLY source of these shapes.
+
+    Every signal ``_work_motion`` reads is read through ``getattr(..., default)`` so
+    that an unreadable probe cannot stop a drain — which means a RENAME on the real
+    class freezes that probe for ever while every test in this file stays green: the
+    doubles carry the old name, and the clock silently loses a signal. The pin is
+    therefore against the REAL classes: model fields by name, methods and properties
+    by ``hasattr``, and ``Session``'s own instance attributes by parsing its source
+    for ``self.<name> =`` — a plain ``hasattr(Session, name)`` excludes exactly the
+    names whose absence caused this class of bug, which is why
+    ``tests/unit/session/test_remote_registries.py`` parses the source for the same
+    reason.
+    """
+    import inspect
+    import re
+
+    from local_operator.harness.jobs import AsyncJob, AsyncJobManager
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    job_fields = set(getattr(AsyncJob, "__fields__", {}))
+    assert {
+        "id",
+        "status",
+        "output_seq",
+        "latest_details",
+    } <= job_fields, (
+        f"_job_footprint reads fields AsyncJob no longer declares: {sorted(job_fields)}"
+    )
+    assert hasattr(AsyncJobManager, "list"), "the job-row probe would report no jobs at all"
+    assert hasattr(Transcript, "latest_entry"), "the transcript probe would freeze"
+    assert hasattr(Session, "transcript"), "the transcript probe would report nothing"
+    assigned = set(
+        re.findall(r"^\s+self\.([a-z_][a-z_0-9]*)\s*(?:[:=])", inspect.getsource(Session), re.M)
+    )
+    assert {
+        "jobs",
+        "_subagent_roster_generation",
+    } <= assigned, "Session no longer assigns the two attributes the job and lane probes read"
+
+
+@pytest.mark.asyncio
+async def test_the_exit_records_a_renderable_cause_and_a_fresh_why_now(rig) -> None:
+    """Q-2 and R2: what a successor can read about this departure afterwards.
+
+    Two facts, both of which were wrong or absent in the first cut. The journal
+    gets the TOKEN (``types.BUILD_DRAIN_OVERDUE_CAUSE``) rather than a sentence,
+    because the row is all that outlives the process and a taxonomy can only
+    render a rung it knows — that is what makes a successor able to say the session
+    was handed over by a bound. And the cut-off note gets the why-now RE-READ at
+    this instant: this rung is only ever reached after hours, so the latch's pair
+    can name a build the install left long ago.
+    """
+    assert await _tick(rig, T0) is False
+    assert await _tick(rig, T0 + BOUND) is True
+    assert rig.handle._turn_journal.exits == [BUILD_DRAIN_OVERDUE_CAUSE]
+    # The attribution the disposal's cut-off note is built from: the departure's own
+    # token, and the pair re-read at the exit rather than the latch's stale one.
+    assert rig.handle._retiring_cause == BUILD_DRAIN_OVERDUE_CAUSE
+    assert rig.handle._retiring_detail == _drain_detail_at_exit(rig.drain)
+    assert rig.handle._retiring_detail != rig.drain.detail
 
 
 @pytest.mark.asyncio
