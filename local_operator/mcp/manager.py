@@ -536,6 +536,16 @@ RECONNECT_BURST_LIMIT = 5
 # fleet-wide. Exported so tests can shrink it without patching a private name.
 AUTH_REVALIDATE_INTERVAL_S = 60.0
 
+#: "This caller cannot say what grant it tried", as distinct from ``None``,
+#: which is the real and different fact "the attempt read the store and the
+#: store was unreadable". Collapsing the two made an unreadable pre-attempt
+#: read fall back to a read AFTER the failed connect — reintroducing, for
+#: exactly that case, the unfalsifiable block this module now exists to
+#: prevent (agent review round 1, minor-1). Unknown-to-the-caller and
+#: unknown-to-the-store are both "unknown" in English and must not be one
+#: value in code.
+_MARKER_NOT_RECORDED: Any = object()
+
 # Reconnect attempts are accounted in one sliding window per server
 # (``_reconnect_history``); the backoff ladder position is separate state
 # (``_backoff_index``) so a successful reconnect resets the LADDER but never
@@ -4017,13 +4027,20 @@ class McpManager:
 
         POPPED rather than read: the entry describes one attempt, and leaving
         it behind would let a later failure on a path that recorded nothing
-        block against a marker from an unrelated, older attempt. Absent means
-        "this caller cannot say what it tried", which ``_block_on_auth`` maps
-        back to its original read-here behaviour.
-        """
-        return self._attempt_grant_marker.pop(name, None)
+        block against a marker from an unrelated, older attempt.
 
-    def _block_on_auth(self, name: str, attempted: tuple[float, bool] | None = None) -> None:
+        Returns :data:`_MARKER_NOT_RECORDED` — NOT ``None`` — when no entry
+        exists, because ``None`` is a real recorded value here meaning "the
+        attempt read the store and it was unreadable". A recorded ``None`` must
+        keep any good marker already held; an ABSENT entry means the caller
+        cannot say what it tried and ``_block_on_auth`` falls back to reading
+        the store itself. Sharing one value for the two made the unreadable
+        case fall through to a post-failure read, which is the very bug this
+        feature removes (review round 1, minor-1).
+        """
+        return self._attempt_grant_marker.pop(name, _MARKER_NOT_RECORDED)
+
+    def _block_on_auth(self, name: str, attempted: Any = _MARKER_NOT_RECORDED) -> None:
         """Hold ``name`` back from auto-reconnect until its stored grant moves.
 
         Called from every arm that gives up over authorization. Recording the
@@ -4049,9 +4066,14 @@ class McpManager:
         22:11:06, blocked on the 22:11:06 row, and was still dead ten hours
         later while sibling sessions used that same row without trouble.
 
-        Callers that cannot say what they tried omit it and keep the old
-        read-here behaviour, which is still correct whenever no grant was
-        written during the attempt.
+        Callers that cannot say what they tried omit it entirely (the
+        :data:`_MARKER_NOT_RECORDED` default) and keep the old read-here
+        behaviour, which is still correct whenever no grant was written during
+        the attempt. That is a DIFFERENT fact from ``attempted=None``, which
+        says the attempt looked and the store was unreadable: sharing one value
+        for both made the unreadable case fall back to a post-failure read and
+        so reintroduced the unfalsifiable block for exactly that case (review
+        round 1, minor-1).
 
         An unreadable store (``None``) must not clobber a marker we already
         hold: overwriting a known grant with "unknown" would make the NEXT
@@ -4061,7 +4083,7 @@ class McpManager:
         can.
         """
         self._auth_blocked.add(name)
-        marker = attempted if attempted is not None else self._grant_marker(name)
+        marker = self._grant_marker(name) if attempted is _MARKER_NOT_RECORDED else attempted
         if marker is not None or name not in self._auth_grant_marker:
             self._auth_grant_marker[name] = marker
 
@@ -4172,7 +4194,9 @@ class McpManager:
                 # the connect failed before reaching that seam, in which case no
                 # rotation happened and the two are the same grant anyway.
                 attempted = self._take_attempt_marker(name)
-                self._block_on_auth(name, attempted if attempted is not None else marker)
+                self._block_on_auth(
+                    name, marker if attempted is _MARKER_NOT_RECORDED else attempted
+                )
                 continue
             # Re-check ownership AFTER the await, as every other reconnect path
             # does: a dispose()/reload() during the connect bumps the epoch, and

@@ -4049,6 +4049,69 @@ class TestAuthBlockRevalidation:
             store.close()
 
 
+class TestAttemptMarkerUnknownSemantics:
+    """``None`` (the store was unreadable) is not "the caller did not say".
+
+    Review round 1, minor-1. ``_block_on_auth`` used one value for both, so an
+    attempt whose pre-connect read FAILED fell through to a read taken after
+    the connect failed — the exact post-failure read this feature removes. A
+    peer re-authing during such an attempt would then be recorded as the grant
+    we failed on, and the block would be unfalsifiable again for that case.
+    """
+
+    URL = TestAuthBlockRevalidation.URL
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_pre_attempt_read_does_not_become_a_post_failure_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recorded ``None`` keeps the good marker; it never re-reads the store."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        store = TestAuthBlockRevalidation._real_store(tmp_path, obtained_at=1000.0)
+        manager = TestAuthBlockRevalidation._oauth_manager(tmp_path, store)
+        try:
+            # A first ordinary failure establishes a known-good marker.
+            async def failing(name: str, cfg: Any, **_: Any):
+                manager._attempt_grant_marker[name] = manager._grant_marker(name)
+                raise McpAuthRequiredError(TestAttemptMarkerUnknownSemantics.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", failing)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            good = manager._auth_grant_marker.get("dd")
+            assert good == (1000.0, False)
+
+            # Now the attempt's own read fails (store hiccup) AND a peer
+            # re-auths mid-dial. The block must keep the good marker rather
+            # than adopt the peer's grant off a post-failure read.
+            async def failing_unreadable(name: str, cfg: Any, **_: Any):
+                manager._attempt_grant_marker[name] = None  # the read failed
+                await TestAuthBlockRevalidation._write_fresh_grant(store)
+                raise McpAuthRequiredError(TestAttemptMarkerUnknownSemantics.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", failing_unreadable)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager._auth_grant_marker.get("dd") == good, (
+                "an unreadable pre-attempt read fell through to a post-failure "
+                "read and adopted the peer's grant"
+            )
+
+            # …and because the peer's grant was never adopted, the next tick
+            # still owes this server its one attempt.
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", counting)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert attempts == ["dd"]
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+
 class TestAuthBlockClearsWhereverAServerHeals:
     """Review round 1, blocker-1: an auth block must not outlive its condition.
 
