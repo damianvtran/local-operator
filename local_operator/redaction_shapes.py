@@ -85,7 +85,12 @@ class Shape:
 
     label: str
     pattern: Pattern[str]
-    replacement: Union[str, Callable[[Match[str]], str]]
+    #: ``None`` only for a GUARDED rule: the guard decides, and the guarded path
+    #: renders the mask from the group the credential is in. Constructing a shape
+    #: with neither a replacement nor a guard raises at import (see
+    #: :meth:`__post_init__`) — a rule that matched and then published the
+    #: credential unchanged is the one failure mode this table must not have.
+    replacement: Optional[Union[str, Callable[[Match[str]], str]]] = None
     secret_group: Optional[int] = None
     #: A condition the PATTERN cannot express cheaply, checked only on a match.
     #:
@@ -99,6 +104,33 @@ class Shape:
     #: them here, checked on the handful of positions where an assignment
     #: actually is. The semantics are the same and the corpus pins them.
     guard: Optional[Callable[[Match[str]], bool]] = None
+
+    def __post_init__(self) -> None:
+        """Refuse a shape that could DETECT a credential and let it through.
+
+        The two optional halves of a rule are the replacement and the guard, and
+        exactly one of them must be present: a template or callable renders the
+        mask, or a guard decides whether to render one. A shape with neither
+        would match, do nothing, and register nothing — the silent
+        detect-but-publish state this whole module exists to prevent — so it is
+        rejected where it is written, at import, rather than at the first tool
+        result that happens to match it.
+        """
+        if self.replacement is None and self.guard is None:
+            raise ValueError(
+                f"shape {self.label!r} has neither a replacement nor a guard: "
+                "it would match text and mask nothing"
+            )
+        if self.replacement is not None and self.guard is not None:
+            raise ValueError(
+                f"shape {self.label!r} has both a replacement and a guard: "
+                "the guarded path renders the mask, so the replacement is dead"
+            )
+        if self.guard is not None and self.secret_group is None:
+            raise ValueError(
+                f"shape {self.label!r} is guarded but names no secret_group: "
+                "the guarded path masks the group holding the credential"
+            )
 
 
 # --- shared sub-patterns -----------------------------------------------------
@@ -770,6 +802,9 @@ def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> s
         if shape.guard is not None:
             text = _apply_guarded(shape, text, hits)
             continue
+        # ``__post_init__`` guarantees one of the two is present; the checker
+        # cannot see through that, so the assertion states it here as well.
+        assert shape.replacement is not None
         matches = list(shape.pattern.finditer(text))
         if matches:
             for match in matches:

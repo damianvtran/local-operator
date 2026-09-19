@@ -310,6 +310,48 @@ def test_the_gated_pass_is_fast_on_ordinary_text() -> None:
     assert per_byte < 0.9e-6, f"ordinary text costs {per_byte * 1e6:.2f} µs/byte"
 
 
+def test_a_shape_that_cannot_render_a_mask_is_rejected_at_import() -> None:
+    """The table's one unacceptable state, refused where it would be written.
+
+    A shape with neither a replacement nor a guard matches text and leaves it
+    alone — it would DETECT a credential and publish it, which is exactly the
+    failure this module exists to prevent and the one a reviewer cannot see by
+    reading a diff. It is therefore an import-time error, not a runtime
+    surprise on whichever result happens to match first.
+    """
+    from local_operator.redaction_shapes import Shape
+
+    with pytest.raises(ValueError, match="neither a replacement nor a guard"):
+        Shape("publishes-everything", re.compile(r"x"), None, None, None)
+    with pytest.raises(ValueError, match="both a replacement and a guard"):
+        Shape("dead-replacement", re.compile(r"x"), "y", None, lambda m: True)
+    with pytest.raises(ValueError, match="names no secret_group"):
+        Shape("guarded-without-group", re.compile(r"x"), None, None, lambda m: True)
+
+
+def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() -> None:
+    """A guarded rule's mask comes from the group, so the readable parts survive.
+
+    Asserted per guarded rule rather than once: the two rules keep different
+    things (an assignment keeps its name and separator, a URL-valued name keeps
+    the name and the password's user/host), and a future guarded rule that
+    replaced the whole match would take back text the operator needs to read.
+    """
+    from local_operator.redaction_shapes import CREDENTIAL_SHAPES
+
+    guarded = [shape for shape in CREDENTIAL_SHAPES if shape.guard is not None]
+    assert {shape.label for shape in guarded} == {"credential-assignment", "credential-url-value"}
+
+    assignment = scrub_shapes("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
+    assert assignment == f"AWS_SECRET_ACCESS_KEY={REDACTION_MARKER}"
+
+    dsn = scrub_shapes(SENTINEL)
+    assert "svc_user" in dsn, "the user must stay readable"
+    assert "db.internal" in dsn, "the host must stay readable"
+    assert "sh4pedSentinelPw" not in dsn
+    assert dsn.startswith("mongodb+srv://svc_user:")
+
+
 def test_no_entropy_heuristic_is_applied() -> None:
     """A bare high-entropy fragment with no spelling around it is NOT masked.
 
