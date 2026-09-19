@@ -106,6 +106,18 @@ class BridgeState(HeartbeatState):
     #: harness reads a record written by an older daemon as the empty default —
     #: "the host told us nothing", which is exactly the refusal case.
     capabilities: list[str] = []
+    #: Whether the DAEMON that wrote this file speaks capability advertisement at
+    #: all — its own build stamp, NOT the extension's.
+    #:
+    #: `capabilities` alone cannot attribute an empty list: a daemon that predates
+    #: the advertisement writes a record with no such key, and a current daemon
+    #: writing "the peer advertised nothing" produces the very same empty list.
+    #: Those two causes have OPPOSITE remedies — restart the bridge versus toggle
+    #: the extension — and design §6.4 promises the model is told which one it is
+    #: (review round 1, R4). A daemon at or after the advertisement always sets
+    #: this, so its ABSENCE names the writer. Defaults false, so a record written
+    #: by an older daemon (and every fixture) reads as "an old writer".
+    capabilities_known: bool = False
     #: Whether a KNOWN extension version is strictly below the one this runtime
     #: ships with (`protocol.EXPECTED_EXTENSION_VERSION`). The predicate lives
     #: in the daemon (see `BridgeService.publish`) and is published rather than

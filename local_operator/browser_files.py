@@ -77,6 +77,9 @@ DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
 DOWNLOAD_MAX_FILES_PER_CALL = 20
 #: Per session, over the whole directory. Checked BEFORE a call rather than
 #: mid-flight, so an over-quota session is refused without arming anything.
+#: Stated precisely because the number reads like a bound on the directory:
+#: it bounds the NEXT call ("refuse when the directory already exceeds it"),
+#: so a session can sit up to one call's worth above it (review round 1, R5).
 DOWNLOAD_MAX_TOTAL_BYTES_PER_SESSION = 2 * 1024**3
 #: How long a `download` waits for the page to start one. The tool may raise it
 #: through ``timeout_s`` up to the ceiling below; the ceiling exists because a
@@ -612,6 +615,16 @@ def safe_name(raw: str, *, sniffed_ext: str = "") -> str:
     return _truncate_bytes(f"{stem}.{ext}" if ext else stem, MAX_NAME_BYTES)
 
 
+#: Declared types that carry no information, so quoting one would read as a
+#: signal the server never sent. Compared lowercased.
+_GENERIC_MIMES = frozenset(
+    {"", "application/octet-stream", "binary/octet-stream", "application/binary", "unknown"}
+)
+#: The declared type lands in model-facing text AND in an audit row, so it is
+#: capped like a name is; 80 bytes is far past any real `Content-Type`.
+MAX_MIME_BYTES = 80
+
+
 def redact_name(name: str) -> str:
     """A refused file's name, for the audit row: first character plus an ellipsis.
 
@@ -620,6 +633,22 @@ def redact_name(name: str) -> str:
     second copy of the thing the refusal exists to protect (design §9.4).
     """
     return f"{name[:1]}\u2026" if name else ""
+
+
+def declared_mime_label(raw: str) -> str:
+    """The host's declared `Content-Type`, sanitised, or "" when it says nothing.
+
+    A HINT and never a decision: §5.3 keeps the filesystem as the truth, so this
+    is only quoted in the rename sentence and carried into the audit row. It is
+    sanitised because it is a string from OUTSIDE landing in the transcript and
+    in the log — the class `safe_name` exists for, and the same one that makes
+    `redact_name` redact — and dropped when it is generic, so the copy can never
+    imply a signal the server did not send.
+    """
+    label = _BIDI_ZERO_WIDTH_RE.sub("", _CONTROL_RE.sub("", str(raw or ""))).strip()
+    if label.lower() in _GENERIC_MIMES:
+        return ""
+    return _truncate_bytes(label, MAX_MIME_BYTES)
 
 
 # ---------------------------------------------------------------------------
@@ -699,10 +728,18 @@ def classify_bytes(
         if name_ext in content_class.exts:
             return Verdict("allow", "", content_class.name, safe_name(raw_name))
         corrected = safe_name(raw_name, sniffed_ext=content_class.ext)
+        # The server's declared type is quoted when it has one to quote (design
+        # §7.4's "the server called it …"): the rename is the moment the model is
+        # told which signals disagreed, and the declared type is the one signal
+        # this function otherwise drops on the floor. It never decides anything —
+        # content does (§5.3) — so a lying `Content-Type` changes wording, not
+        # outcome.
+        declared = declared_mime_label(declared_mime)
+        server_said = f"the server said '{declared}'; " if declared else ""
         return Verdict(
             "allow",
-            f"saved as '{corrected}' (the name said '{name_ext or '(none)'}'; the content is "
-            f"{content_class.label})",
+            f"saved as '{corrected}' (the name said '{name_ext or '(none)'}'; {server_said}"
+            f"the content is {content_class.label})",
             content_class.name,
             corrected,
         )
@@ -824,7 +861,7 @@ def check_upload(raw: str, *, cwd: str, policy: Policy = DEFAULT) -> tuple[Path 
     except OSError:
         return None, f"refused: '{safe_name(str(raw))}' does not exist"
     config_root = config_dir().resolve()
-    if _is_within(resolved, config_root):
+    if is_within(resolved, config_root):
         # Unconditional and first: this is where the encrypted secret store and
         # config.yml live (§9.2's step 1, "the cheapest high-value rule").
         return None, (
@@ -857,8 +894,15 @@ def check_upload(raw: str, *, cwd: str, policy: Policy = DEFAULT) -> tuple[Path 
     return resolved, ""
 
 
-def _is_within(path: Path, root: Path) -> bool:
-    """Whether ``path`` is ``root`` or lives under it, on normalised paths."""
+def is_within(path: Path, root: Path) -> bool:
+    """Whether ``path`` is ``root`` or lives under it, on normalised paths.
+
+    Public, and the ONE spelling of containment: the upload gate applies it to
+    the config root and the download half applies it to the quarantine root, and
+    a second private copy in the caller is how the two would drift apart (review
+    round 1, N4). Both paths must already be resolved — this compares normalised
+    paths, it does not resolve them.
+    """
     return path == root or root in path.parents
 
 
@@ -907,6 +951,29 @@ def session_dir(session_id: str, *, root: Path | None = None, stamp: str | None 
 def _safe_component(value: str) -> str:
     """A filename-safe, identity-safe component for a directory name."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", value)[:32] or "session"
+
+
+#: What a KEPT artifact must be, and what §4.1 promises it is. The host writes
+#: the bytes and therefore owns the mode it lands with — an Electron/Chromium
+#: write lands 0644 by umask — so the harness tightens it once the file is the
+#: one it is going to report. Best-effort: a chmod that fails must not turn a
+#: saved file into a failed call, exactly like the audit write (§10.5).
+PRIVATE_FILE_MODE = 0o600
+
+
+def chmod_private(path: Path) -> bool:
+    """Tighten a kept artifact to 0600 (§4.1). ``False`` if it could not be done.
+
+    Bounded by the 0700 session directory either way, so this is defence in
+    depth rather than the only thing standing between a page's download and
+    another local user; it is still done, because the design states it and a
+    claim the code does not enforce is the defect class review round 1 caught.
+    """
+    try:
+        os.chmod(path, PRIVATE_FILE_MODE)
+        return True
+    except OSError:
+        return False
 
 
 def session_bytes(session_id: str, *, root: Path | None = None) -> int:

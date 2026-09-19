@@ -82,7 +82,8 @@ Two actions, one wire contract, and — deliberately — **one policy module**
 the harness and the desktop app is data.
 
 **Where a download goes.** `<config_dir>/browser/downloads/<stamp>-<session>/`,
-0700/0600, composed by the harness from the config root and never from anything a
+0700 directories with the artifacts the harness keeps tightened to 0600, composed
+by the harness from the config root and never from anything a
 page or the model supplies. `download` takes no destination parameter at all:
 a `Page.setDownloadBehavior`-style path is the one argument whose misuse writes
 into `~/.ssh` (that is what the original Project Zero report demonstrated), so it
@@ -96,8 +97,13 @@ call. Content wins over the name in one direction only — an executable under
 `holiday.jpg` is deleted and its class named, while a PDF under `invoice.zip` is
 kept, renamed `.pdf`, and the rename is reported. Files that match no known
 signature are kept, flagged `unverified`, and never opened; SVG is deliberately
-one of them. Caps: 256 MB per file, 20 files per call, 2 GB per session, and
-nothing over the cap is kept.
+one of them. Caps: 256 MB per file and 20 files per call, checked on what landed —
+an over-cap file is deleted and the refusal says so, so nothing over either is
+kept. The 2 GB session ceiling is checked BEFORE a call is armed, against the
+directory as it already stands: it refuses the next download rather than shrinking
+what is already there, so a session can sit up to one call's worth above it.
+Nothing is deleted by age; the directory is named in the tool result so the model
+can quote a path the user can open.
 
 **Uploads are the more dangerous verb**, because a file is read and transmitted
 rather than written. The gate runs unconditionally — before any approval tier is
@@ -109,6 +115,20 @@ regular file, the credential deny-list (`id_rsa*`, `*.pem`, `*.key`, `.env`,
 AND on every path component, and anything over 256 MB. The path is RESOLVED
 first, so a symlink named `handout.pdf` pointing at `~/.ssh/id_rsa` is judged by
 its target. A refusal is all-or-nothing: nothing is attached.
+
+**The attach is read back, and a read that could not be TAKEN says so.** After the
+input is driven the extension re-reads what it holds and the tool compares that
+against the file on disk. A page that submits itself from its `change` handler
+navigates in the same tick as the attach and destroys the context the re-read runs
+in, and a stalled re-read fails the same way; in both the attach has already
+happened and the bytes have already gone, so that case is reported as an
+**unverified attach** (the facts come from the harness re-statting and hashing each
+path itself, which the page cannot touch; the audit row records it) rather than as
+a failure that would read as "nothing was sent" and invite a double-send. A page
+that IGNORED the attach is the different case the read-back exists for, and it
+still fails the call. The comparison itself is name-plus-size, not contents: a
+same-name, same-size replacement between the two reads would pass, which is why
+the digest is always the harness's own.
 
 **Which host can do what, and why they differ.** `upload` is served by both
 non-cmux hosts: the extension attaches files with `DOM.setFileInputFiles` over the
@@ -128,9 +148,11 @@ the user to update an extension whose update could not help.
 they serve (the extension in a `capabilities` event after its handshake, the app
 in its `host.json` and `/health`), and the tool reads the discovery record before
 dispatching — so a pre-feature host produces a typed `capability_unsupported`
-with a remedy instead of a 120-second wait on a bare `internal`. The three
+with a remedy instead of a 120-second wait on a bare `internal`. The four
 remedies are kept apart on purpose: *no build can serve this*, *your build
-predates it*, and *your build is current but stopped advertising* (a wedge).
+predates it*, *the bridge predates it* (so the extension was never asked —
+`lop browser restart`), and *your build is current but stopped advertising* (a
+wedge: toggle the extension).
 
 ## Detection
 

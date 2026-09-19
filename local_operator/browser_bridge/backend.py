@@ -555,6 +555,12 @@ class HostCapabilities:
 
     methods: tuple[str, ...] = ()
     version: str = ""
+    #: Whether the record's WRITER knows the advertisement at all — the bridge
+    #: daemon's own stamp, not the peer's. An empty ``methods`` has two causes
+    #: with opposite remedies (a peer that advertised nothing vs a daemon that
+    #: predates the field), and this is the only thing that separates them
+    #: (design §6.4; review round 1, R4).
+    capabilities_known: bool = False
 
     def serves(self, method: str) -> bool:
         return method in self.methods
@@ -592,6 +598,7 @@ def capability_refusal(
             "method": method,
             "advertised": sorted(current.methods),
             "extension_version": current.version,
+            "capabilities_known": current.capabilities_known,
             "host": host,
         },
     )
@@ -600,13 +607,14 @@ def capability_refusal(
 def _capability_message(error: BridgeError, *, host: str) -> str:
     """The model-facing sentence for a `capability_unsupported`.
 
-    Three cases, and they must not be merged: a method NO build of this host can
+    Four cases, and they must not be merged: a method NO build of this host can
     serve (an extension cannot choose a download destination at all — see
     ``EXTENSION_CANNOT_SERVE``), a host that predates the feature (its build can
-    be updated), and a current host that did not advertise it (which is a wedge,
-    not a version). Getting this wrong sends the user to a remedy that cannot
-    help, which is the defect `OWNERSHIP_MIN_EXTENSION_VERSION` exists to stop
-    repeating.
+    be updated), a BRIDGE that predates the advertisement (so the extension was
+    never asked what it can do — restart the bridge), and a current host that did
+    not advertise it (which is a wedge, not a version). Getting this wrong sends
+    the user to a remedy that cannot help, which is the defect
+    `OWNERSHIP_MIN_EXTENSION_VERSION` exists to stop repeating.
     """
     from local_operator.browser_bridge.protocol import (
         CAPABILITY_MIN_EXTENSION_VERSION,
@@ -641,6 +649,18 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
             f"no browser is attached, so '{method}' cannot run. Ask the user to open their "
             "browser (the extension reconnects automatically) and retry; 'lop browser status' "
             "shows the connection."
+        )
+    if not bool(error.data.get("capabilities_known", True)):
+        # The record was written by a bridge that predates the advertisement, so
+        # an empty list says nothing about the EXTENSION at all. Naming a version
+        # or an extension toggle here would send the user to a remedy that cannot
+        # help — the misdiagnosis class this function's own docstring exists for
+        # (review round 1, R4; design §6.4 row "new harness + old daemon").
+        return (
+            f"the running browser bridge predates '{method}', so it never learned what this "
+            "extension can do and the command was not sent. Restart it with 'lop browser "
+            "restart' (pairing is preserved and the extension reconnects automatically), then "
+            "retry; nothing else about this tab is affected."
         )
     minimum = CAPABILITY_MIN_EXTENSION_VERSION.get(method)
     if minimum and extension_older(peer, minimum):
@@ -744,7 +764,15 @@ class HostClient:
         version = str(
             getattr(current, "extension_version", "") or getattr(current, "app_version", "")
         )
-        return HostCapabilities(tuple(str(name) for name in methods), version)
+        return HostCapabilities(
+            tuple(str(name) for name in methods),
+            version,
+            # Only the bridge writes this, and only a bridge at or after the
+            # advertisement sets it true (state.BridgeState.capabilities_known).
+            # The app host has no equivalent and needs none: its remedy
+            # ("update the app") is correct whether or not it knew the field.
+            bool(getattr(current, "capabilities_known", False)),
+        )
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         copy = HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])

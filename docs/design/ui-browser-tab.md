@@ -639,7 +639,7 @@ view/tab/profile design of §5–§7 and §11, and the sharing split of §12.
 
 ## 4. Capability matrix
 
-`BROWSER_ACTIONS` — **19** actions since PR #1318 (`download`, `upload`) — and
+`BROWSER_ACTIONS` — **19** actions since PR #1323 (`download`, `upload`) — and
 the 22 `METHODS` (`protocol.py`). The file counts and `file:line` references
 below are the ones this document was written against; the live source is the
 constants themselves. "UI" is the UI host's v1 verdict.
@@ -2085,7 +2085,7 @@ case the honest way (probe P13, §15) rather than asserting the default is fine.
   `event.preventDefault()` and tell the user; the extension lists downloads as a
   non-goal too, and a download UI is a separate feature with its own security
   surface.
-  **SUPERSEDED IN PR #1318** — not deleted, because the reasoning above is still
+  **SUPERSEDED IN PR #1323** — not deleted, because the reasoning above is still
   why the destination is a quarantined directory rather than the user's
   `~/Downloads`. `will-download` becomes ARM-GATED policy instead of
   `preventDefault`: a `download` call arms the tab, the handler takes the item,

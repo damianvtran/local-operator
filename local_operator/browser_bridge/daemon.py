@@ -1205,6 +1205,15 @@ class BridgeService:
             port=port,
             session_key=secrets.token_urlsafe(32),
             proto=PROTO_VERSION,
+            # This daemon's own stamp that it knows the `capabilities` field: a
+            # session that reads an EMPTY `capabilities` list has to tell "the
+            # extension advertised nothing" (toggle it) from "the daemon that
+            # wrote this file predates the advertisement" (restart it), and only
+            # the writer can say which (state.BridgeState.capabilities_known).
+            # Set here rather than in `publish` because it describes the PROCESS,
+            # not the link: it stays true while no peer is attached, which is
+            # exactly when the refusal copy is most likely to be read.
+            capabilities_known=True,
             started_at=self.started_at,
         )
         self._heartbeat_task: asyncio.Task[None] | None = None

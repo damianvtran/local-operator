@@ -174,6 +174,27 @@ def test_the_record_field_is_additive_in_both_directions() -> None:
     assert state_store.BridgeState.model_validate(record).capabilities == ["upload"]
 
 
+def test_the_daemon_stamps_the_record_with_the_advertisement_it_knows(tmp_path: Path) -> None:
+    """R4: an empty `capabilities` list has TWO causes with opposite remedies.
+
+    A record with no stamp was written by a bridge that predates the
+    advertisement, so its empty list says nothing about the extension and the
+    remedy is a restart, not an extension toggle (design §6.4). A daemon at or
+    after the advertisement always stamps itself, which is what lets the refusal
+    tell the two apart from the file alone.
+    """
+    old = {
+        "pid": 1,
+        "port": 4099,
+        "session_key": "k" * 32,
+        "proto": PROTO_VERSION,
+        "extension_connected": True,
+        "extension_version": "0.1.18",
+    }
+    assert state_store.BridgeState.model_validate(old).capabilities_known is False
+    assert BridgeService(root=tmp_path).state.capabilities_known is True
+
+
 def test_no_extension_build_can_serve_download() -> None:
     """The measured fact the refusal copy depends on (E1x, Chrome 153.0.8010.53)."""
     assert EXTENSION_CANNOT_SERVE == frozenset({"download"})

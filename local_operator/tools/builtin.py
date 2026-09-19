@@ -10879,6 +10879,7 @@ def _capability_problem(
     """
     from local_operator.browser_bridge.backend import (
         HOST_EXTENSION,
+        HostCapabilities,
         capability_refusal,
         format_error,
     )
@@ -10888,7 +10889,12 @@ def _capability_problem(
     # different processes. `_host_of_client` is the HANDLE spelling and is used
     # below, not here.
     host = str(getattr(client, "host", HOST_EXTENSION) or HOST_EXTENSION)
-    capabilities = client.capabilities()
+    # `client` defaults to None at every call site and the production path always
+    # passes a real one — but this function's whole purpose is to answer BEFORE
+    # touching a socket, so an unknown host gets the refusal (an empty
+    # capability set is "told us nothing") rather than an AttributeError from the
+    # one place that must never raise before deciding (review round 1, N3).
+    capabilities = client.capabilities() if client is not None else HostCapabilities()
     if capabilities.serves(method):
         return None
     error = capability_refusal(method, host=host, capabilities=capabilities)
@@ -11052,23 +11058,58 @@ async def _browser_download(
 
     kept: list[dict[str, Any]] = []
     refused: list[str] = []
-    for name in candidates:
+    # The per-CALL cap is applied to the CANDIDATE list, BEFORE anything is
+    # classified, renamed or audited (review round 1, R2). Truncating the kept
+    # list after the loop deleted the extra files but left their `verdict=allow`
+    # rows behind naming paths that no longer existed, and no row named the cap —
+    # so the trail over-reported what the session kept and never said why the rest
+    # went. Every dropped candidate gets its own `deny` row here instead.
+    over_cap = candidates[limits.download_max_files :]
+    for name in over_cap:
+        removed = _unlink_quietly(directory / name)
+        # Same rule as the containment branch: the sentence says which of the two
+        # outcomes happened, never "deleted" over a file still on disk.
+        outcome = "refused and deleted" if removed else "refused, NOT deleted"
+        reason = f"over the {limits.download_max_files} files per call limit"
+        refused.append(f"{name}: {outcome} — {reason}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=name,
+            path="",
+            size=landed.get(name, 0),
+            verdict="deny",
+            reason=reason,
+            redact=True,
+        )
+    for name in candidates[: limits.download_max_files]:
         path = directory / name
-        declared = str((reported.get(name) or {}).get("mime") or "")
+        declared = files.declared_mime_label(str((reported.get(name) or {}).get("mime") or ""))
         try:
-            # `resolve()` first: the destination is ours, but a hostile host could
-            # still have written a symlink, so what is judged and reported is the
-            # real file. Anything outside the quarantine root is deleted, not
-            # described (§5.3 step 4).
+            # `resolve()` is what the CONTAINMENT check reads: the destination is
+            # ours, but a hostile host could still have written a symlink, and it
+            # is the target that decides whether the entry escapes (§5.3 step 4).
+            # Everything after the check works on the ENTRY, never on the
+            # resolved path — see the refusal branch below.
             resolved = path.resolve()
         except OSError:
             refused.append(f"{name}: could not be read")
             continue
-        if not files._is_within(resolved, directory.resolve()):
-            refused.append(
-                f"{name}: refused and deleted — it resolved outside the download directory"
-            )
-            _unlink_quietly(resolved)
+        if not files.is_within(resolved, directory.resolve()):
+            # The ENTRY is deleted, never what it points at (review round 1, R1).
+            # `resolved` here is by definition a path OUTSIDE the quarantine
+            # root, so unlinking it deleted the user's own file — the data loss
+            # the containment rule exists to prevent — while leaving the
+            # escaping entry sitting in the session directory. Unlinking the
+            # entry removes the escape and touches nothing outside the root: a
+            # symlink dies, its target does not. The message and the audit row
+            # say what actually happened, including a delete that failed.
+            removed = _unlink_quietly(path)
+            outcome = "refused and deleted" if removed else "refused, NOT deleted"
+            refused.append(f"{name}: {outcome} — it resolved outside the download directory")
             _download_audit(
                 call_id=call_id,
                 session_id=session_id,
@@ -11076,16 +11117,27 @@ async def _browser_download(
                 action="download",
                 origin=origin,
                 name=name,
-                path=str(resolved),
+                path="",
                 verdict="deny",
-                reason="outside the quarantine root",
+                reason=(
+                    "outside the quarantine root; the entry was removed"
+                    if removed
+                    else "outside the quarantine root; the entry could NOT be removed"
+                ),
                 redact=True,
             )
             continue
-        verdict = files.classify_download(resolved, declared_mime=declared, policy=limits)
+        verdict = files.classify_download(path, declared_mime=declared, policy=limits)
         if verdict.kind == "deny":
-            _unlink_quietly(resolved)
-            refused.append(f"{name}: {verdict.reason}")
+            # The entry, for the same reason as above: a symlink that stays
+            # inside the root must not be able to make Python delete the file it
+            # points at and leave the link behind.
+            removed = _unlink_quietly(path)
+            # `verdict.reason` already says "refused and deleted", so a delete
+            # that did NOT happen is corrected here rather than left implied
+            # (review round 1, R1's class: the sentence claims only what happened).
+            tail = "" if removed else " (NOT deleted: the entry is still on disk)"
+            refused.append(f"{name}: {verdict.reason}{tail}")
             _download_audit(
                 call_id=call_id,
                 session_id=session_id,
@@ -11096,21 +11148,29 @@ async def _browser_download(
                 path="",
                 size=landed.get(name, 0),
                 verdict="deny",
-                reason=verdict.reason,
+                reason=f"{verdict.reason}{tail}",
                 declared_mime=declared,
                 sniffed=verdict.sniffed,
                 redact=True,
             )
             continue
-        final = resolved
-        if verdict.safe_name and verdict.safe_name != resolved.name:
+        final = path
+        if verdict.safe_name and verdict.safe_name != path.name:
             # ALLOW-WITH-RENAME: the content disagreed with the name, so the file
             # takes the name the content earns and the change is reported.
-            final = resolved.with_name(_unique_name(directory, verdict.safe_name))
+            final = path.with_name(_unique_name(directory, verdict.safe_name))
             try:
-                resolved.rename(final)
+                path.rename(final)
             except OSError:
-                final = resolved
+                final = path
+        # The host wrote the bytes, so the host owned the mode they landed with
+        # (an Electron/Chromium write lands 0644 by umask). §4.1 promises files
+        # 0600, so the harness tightens the artifact it is about to report
+        # (review round 1, Q-2). Best-effort and never fatal: the 0700 session
+        # directory is the real bound, and a failed chmod must not cost the file
+        # it was protecting.
+        if not files.chmod_private(final):
+            logger.warning("could not tighten the mode of the kept browser download %s", final)
         fact = files.stat_fact(final.name, final, declared_mime=declared)
         fact["sniffed"] = verdict.sniffed
         kept.append(fact)
@@ -11131,19 +11191,6 @@ async def _browser_download(
         )
         if verdict.reason:
             kept[-1]["note"] = verdict.reason
-
-    # Per-CALL ceiling, enforced after the fact for a host that cannot abort
-    # mid-flight (the extension cannot; the app host can, design §10.3): what is
-    # kept is the FIRST n files, and the rest are deleted with the reason.
-    if len(kept) > limits.download_max_files:
-        extra = kept[limits.download_max_files :]
-        for fact in extra:
-            _unlink_quietly(Path(str(fact["path"])))
-            refused.append(
-                f"{fact['name']}: refused and deleted — over the "
-                f"{limits.download_max_files} files per call limit"
-            )
-        kept = kept[: limits.download_max_files]
 
     if not kept:
         return _error(
@@ -11233,21 +11280,51 @@ async def _browser_upload(
         return _error(tool_call_id, "browser", f"refused: nothing was attached — {reasons}")
     accepted = [item for item in (result.get("accepted") or []) if isinstance(item, dict)]
     by_path = {str(item.get("path") or ""): item for item in accepted}
+    # The host's read-back can be LOST to the page's own success: a form that
+    # submits itself from the change handler navigates in the same tick as the
+    # attach, so the DOM can no longer be asked what it holds — while the bytes
+    # have already gone. The marker therefore means "the attach happened, the
+    # read-back did not": the facts come from Python's own re-stat + digest, and
+    # the call is reported as an UNVERIFIED attach rather than as a failure,
+    # because a failure here reads as "nothing was sent" and invites the
+    # double-send it is trying to prevent (review round 1, Q-1). The marker is
+    # the HOST's word about its own read — it cannot be checked from here, and
+    # the host is our own code; the size comparison below is what a page that
+    # ignored the attach is caught by, and a read that came back still runs it.
+    # The host reports it for ANY failed read, not only a navigation (a stall on
+    # the read is the same situation, and the read is what failed either way).
+    readback = str(result.get("readback") or "")
     facts: list[dict[str, Any]] = []
     for path in resolved:
         fact = files.stat_fact(files.safe_name(path.name), path)
         seen = by_path.get(str(path))
-        if seen is None or int(seen.get("bytes", -1)) != int(fact["bytes"]):
-            # The DOM holds something else. Reported as an error naming both
-            # sides rather than as a success: a file input that ignored the
-            # attach is exactly the failure a page would like us to call filled.
+        if seen is None:
+            # Not even a path came back for a file the host was told to set.
             return _error(
                 tool_call_id,
                 "browser",
-                f"the file input did not take the attach: it holds "
-                f"{seen.get('bytes') if seen else 'nothing'} bytes for {path}, and the file "
-                f"on disk is {fact['bytes']} bytes. Nothing was sent.",
+                "the file input did not take the attach: nothing came back for "
+                f"{path}, and the file on disk is {fact['bytes']} bytes. Nothing was sent.",
             )
+        if not readback:
+            # The byte count is what Python compares (the extension compares the
+            # NAMES, in the read-back it does itself), so the check is
+            # name-plus-size rather than contents: a same-name, same-size
+            # replacement between the read and this stat would pass. That is the
+            # residual limit of the read-back, stated rather than implied
+            # (review round 1, N5) — which is why the digest is Python's own and
+            # the bytes are re-statted from disk rather than taken from the host.
+            if int(seen.get("bytes", -1)) != int(fact["bytes"]):
+                # The DOM holds something else. Reported as an error naming both
+                # sides rather than as a success: a file input that ignored the
+                # attach is exactly the failure a page would like us to call filled.
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    "the file input did not take the attach: it holds "
+                    f"{seen.get('bytes')} bytes for {path}, and the file "
+                    f"on disk is {fact['bytes']} bytes. Nothing was sent.",
+                )
         facts.append(fact)
         _download_audit(
             call_id=call_id,
@@ -11259,6 +11336,9 @@ async def _browser_upload(
             path=str(path),
             size=int(fact["bytes"]),
             verdict="allow",
+            # Empty in the ordinary case; the unverified marker otherwise, so the
+            # trail carries the same caveat the model was given.
+            reason=readback,
             sha256=str(fact["sha256"]),
         )
     accept = str(result.get("accept") or "")
@@ -11272,20 +11352,36 @@ async def _browser_upload(
         # REPORTED, never obeyed: a site's `accept` filter protects nothing and
         # honouring it would let the page steer which local files we try.
         lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
+    if readback:
+        # Never silent: an unverified attach that reads like a confirmed one is
+        # how a model ends up re-sending files that already left.
+        lines.append(
+            f"note: the attach could not be read back ({readback}). The bytes above are what "
+            "is on disk and were handed to the page; whether the page kept or sent them is "
+            "not something this call can confirm — check before re-sending."
+        )
     return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
 
 
-def _unlink_quietly(path: Path) -> None:
-    """Delete a refused artifact, absorbing the failure.
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a refused artifact, absorbing the failure. ``True`` when it went.
 
     Best-effort on purpose: the verdict is the deliverable here, and a file we
     could not delete must not turn a policy refusal into a traceback in the
     model's context. The audit row already records what was refused.
+
+    The RETURN VALUE is what the model-facing sentence is built from, and it is
+    not decoration: this is called on the candidate ENTRY (never on a resolved
+    path — see the containment branch), and a refusal that claims "deleted" over
+    an entry still sitting on disk is the same class of false report the whole
+    post-hoc verification exists to remove (review round 1, R1).
     """
     try:
         path.unlink()
     except OSError:
         logger.warning("could not delete the refused browser download %s", path)
+        return False
+    return True
 
 
 def _unique_name(directory: Path, name: str) -> str:
