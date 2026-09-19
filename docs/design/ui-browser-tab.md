@@ -639,8 +639,10 @@ view/tab/profile design of §5–§7 and §11, and the sharing split of §12.
 
 ## 4. Capability matrix
 
-`BROWSER_ACTIONS` (`builtin.py:7498-7529`) — **17** actions — and the 20
-`METHODS` (`protocol.py:162-209`). "UI" is the UI host's v1 verdict.
+`BROWSER_ACTIONS` — **19** actions since PR #1323 (`download`, `upload`) — and
+the 22 `METHODS` (`protocol.py`). The file counts and `file:line` references
+below are the ones this document was written against; the live source is the
+constants themselves. "UI" is the UI host's v1 verdict.
 
 R5 asks whether the UI host really is a superset. The answer is **yes for the
 wire, yes for the tool, and no for one environmental axis** — and the matrix
@@ -665,6 +667,8 @@ below is now argued per row rather than asserted.
 | `recover` | yes | `owner_recover` against the UI host's in-process surface ledger; **unreachable on any host without a bridge today** — see §10.5 |
 | `retain` / `release` | yes | `owner_retain`/`owner_release`; `release` also drives `owner_finish` when the scope is terminal (`builtin.py:9750-9755`). Same §10.5 gate caveat |
 | `status` (method) | yes | the host's own state: proto, app version, profile path, tabs, per-surface url/title |
+| `download` | **PR B** | the UI host is the ONLY host that can serve this: `will-download` + `item.setSavePath()` picks the destination before the bytes land, with no CDP primitive and no new permission (the extension's two candidate primitives are refused by Chrome — `docs/design/browser-file-transfer.md`). The harness already refuses it on a host whose record does not advertise it, so an old app answers with a typed `capability_unsupported` rather than a mystery failure |
+| `upload` | yes | `DOM.setFileInputFiles` over `webContents.debugger`, plus the read-back comparison; the shared `driver/file-transfer-policy.ts` is vendored for the host-side name check, and Python's `browser_files.check_upload` remains the control |
 | `retitle` (method) | **served as a no-op, never called** | the UI has no tab *groups*; Python should skip `ui:` the way it already skips cmux for this method (`retitle_browser_surface` returns early for anything not `bridge:`, `builtin.py:9549`). The UI tab label is the page title, which is strictly more informative than a session title |
 | `owner_recover` / `owner_finish` / `owner_retain` / `owner_release` (methods) | yes | implemented against an in-process ledger keyed by `session_id` + `owner_proof` + `owner_generation`, with the same param contract (`resources.py:248-280`). Requires the Python-side host selection of §10.5 |
 
@@ -2081,6 +2085,16 @@ case the honest way (probe P13, §15) rather than asserting the default is fine.
   `event.preventDefault()` and tell the user; the extension lists downloads as a
   non-goal too, and a download UI is a separate feature with its own security
   surface.
+  **SUPERSEDED IN PR #1323** — not deleted, because the reasoning above is still
+  why the destination is a quarantined directory rather than the user's
+  `~/Downloads`. `will-download` becomes ARM-GATED policy instead of
+  `preventDefault`: a `download` call arms the tab, the handler takes the item,
+  sets a save path the HARNESS composed (`item.setSavePath`, so the app host does
+  not need the CDP primitives Chrome refuses to an extension), and Python
+  classifies what landed. The refusal above stays the behaviour for an UNARMED
+  download — a file the user did not ask for still does not land in their
+  Downloads folder. See `docs/design/browser-file-transfer.md` (and PR B for the
+  app-host half, including the consent/reveal surface §16.4 argues for).
 
 ### 11.7 The trust boundary, and why the renderer must not reach it
 

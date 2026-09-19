@@ -1293,6 +1293,43 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         except (OSError, ValueError):
             return f"screenshot: {_display_target(raw_path)}"
         return _approval_description(path, inside, "screenshot", resolvable)
+    if action == "download":
+        # The consent question is "may this page write files to your disk", and the
+        # DIRECTORY is the answer — the file names are the page's to choose, and a
+        # prompt that showed one of them would describe the wrong thing. Folded to
+        # `~` like every other row: the path is on every row of a session, so the
+        # home prefix is noise in a 40-cell budget.
+        from local_operator import browser_files as _files
+
+        root = str(_files.downloads_root())
+        home = str(Path.home())
+        shown = root.replace(home, "~", 1) if root.startswith(home) else root
+        return f"download \u2192 {_display_target(shown)}/"
+    if action == "upload":
+        # Both halves are mandatory (design §7.3): the FILE, because that is what
+        # leaves the machine, and the ORIGIN, because that is where it goes. The
+        # file goes through the same resolver and marker as `screenshot`, so an
+        # outside-workspace path is named as one and the row shows the resolved
+        # target rather than the string the model typed. A multi-file call shows
+        # the first and the count, because a prompt that truncates a list of
+        # secrets is worse than one that admits the count.
+        raw_paths = args.get("paths")
+        named = [str(entry) for entry in raw_paths] if isinstance(raw_paths, list) else []
+        if not named:
+            return "upload: no files named"
+        first = named[0]
+        if _SCHEME_SHAPED_RE.match(first.strip()):
+            row = f"upload: {_display_target(first.strip())}"
+        else:
+            try:
+                path, inside, resolvable = _resolve_workspace_path(first, cwd or ".")
+            except (OSError, ValueError):
+                row = f"upload: {_display_target(first)}"
+            else:
+                row = _approval_description(path, inside, "upload", resolvable)
+        if len(named) > 1:
+            row = f"{row} +{len(named) - 1} more"
+        return f"{row} \u2192 the page in the tab this session is driving"
     if url and action in NAVIGATING_BROWSER_ACTIONS:
         if url_unparsed:
             return f"{UNRESOLVABLE_MARKER} {UNPARSED_URL_PREFIX} {url}"
@@ -8426,6 +8463,16 @@ BROWSER_ACTIONS = (
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
     # multi-surface registry, so it degrades with the same typed error.
     "tabs",
+    # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
+    # tab-scoped CDP session they already hold); `download` is served by the
+    # desktop app's host only, because Chrome refuses an extension the
+    # browser-level commands that would let it choose a destination — see
+    # EXTENSION_CANNOT_SERVE, and the extension host answers with a typed
+    # capability refusal that names where to go instead of failing obscurely.
+    # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
+    # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
+    "download",
+    "upload",
     # The async site-approval flow, non-cmux only like scroll/logs. open/goto
     # to a not-yet-allowed origin fails EARLY with a typed error naming these
     # two actions, because the old behaviour — blocking the navigation RPC on
@@ -8455,7 +8502,16 @@ BROWSER_ACTIONS = (
 #: BROWSER_ACTIONS so the degrade check and the advertised action list can never
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
-    {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
+    {
+        "scroll",
+        "logs",
+        "tabs",
+        "request_access",
+        "await_access",
+        "cancel_access",
+        "download",
+        "upload",
+    }
 )
 
 #: The actions whose whole handler lives in the ownership lane (see
@@ -8552,9 +8608,8 @@ class BrowserParams(BaseModel):
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
         "(console + errors) | tabs (list agent-driven tabs) | request_access "
-        "(raise the site-approval prompt for a not-yet-allowed origin; returns "
-        "pending/allowed/denied immediately) | "
-        "await_access (wait for the user's decision on that prompt) | "
+        "(raise the site-approval prompt for a not-yet-allowed origin) | "
+        "await_access (wait for the user's decision) | "
         "cancel_access (cancel YOUR pending exact-origin request) | "
         "recover (recover YOUR tab) | "
         "retain (hold it) | release (end that hold) | close (end "
@@ -8574,14 +8629,28 @@ class BrowserParams(BaseModel):
             "new tab; a redacted handle is not yours to drive."
         ),
     )
-    path: str = Field(default="", description="Destination file for 'screenshot'.")
+    path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
         description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
         "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view.",
+        "to bring into view; for 'download', the control that starts it; for "
+        "'upload', the file input to fill.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
+    # One new field for the whole feature (the tool-surface ladder's rung 1):
+    # `download` needs no destination (the harness chooses it), so a comma-split
+    # of the existing `path` was the alternative — rejected because a filename may
+    # legally contain a comma, which would make the failure a silently wrong
+    # attachment.
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "'upload' only: the local files to attach, one or more. Credential "
+            "files and the harness's own config directory are refused; relative "
+            "paths resolve against the session's working directory."
+        ),
+    )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
     # down. Precedence is selector > x/y > direction > default (mirrors
     # extension/src/commands/scroll.ts).
@@ -8612,8 +8681,8 @@ class BrowserParams(BaseModel):
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
-        "(default 120, max 240). Still pending after that? Tell the user, then "
-        "call await_access again.",
+        "(default 120, max 240); 'download' max seconds to wait for one to start "
+        "(default 120, max 600).",
     )
 
 
@@ -9010,6 +9079,26 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"unknown scroll direction: {params.direction!r} "
                 f"(expected one of {', '.join(sorted(_SCROLL_DIRECTIONS))})"
             )
+        return ""
+    if action == "download":
+        # Only the selector is optional: a page that starts its own download needs
+        # none, and one that needs a click names the control. The wait is bounded
+        # by `timeout_s` and by the host, so there is nothing else to validate —
+        # the DESTINATION is composed by the harness and is not a parameter at all
+        # (design §6.1).
+        return _validate_selector(params.selector, "download") if params.selector.strip() else ""
+    if action == "upload":
+        problem = _validate_selector(params.selector, "upload")
+        if problem:
+            return problem
+        if not params.paths:
+            return "'upload' needs paths: name at least one local file to attach"
+        # Entries that are not strings are refused by the model's own validator
+        # (`list[str]`), which reports the offending value; only emptiness has to
+        # be caught here, because "" is a well-formed string.
+        for entry in params.paths:
+            if not entry.strip():
+                return "every entry in 'paths' must be a non-empty path"
         return ""
     if action == "logs":
         level = params.level.strip().lower()
@@ -10757,6 +10846,707 @@ async def _bridge_tabs(
     )
 
 
+def _audit_host(client: Any) -> str:
+    """The audit row's host column: ``extension`` | ``app`` | ``cmux``.
+
+    The design's vocabulary (design §10.5), which is NOT the handle spelling
+    `_host_of_client` returns ("bridge"/"ui") and not the copy spelling
+    ("extension"/"ui"): a log read months later should name the product surface,
+    not the handle grammar.
+    """
+    return "app" if _host_of_client(client) == HOST_UI_PREFIX else "extension"
+
+
+def _capability_problem(
+    tool_call_id: str, method: str, client: Any, *, surface: str = ""
+) -> ToolResult | None:
+    """Refuse a capability-gated method from the host's own record, no socket call.
+
+    The FIRST line of the capability check (design §6.3): the daemon refuses to
+    send an unadvertised method too, but by then a socket round trip has been paid
+    and the refusal arrives as a wire error rather than as the local, immediate
+    answer the model can act on. `None` means the host advertises the method and
+    the call may proceed.
+
+    The decision reads the discovery FILE, which is what makes it work between
+    dials and costs nothing; a record written by a pre-feature daemon or app has no
+    `capabilities` key at all, and that reads as "told us nothing" — the refusal.
+    """
+    from local_operator.browser_bridge.backend import (
+        HOST_EXTENSION,
+        HostCapabilities,
+        capability_refusal,
+        format_error,
+    )
+
+    # The COPY's host (``extension``/``ui``), read off the client exactly as
+    # `_bridge_call` reads it, so the reference and the refusal cannot name
+    # different processes. `_host_of_client` is the HANDLE spelling and is used
+    # below, not here.
+    host = str(getattr(client, "host", HOST_EXTENSION) or HOST_EXTENSION)
+    # `client` defaults to None at every call site and the production path always
+    # passes a real one — but this function's whole purpose is to answer BEFORE
+    # touching a socket, so an unknown host gets the refusal (an empty
+    # capability set is "told us nothing") rather than an AttributeError from the
+    # one place that must never raise before deciding (review round 1, N3).
+    capabilities = client.capabilities() if client is not None else HostCapabilities()
+    if capabilities.serves(method):
+        return None
+    error = capability_refusal(method, host=host, capabilities=capabilities)
+    problem = _error(
+        tool_call_id,
+        "browser",
+        format_error(error, action=method, surface=surface, host=host),
+    )
+    problem.details = {**(problem.details or {}), "error_code": error.code.value}
+    return problem
+
+
+def _download_audit(
+    *,
+    call_id: str,
+    session_id: str,
+    host: str,
+    action: str,
+    origin: str,
+    name: str,
+    path: str = "",
+    size: int = 0,
+    verdict: str = "",
+    reason: str = "",
+    declared_mime: str = "",
+    sniffed: str = "",
+    sha256: str = "",
+    redact: bool = False,
+) -> None:
+    """One audit row (design §10.5), best-effort and never raising.
+
+    A REFUSED file's name field is redacted to its first character: the log is
+    not allowed to become a map of where the secrets are, and the model (whose
+    context is the user's own transcript) is told the real name elsewhere.
+    """
+    from local_operator import browser_files as files
+
+    files.audit(
+        {
+            "session_id": session_id,
+            "call_id": call_id,
+            "tool": "browser",
+            "action": action,
+            "origin": origin,
+            "host": host,
+            "name": files.redact_name(name) if redact else name,
+            "path": path,
+            "bytes": size,
+            "sha256": sha256,
+            "declared_mime": declared_mime,
+            "sniffed": sniffed,
+            "verdict": verdict,
+            "reason": reason,
+        }
+    )
+
+
+async def _browser_download(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+    policy: Any = None,
+) -> ToolResult:
+    """`download`: arm the host, then judge what LANDED, from disk.
+
+    The whole shape follows the screenshot precedent: the host's exit code is not
+    evidence, so the answer is assembled from Python's own inspection of the
+    quarantine directory it composed itself (§5.3). A host that reports a file
+    which is not there — or a PDF that is an ELF — is CAUGHT rather than believed.
+    """
+    from local_operator import browser_files as files
+
+    # `policy` is the caps as data, injectable so a test can shrink a ceiling
+    # instead of writing a 256 MB file. The tool always leaves it at the default.
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
+    problem = _capability_problem(tool_call_id, "download", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+
+    session_id = str(getattr(context, "session_id", "") or "")
+    # Over-quota sessions are refused BEFORE anything is armed: the ceiling exists
+    # so a page cannot fill the disk through an agent loop, and a check that runs
+    # after the bytes land is a check that already lost.
+    if files.session_bytes(session_id) > limits.download_max_session_bytes:
+        return _error(
+            tool_call_id,
+            "browser",
+            "refused: this session has already downloaded more than "
+            f"{limits.download_max_session_bytes} bytes. Move or delete some of "
+            "what is in the browser download directory, then retry.",
+        )
+    directory = files.session_dir(session_id)
+    before = files.snapshot(directory)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        # Composed by the harness from the config root and never from page input:
+        # this parameter is the one whose value the Project Zero report used to
+        # write into ~/.ssh, so it is the last thing a page is allowed to reach.
+        "dir": str(directory),
+        **_browser_identity_params(context, tool_call_id),
+    }
+    if params.selector.strip():
+        wire["selector"] = params.selector.strip()
+    if params.timeout_s is not None and params.timeout_s > 0:
+        wire["timeout_s"] = min(float(params.timeout_s), files.DOWNLOAD_TIMEOUT_MAX_S)
+    result, problem = await _bridge_call(
+        tool_call_id, "download", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    if not bool(result.get("armed", True)):
+        # The host refused to arm. That is a policy answer carried as a result
+        # (§6.2 — an extension may not emit an ErrorCode an old daemon would
+        # drop), and it is rendered here as the model-facing refusal.
+        reason = str(result.get("reason") or "the host refused to arm a download")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_false",
+            reason=reason,
+        )
+        return _error(tool_call_id, "browser", f"refused: {reason}")
+
+    reported = {
+        str(item.get("name")): item
+        for item in (result.get("files") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    landed = files.snapshot(directory)
+    candidates = sorted(name for name in landed if name not in before)
+    if not candidates:
+        wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="no_download",
+            reason="nothing started",
+        )
+        return _error(
+            tool_call_id,
+            "browser",
+            f"no download started within {wait:g} s. If the page needs a click first, "
+            "call 'click' on its Download control and retry with selector=..., or the "
+            "file may be behind a login — ask the user to sign in, then retry.",
+        )
+
+    kept: list[dict[str, Any]] = []
+    refused: list[str] = []
+    # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
+    # symlink ENTRY is never settable there). Reported rather than implied.
+    unhardened: list[str] = []
+    # The per-CALL cap is applied to the CANDIDATE list, BEFORE anything is
+    # classified, renamed or audited (review round 1, R2). Truncating the kept
+    # list after the loop deleted the extra files but left their `verdict=allow`
+    # rows behind naming paths that no longer existed, and no row named the cap —
+    # so the trail over-reported what the session kept and never said why the rest
+    # went. Every dropped candidate gets its own `deny` row here instead.
+    over_cap = candidates[limits.download_max_files :]
+    for name in over_cap:
+        removed = _unlink_quietly(directory / name)
+        # The sentence and the audit row both come from `_delete_outcome`, so the
+        # over-cap refusal says what happened to the entry in the same words as
+        # the containment rule and the content refusals (review round 2, N7 — the
+        # row used to carry the cap and not the outcome, so a reader could not
+        # tell an entry that was removed from one still in the session
+        # directory, and this path can FAIL to delete when the directory is not
+        # writable).
+        word, trail = _delete_outcome(removed)
+        rule = f"over the {limits.download_max_files} files per call limit"
+        refused.append(f"{name}: {word} — {rule}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=name,
+            path="",
+            size=landed.get(name, 0),
+            verdict="deny",
+            reason=f"{rule}; {trail}",
+            redact=True,
+        )
+    for name in candidates[: limits.download_max_files]:
+        path = directory / name
+        declared = files.declared_mime_label(str((reported.get(name) or {}).get("mime") or ""))
+        try:
+            # `resolve()` is what the CONTAINMENT check reads: the destination is
+            # ours, but a hostile host could still have written a symlink, and it
+            # is the target that decides whether the entry escapes (§5.3 step 4).
+            # Everything after the check works on the ENTRY, never on the
+            # resolved path — see the refusal branch below.
+            resolved = path.resolve()
+        except OSError:
+            refused.append(f"{name}: could not be read")
+            continue
+        if not files.is_within(resolved, directory.resolve()):
+            # The ENTRY is deleted, never what it points at (review round 1, R1).
+            # `resolved` here is by definition a path OUTSIDE the quarantine
+            # root, so unlinking it deleted the user's own file — the data loss
+            # the containment rule exists to prevent — while leaving the
+            # escaping entry sitting in the session directory. Unlinking the
+            # entry removes the escape and touches nothing outside the root: a
+            # symlink dies, its target does not. The message and the audit row
+            # say what actually happened, including a delete that failed.
+            removed = _unlink_quietly(path)
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — it resolved outside the download directory")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                verdict="deny",
+                reason=f"outside the quarantine root; {trail}",
+                redact=True,
+            )
+            continue
+        verdict = files.classify_download(path, declared_mime=declared, policy=limits)
+        if verdict.kind == "deny":
+            # The entry, for the same reason as above: a symlink that stays
+            # inside the root must not be able to make Python delete the file it
+            # points at and leave the link behind.
+            removed = _unlink_quietly(path)
+            # One construction for every deny reason (review round 2, N7): the
+            # verdict and the entry's fate come from what actually happened, and
+            # `verdict.reason` is the rule alone — no reason can claim a delete it
+            # did not do, and none can delete the artifact silently.
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — {verdict.reason}")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                size=landed.get(name, 0),
+                verdict="deny",
+                reason=f"{verdict.reason}; {trail}",
+                declared_mime=declared,
+                sniffed=verdict.sniffed,
+                redact=True,
+            )
+            continue
+        final = path
+        if verdict.safe_name and verdict.safe_name != path.name:
+            # ALLOW-WITH-RENAME: the content disagreed with the name, so the file
+            # takes the name the content earns and the change is reported.
+            final = path.with_name(_unique_name(directory, verdict.safe_name))
+            try:
+                path.rename(final)
+            except OSError:
+                final = path
+        # The host wrote the bytes, so the host owned the mode they landed with
+        # (an Electron/Chromium write lands 0644 by umask). §4.1 promises files
+        # 0600, so the harness tightens the artifact it is about to report
+        # (review round 1, Q-2). Best-effort and never fatal: the 0700 session
+        # directory is the real bound, and a failed chmod must not cost the file
+        # it was protecting.
+        if not files.chmod_private(final):
+            # NOT silent (review round 4): on Linux a symlink entry's own mode is
+            # not settable at all, and a tightened mode that did not happen is a
+            # claim the result must not imply. The 0700 session directory is
+            # still the bound, so this is a caveat rather than a failure.
+            logger.warning("could not tighten the mode of the kept browser download %s", final)
+            unhardened.append(final.name)
+        fact = files.stat_fact(final.name, final, declared_mime=declared)
+        fact["sniffed"] = verdict.sniffed
+        kept.append(fact)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=final.name,
+            path=str(final),
+            size=int(fact["bytes"]),
+            verdict=verdict.kind,
+            reason=verdict.reason,
+            declared_mime=declared,
+            sniffed=verdict.sniffed,
+            sha256=str(fact["sha256"]),
+        )
+        if verdict.reason:
+            kept[-1]["note"] = verdict.reason
+
+    if not kept:
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved. " + " ".join(refused),
+        )
+    lines = [f"downloaded {len(kept)} file(s) into {directory}:"]
+    for fact in kept:
+        kind = str(fact.get("sniffed") or fact.get("mime") or "unknown type")
+        line = f"- {fact['path']} — {fact['bytes']} bytes, {kind}"
+        if fact.get("sniffed") == "":
+            line += " (unverified: not opened)"
+        if fact.get("note"):
+            line += f" [{fact['note']}]"
+        lines.append(line)
+    if refused:
+        lines.append("refused:")
+        lines.extend(f"- {item}" for item in refused)
+    if unhardened:
+        lines.append(
+            "note: could not tighten the mode of "
+            + ", ".join(unhardened)
+            + " to 0600 (a symlink's own mode is not settable on this platform); the "
+            "0700 session directory is still the bound, but the file's own mode is "
+            "not private."
+        )
+    text = "\n".join(lines)
+    return _text(
+        tool_call_id, "browser", text, details={"files": kept, "directory": str(directory)}
+    )
+
+
+async def _browser_upload(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+    policy: Any = None,
+) -> ToolResult:
+    """`upload`: the unconditional gate, then the attach, then the read-back.
+
+    The gate runs BEFORE anything reaches a browser (§9.2) and it consults no
+    approval policy, because the adversary it exists for is a confused-deputy
+    agent whose call may be auto-approved. All-or-nothing on a multi-file call: a
+    partial attach would send the page a set of files the model never asked for.
+    """
+    from local_operator import browser_files as files
+
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
+    problem = _capability_problem(tool_call_id, "upload", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    if len(params.paths) > limits.upload_max_files:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"refused: {len(params.paths)} files named, over the {limits.upload_max_files} "
+            "files per call limit. Attach them in batches.",
+        )
+    session_id = str(getattr(context, "session_id", "") or "")
+    resolved: list[Path] = []
+    for raw in params.paths:
+        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        if path is None:
+            # Refused as a whole call: attaching the rest would send a set the
+            # caller did not name, and the refusal names the one rule that fired.
+            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+        resolved.append(path)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        "selector": params.selector.strip(),
+        # The RESOLVED paths, so the host is handed targets that were checked,
+        # never the strings the model typed (design §9.2's step 2).
+        "paths": [str(path) for path in resolved],
+        **_browser_identity_params(context, tool_call_id),
+    }
+    result, problem = await _bridge_call(
+        tool_call_id, "upload", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    host_refused = result.get("refused") or []
+    if host_refused:
+        reasons = "; ".join(
+            str(item.get("reason") or item) if isinstance(item, dict) else str(item)
+            for item in host_refused
+        )
+        return _error(tool_call_id, "browser", f"refused: nothing was attached — {reasons}")
+    accepted = [item for item in (result.get("accepted") or []) if isinstance(item, dict)]
+    by_path = {str(item.get("path") or ""): item for item in accepted}
+    # The host's read-back can be LOST to the page's own success: a form that
+    # submits itself from the change handler navigates in the same tick as the
+    # attach, so the DOM can no longer be asked what it holds — while the bytes
+    # have already gone. The marker therefore means "the attach happened, the
+    # read-back did not": the facts come from Python's own re-stat + digest, and
+    # the call is reported as an UNVERIFIED attach rather than as a failure,
+    # because a failure here reads as "nothing was sent" and invites the
+    # double-send it is trying to prevent (review round 1, Q-1). The host
+    # reports it for ANY failed read, not only a navigation (a stall on the read
+    # is the same situation, and the read is what failed either way).
+    #
+    # It is a HOST-supplied string, so it is sanitised and capped like the declared
+    # type is before it reaches the transcript or the audit row (review round 2,
+    # R7): a marker containing a newline used to grow the tool result by a line
+    # the host chose. Its PRESENCE and its TEXT are kept apart, because sanitising
+    # can empty a marker that was really sent — and a marker that sanitises down
+    # to nothing must still mark the attach unverified rather than read as a
+    # verified one.
+    readback_reported = bool(result.get("readback"))
+    readback = files.readback_label(str(result.get("readback") or ""))
+    # One spelling for "the host said its read failed but left nothing printable",
+    # which is also the fallback the extension uses for an empty error detail.
+    readback_note = readback or "no detail"
+    facts: list[dict[str, Any]] = []
+    # What a contract-violating host sent in place of a count, one entry per file,
+    # carried into the note AND the audit row below so the two cannot disagree
+    # (review round 3's MINOR-2 / QA's Q-1).
+    malformed_counts: list[str] = []
+    for path in resolved:
+        fact = files.stat_fact(files.safe_name(path.name), path)
+        seen = by_path.get(str(path))
+        if seen is None:
+            # Not even a path came back for a file the host was told to set.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: nothing came back for "
+                f"{path}, and the file on disk is {fact['bytes']} bytes. Nothing was sent.",
+            )
+        # Never a bare `int()`: a count the host typed wrong must not raise out of
+        # the tool (review round 3's MINOR-2).
+        count, malformed = _host_byte_count(seen.get("bytes", -1))
+        # Gated on the SENTINEL, never on the marker (review round 2, R6). The
+        # marker is the host's word about its own read and means "I could not read
+        # it back"; treating it as "do not check" let one field that the host
+        # controls suppress the only check a real mismatch is caught by — a host
+        # reporting both a count and a marker lost the comparison entirely.
+        if count >= 0:
+            # The byte count is what Python compares (the extension compares the
+            # NAMES, in the read-back it does itself), so the check is
+            # name-plus-size rather than contents: a same-name, same-size
+            # replacement between the read and this stat would pass. That is the
+            # residual limit of the read-back, stated rather than implied
+            # (review round 1, N5) — which is why the digest is Python's own and
+            # the bytes are re-statted from disk rather than taken from the host.
+            if count != int(fact["bytes"]):
+                # The DOM holds something else. Reported as an error naming both
+                # sides rather than as a success: a file input that ignored the
+                # attach is exactly the failure a page would like us to call filled.
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    "the file input did not take the attach: it holds "
+                    f"{count} bytes for {path}, and the file "
+                    f"on disk is {fact['bytes']} bytes. Nothing was sent.",
+                )
+        elif malformed and not readback_reported:
+            # A count the host typed wrong, with nothing to explain it: refused
+            # with the value NAMED, because "no byte count" would be a lie about a
+            # field the host did send — and the sentence is what tells a reader
+            # which writer is broken.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported a malformed "
+                f"byte count ({malformed}) for {path}, and the file on disk is "
+                f"{fact['bytes']} bytes. Nothing was sent.",
+            )
+        elif not readback_reported:
+            # No count AND no marker: the host claims a read that reported nothing
+            # it measured, and there is no unverified note to carry either, so the
+            # call is refused rather than reported as a verified attach. The marker
+            # is what makes the unreported case legitimate — not the absence of a
+            # comparison.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported no byte "
+                f"count for {path}, and the file on disk is {fact['bytes']} bytes. "
+                "Nothing was sent.",
+            )
+        elif malformed:
+            # A marker says the read failed, so the count is unusable either way —
+            # that is the unverified attach this branch already reports, NOT a
+            # refusal: the host listed the file as accepted, so "the file input did
+            # not take the attach" would be false over bytes that went, which is
+            # the double-send harm Q-1 exists to prevent (round 1). The bad value
+            # is recorded rather than swallowed.
+            malformed_counts.append(malformed)
+        # A fact is VERIFIED only when the host's own read completed and agreed
+        # with Python's stat: an unverified attach must be discriminable by a
+        # consumer reading `details` and not only by one reading the prose
+        # (review round 2, N6) — the caveat below is what the key mirrors.
+        verified = count >= 0 and not readback_reported
+        facts.append({**fact, "verified": verified})
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="upload",
+            origin=origin,
+            name=str(fact["name"]),
+            path=str(path),
+            size=int(fact["bytes"]),
+            verdict="allow",
+            # Empty in the ordinary case; the unverified marker otherwise, so the
+            # trail carries the same caveat the model was given.
+            reason=_readback_reason(readback_note if readback_reported else "", malformed),
+            sha256=str(fact["sha256"]),
+        )
+    accept = str(result.get("accept") or "")
+    # The same construction as each row above, so the note and the trail cannot
+    # drift apart (review round 2, N7's rule).
+    readback_reason = _readback_reason(
+        readback_note if readback_reported else "", ", ".join(malformed_counts)
+    )
+    where = f" to {origin}" if origin else " to the page in this tab"
+    lines = [f"attached {len(facts)} file(s){where}:"]
+    lines.extend(
+        f"- {fact['path']} — {fact['bytes']} bytes, sha256 {str(fact['sha256'])[:12]}"
+        for fact in facts
+    )
+    if accept:
+        # REPORTED, never obeyed: a site's `accept` filter protects nothing and
+        # honouring it would let the page steer which local files we try.
+        lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
+    if readback_reason:
+        # Never silent: an unverified attach that reads like a confirmed one is
+        # how a model ends up re-sending files that already left.
+        lines.append(
+            f"note: the attach could not be read back ({readback_reason}). The bytes above are "
+            "what is on disk and were handed to the page; whether the page kept or sent them "
+            "is not something this call can confirm — check before re-sending."
+        )
+    return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
+
+
+def _host_byte_count(raw: Any) -> tuple[int, str]:
+    """The host's reported byte count, or the sentinel plus what was wrong with it.
+
+    `bytes` is a field the HOST chooses the type of, and this is the boundary
+    that must not take that on trust: `null`, `{}`, a non-numeric string or a
+    float-shaped one used to reach a bare `int()`, which raised straight out of
+    `_browser_upload` and surfaced as `Tool raised: ...` — an internal-error card
+    and a warning traceback where the design says the call is refused with a
+    sentence (review round 3's MINOR-2 / QA's Q-1).
+
+    Returns `(count, "")` for an integer count, and `(-1, label)` for everything
+    else — including a JSON float, which `int()` would silently TRUNCATE into a
+    count nobody sent. `-1` is the documented "unknown here" sentinel, so the
+    CALLER decides the shape: with a marker it is the unverified attach the
+    sentinel already means, and with no marker it is a refusal that names what the
+    host sent instead.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw, ""
+    if isinstance(raw, str):
+        text = raw.strip()
+        body = text[1:] if text[:1] in ("+", "-") else text
+        # `str.isdigit()` alone is not enough, and round 4 measured why: it is
+        # TRUE for Unicode digits `int()` rejects ("\u00b2"), and it says nothing
+        # about CPython's ~4300-digit limit on `int()` from a string ("9"*4301
+        # raises `ValueError`). `isascii()` plus the try/except closes both, so a
+        # value the host typed can never raise out of the tool.
+        if body.isascii() and body.isdigit():
+            try:
+                return int(text), ""
+            except ValueError:
+                pass
+    from local_operator import browser_files as files
+
+    # The offending value lands in the transcript and the audit row, so it goes
+    # through the same sanitiser as every other host-supplied string.
+    return -1, files.readback_label(repr(raw)) or "empty value"
+
+
+def _readback_reason(note: str, malformed: str) -> str:
+    """One string for the unverified note and the audit row: they cannot disagree.
+
+    `note` is the sanitised marker (empty when the host sent none) and `malformed`
+    is the count it sent instead of a number, if any — both are host-supplied, so
+    both are already sanitised by the time they arrive here. Round 2's N7 is the
+    rule: a reader of the trail and a reader of the transcript are looking at the
+    same fact, so they get the same sentence.
+    """
+    parts = [note] if note else []
+    if malformed:
+        parts.append(f"the host's byte count was malformed ({malformed})")
+    return "; ".join(parts)
+
+
+def _delete_outcome(removed: bool) -> tuple[str, str]:
+    """What happened to a refused ENTRY: the verdict word and the row's clause.
+
+    Both halves are built from the RETURN of the delete rather than from the
+    assumption that it worked (review round 1, R1) and from ONE function rather
+    than one spelling per branch (review round 2, N7): the containment rule, the
+    per-call cap and the content refusals all delete the entry, and a reader of
+    the trail reconstructs what a session kept from these rows — two vocabularies
+    for one fact is a row that cannot be compared with its neighbour.
+    """
+    if removed:
+        return "refused and deleted", "the entry was removed"
+    return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a refused artifact, absorbing the failure. ``True`` when it went.
+
+    Best-effort on purpose: the verdict is the deliverable here, and a file we
+    could not delete must not turn a policy refusal into a traceback in the
+    model's context. The audit row already records what was refused.
+
+    The RETURN VALUE is what the model-facing sentence is built from, and it is
+    not decoration: this is called on the candidate ENTRY (never on a resolved
+    path — see the containment branch), and a refusal that claims "deleted" over
+    an entry still sitting on disk is the same class of false report the whole
+    post-hoc verification exists to remove (review round 1, R1).
+    """
+    try:
+        path.unlink()
+    except OSError:
+        logger.warning("could not delete the refused browser download %s", path)
+        return False
+    return True
+
+
+def _unique_name(directory: Path, name: str) -> str:
+    """``name``, or ``name-2``, ``name-3``... when something already holds it.
+
+    The rename a content-corrected file needs must never overwrite: two receipts
+    downloaded from one page can both be called `invoice.pdf` after correction.
+    """
+    candidate = name
+    stem, dot, ext = name.rpartition(".")
+    stem = stem if dot else name
+    ext = ext if dot else ""
+    index = 2
+    while (directory / candidate).exists():
+        candidate = f"{stem}-{index}.{ext}" if ext else f"{stem}-{index}"
+        index += 1
+    return candidate
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -10775,6 +11565,10 @@ async def _bridge_action(
     """
     host = _host_of_client(client)
     surface = state.surface_id
+    if action == "download":
+        return await _browser_download(tool_call_id, state, params, context, client=client)
+    if action == "upload":
+        return await _browser_upload(tool_call_id, state, params, context, client=client)
     wire: dict[str, Any] = {
         "tab": surface,
         # Identity and display label are trusted host metadata. Keeping both on
@@ -11475,8 +12269,10 @@ async def _execute_browser(
             tool_call_id,
             "browser",
             f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
-            "background-tab scroll primitive, multi-surface registry or site-permission "
-            "model. " + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available) + demotion,
+            "background-tab scroll primitive, multi-surface registry, site-permission "
+            "model, or file-transfer primitive. "
+            + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+            + demotion,
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -11693,42 +12489,53 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
+            # Footprint: this description rides in EVERY session's cache prefix, so
+            # the per-action detail lives in `guide://browser` (the playbook the
+            # model is pointed at below) and in the parameter descriptions, and
+            # this string carries only what a model needs to CHOOSE the tool and
+            # call it correctly. The context-budget guard measures the whole
+            # surface and it is why the download/upload sentence is one clause
+            # rather than the four the design first drafted (AGENTS.md,
+            # "tool-surface footprint ladder"; see the round-4 remediation).
             "Drive the user's REAL browser (the Local Operator desktop app's browser "
             "tab, their paired browser extension, or a cmux browser "
-            "panel): open/goto a URL, read page text, snapshot the "
-            "accessibility tree for click refs, click, type, scroll, read console "
-            "logs, screenshot, close. Cookies and logins persist across calls and "
+            "panel): open/goto a URL, read text, snapshot for click refs, click, type, "
+            "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
-            "to, so this reaches authenticated pages a throwaway headless browser "
-            "cannot. 'scroll' pages the view (default: one screen down) and "
-            "reports whether more content remains; 'logs' returns the page's "
-            "console output and uncaught exceptions for debugging web apps. "
+            "to, so this reaches authenticated pages a throwaway browser cannot. "
             "Parallel "
             "sessions each drive their own tab: a fresh 'open' creates one NEW "
             "tab owned by this session; reuse it because later opens navigate it. "
-            "Before your final response, call 'close' unless the user explicitly "
-            "needs it left open for a pending or immediately continuing interaction. "
+            "Before your final response, call 'close' unless the user needs it left "
+            "open for a pending interaction. "
             "'tabs' lists every agent-driven tab including other sessions' "
-            "(handles are redacted: awareness-only, it cannot "
-            "drive or close anything — except a tab the user handed over, listed in "
-            "full for 'open'), and 'close' ends only your own tab. "
-            "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
-            "your turn with 'retain' and end that hold with 'release'. "
+            "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
             "'scroll', 'logs' and "
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
+            "'download' saves what the page offers into this session's private "
+            "download directory, and 'upload' attaches local files to a page's file "
+            "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt in the extension popup "
-            "or the app's browser tab, "
-            "and 'await_access' before navigating again. "
-            "Use it for every "
-            "screenshot and page interaction; never install or script a browser "
-            "engine instead."
+            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "it, and 'await_access' before navigating again. "
+            "Never install or script a browser engine instead."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
-        # approval gate rather than auto-approved read.
+        # approval gate rather than auto-approved read. `upload` escalates PER
+        # CALL to `exec`, because it transmits local bytes to a remote origin — a
+        # side effect whose consequence is not visible from the arguments.
+        #
+        # The honest caveat, which must not be lost: today the gate is ONE callback
+        # for both tiers and `tool_approval_mode: auto` / `--yolo` installs no gate
+        # at all, so the tier records intent and future-proofs a tier-sensitive
+        # host — it is NOT the protection. The protection is the policy in
+        # `local_operator/browser_files.py`, which runs unconditionally, plus this
+        # describer naming what the call will do.
         approval_tier="write",
+        call_approval_tier=lambda args: (
+            "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+        ),
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,
