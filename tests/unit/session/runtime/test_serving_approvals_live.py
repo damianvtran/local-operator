@@ -430,7 +430,14 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # desktop app's settings), not something to go and type in a terminal — the
     # surface the operator was already sitting at (UX round 2, U7).
     assert "run it on a terminal" not in refused, refused
-    assert "this machine's config.yml" in refused, refused
+    # ...and it names the machine the SESSION runs on, because the reader can be
+    # a phone for which "this machine" means the phone (design round 3, D16). The
+    # two hosts build this from ONE function, so they cannot drift apart again.
+    assert "the machine this session runs on" in refused, refused
+    from local_operator.harness.approval import approvals_default_notice
+
+    assert refused == approvals_default_notice(may_loosen=False), refused
+    assert capable == approvals_default_notice(may_loosen=True), capable
     await handle.dispose()
 
 

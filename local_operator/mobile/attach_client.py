@@ -44,6 +44,7 @@ from typing import Any, Callable, NamedTuple, Sequence
 
 from local_operator.harness.approval import (
     frame_authority,
+    handshake_proof,
     handshake_proof_ok,
     is_wire_hex,
     operator_cap_for,
@@ -1413,10 +1414,26 @@ class AttachClient:
         relay and the peer paths, and a per-caller field would be a field some
         future caller forgets.
         """
-        proof = self.authority_proof(str(frame.get("op", "")), frame)
-        if proof is None:
-            return frame
-        return {**frame, "operator_cap": proof}
+        op = str(frame.get("op", ""))
+        proof = self.authority_proof(op, frame)
+        out = {**frame, "operator_cap": proof} if proof is not None else dict(frame)
+        # THE SENTENCE HALF. ``slash_result`` returns REPORTS that name remedies,
+        # and whether this connection may loosen decides which remedy is true —
+        # so the runtime is given the one thing it can verify about us (agent
+        # review round 3, R3-1 = UX U10: without this the runtime could only
+        # answer "not proved", and told a console that had just loosened the gate
+        # that loosening belonged to another window). The value is the HANDSHAKE
+        # proof, not the capability: it is the same value this connection was
+        # already sent, it is bound to this connection's nonce and salt, and it
+        # authorises nothing on its own — a frame that needed authority would
+        # still have to carry ``operator_cap`` for that frame.
+        if op == "slash_result" and self._authority_bearing and self._operator_cap is not None:
+            out["operator_handshake"] = handshake_proof(
+                self._operator_cap,
+                client_nonce=self._operator_nonce,
+                server_salt=self._operator_salt,
+            )
+        return out
 
     async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""

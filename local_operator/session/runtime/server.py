@@ -62,6 +62,7 @@ from local_operator.harness.approval import (
     AUTHORITY_OPS,
     frame_authority,
     handshake_proof,
+    handshake_proof_ok,
     is_wire_hex,
     operator_nonce,
     report_operator_cap_guarantee,
@@ -3479,6 +3480,48 @@ class RuntimeServer:
             server_salt=conn.operator_salt,
         )
 
+    def _connection_may_loosen(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
+        """Whether THIS connection has PROVEN it may loosen this session's gate.
+
+        ``True``, or ``None`` for "it has not said", which the sentence builders
+        read as the conservative branch. Never ``False``: a follower and a
+        capable console must not be indistinguishable by accident, and the
+        distinction that matters is "proved" vs "did not".
+
+        WHY NOT ``_authority_admitted`` ON A SYNTHETIC FRAME. That predicate
+        reads the proof off the ``frame`` it is handed, and a frame constructed
+        here has none — so it answered a constant ``False`` and told a console
+        that had just loosened the gate that loosening "has to come from the
+        window that started it" (agent review round 3, R3-1 = UX U10 = QA Q6:
+        measured on production objects, on both the desktop and the phone).
+        Passing the REQUEST frame instead is not a fix either: the request is
+        ordinary, so an ordinary op would answer "may loosen" for a follower.
+
+        What CAN be verified here is the HANDSHAKE proof: HMAC over THIS
+        connection's nonce and salt, computable only by a process holding the
+        capability. A client that spawned this runtime has both; a follower, an
+        impostor holding the rewritten record, and a relay forwarding someone
+        else's frames do not — the proof is bound to the connection's own nonce
+        and salt, so another connection's proof does not verify here.
+        """
+        if self._operator_cap is None:
+            return None
+        supplied = frame.get("operator_handshake")
+        if not is_wire_hex(supplied) or not conn.operator_nonce or not conn.operator_salt:
+            # Not proved: an unchanged client (the field is optional and
+            # additive), a follower, or a relay. The conservative sentence is
+            # the right answer for all three, and for a capable client on an
+            # older build it is only cosmetically wrong until it updates.
+            return None
+        if not handshake_proof_ok(
+            supplied=supplied,
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        ):
+            return None
+        return True
+
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
         # HERE rather than at the reader's parse because this is the line that
@@ -3876,13 +3919,13 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
-                    # Whether THIS connection could loosen the gate, judged by
-                    # the seam's own predicate (design round 2 D10, UX round 2
-                    # U9): the reports a routed command returns must not offer a
-                    # command this connection would be refused.
-                    may_loosen=self._authority_admitted(
-                        {"op": "slash_result", "command": "approvals", "args": "auto"}, conn
-                    ),
+                    # Whether THIS connection PROVED it may loosen the gate,
+                    # or ``None`` for "it has not said" (design round 2 D10, UX
+                    # round 2 U9; corrected in agent review round 3, R3-1): the
+                    # reports a routed command returns must not offer a command
+                    # this connection would be refused, and must not deny one it
+                    # could carry.
+                    may_loosen=self._connection_may_loosen(frame, conn),
                 )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
@@ -4541,7 +4584,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
-        may_loosen: bool = True,
+        may_loosen: bool | None = None,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -4604,6 +4647,7 @@ class RuntimeServer:
                 # known — the same reason ``consumers`` is (design round 2 D10,
                 # UX round 2 U9).
                 kwargs["may_loosen"] = may_loosen
+
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result

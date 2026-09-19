@@ -672,7 +672,7 @@ class TuiSessionHandle(SessionHandle):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
-        may_loosen: bool = True,
+        may_loosen: bool | None = True,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 

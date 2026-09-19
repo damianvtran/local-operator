@@ -9996,7 +9996,16 @@ class OperatorApp(App[None]):
         def show() -> None:
             if not self._is_current(source):
                 return
-            self._system_notice(str(error), "warning")
+            # A REFUSED CARD'S OWN KEYSTROKE ALREADY WROTE A RECEIPT. The dock
+            # card resolves on the keypress, so "✓ allowed  bash  rm -rf build/"
+            # is on the row above this notice, and the tick is the strongest
+            # "it worked" affordance the transcript has (UX review round 3, U13).
+            # The correction belongs in the notice's first words, because the
+            # receipt cannot be revised once the widget has settled.
+            prefix = ""
+            if getattr(error, "trigger", "") in getattr(type(error), "CARD_OPS", frozenset()):
+                prefix = "not applied — "
+            self._system_notice(prefix + str(error), "warning")
 
         try:
             self.call_later(show)
@@ -21681,11 +21690,12 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"config.yml says {saved} — {self._adopt_remedy(saved)}",
+            f"config.yml says {saved} — "
+            f"{self._adopt_remedy(saved, may_loosen=self._may_loosen_gate_here())}",
             "warning" if self._approve_all else "info",
         )
 
-    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = None) -> str:
+    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = True) -> str:
         """The command that matches ``config.yml``, and WHERE it has to be typed.
 
         Every remedy printed has to work where it is printed (design round 1 D3,
@@ -21703,12 +21713,14 @@ class OperatorApp(App[None]):
         ``may_loosen`` is WHO THE SENTENCE IS FOR, and it is passed rather than
         inferred when the sentence is built for a FOLLOWER: ``_may_loosen_gate_here``
         describes THIS pane, and a routed report is rendered in someone else's
-        (issue #1310; design round 2 D10, UX round 2 U9). ``None`` means "the
-        local pane is the audience", which is the only case a local caller has.
+        (issue #1310; design round 2 D10, UX round 2 U9). ``None`` is the ROUTED
+        "it did not prove it may loosen" (agent review round 3, R3-1) — the
+        conservative branch — and the local call sites pass their own answer
+        explicitly rather than letting that question and this one share a value.
         """
         from local_operator.harness.approval import transition_authority
 
-        here = self._may_loosen_gate_here() if may_loosen is None else may_loosen
+        here = may_loosen
         remedy = f"/approvals {saved} adopts it in this session"
         loosens = transition_authority("approvals", saved) == "authority-increasing"
         if loosens and not here:
@@ -38208,7 +38220,7 @@ class OperatorApp(App[None]):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
-        may_loosen: bool = True,
+        may_loosen: bool | None = True,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -38311,7 +38323,7 @@ class OperatorApp(App[None]):
         args: str,
         images: list[Any] | None,
         locality: str = "local",
-        may_loosen: bool = True,
+        may_loosen: bool | None = True,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -39150,7 +39162,7 @@ class OperatorApp(App[None]):
         return SlashResult(kind="notice", text="compacting context…", style="info")
 
     def _approvals_slash_result(
-        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
+        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = True
     ) -> Any:
         """The routed ``/approvals``: report or switch the OWNER's gate.
 
@@ -39164,26 +39176,16 @@ class OperatorApp(App[None]):
         persist = argument == "default" or argument.startswith("default ")
         mode = argument[len("default ") :].strip() if persist else argument
         if persist:
-            # The same two-truths split the runtime makes (design round 2 D10 =
-            # UX round 2 U7). ``default`` writes a FILE on whichever machine this
-            # is — no control connection can do it — and the second half of the
-            # old sentence promised `auto` "now" to a follower whose connection
-            # may not loosen the shared session at all.
-            here = self._may_loosen_gate_here() if may_loosen is None else may_loosen
-            switch = (
-                "/approvals ask|auto switches the shared session now"
-                if here
-                else (
-                    "/approvals ask switches the shared session now; /approvals auto has "
-                    "to come from the window that started it"
-                )
-            )
+            # The same two-truths split the runtime makes, in the SAME WORDS:
+            # the sentence is shared so the two hosts cannot drift, and it names
+            # the machine the session runs on rather than "this machine", which
+            # reads as the reader's own filesystem from a phone (design round 2
+            # D10 = UX round 2 U7; design round 3, D16).
+            from local_operator.harness.approval import approvals_default_notice
+
             return SlashResult(
                 kind="notice",
-                text=(
-                    "/approvals default writes this machine's config.yml — a file, not a "
-                    f"session command. {switch}"
-                ),
+                text=approvals_default_notice(may_loosen=may_loosen),
                 style="warning",
             )
         if mode in ("ask", "on", "prompt"):
@@ -39218,7 +39220,7 @@ class OperatorApp(App[None]):
                 )
             from local_operator.harness.approval import transition_authority
 
-            here = self._may_loosen_gate_here() if may_loosen is None else may_loosen
+            here = may_loosen
             remedy = self._adopt_remedy(saved, may_loosen=here)
             if transition_authority("approvals", saved) == "authority-increasing" and not here:
                 # The route that DOES work belongs in the report too, not only in
@@ -42895,7 +42897,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 124
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 125
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
