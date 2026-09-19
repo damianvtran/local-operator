@@ -706,7 +706,20 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
         logger.warning("child session dispose failed", exc_info=True)
     try:
-        await runtime.aclose()  # type: ignore[attr-defined]
+        # ``aclose`` RAISES off the runtime's owning loop by design, and this
+        # exit path runs on the SESSION's loop — after the serving plane moved
+        # to its own thread, that is every daemon and exec teardown. The raise
+        # here is swallowed by the ``except`` below, so the failure was quiet:
+        # teardown still STARTED (``aclose`` requests the close before raising),
+        # but nothing waited for it and the process could exit mid-teardown.
+        # ``aclose_remote`` is the same teardown awaited across the thread hop;
+        # a reduced test double that has only the owner-loop form falls back to
+        # it, which is the behaviour that double was written against.
+        remote = getattr(runtime, "aclose_remote", None)
+        if callable(remote):
+            await cast(Callable[[], Awaitable[None]], remote)()
+        else:
+            await runtime.aclose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         logger.debug("child runtime aclose failed", exc_info=True)
     _clear_boot_record()
@@ -1659,7 +1672,7 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
 
     CALLED FROM THE FIRST STATEMENT OF ``amain``, so the guarantee covers the
     whole substantive boot (lease arbitration, session construction, MCP
-    bring-up, ``start_in_process``). The residual window is ``main()``'s logging
+    bring-up, ``RuntimeServer.start``). The residual window is ``main()``'s logging
     setup and the ``asyncio.run`` bootstrap — milliseconds, and nothing is
     spawned in it. A process-wide ``signal.signal(SIG_IGN)`` installed in
     ``main()`` instead would close even that, and is deliberately NOT done:
@@ -1709,7 +1722,7 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
 
 async def amain() -> int:
     # SIGHUP FIRST, before the deferred imports below, the lease arbitration,
-    # session construction, MCP bring-up and ``start_in_process``: the guarantee
+    # session construction, MCP bring-up and ``RuntimeServer.start``: the guarantee
     # is "no interface can end this session's work", and a HUP during boot has
     # exactly the unattributed shape it exists to remove (review round 1,
     # MINOR-3). See ``_install_sighup_ignore`` for the scope this does and does
@@ -1799,8 +1812,12 @@ async def amain() -> int:
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
     # session was cold are delivered here, BEFORE the control socket begins
     # listening, so they cannot be interleaved with an errand a client sends
-    # over that socket — there is no socket yet. Draining after
-    # ``start_in_process`` would race the engaging caller's own prompt and
+    # over that socket — there is no socket yet. ``runtime.start()`` below is
+    # what binds it, on the runtime's own thread, so the ordering this comment
+    # describes is now a happens-before across two threads rather than two
+    # statements in one coroutine: the drain completes before ``start()`` is
+    # called, and ``start()`` cannot return before the listener is bound.
+    # Draining after it would race the engaging caller's own prompt and
     # deliver a note written minutes ago after one written just now.
     await _drain_inbox_into(handle)
 
@@ -1827,7 +1844,27 @@ async def amain() -> int:
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
     runtime = RuntimeServer(handle, kind="daemon")
-    await runtime.start_in_process()
+    # THE SERVING PLANE GETS ITS OWN LOOP. ``start()`` rather than
+    # ``start_in_process()``, and the whole of the operator-visible defect is
+    # that one word: in process, the listener, the welcome, ``ping`` and the
+    # heartbeat share an event loop with the turn, so ANY synchronous step of a
+    # turn parks all four together. Measured on the audit's rig (50 s block, no
+    # client attached): the record crossed into ``wedged`` at t=46.2 s, and a
+    # fresh dial connected in 0.01 s and then received NO welcome within 15 s.
+    # The same rig with ``start()``: welcome immediate, ``ping`` -> ``pong`` in
+    # 0.00 s, and the heartbeat never past 14.2 s. A fresh beat now means the
+    # SERVING PLANE ran, which is the claim the surfaces already make.
+    runtime.start()
+    # WAIT FOR PUBLICATION BEFORE ANYTHING READS THE RECORD. ``start()`` returns
+    # while ``_serve`` is still binding on its thread, so ``control_port`` is the
+    # constructor's 0 and the record file does not exist yet. The parent polls
+    # for the record (``launch.py``'s wait-for-record loop) and so does the wake
+    # supervisor, but the boot record's withdrawal and the exit ordering below
+    # both read the runtime's own state, so the wait is taken here too rather
+    # than left to a caller's convention. A bind that failed releases this latch
+    # as well; the answer would be "no control surface", and this path's
+    # behaviour on a dead socket is what it always was.
+    await runtime.wait_until_published()
 
     stop = asyncio.Event()
     # What ASKED this runtime to leave. Named because the exit itself is the one
@@ -1878,9 +1915,24 @@ async def amain() -> int:
         )
 
     def _on_socket_stop() -> None:
-        """The graceful ``stop`` op (``ServingSessionHandle.request_stop``)."""
+        """The graceful ``stop`` op (``ServingSessionHandle.request_stop``).
+
+        THIS HOOK NOW ARRIVES FROM ANOTHER THREAD, and the set is hopped rather
+        than written here. ``request_stop`` runs on the runtime's control-socket
+        thread, while ``stop`` belongs to the session's loop — and
+        ``asyncio.Event.set()`` from a foreign thread sets the flag WITHOUT
+        waking the waiter: its callback is scheduled with plain ``call_soon``
+        and no self-pipe write happens, so a loop parked in ``select()`` (which
+        is what ``await stop.wait()`` below looks like at the syscall level) is
+        not woken until some other timer fires. With nothing else armed, that is
+        never, and the graceful rung's stop never lands — the exact failure
+        ``publication.PublicationGate`` was written to prevent, and the reason
+        ``RuntimeServer._wake_close_wait`` goes through ``call_soon_threadsafe``
+        too. ``trigger`` is written here and read by the loop below; the hop is
+        what orders the two, the same way it orders ``stop``.
+        """
         trigger.setdefault("why", "socket-stop")
-        stop.set()
+        loop.call_soon_threadsafe(stop.set)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _on_signal, sig)
@@ -1981,7 +2033,16 @@ async def amain() -> int:
             await handle.dispose()
         except Exception:  # noqa: BLE001
             logger.warning("child session dispose failed", exc_info=True)
-    await runtime.aclose()
+    # ``aclose_remote``, not ``aclose``: this is the SESSION's loop and the
+    # runtime now owns its own thread, so the owner-loop-only form would raise
+    # here — on the exit path that withdraws the boot record two lines below,
+    # which an unwrapped raise skips entirely, leaving a record the reaper reads
+    # as a runtime that stopped without running its own exit ordering.
+    remote = getattr(runtime, "aclose_remote", None)
+    if callable(remote):
+        await cast(Callable[[], Awaitable[None]], remote)()
+    else:  # pragma: no cover - a reduced host that only answers the owner-loop form
+        await runtime.aclose()
     # Clean exit, so the boot record goes with it (see ``_clear_boot_record``):
     # a record that outlives its process is the statement "this pid stopped
     # without running its own exit ordering", and this path ran it.
