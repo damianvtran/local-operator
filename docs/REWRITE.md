@@ -395,11 +395,17 @@ ink) rather than from the hue.
   `asyncio.gather` (never serial); exclusive tools run alone. Provider
   streaming starts as early as possible (no pre-turn classification or
   planning round trips — the old triple-LLM-call per turn is gone).
-- **Streaming/UI contract preserved**: the server websocket contract
-  (`/v1/ws/messages/{message_id}` push shape, `CRUDResponse` envelope) is
-  unchanged for the existing UI. The new engine pushes incremental
-  `message_update` deltas rather than re-sending whole messages — same
-  endpoint, lower latency. The AgentEvent stream is additive.
+- **Streaming/UI contract preserved**: the record push shape the existing UI
+  consumes is unchanged — the `CodeExecutionResult` dump with the injected
+  `message_id`/`connection_type`, inside the `CRUDResponse` envelope. The new
+  engine pushes incremental `message_update` deltas rather than re-sending
+  whole messages — same payloads, lower latency — and the AgentEvent stream is
+  additive.
+  The deprecated `/v1/ws` socket mount that carried those frames during the
+  rewrite was removed afterwards: `/v1/sse/*` is the only streaming transport
+  now, and an installed desktop build that fell back to the socket (only when
+  its SSE probe failed or the stream went silent) has no fallback until it is
+  updated. `docs/DESKTOP_API.md` records the surfaces this affects.
   harness-injected fields the server doesn't declare, drop empty optionals),
   retriable-error classification → one reconnect + one retry.
 - stdio hardening: `start_new_session=True` on POSIX except macOS; Windows

@@ -30,7 +30,6 @@ from local_operator.server.dependencies import (
     get_event_broker,
     get_job_manager,
     get_scheduler_service,
-    get_websocket_manager,
 )
 from local_operator.server.models.schemas import (
     AgentChatRequest,
@@ -52,7 +51,6 @@ from local_operator.server.utils.job_processor_queue import (
     run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import ExecutorInitError, create_operator
-from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import ConversationRecord, ConversationRole
 
 if TYPE_CHECKING:
@@ -343,7 +341,6 @@ async def chat_async_endpoint(
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
-    websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
@@ -363,7 +360,6 @@ async def chat_async_endpoint(
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
-        websocket_manager: Dependency for managing WebSocket connections
 
     Returns:
         A response containing the job ID and status
@@ -400,7 +396,6 @@ async def chat_async_endpoint(
                 request.options,
             ),
             job_manager=job_manager,
-            websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
             event_broker=event_broker,
         )
@@ -469,7 +464,6 @@ async def chat_with_agent_async(
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
-    websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
@@ -493,7 +487,6 @@ async def chat_with_agent_async(
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
-        websocket_manager: Dependency for managing WebSocket connections
         agent_id: ID of the agent to use for the chat
 
     Returns:
@@ -538,7 +531,6 @@ async def chat_with_agent_async(
                 request.user_message_id,
             ),
             job_manager=job_manager,
-            websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
             event_broker=event_broker,
         )

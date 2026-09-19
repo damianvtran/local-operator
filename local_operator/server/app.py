@@ -59,10 +59,8 @@ from local_operator.server.routes import (
     sse,
     static,
     transcription,
-    websockets,
 )
 from local_operator.server.utils.event_broker import EventBroker
-from local_operator.server.utils.websocket_manager import WebSocketManager
 
 # Annotating the lifespan's record publisher (`None` on a boot that was not
 # announced) needs the shared publisher's type. Zero runtime cost where it
@@ -159,10 +157,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
-    app.state.websocket_manager = WebSocketManager()
-    # The SSE fan-out. One instance per process, mirroring the websocket
-    # manager: both are subscribers to the same pump, which is what keeps the
-    # legacy transport byte-identical while SSE carries the richer taxonomy.
+    # The SSE fan-out. One instance per process: it is the ONLY streaming
+    # transport the server offers (the deprecated /v1/ws socket surface was
+    # removed, so a subscriber count here is the whole live-stream picture -
+    # see `server/retire.py::in_flight`).
     app.state.event_broker = EventBroker()
     app.state.env_config = get_env_config()
 
@@ -174,7 +172,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
         job_manager=app.state.job_manager,
-        websocket_manager=app.state.websocket_manager,
         event_broker=app.state.event_broker,
     )
 
@@ -353,7 +350,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.config_manager = None
         app.state.agent_registry = None
         app.state.job_manager = None
-        app.state.websocket_manager = None
         app.state.event_broker.close()
         app.state.event_broker = None
         app.state.env_config = None
@@ -750,13 +746,10 @@ app.include_router(
     static.router,
 )
 
-# /v1/ws
-app.include_router(
-    websockets.router,
-)
-
-# /v1/sse - the preferred streaming transport; /v1/ws above is the fallback
-# kept for older clients.
+# /v1/sse - the only streaming transport the HTTP plane serves. The deprecated
+# /v1/ws socket mount that used to sit above this was removed rather than kept
+# as a fallback: it carried the same frames on a second, unversioned contract,
+# and every maintained client negotiates SSE from /v1/sse/capabilities.
 app.include_router(
     sse.router,
 )

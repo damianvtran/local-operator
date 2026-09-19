@@ -25,7 +25,6 @@ from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import app
 from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.operator import ExecutorInitError
-from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.types import (
     ActionType,
     AgentState,
@@ -201,8 +200,6 @@ def test_app_client(temp_dir):
         original_state["agent_registry"] = app.state.agent_registry
     if hasattr(app.state, "job_manager"):
         original_state["job_manager"] = app.state.job_manager
-    if hasattr(app.state, "websocket_manager"):
-        original_state["websocket_manager"] = app.state.websocket_manager
     if hasattr(app.state, "event_broker"):
         original_state["event_broker"] = app.state.event_broker
     if hasattr(app.state, "env_config"):
@@ -214,9 +211,10 @@ def test_app_client(temp_dir):
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
     mock_job_manager = JobManager()
-    mock_websocket_manager = WebSocketManager()
-    # Streaming fan-out is app state like the websocket manager: the async chat
-    # routes depend on it, so a client built without lifespan must supply it.
+    # The SSE fan-out is app state the async chat routes depend on, so a client
+    # built without lifespan must supply it. It is the ONLY streaming fan-out:
+    # the websocket manager this fixture used to build went with the removal of
+    # the /v1/ws transport.
     mock_event_broker = EventBroker()
     mock_env_config = EnvConfig(
         radient_api_base_url="https://api.radienthq.com/v1",
@@ -228,7 +226,6 @@ def test_app_client(temp_dir):
         credential_manager=mock_credential_manager,
         env_config=mock_env_config,
         operator_type=OperatorType.SERVER,
-        websocket_manager=mock_websocket_manager,
         verbosity_level=VerbosityLevel.QUIET,
     )
     _ = mock_scheduler_service.start()
@@ -239,7 +236,6 @@ def test_app_client(temp_dir):
     app.state.config_manager = mock_config_manager
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
-    app.state.websocket_manager = mock_websocket_manager
     app.state.event_broker = mock_event_broker
     app.state.env_config = mock_env_config
     app.state.scheduler_service = mock_scheduler_service

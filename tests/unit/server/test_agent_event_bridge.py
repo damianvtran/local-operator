@@ -1,7 +1,7 @@
 """Streaming semantics of ``AgentEventBridge``.
 
 This class had no test coverage at all, and that gap let a harness-side
-optimization silently break the websocket/SSE streaming contract: when the
+optimization silently break the streaming contract: when the
 harness stopped rebuilding ``message.content`` on every delta (it was quadratic
 in response length), the bridge — which re-read that field per delta — began
 broadcasting an empty string for the whole turn and only filled the text in at

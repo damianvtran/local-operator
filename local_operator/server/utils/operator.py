@@ -3,7 +3,7 @@
 Why this module exists
 ----------------------
 The HTTP surface (44 endpoints) and the shipped Electron UI are frozen: paths,
-verbs, envelopes, status codes and websocket message shapes must not move. The
+verbs, envelopes, status codes and the message shapes on the wire must not move. The
 engine underneath them was replaced wholesale — the classify/plan/act triple
 round-trip ``Operator`` + ``LocalCodeExecutor`` pair is gone, and the rewritten
 harness exposes a very different contract (``Session.prompt`` driving an
@@ -34,8 +34,9 @@ design points:
    to the registry when ``persist_conversation`` is set), which is exactly
    what the routes serialize into their response envelopes.
 3. **Events are translated, not re-invented.** ``AgentEventBridge`` maps the
-   engine's event stream onto the ``CodeExecutionResult`` payloads the
-   websocket manager already broadcasts, so the UI sees byte-identical frames.
+   engine's event stream onto the ``CodeExecutionResult`` payloads the UI
+   consumes - the shapes the removed websocket transport put on the wire - so
+   an installed UI sees byte-identical frames.
 """
 
 from __future__ import annotations
@@ -208,15 +209,15 @@ def _cap_stream_payload(payload: dict[str, object], _depth: int = 0) -> None:
 
 
 class AgentEventBridge:
-    """Translate the engine's ``AgentEvent`` stream into the websocket frames
-    the UI expects.
+    """Translate the engine's ``AgentEvent`` stream into the record frames the
+    UI expects.
 
-    The UI consumes ``CodeExecutionResult`` dumps (see
-    ``WebSocketManager.broadcast_update``) pushed through the multiprocessing
-    ``status_queue`` as ``("message_update", <message id>, result)`` and
-    ``("execution_update", <job id>, result)``. Both tuple shapes and the
-    payload model are unchanged from the legacy executor; only their producer
-    moved.
+    The UI consumes ``CodeExecutionResult`` dumps - the shape the removed
+    ``WebSocketManager.broadcast_update`` produced - pushed through the
+    multiprocessing ``status_queue`` as ``("message_update", <message id>,
+    result)`` and ``("execution_update", <job id>, result)``. Both tuple shapes
+    and the payload model are unchanged from the legacy executor; only their
+    producer moved.
 
     Streaming semantics preserved from the legacy operator:
 
@@ -290,8 +291,8 @@ class AgentEventBridge:
         # rebuild was quadratic in response length), so the serialised message
         # is empty mid-stream and the guarantee would be silently lost.
         #
-        # The bridge already tracks the accumulated text for the websocket
-        # record, so publish it explicitly instead of depending on a field the
+        # The bridge already tracks the accumulated text for the record frame,
+        # so publish it explicitly instead of depending on a field the
         # harness no longer maintains per delta. ``_raw`` runs BEFORE the record
         # projection updates, so the stored value is the text as of the previous
         # delta; this frame's increment is appended to make the snapshot
@@ -310,7 +311,7 @@ class AgentEventBridge:
 
     def handle(self, event: AgentEvent) -> None:
         # Every event goes to the SSE path first, unconditionally. The record
-        # translation below is a lossy projection for the legacy websocket
+        # translation below is a lossy projection for the legacy record
         # contract; forwarding before it means a new event type reaches SSE
         # consumers whether or not anyone taught the projection about it.
         self._raw(event)
