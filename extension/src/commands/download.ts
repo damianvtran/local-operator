@@ -1,6 +1,7 @@
 import { requireSurface } from "../cdp";
 import { requireConsent } from "../consent";
 import { CHROME_API_DEADLINE_MS, deadline } from "../driver/deadline";
+import { safeName } from "../driver/file-transfer-policy";
 import { CAPS } from "../driver/file-transfer.tables.gen";
 import { click } from "./input";
 
@@ -69,6 +70,7 @@ const SETTLE_MS = 750;
 const POLL_MS = 200;
 
 interface ObservedItem {
+  name: string;
   id: number;
   path: string;
   bytes: number;
@@ -95,6 +97,13 @@ function describe(chromeError: string): string {
  */
 function reduce(item: chrome.downloads.DownloadItem, cancelled: string): ObservedItem {
   return {
+    // The name is the PAGE-SUPPLIED filename, so it goes through the shared
+    // sanitiser before it reaches a report, a log or an approval card — the same
+    // function Python applies, deliberately, so the name this report is keyed on
+    // and the name the harness writes into the quarantine directory are the same
+    // string. `safeName` also reduces any directory component to its last
+    // segment, which is why `filename` can be passed whole.
+    name: safeName(String(item.filename ?? "")),
     id: item.id,
     path: String(item.filename ?? ""),
     bytes: Number(item.bytesReceived ?? 0),
