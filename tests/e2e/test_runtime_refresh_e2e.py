@@ -617,7 +617,9 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 # its own rather than the durable-admission ACK — the weaker fact
                 # has to be visibly weaker.
                 queued_command = str(uuid.uuid4())
-                queued_receipt = await viewer._client.prompt(
+                client = viewer._client
+                assert client is not None, "the viewer is bound, so it has a client"
+                queued_receipt = await client.prompt(
                     "run the report while the build moves",
                     command_id=queued_command,
                 )
