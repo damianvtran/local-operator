@@ -280,6 +280,14 @@ follow-ups have to be scheduled explicitly. When an agent handles the advisory,
 it records a wake/reminder for each checkpoint; a human puts them in a calendar.
 Do not consider the advisory closed until one of these outcomes is recorded.
 
+The September 2026 advisories (GHSA-22mg-8gw7-636x, GHSA-3xjw-9qpc-53mh) show
+the trigger is real, not hypothetical. At +3d, +7d and +14d after publication
+nothing had propagated: no CVE assigned, `gh api "advisories?ghsa_id=<GHSA>"`
+still empty, `https://github.com/advisories/<GHSA>` still 404, the OSV query
+returning `{}`, and PyPI `<version>/json` `.vulnerabilities` still `[]`. That
+is past GitHub's stated "up to 3 working days", so the +14d escalation below is
+what actually reaches the databases.
+
 - **+3 days**: rerun phase 7. Typical outcome: 7a is green (curated), 7b–7d are
   filling in. If `cve_id` is still null and 7a is still 0, check the advisory
   for a curation comment from GitHub asking for changes (they can request a
@@ -305,20 +313,53 @@ Do not consider the advisory closed until one of these outcomes is recorded.
        vulns/local-operator/PYSEC-0000-<anything>.yaml
      ```
 
-  2. **Snyk** — submit through <https://snyk.io/vulnerability-disclosure/>, or
-     ask them to ingest the GHSA by id. Include the GHSA link, the affected
-     range and the fixed version.
-  3. **GitHub curation** — if 7a is still 0 at +14d, comment on the advisory
-     and contact GitHub Support referencing the GHSA and the CVE request date.
+     A PR to `pypa/advisory-database` from a first-time contributor shows GitHub
+     Actions status `action_required` until a maintainer approves the workflow
+     run, so "no checks reported" on that PR is normal and not a failure — do
+     not read it as a broken submission.
 
-  Record which escalations were filed, with links, on the advisory thread.
+  2. **Snyk** — email <report@snyk.io>. The vulnerability-disclosure route is
+     the wrong path: as of 2026-09-19 <https://snyk.io/report-a-vulnerability/>
+     sends a vulnerability *in a Snyk product* to the Intigriti VDP, and new
+     open-source disclosures are **paused** ("we are pausing the acceptance of
+     external vulnerability disclosures for open source projects"), so do not
+     use it. A *missing* vulnerability — a known advisory absent from their
+     database — is the open path and is reported by email. Include the package
+     name and purl (`pkg:pypi/local-operator`), both GHSA urls, the affected
+     range, the fixed version, links to the fix PR/commit/release, any
+     OSV/PYSEC PR link, and the CVE status. The agent harness has no mail tool,
+     so this email is drafted and handed to the operator to send from their own
+     mailbox; the record must mark it pending until they confirm it was sent.
+  3. **GitHub curation** — if 7a is still 0 at +14d, record the curation
+     request in the durable record (below) and contact GitHub Support
+     referencing the GHSA and the CVE request date. Support is a Web form at
+     <https://support.github.com> with no API, and the origin may not be
+     approved for the agent's browser, so the GitHub Support escalation is
+     likewise drafted and handed to the operator, and the record must mark it
+     pending.
+
+  Record which escalations were filed, which are still pending a human action,
+  and their links, in the repository rather than on the advisory page. A
+  *published* repository advisory has no comment surface: the page renders only
+  the description, timeline events and the Request-CVE panel,
+  `GET /repos/<owner>/<repo>/security-advisories/<GHSA>/comments` is 404, the
+  GraphQL `SecurityAdvisory` type exposes no comment field and `Mutation` has no
+  advisory-comment mutation, and a `POST` to that REST path is 404 too.
+  Commentary is possible only while the advisory is in draft/triage. So record
+  it on the release/announcement discussion for the advisory batch (a comment
+  on it, via GraphQL `addDiscussionComment`) and/or the fix PR thread; if the
+  advisory is still in draft/triage at +14d, record it on the advisory as well.
+  Say which escalations were filed and which are still pending a human action,
+  rather than implying all were sent.
 
 ## 9. Close-out
 
 An advisory is closed when all of the following are true and recorded:
 
-- Phase 7 is fully green, **or** phase 8 escalations are filed with links and a
-  further follow-up is scheduled.
+- Phase 7 is fully green, **or** phase 8 escalations are filed with links in the
+  durable record, any that need a human action (the Snyk email, the GitHub
+  Support form) are marked pending and handed to the operator, and a further
+  follow-up is scheduled.
 - The reporter has been thanked on the advisory, told the fixed version and
   the CVE id (once assigned), and asked to accept the credit.
 - The GitHub Release notes and `SECURITY.md` "Past advisories" table list the
