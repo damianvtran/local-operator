@@ -14,6 +14,11 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictBool, model_validator
 
+from local_operator.providers.auth_store import (
+    AuthStoreError,
+    CredentialInvalidError,
+    OAuthAccess,
+)
 from local_operator.providers.registry import get_provider_definition
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -111,6 +116,20 @@ UPSTREAM_ABSENT_STATUSES = frozenset({404, 410})
 #: ``fullmatch``, not ``match``, so a trailing newline cannot ride into a URL
 #: path segment.
 STATUS_ID = re.compile(IDENTIFIER)
+
+#: The ONE sentence each refusal class of this transport carries, so the single-op
+#: path and the batch cannot word the same class differently. A client keys on
+#: ``code`` (the desktop transport reads ``detail.code`` and falls back to the
+#: string form of ``detail``); this is what a human reads when the client holds no
+#: copy of its own, and it is deliberately the batch's existing wording rather
+#: than new prose invented for the single-op path.
+REFUSAL_MESSAGE = "Radient could not complete this operation"
+
+#: The sentence for "this account has no usable Radient sign-in" — the same words
+#: the 409 has always carried, because the remedy for a missing sign-in and the
+#: remedy for a grant Radient has declared dead are the SAME single action. The
+#: two stay distinguishable by ``code`` and by status, not by prose.
+NO_CREDENTIAL_MESSAGE = "Sign in to Radient to access your account"
 
 
 def status_ids(body: RadientRequest) -> list[str]:
@@ -428,28 +447,223 @@ def _failure(status: int, code: str, message: str, **details: Any) -> HTTPExcept
     return HTTPException(status, {"code": code, "message": message, "details": details})
 
 
-def _upstream_failure(status: int, agent_id: str, relation: str) -> HTTPException:
-    """The batch's answer for one upstream read that failed, mapped like the single-op path.
+def _upstream_refusal(status: int, **details: Any) -> HTTPException:
+    """The ONE reading of an upstream answer that is not a success.
 
-    The status is passed through for the classes that path passes through
-    (``UPSTREAM_PASSTHROUGH_STATUSES``) and is a 502 otherwise, so the two ops
-    cannot disagree about the same upstream answer; ``code`` is what tells the
-    renderer whether it is looking at a refusal or at an outage.
+    The status is passed through for the classes
+    ``UPSTREAM_PASSTHROUGH_STATUSES`` names and is a 502 otherwise, so an
+    upstream answer this proxy does not recognise leaves the caller with the
+    same move as an unreachable upstream. On top of the status sits ``code``,
+    which is what tells the renderer whether it is looking at a refusal of the
+    ACCOUNT's credential (sign in to Radient again) or at an outage (retry). The
+    status alone cannot: a 401 from Radient and a 401 from the desktop plane are
+    both 401, and they have opposite remedies — the desktop plane refusing this
+    app's own bearer is answered by restarting or re-pairing the app, which is
+    the wrong thing to tell a user whose Radient account merely needs a fresh
+    sign-in.
+
+    There is exactly one of these because the batch and the single-op path must
+    not be able to classify the same answer two ways; the split is what let an
+    upstream 500 render as a page of "nothing liked" (review round 1, R-1).
     """
-    details = {"upstream_status": status, "agent_id": agent_id, "relation": relation}
     if status in {401, 403, 429}:
-        return _failure(
-            status,
-            "radient_credential_refused",
-            "Radient could not complete this operation",
-            **details,
-        )
+        return _failure(status, "radient_credential_refused", REFUSAL_MESSAGE, **details)
     return _failure(
         status if status in UPSTREAM_PASSTHROUGH_STATUSES else 502,
         "radient_upstream_failed",
-        "Radient could not complete this operation",
+        REFUSAL_MESSAGE,
         **details,
     )
+
+
+def _upstream_failure(status: int, agent_id: str, relation: str) -> HTTPException:
+    """The batch's answer for one upstream read that failed, mapped once.
+
+    The per-id detail rides along so the batch can say WHICH id, WHICH relation
+    and WHICH upstream status failed while the class itself comes from
+    :func:`_upstream_refusal`, the single reading both ops share.
+    """
+    return _upstream_refusal(status, upstream_status=status, agent_id=agent_id, relation=relation)
+
+
+async def _unusable_credential(auth: DesktopAuth) -> HTTPException:
+    """WHY the cascade had no usable Radient credential, in the client's classes.
+
+    Reached only when ``get_oauth_access`` came back empty: either nothing is
+    stored, or something IS stored and could not be used. The second case is the
+    silent one this change exists for — a credential whose grant the IdP has
+    declared dead is still "logged in" to every surface that reads rows, so the
+    user is told nothing while every call fails.
+
+    ``list_oauth_accesses`` is asked which kind it is, and deliberately so: it is
+    the store's ONE place that separates a dead grant from a transient miss (it
+    returns ``credential_invalid`` for the first and omits the row for the
+    second), and the cascade cannot carry that back — ``_resolve`` catches both as
+    ``AuthStoreError`` and rotates away, which is right for routing and useless
+    for reporting. The cost is one refresh attempt per stored OAuth row, paid only
+    on the path where the resolver already had nothing to serve, and it is what
+    makes the dead-grant state visible instead of silent.
+    """
+    if not auth.store.list_credentials("radient"):
+        return _failure(409, "radient_no_credential", NO_CREDENTIAL_MESSAGE)
+    accesses = await auth.store.list_oauth_accesses("radient")
+    if any(access.credential_invalid for access in accesses):
+        return _failure(
+            401,
+            "radient_credential_refused",
+            NO_CREDENTIAL_MESSAGE,
+            reason="grant_invalid",
+        )
+    return _failure(
+        502, "radient_upstream_failed", REFUSAL_MESSAGE, reason="credential_unavailable"
+    )
+
+
+async def radient_bearer(auth: DesktopAuth, *, classify: bool = True) -> str:
+    """The bearer to spend on Radient — or the classified refusal that says not to.
+
+    THE ACCOUNT'S CREDENTIAL IS NOT THE APP'S. Everything else on this transport
+    authenticates with the desktop plane's own bearer, whose refusal means this
+    app can no longer talk to its server; this is the operator's Radient
+    sign-in, whose refusal means they have to sign in to Radient again. Two
+    remedy classes, two credentials, and only one of them is safe to spend
+    blind — so this function is what keeps the plane's 401 (restart or re-pair
+    the app) and the account's 401 (sign in to Radient) tellable apart, by putting
+    a ``code`` on the second one.
+
+    WHY A ROUTE ASKS THE STORE A SECOND QUESTION. ``get_oauth_access`` answers
+    with the cascade's pick, and the cascade's last resort is deliberately to
+    hand back a token whose refresh did not happen (``AuthStore._ensure_oauth_fresh``
+    returns the stored row when a peer holds the refresh lease and the re-read is
+    still due). That is right for a model request, which the stale bearer may
+    still serve; it is wrong here, because the proxy's only possible report is
+    Radient's own 401 — a failure that names no remedy, costs a round trip it
+    cannot win, and (measured 2026-09-19) left the operator's account row
+    silently showing a placeholder name while ``/v1/auth/status`` reported
+    ``refresh_due``. So this function asks for the one fact the cascade does not
+    carry — is the bearer I was just handed one the store already considers due a
+    refresh — and answers the refusal when the store cannot produce a live one.
+
+    IT USES THE STORE'S OWN MACHINERY, NOT A SECOND READING OF IT. The refresh
+    goes through ``AuthStore.ensure_oauth_fresh_or_raise``, the public per-row
+    entry point that keeps the store's own types on the way out: single-flight
+    through the same lease every other caller uses, so a concurrent attempt is
+    JOINED rather than raced — two processes POSTing one rotating refresh token is
+    how a live grant earns a real ``invalid_grant`` (see the race guard in
+    ``_ensure_oauth_fresh``). It also deliberately does NOT block the credential:
+    blocking is the routing decision ``_resolve`` makes for a request in flight,
+    and a read route is not entitled to take an account out of the rotation. The
+    freshness QUESTION has no public predicate — the two public entry points wrap
+    the refresh, not the rule — so ``_needs_refresh`` is reached for, on purpose:
+    re-deriving ``expires`` against ``now`` here would be exactly the second
+    spelling of the store's rule that this change removes (the skew and the
+    never-expires case live with the store). When the store grows that predicate,
+    this is its first caller.
+
+    THE CLASSES ARE REMEDIES, NOT VENDORS. A dead grant
+    (:class:`CredentialInvalidError`, an ``invalid_grant`` the IdP has declared
+    terminal) leaves exactly one move, a fresh sign-in, so it answers as
+    ``radient_credential_refused`` with ``details.reason = "grant_invalid"`` — the
+    same class an upstream refusal of the credential earns, because it is the same
+    remedy. A refresh that failed transiently (:class:`AuthStoreError`: a 5xx or
+    unreachable token endpoint, or a peer's attempt still in flight) leaves the
+    move "try again", so it answers as ``radient_upstream_failed``, the class
+    already reserved for "this page has no viewer state to show" and retry is
+    the caller's move. No fourth code is invented for the distinction: the class
+    vocabulary is the remedies, and the reason for the answer rides in ``details``.
+
+    ``classify=False`` is for :func:`radient_bearer_optional`, which discards the
+    reason: the diagnosis costs the store a refresh attempt per stored OAuth row
+    (and a log line), and the credentialless op is served bare regardless of what
+    it would have said.
+
+    Raises:
+        HTTPException: 409 ``radient_no_credential`` when nothing is stored, 401
+            ``radient_credential_refused`` when the stored grant is dead, or 502
+            ``radient_upstream_failed`` when no live bearer could be produced
+            right now.
+    """
+
+    def is_due(access: OAuthAccess) -> bool:
+        """Whether the store's own rule says the bearer it just served is due a refresh.
+
+        False for an api_key row (no expiry to be due) and for a row the store
+        considers current.
+        """
+        if access.kind != "oauth" or not access.credential_id:
+            return False
+        row = auth.store.get_credential(access.credential_id)
+        return row is not None and bool(auth.store._needs_refresh(dict(row.data)))
+
+    access = await auth.store.get_oauth_access("radient")
+    if access is None:
+        failure = (
+            _failure(409, "radient_no_credential", NO_CREDENTIAL_MESSAGE)
+            if not classify
+            else await _unusable_credential(auth)
+        )
+        raise failure
+    if not is_due(access):
+        return access.access_token
+    try:
+        await auth.store.ensure_oauth_fresh_or_raise(access.credential_id)
+    except CredentialInvalidError as error:
+        # Terminal: the refresh token is dead and only a re-login revives the
+        # account, so the refusal names that remedy instead of relaying a bare
+        # 401 the user cannot act on.
+        raise _failure(
+            401,
+            "radient_credential_refused",
+            NO_CREDENTIAL_MESSAGE,
+            reason="grant_invalid",
+            cause=type(error).__name__,
+        ) from error
+    except AuthStoreError as error:
+        # Transient: the token endpoint answered a 5xx, timed out, or could not
+        # be reached. Nothing is wrong with the stored grant as far as anyone
+        # knows, so the caller's move is to retry rather than to sign in.
+        raise _failure(
+            502,
+            "radient_upstream_failed",
+            REFUSAL_MESSAGE,
+            reason="refresh_failed",
+            cause=type(error).__name__,
+        ) from error
+    refreshed = await auth.store.get_oauth_access("radient")
+    if refreshed is None:
+        # Still nothing selectable: a verdict written by an earlier failure (the
+        # block the cascade sets) is what hides the row, and that is "not right
+        # now", not "you are signed out".
+        raise _failure(
+            502, "radient_upstream_failed", REFUSAL_MESSAGE, reason="credential_unavailable"
+        )
+    if is_due(refreshed):
+        # The refresh call came back without a live bearer — the store's last
+        # resort (a peer holds the lease and its attempt has not landed) or a
+        # cascade that picked another due row. Both are "not right now", which is
+        # retryable, and neither is a token worth spending: this is the round
+        # trip that cannot be classified afterwards.
+        raise _failure(
+            502, "radient_upstream_failed", REFUSAL_MESSAGE, reason="refresh_did_not_land"
+        )
+    return refreshed.access_token
+
+
+async def radient_bearer_optional(auth: DesktopAuth) -> str:
+    """`radient_bearer` for the ONE op the census marks credentialless (``prices``).
+
+    That op's contract is that it runs WITHOUT a Radient sign-in — it is served
+    with no Authorization header when nothing is stored. So a credential that is
+    stored but cannot be freshened must not become a failure this op never
+    needed: it falls back to running bare, exactly as it does when signed out,
+    rather than spending the stale bearer the store still holds. Every other op
+    refuses instead, because for them a bearer nobody has asked Radient about yet
+    is precisely the unclassifiable 401 this change removes.
+    """
+    try:
+        return await radient_bearer(auth, classify=False)
+    except HTTPException:
+        return ""
 
 
 async def _settle(reads: list[asyncio.Task[None]]) -> None:
@@ -524,7 +738,11 @@ async def agent_statuses(body: RadientRequest, auth: DesktopAuth) -> dict[str, A
     ``ceil(2N / 6)`` multiples a per-read timeout alone would allow.
 
     Raises:
-        HTTPException: 409 when no Radient credential is stored; the upstream
+        HTTPException: 409 ``radient_no_credential`` when no Radient credential is
+            stored; the credential classes ``radient_bearer`` raises before any
+            upstream read (401 ``radient_credential_refused`` for a grant the
+            store knows is dead, 502 ``radient_upstream_failed`` when no live
+            bearer could be produced); the upstream
             status (401/403/429) when Radient refuses the whole batch; the mapped
             upstream status for any other non-200 answer, which is a FAILURE — the
             only upstream answers read as an absent per-agent relation are 404 and
@@ -534,10 +752,7 @@ async def agent_statuses(body: RadientRequest, auth: DesktopAuth) -> dict[str, A
             ``{"code", "message", "details"}``.
     """
     ids = status_ids(body)
-    access = await auth.store.get_oauth_access("radient")
-    if access is None:
-        raise _failure(409, "radient_no_credential", "Sign in to Radient to access your account")
-    token = access.access_token
+    token = await radient_bearer(auth)
     base = base_url()
     headers = {"Authorization": "Bearer " + token}
     statuses: dict[str, dict[str, bool]] = {
@@ -665,12 +880,15 @@ async def radient(
     method, path = endpoint(body)
 
     async def execute():
-        access = await auth.store.get_oauth_access("radient")
-        if access is None and body.operation != "prices":
-            raise HTTPException(409, "Sign in to Radient to access your account")
-        # AuthStore performs the only refresh. Never retry a mutation on a 401:
-        # upstream may have accepted it before the connection failed.
-        token = access.access_token if access else ""
+        # The ONE place this transport decides whether it has a bearer worth
+        # spending: an unrefreshed token is refused here rather than relayed as an
+        # upstream 401 that names no remedy (see `radient_bearer`). AuthStore
+        # performs the only refresh. Never retry a mutation on a 401: upstream may
+        # have accepted it before the connection failed. `prices` is the census's
+        # credentialless op and keeps its no-sign-in form.
+        token = await (
+            radient_bearer_optional(auth) if body.operation == "prices" else radient_bearer(auth)
+        )
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 async with client.stream(
@@ -681,34 +899,62 @@ async def radient(
                     headers={"Authorization": "Bearer " + token} if token else {},
                 ) as response:
                     if response.is_redirect:
-                        raise HTTPException(502, "Radient returned an unexpected redirect")
+                        raise _failure(
+                            502,
+                            "radient_upstream_failed",
+                            "Radient returned an unexpected redirect",
+                            upstream_status=response.status_code,
+                        )
                     if response.status_code >= 400:
-                        raise HTTPException(
-                            (
-                                response.status_code
-                                if response.status_code in UPSTREAM_PASSTHROUGH_STATUSES
-                                else 502
-                            ),
-                            "Radient could not complete this operation",
+                        raise _upstream_refusal(
+                            response.status_code, upstream_status=response.status_code
                         )
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)
                         if len(content) > MAX_UPSTREAM_BYTES:
-                            raise HTTPException(502, "Radient returned too much data")
+                            raise _failure(
+                                502,
+                                "radient_upstream_too_large",
+                                "Radient returned too much data",
+                                limit_bytes=MAX_UPSTREAM_BYTES,
+                            )
                     import json
 
                     value = json.loads(content) if content else {}
-        except (httpx.HTTPError, ValueError):
-            raise HTTPException(
-                502, "Radient is unavailable or returned an invalid response"
-            ) from None
+        except httpx.TimeoutException as error:
+            # The batch's own spelling for "the upstream did not answer", so the
+            # renderer has ONE path for it rather than a per-op guess: a per-read
+            # timeout there produces this same code and status.
+            raise _failure(
+                502,
+                "radient_upstream_timeout",
+                "Radient did not answer in time",
+                cause=type(error).__name__,
+            ) from error
+        except (httpx.HTTPError, ValueError) as error:
+            # `ValueError` is a body that would not parse, and it answers in the
+            # same class as an unreachable upstream because the caller's move is
+            # the same one. The cause is kept on the chain (unlike the `from None`
+            # this replaces): the client's copy never carries it, but the log does,
+            # and a transport failure with no recorded cause is what made this
+            # route's failures unattributable.
+            raise _failure(
+                502,
+                "radient_upstream_unreachable",
+                "Radient is unavailable or returned an invalid response",
+                cause=type(error).__name__,
+            ) from error
         stored_key = ""
         if body.operation in {"provision", "application.create"}:
             result = value.get("result", {})
             stored_key = result.get("api_key", "")
             if not isinstance(stored_key, str) or not stored_key:
-                raise HTTPException(502, "Radient did not return an application credential")
+                raise _failure(
+                    502,
+                    "radient_upstream_failed",
+                    "Radient did not return an application credential",
+                )
             auth.store.upsert_credential(
                 "radient", {"type": "api_key", "source": "login", "key": stored_key}
             )
