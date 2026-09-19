@@ -440,14 +440,23 @@ runs `scripts/visual_gallery.py` through `sys.executable` + a path, and several
 modules are spawned as `-m local_operator.x`. No import statement records either,
 so an imports-only graph selected NOTHING for such a change and a local run
 printed `all selected gates passed` while CI's `test` job was red (the blocker on
-#1322). A string constant that resolves to a covered file — a path (relative,
-absolute, or a bare basename) or a dotted module name — is therefore an edge in
+#1322). A string constant that resolves to a covered file — a path (`scripts/x.py`,
+`./x.py`, `../x.py`, `~/x.py`, an absolute path, or a bare basename, which is
+also what an f-string like `f"{ROOT}/scripts/x.py"` leaves behind) or a dotted
+module name — is therefore an edge in
 the REVERSE direction: when the named file changes, the file that NAMES it is
 selected, and so is anything that imports that namer. It is reverse-only on
 purpose — a name is not a static import, so it must not inflate the `type-check`
-cost estimate. `test_a_repo_python_file_a_test_names_is_always_selected` asserts
-that property over the real tree, so the next instance of the class fails a test
-rather than a CI job.
+cost estimate. Two tests guard the class rather than one instance of it:
+`test_a_repo_python_file_a_test_names_is_always_selected` walks the LITERALS the
+real tree's tests carry (not the resolver's output), and
+`test_every_spelling_of_a_repo_path_is_collected_and_resolved` asserts each
+spelling above — collection and resolution — so a narrower regex, a stricter
+resolver or a lost edge fails a test rather than a CI job.
+
+A conftest that NAMES a changed file is a namer pytest runs and nothing imports,
+so it is not in the test universe: seeding on it alone selected nothing. Its
+subtree is selected instead, which is the scope pytest itself gives it.
 
 **Two honest limits, both printed on a scoped run.** First, an import whose
 target is a computed name — `importlib.import_module(name)` — is invisible to

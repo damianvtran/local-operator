@@ -991,11 +991,22 @@ def summary_lines(
 DOTTED_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
 
 #: A string constant that could NAME a Python file: a path ending in a source
-#: extension, absolute or relative, or a bare basename. This is how the suite
-#: reaches a file it does not import — `sys.executable` + a path, or `-m` — which
-#: no import statement records, so a scoped `test` job that ignored these names
-#: would go green while CI's `test` job failed (#1322 review, BLOCKER 1).
-PY_PATH_RE = re.compile(r"[A-Za-z_][\w./\-]*\.py[io]?\Z")
+#: extension, or a bare basename. This is how the suite reaches a file it does
+#: not import — `sys.executable` + a path, or `-m` — which no import statement
+#: records, so a scoped `test` job that ignored these names would go green while
+#: CI's `test` job failed (#1322 review, BLOCKER 1).
+#:
+#: The optional leading `[/.~]*` is load-bearing, not tidiness: an f-string leaves
+#: its literal segments as separate constants, so the natural `f"{ROOT}/scripts/x.py"`
+#: contributes `/scripts/x.py`, and the equally ordinary `"./x.py"`, `"../x.py"`,
+#: `"~/x.py"` and `/absolute/path/x.py` spellings all begin with a separator
+#: (`.{1,2}/` is two characters, so a single optional one is not enough).
+#: Without it NONE of them were collected or resolved, so the file they name
+#: selected nothing, the gate went green, and — unlike a computed import — nothing
+#: was printed to say so (#1322 round 2, MAJOR 1). `_name_target` is what decides
+#: whether a collected name lands on a real file; the two must admit the same
+#: spellings, or the collection gate silently drops the case before resolution.
+PY_PATH_RE = re.compile(r"[/.~]*[A-Za-z_][\w./\-]*\.py[io]?\Z")
 
 #: Dynamic-import callables: `importlib.import_module(...)`, `__import__(...)`.
 _DYNAMIC_IMPORT_NAMES = ("import_module", "__import__")
@@ -1088,9 +1099,16 @@ def _name_target(
 
     Two spellings, because the suite uses both for a file it never imports: a
     dotted module name (`python -m local_operator.exec_worker`, a registry name)
-    and a path (`sys.executable` + `scripts/visual_gallery.py`). A path is tried
-    as written and then with leading components stripped one at a time, so an
-    absolute path or a `../../`-relative one still lands on its file.
+    and a path (`sys.executable` + `scripts/visual_gallery.py`). A path is
+    normalised the way a reader would read it — empty and `.` segments dropped,
+    then leading `..`/`~` segments dropped — and every remaining suffix is tried,
+    so `scripts/x.py`, `./scripts/x.py`, `../scripts/x.py`, `~/scripts/x.py`,
+    `/scripts/x.py` and `/abs/path/scripts/x.py` all land on the same file; a
+    bare basename falls back to the basename index.
+    `test_every_spelling_of_a_repo_path_is_collected_and_resolved` asserts that
+    list, because a spelling the resolver cannot see is a silent
+    false green and the real-tree property test iterates resolution OUTPUT, so it
+    cannot catch one.
     """
     resolved: set[str] = set()
     if DOTTED_NAME_RE.match(literal):
@@ -1098,7 +1116,13 @@ def _name_target(
         if target:
             resolved.add(target)
     if PY_PATH_RE.match(literal):
-        parts = literal.lstrip("./").split("/")
+        # Drop empty and `.` segments (from `./x`, `/x`, `a//b`) and then the
+        # leading `..`/`~` ones. What is left is a suffix of the real path, and
+        # the loop below tries each suffix from longest to shortest — so an
+        # absolute path lands on its repo-relative tail rather than on nothing.
+        parts = [part for part in literal.split("/") if part not in ("", ".")]
+        while parts and parts[0] in ("..", "~"):
+            parts.pop(0)
         hit = next(
             (
                 suffix
@@ -1109,8 +1133,10 @@ def _name_target(
         )
         if hit:
             resolved.add(hit)
-        elif len(parts) == 1:
-            resolved.update(basenames.get(parts[0], ()))
+        elif parts:
+            # The TRUE last component, so a dotted name like `.hidden.py` is not
+            # truncated by the separator strip above.
+            resolved.update(basenames.get(parts[-1], ()))
     return tuple(sorted(resolved))
 
 
@@ -1169,9 +1195,16 @@ def _references(rel: str, source: str) -> _References:
     module names and file paths (`PY_PATH_RE`) — because a name a file carries is
     evidence of a dependency even when no import statement exists: a registry
     naming `"local_operator.providers.oauth.anthropic"` in a table, a test
-    naming `"scripts/visual_gallery.py"`, a `mock.patch("a.b.c")` target. Which of
-    those become edges is decided in `build_import_graph` (a dotted name is only
-    taken from a file that imports by name, to keep prose out of the graph).
+    naming `"scripts/visual_gallery.py"`, a `mock.patch("a.b.c")` target.
+
+    What differs is which of those become edges. `imports` takes a dotted name
+    only from a file that imports by name (`if refs.prefixes or refs.unnamed`),
+    so prose in a file that imports nothing statically cannot invent one.
+    `referrers` takes EVERY covered file's literals, deliberately: the whole point
+    of that edge is the file that imports nothing and still runs the named file
+    (`sys.executable` + a path, `-m`, a data table). The cost is over-inclusion —
+    a name in a table can pull a run over an arm — and over-inclusion is the
+    fail-closed direction here.
     """
     tree = ast.parse(source, filename=rel)
     package = _package_parts(rel)
@@ -1603,6 +1636,8 @@ def _select_tests(
     """
     notes: list[str] = []
     reachable_seeds = set(seeds)
+    in_universe = set(universe)
+    conftest_namers: set[str] = set()
     for rel in sorted(reachable_seeds):
         hubs = graph.hubs_for(rel)
         if hubs:
@@ -1619,7 +1654,32 @@ def _select_tests(
                 f"{rel} is also named by path or module string in {len(named_by)} "
                 f"file(s) ({listed}), so those are selected too"
             )
-    reachable = set(graph.dependents(reachable_seeds)) | reachable_seeds
+            # A conftest that names the file is a namer pytest will RUN, but it is
+            # not in the test universe and nothing imports it, so seeding on it
+            # selected NOTHING — the same silent false green the name edge exists
+            # to close, one level up (#1322 round 2, MINOR 2). pytest's own scope
+            # says what the right answer is: a conftest applies to every test under
+            # its directory, so that subtree is selected.
+            conftest_namers.update(
+                referrer
+                for referrer in named_by
+                if Path(referrer).name == "conftest.py" and referrer not in in_universe
+            )
+    conftest_tests: set[str] = set()
+    for conftest in sorted(conftest_namers):
+        parent = Path(conftest).parent.as_posix()
+        # The repository-root conftest has parent `.`, and applies to the lot.
+        scoped = (
+            set(universe)
+            if parent == "."
+            else {rel for rel in universe if rel.startswith(f"{parent}/")}
+        )
+        conftest_tests |= scoped
+        notes.append(
+            f"{conftest} names it, and pytest runs that conftest for every test "
+            f"under {parent}, so those {len(scoped)} test file(s) are selected"
+        )
+    reachable = set(graph.dependents(reachable_seeds)) | reachable_seeds | conftest_tests
     selected = tuple(rel for rel in universe if rel in reachable)
     return selected, notes
 

@@ -714,12 +714,17 @@ def test_a_repo_python_file_a_test_names_is_always_selected():
     root = Path(__file__).resolve().parents[2]
     graph = ci_scope.build_import_graph(root)
     universe = ci_scope._test_universe(graph, "tests/unit")
-    in_universe = set(universe)
+    basenames = ci_scope._repo_basenames(sorted(graph.files))
+    # Driven from the LITERALS each test carries, not from `graph.referrers`: the
+    # referrer map is resolution OUTPUT, so a spelling the resolver cannot see is
+    # invisible to it — which is exactly how the round-2 MAJOR survived a test
+    # written to guard that class.
     by_target: dict[str, list[str]] = {}
-    for target, referrers in graph.referrers.items():
-        for test in referrers:
-            if test in in_universe:
-                by_target.setdefault(target, []).append(test)
+    for test in universe:
+        for literal in graph.literals_of(test):
+            for target in ci_scope._name_target(root, literal, basenames):
+                if target != test:
+                    by_target.setdefault(target, []).append(test)
 
     assert by_target, "no test names any repo file, so this property proves nothing"
 
@@ -820,3 +825,98 @@ def _git_repo(root: Path) -> Path:
     ):
         subprocess.run(["git", *args], cwd=str(root), env=env, check=True, capture_output=True)
     return root
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "scripts/tool.py",  # as written against the repo root
+        "./scripts/tool.py",  # what a `cd`-relative command line looks like
+        "../scripts/tool.py",  # a test that walks up from its own directory
+        "../../scripts/tool.py",
+        "~/scripts/tool.py",  # a home-relative path
+        "/scripts/tool.py",  # the segment an f-string leaves behind
+        "{abs}/scripts/tool.py",  # the full absolute path
+        "tool.py",  # a bare basename, resolved through the index
+    ],
+)
+def test_every_spelling_of_a_repo_path_is_collected_and_resolved(tmp_path, template):
+    """The SPELLINGS the rule admits, asserted as inputs rather than as output.
+
+    `test_a_repo_python_file_a_test_names_is_always_selected` walks the graph's
+    literals and the referrer map; a literal the COLLECTOR's regex rejects never
+    reaches either, so the round-1 blocker could come back as
+    `f"{ROOT}/scripts/target.py"` (whose constant is `/scripts/target.py`) with
+    every test still green. This is the guard for that: the collector and the
+    resolver must admit the same spellings, and each must land on the same file
+    (#1322 round 2, MAJOR 1).
+    """
+    root = _fixture_repo(tmp_path)
+    literal = template.format(abs=tmp_path.as_posix())
+    files, _ = ci_scope._graph_files(root)
+    basenames = ci_scope._repo_basenames(files)
+
+    assert ci_scope._name_target(root, literal, basenames) == ("scripts/tool.py",)
+    assert literal in ci_scope._references("probe.py", f"X = {literal!r}").literals
+
+
+def test_a_path_built_by_an_f_string_is_an_input(tmp_path):
+    """The live shape review round 2 reproduced.
+
+    An f-string leaves its literal segments as separate constants, so
+    `f"{ROOT}/scripts/target.py"` contributes `/scripts/target.py`. With that
+    spelling dropped, a one-token change to the script planned `nothing to run`
+    and the local gate went green with nothing disclosed.
+    """
+    root = _fixture_repo(tmp_path)
+    _write(root, "scripts/target.py", "TARGET = True\n")
+    _write(
+        root,
+        "tests/unit/test_runs_target.py",
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        ROOT = Path(__file__).resolve().parents[2]
+
+        def test_it_runs_the_target():
+            subprocess.run([sys.executable, f"{ROOT}/scripts/target.py"], check=True)
+        """,
+    )
+
+    decision = _plan(root, ["scripts/target.py"])["test"]
+
+    assert not decision.whole_tree, decision.notes
+    assert decision.targets == ("tests/unit/test_runs_target.py",)
+
+
+def test_a_conftest_that_names_a_file_selects_the_tests_it_governs(tmp_path):
+    """A conftest is a namer pytest RUNS but not a universe member.
+
+    Nothing imports it either (pytest loads it by path), so seeding on it selected
+    NOTHING and a conftest that executes the named file broke its whole subtree
+    silently. pytest's own scope is the answer: that conftest's subtree.
+    """
+    root = _fixture_repo(tmp_path)
+    _write(root, "scripts/target.py", "TARGET = True\n")
+    _write(
+        root,
+        "tests/unit/tui/conftest.py",
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        ROOT = Path(__file__).resolve().parents[3]
+
+        def pytest_configure():
+            subprocess.run([sys.executable, f"{ROOT}/scripts/target.py"], check=True)
+        """,
+    )
+
+    decision = _plan(root, ["scripts/target.py"])["test"]
+
+    assert not decision.whole_tree, decision.notes
+    assert decision.targets == ("tests/unit/tui/test_widget.py",)
+    assert any("conftest" in note for note in decision.notes), decision.notes
