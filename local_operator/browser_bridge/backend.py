@@ -735,12 +735,43 @@ class HostClient:
     #: test's fake store must not be able to change the copy silently.
     host: str = HOST_EXTENSION
 
+    #: Optional override of the failure copy, for a client whose PROCESS is the
+    #: same as another's but whose CAPABILITY is not. `host` selects a table
+    #: entry, and the table is keyed by process because that is what each
+    #: sentence tells the reader to go and look at; the console rides the app
+    #: host (design ui-console-tab §10.1) and yet "the app's browser host is not
+    #: running" is the wrong sentence to hand a session that asked the console to
+    #: read a surface — the remedy differs (open a browser tab vs open the
+    #: console), and a reader told to go and look in the wrong place is worse off
+    #: than one told nothing. Declared here rather than as a second `host` key in
+    #: the table so the console's own sentences live in the console's module.
+    failure_copy: HostCopy | None = None
+
     def __init__(self, store: Any = state_store, root: Path | None = None) -> None:
         # The namespace is the STORE's business, never a client parameter: every
         # host's state module fixes its own directory and filename, so a client
         # that could also pass them would be a second place to get them wrong.
         self.store = store
         self.root = root
+
+    def copy_for(self) -> HostCopy:
+        """The sentences a transport failure is reported in."""
+        return self.failure_copy or HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])
+
+    def timeout_for(self, method: str, params: dict[str, Any]) -> float:
+        """The HTTP budget for ONE call.
+
+        A method rather than a direct :func:`client_timeout` call for the same
+        reason as :meth:`copy_for`: the browser's budget is `base +
+        ORIGIN_PROMPT_WINDOW_S + margin` because its host may sit on a HUMAN's
+        site-approval popup, and every console method is refused or answered by
+        the app within a second or two — inheriting the browser's 190 s ceiling
+        for an unknown name would turn a wedged app into a tool call that hangs
+        for three minutes, which is exactly the failure the console's absence
+        copy exists to avoid. A subclass therefore supplies its own table; the
+        default keeps every existing host's arithmetic byte-identical.
+        """
+        return client_timeout(method, params.get("timeout_s"))
 
     def _read(self) -> Any:
         return self.store.read(self.root)
@@ -775,13 +806,13 @@ class HostClient:
         )
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        copy = HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])
+        copy = self.copy_for()
         current = self._read()
         if current is None:
             raise BridgeUnreachable(copy.no_state)
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
-        timeout = client_timeout(method, params.get("timeout_s"))
+        timeout = self.timeout_for(method, params)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 http_response = await client.post(

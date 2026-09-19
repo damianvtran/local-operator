@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (10 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: e2bfac4b5d4acfd222480cb67fbdd7a9c5393f1a8fbb4e902e0ea35f3339294e
+// Inputs sha256: 8ca02f1956d40409146c0f371c865b434666d420ee4b7ffa8f6309a56d9601de
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -44,6 +44,16 @@ export enum ErrorCode {
   OWNER_REFUSED = 'owner_refused',
   EXTENSION_UNRESPONSIVE = 'extension_unresponsive',
   CAPABILITY_UNSUPPORTED = 'capability_unsupported',
+  UNSUPPORTED_METHOD = 'unsupported_method',
+  SURFACE_UNAVAILABLE = 'surface_unavailable',
+  SURFACE_NOT_OWNED = 'surface_not_owned',
+  PROCESS_EXITED = 'process_exited',
+  INPUT_QUEUE_FULL = 'input_queue_full',
+  UNKNOWN_KEY = 'unknown_key',
+  SECURE_INPUT_ACTIVE = 'secure_input_active',
+  CONSOLE_UNAVAILABLE = 'console_unavailable',
+  INVALID_GRID = 'invalid_grid',
+  CONSOLE_CAPTURE_FULL = 'console_capture_full',
   INTERNAL = 'internal',
 }
 

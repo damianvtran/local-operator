@@ -173,7 +173,49 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: costs nothing extra — the guide body is progressive disclosure and never
 #: rides the start context, and its description only rides a turn that selects
 #: it.
-BUDGET_BILLED_TOKENS = 28_000
+#:
+#: RAISED 28,000 -> 29,950 for the ``console`` tool (design ui-console-tab §17.1
+#: row C), stated here with the arithmetic rather than a wave of the hand,
+#: because the guard exists to make this an explicit decision and because the
+#: delta is large enough that a reader deserves to see where it went. Both
+#: sides are this script, this machine, and the deterministic char arithmetic;
+#: the base was measured by running THIS script against the console-less tree
+#: (``origin/main`` a8fe0c1d, which is what ``~/local-operator-worktrees/
+#: console-tab-design`` carries besides the design doc itself) rather than
+#: derived from the branch, so the two numbers cannot share a mistake:
+#:
+#:   base, ``origin/main`` a8fe0c1d          27,912   (88 tokens under the old
+#:                                                     ceiling: no room for a
+#:                                                     10-method tool at all)
+#:   + the tool's schema                     48,841 chars of tool_schemas vs
+#:                                           44,124 = +4,717 chars = +1,697
+#:   + its ``system.md`` section             33,947 chars of instructions vs
+#:                                           33,136  =   +811 chars =   +292
+#:   + its one inventory line                +10 chars = +4
+#:   = measured on this head                  83,134 chars = ~29,904 billed
+#:
+#: The schema is 85% of it, and the schema is the capability: ten methods with
+#: one method parameter is ONE tool, where ten tools would be ten schemas of
+#: permanent tax (the ladder's rung 1). It was measured and then CUT once — the
+#: parameter descriptions were shortened and the class docstring dropped, since
+#: pydantic copies a docstring into the emitted schema's ``description`` —
+#: taking the schema from 5,673 to 4,717 characters, i.e. -344 billed tokens
+#: before this raise was written. What remains is the irreducible part of
+#: "describe ten methods' arguments so a model can call them correctly", and the
+#: per-method playbook lives in ``guide://console`` where it costs nothing until
+#: it is read.
+#:
+#: And it is paid only where it is usable: ``build_console_tool`` is a createIf
+#: factory that returns ``None`` unless the desktop app publishes a
+#: console-capable record, so a session on a machine without the app carries no
+#: console schema at all — this benchmark forces the gate ON precisely so the
+#: figure reported is the worst case rather than the common one.
+#:
+#: The ceiling is set 46 above the measured head, the same order of headroom as
+#: the ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51) raises, so
+#: the ratchet stays tight; the tighten band below (1,200) is nowhere near
+#: tripped and the next context reduction tightens it.
+BUDGET_BILLED_TOKENS = 29_950
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

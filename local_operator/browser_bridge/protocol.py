@@ -410,6 +410,53 @@ class ErrorCode(StrEnum):
     # report an internal error naming nothing actionable. The daemon checks first
     # and answers immediately with this code and the host's own advertised list.
     CAPABILITY_UNSUPPORTED = "capability_unsupported"
+    # --- The desktop app's console namespace (design ui-console-tab §10.6) ---
+    #
+    # The console rides THIS wire and THIS enum rather than a parallel taxonomy,
+    # because a second vocabulary for the same class of refusal is how copy
+    # drifts. These values are emitted by the APP's RPC host (`local-operator-ui`,
+    # PR A of the console split) and parsed by a `lop` session; the daemon never
+    # produces them and the extension has no handler for them. Additive in the
+    # sense `MIN_SUPPORTED_PROTO`'s rules mean: a peer that does not know a code
+    # never emits it, and an OLD session that receives one fails
+    # `Response.model_validate` and reports an unreadable answer — which is that
+    # peer's version-skew behaviour, not a wire break. No proto bump either way.
+    #
+    # Names are reused from the existing vocabulary wherever a value fits (the
+    # doc's rule); these ten are the ones a reuse would have made a lie:
+    #
+    # * `unsupported_method` — this app version has no console at all. A TYPED
+    #   refusal, so the caller can say "update the app" instead of
+    #   substring-matching a message (which is what keeps the floor at 1).
+    # * `surface_unavailable` — no such surface on this host, or a stale handle
+    #   after a relaunch.
+    # * `surface_not_owned` — the surface exists and belongs to ANOTHER session.
+    #   The browser's `owner_refused` precedent: typed so a caller does not have
+    #   to tell it apart from `surface_unavailable` by reading prose.
+    # * `process_exited` — the pty's program is gone; the log is retained and
+    #   `console_read` still works.
+    # * `input_queue_full` — the app refused more bytes for a surface that is not
+    #   draining them, and says how many it took.
+    # * `unknown_key` — a named key the encoder does not have; carries the set it
+    #   does accept.
+    # * `secure_input_active` — read/screenshot refused while the human holds the
+    #   secure-input span.
+    # * `console_unavailable` — the console feature is off in this app (settings,
+    #   env flag, or a pty load failure) and names which of the three it was.
+    # * `invalid_grid` — requested cols/rows outside what the app will honour;
+    #   carries the clamp it applied.
+    # * `console_capture_full` — the app's one-at-a-time offscreen capture view is
+    #   already in use (design §13.3).
+    UNSUPPORTED_METHOD = "unsupported_method"
+    SURFACE_UNAVAILABLE = "surface_unavailable"
+    SURFACE_NOT_OWNED = "surface_not_owned"
+    PROCESS_EXITED = "process_exited"
+    INPUT_QUEUE_FULL = "input_queue_full"
+    UNKNOWN_KEY = "unknown_key"
+    SECURE_INPUT_ACTIVE = "secure_input_active"
+    CONSOLE_UNAVAILABLE = "console_unavailable"
+    INVALID_GRID = "invalid_grid"
+    CONSOLE_CAPTURE_FULL = "console_capture_full"
     INTERNAL = "internal"
 
 

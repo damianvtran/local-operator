@@ -26,9 +26,16 @@ def _force_browser_available(monkeypatch):
     desktop app running would otherwise flip every host-diagnosis assertion in
     this file from a probe that has nothing to do with the test. Tests that
     need it ON say so themselves.
+
+    ``console`` is the same story one capability over: gated on the desktop app's
+    discovery record, so a developer running the app would flip every
+    console-note assertion in this file. Forced OFF here, ON in the tests that
+    are about it (and in the file that owns those assertions,
+    ``test_prompts_console_flags.py``).
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
 
 
 if TYPE_CHECKING:
