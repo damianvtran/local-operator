@@ -9,6 +9,14 @@ Two rules shape everything here:
 - **Textual owns its thread.** Every mutation of app state goes through
   ``app.call_from_thread`` (the registrant's methods run on its own loop);
   reads of plain Python session state are safe directly.
+- **The runtime's loop never waits on another thread.** ``call_from_thread``
+  ENQUEUES the callback and then blocks until Textual runs it, so calling it
+  directly from a coroutine parks the runtime's loop — and with it the accept,
+  the welcome, ``ping`` and the heartbeat, all of which that one loop owns —
+  for as long as the app is busy. Every hop therefore goes through
+  :meth:`TuiSessionHandle._on_app`, which performs the blocking enqueue on a
+  worker thread (``asyncio.to_thread``) and awaits the *bound* result
+  (:meth:`_on_app` states the measured failure this prevents).
 - **The phone is a second front end, not a second session.** Prompts,
   interrupts, model switches and slash commands route through the app's own
   code paths (``_submit_prompt``, ``_interrupt``, ``_run_slash_command`` …)
@@ -62,10 +70,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How long ONE hop into the Textual loop may take before its caller stops
+#: waiting: the blocking enqueue in :meth:`TuiSessionHandle._on_app` plus the
+#: callback's own awaited result, as a single budget rather than one per leg.
+#:
+#: Ten seconds, chosen against the CLIENT's patience rather than by taste:
+#: ``attach_client.ACK_TIMEOUT_S`` is 15 s, so a hop that has not answered by
+#: ten has to fail as an error the caller can report, not keep the caller's own
+#: socket parked until the client gives up first. It is deliberately NOT a
+#: bound on the app-loop work the callback performs once it starts — that is
+#: the app's own business and the runtime's loop is free by then (see
+#: :meth:`_on_app`) — only on how long a caller waits for the answer.
+_APP_HOP_TIMEOUT_S = 10.0
+
 
 async def _await_future(future: asyncio.Future[Any]) -> Any:
     """Await an owner-loop future from the registrant's bridge coroutine."""
     return await future
+
+
+def _app_hop_timeout_note() -> str:
+    """The sentence a hop that ran out of its budget reports.
+
+    Names the budget and the two things a reader needs to act on it (the app is
+    busy, the budget is the client's patience divided by one and a half) rather
+    than a bare ``TimeoutError``, because this message is what reaches a
+    follower's terminal through an error frame.
+    """
+    return (
+        f"the terminal did not answer within {_APP_HOP_TIMEOUT_S:.0f}s "
+        "(the app is busy with a turn; retry when it settles)"
+    )
 
 
 # Decode wire images via the shared mobile-contract helper (registrant.py);
@@ -162,6 +197,10 @@ class TuiSessionHandle(SessionHandle):
         self._detail_tasks: dict[str, asyncio.Task[None]] = {}
         self._detail_generations: dict[str, int] = {}
         self._detail_fingerprints: dict[str, tuple[int, int]] = {}
+        # The in-flight app-loop hop of a ``request_stop``, held so the loop
+        # cannot collect it before it lands — the receipt is returned WITHOUT
+        # waiting for it (see ``_detach_stop_hop``).
+        self._stop_hop_task: asyncio.Task[Any] | None = None
 
     def _session(self) -> Any:
         """The app's current session. A property method (not cached) because
@@ -591,19 +630,62 @@ class TuiSessionHandle(SessionHandle):
         (a pid-alive poll) never applies to a TUI, whose record is simply
         unpublished — ``_await_pid_exit`` is what makes the caller observe
         the session as gone, through the reaped record on its next scan.
+
+        THE RECEIPT DOES NOT WAIT FOR THE APP LOOP (review round 1, UX U2).
+        It used to: the hop into Textual was awaited, so the reply arrived only
+        once the app had run the scheduling step — which is precisely the work
+        a BUSY app cannot service. Measured over a real socket on a working
+        session, rung 1 of the ladder timed out at its 15 s
+        (``OwnerAckTimeout``) and ``lop stop`` escalated to the signal rung,
+        killing a host whose hook would have ended the session politely
+        (exit 143). A receipt is a STATEMENT about what is about to happen, not
+        a report of work completed, so it is built here from identity reads and
+        the hop that PERFORMS the stop is detached (``_detach_stop_hop``). The
+        ladder's record reap is still the confirmation, so an early ack cannot
+        make a caller believe more than it should.
         """
 
         def schedule() -> str:
-            session = self._app._session
-            sid = str(getattr(session, "session_id", "") or "")
-            name = str(getattr(session, "conversation_name", "") or sid)
             self._app.run_worker(self._app._stop_local_session(), thread=False, group="session")
-            # The follower's receipt: what ended and the way back, the same
-            # line the host's own transcript paints.
-            reopen = f"/resume {sid}" if sid else "/resume"
-            return f'stopping "{name}" — {reopen} reopens it'
+            return "scheduled"
 
-        return str(await self._on_app(schedule))
+        # Identity reads, off the app loop: the same latitude the runtime takes
+        # when it reads ``session_projection_seed`` for identity, and the reason
+        # this receipt can be built without hopping. ``_app`` is read from the
+        # runtime's loop, which is never Textual's (see the module docstring).
+        session = self._app._session
+        sid = str(getattr(session, "session_id", "") or "")
+        name = str(getattr(session, "conversation_name", "") or sid)
+        self._detach_stop_hop(schedule)
+        # The follower's receipt: what ended and the way back, the same
+        # line the host's own transcript paints.
+        reopen = f"/resume {sid}" if sid else "/resume"
+        return f'stopping "{name}" — {reopen} reopens it'
+
+    def _detach_stop_hop(self, schedule: Callable[[], str]) -> None:
+        """Run the stop's app-loop hop WITHOUT holding the caller's reply.
+
+        One slot rather than a set: this is rung 1 of the stop ladder and the
+        ladder dials once per session, so a second concurrent stop of the same
+        TUI is the same stop. The task is held so the loop cannot collect it
+        mid-hop, and its exception is consumed here — an unretrieved task
+        exception is an asyncio warning, not a diagnostic. A hop that fails is
+        logged at WARNING, because it is the one state in which the session
+        stays up and the ladder's signal rung becomes the thing that ends it.
+        """
+        task = asyncio.ensure_future(self._on_app(schedule))
+        self._stop_hop_task = task
+
+        def settle(completed: asyncio.Task[Any]) -> None:
+            if self._stop_hop_task is completed:
+                self._stop_hop_task = None
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.warning("the TUI stop hop did not run — %s", error)
+
+        task.add_done_callback(settle)
 
     async def set_model(self, provider: str, model_id: str) -> str:
         return await self.set_model_effort(provider, model_id, None)
@@ -732,7 +814,22 @@ class TuiSessionHandle(SessionHandle):
 
             task.add_done_callback(finish)
 
-        self._app.call_from_thread(schedule)
+        # Same reason as :meth:`_on_app`: this hop is taken by a follower's
+        # ``route_shared_slash``, i.e. from the runtime's loop, and a direct
+        # ``call_from_thread`` would park that loop — accept, ``ping`` and
+        # heartbeat included — until the app services the enqueue. Bounded by
+        # the same budget for the same reason (review round 1, MAJOR 1: an
+        # unbounded enqueue answers the client's 15 s timeout with silence).
+        # The ``done`` await below stays unbounded ON PURPOSE — it is the
+        # producer's own work, and the grant verbs that used to wait on a human
+        # now report their outcome as a ``NoticeEvent`` instead.
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._app.call_from_thread, schedule),
+                timeout=_APP_HOP_TIMEOUT_S,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            raise TimeoutError(_app_hop_timeout_note()) from None
         result = await done
         return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
 
@@ -1060,23 +1157,113 @@ class TuiSessionHandle(SessionHandle):
     # -- internals ---------------------------------------------------------------------
 
     async def _on_app(self, fn: Callable[[], Any]) -> Any:
-        """Run ``fn`` on the Textual thread and await its result, BOUNDED:
-        ``call_from_thread`` enqueues, and an app inside a modal's nested pump
-        or a blocked handler never runs the callback — an unbounded await here
-        would wedge this session's whole serialized dispatch behind one stuck
-        command. Ten seconds is generous for a UI hop and turns the wedge
-        into an error the phone can show."""
+        """Run ``fn`` on the Textual thread and await its result, BOUNDED —
+        and WITHOUT parking the runtime's loop on the way there.
+
+        ``call_from_thread`` does not merely enqueue: it ENQUEUES AND THEN
+        BLOCKS until Textual runs the callback. Called directly from this
+        coroutine, that blocking enqueue happens on whichever thread is awaiting
+        us — and for a TUI-hosted runtime that thread is the runtime's own
+        event loop, so the loop stops accepting connections, stops answering
+        ``ping``, stops pushing projections and stops writing the heartbeat for
+        as long as the app is busy. Measured on 2026-09-18 (a real
+        ``OperatorApp`` + ``RuntimeServer(kind="tui")``, the app loop held with
+        a synchronous ``time.sleep``): with one client registered, the control
+        thread sat inside this function's enqueue for 49.6 s while the app was
+        held 50.5 s; a fresh dial got no welcome within 20 s (and the client's
+        own ``ACK_TIMEOUT_S`` is 15 s), and the discovery record's heartbeat
+        crossed the 45 s timeout into ``wedged`` at hold+43 s, peaking at
+        52.5 s — on a pid that was alive and idle. With NO client registered the
+        same 20 s hold was harmless (beat 5.1 s, ``live``), which is what
+        identifies the hop — not a slow turn — as the cause.
+
+        ``asyncio.to_thread`` is what puts the blocking enqueue INSIDE the
+        bound: the runtime's loop only awaits the worker thread, so it stays
+        runnable and keeps serving every OTHER connection and its own loops
+        while this one hop waits. The pattern is the same one already used two
+        modules away for the viewer-resume hop (``tui/app.py``: "`to_thread` is
+        what puts the blocking enqueue INSIDE the bound").
+
+        THE BOUND, AND WHAT IT DOES NOT DO. The wait here is bounded by ONE
+        budget of :data:`_APP_HOP_TIMEOUT_S` covering the whole hop — the
+        blocking enqueue AND the callback's awaited result. That is a
+        correction of what this docstring said in review round 1 (MAJOR 1): the
+        first version claimed the pre-existing ``wait_for`` around the *future*
+        had "become a real bound", which it could not, because
+        ``call_from_thread`` returns only once Textual has RUN the callback —
+        so the ENQUEUE await is what has to sit inside the bound, and the
+        future-await that follows is only the scheduling tail. It still does
+        not RECALL an enqueue that is already parked: Textual cannot cancel a
+        queued callback, so on expiry the callback runs anyway on the app loop
+        and ``_set_unless_done`` drops its result. What expires is how long
+        THIS caller waits — what a stuck app produces is an error the caller
+        can report, instead of a wedge it waits out forever. The residual cost
+        is one parked worker thread per expired hop until the app drains its
+        queue, bounded by the executor's own ``max_workers``; before this
+        change that same wait was paid by the runtime's loop instead, taking
+        the control socket down with it.
+
+        AN AWAITABLE RESULT IS AWAITED (review round 1, U1). Several callbacks
+        handed to this method are async on the session
+        (``refresh_attention``, ``acknowledge_attention``, ``record_shell``),
+        so ``fn()`` returns a coroutine OBJECT. Handing that back as the answer
+        is not a harmless no-op: it stored a coroutine in
+        ``Projection.attention``, after which every projection push failed to
+        serialize — the FIRST viewer was dropped the moment a SECOND dialled
+        (reproduced by UX round 1 over a real socket with the product's own
+        attach clients, and identically at 2484cfa4, which is what marks it
+        pre-existing rather than new here), and ``record_shell``'s write silently
+        never ran at all. An awaitable result is therefore scheduled as a task ON
+        the app loop and this caller is settled with ITS result.
+        """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
 
-        def wrapped() -> None:
-            try:
-                loop.call_soon_threadsafe(_set_unless_done, future, fn(), None)
-            except Exception as exc:  # noqa: BLE001 — the error IS the answer
-                loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
+        def settle(value: Any, error: BaseException | None) -> None:
+            loop.call_soon_threadsafe(_set_unless_done, future, value, error)
 
-        self._app.call_from_thread(wrapped)
-        return await asyncio.wait_for(future, timeout=10.0)
+        def wrapped() -> None:
+            # RUNS ON THE APP LOOP: ``call_from_thread`` invokes it there, so
+            # ``get_running_loop()`` below is Textual's loop and a task created
+            # on it runs the callback on the thread that owns the widgets.
+            try:
+                result = fn()
+            except Exception as exc:  # noqa: BLE001 — the error IS the answer
+                settle(None, exc)
+                return
+            if not inspect.isawaitable(result):
+                settle(result, None)
+                return
+
+            def finish(completed: asyncio.Task[Any]) -> None:
+                if completed.cancelled():
+                    settle(None, asyncio.CancelledError())
+                    return
+                error = completed.exception()
+                settle(None if error else completed.result(), error)
+
+            asyncio.ensure_future(result).add_done_callback(finish)
+
+        # ``fn`` still runs on the Textual loop — only the WAIT moved off this
+        # one. That distinction is load-bearing: the admission sections these
+        # callbacks perform (``CommandReservations.reserve`` and friends) are
+        # documented as "mutated only on the session runtime's loop", and the
+        # runtime's loop here IS Textual's, so they must keep running there.
+        deadline = loop.time() + _APP_HOP_TIMEOUT_S
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._app.call_from_thread, wrapped),
+                timeout=_APP_HOP_TIMEOUT_S,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            raise TimeoutError(_app_hop_timeout_note()) from None
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            # The enqueue answered, but there is nothing left of the budget for
+            # the callback's own result — the same failure, reported the same
+            # way rather than as a second full wait.
+            raise TimeoutError(_app_hop_timeout_note())
+        return await asyncio.wait_for(future, timeout=remaining)
 
     def _cancel_detail_tasks(self) -> None:
         for task in self._detail_tasks.values():
