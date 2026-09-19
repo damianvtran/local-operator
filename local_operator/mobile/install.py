@@ -587,9 +587,14 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     # 503s, so install builds it rather than leaving the phone on a dead
     # page — the wheel normally ships it, a source checkout does not.
     bundle_ok, bundle_detail = ensure_bundle(build=not dry_run)
-    steps.append(bundle_detail)
     if not bundle_ok:
-        return {"ok": False, "steps": steps, "error": f"web bundle unavailable: {bundle_detail}"}
+        # THE FAILURE TEXT IS THE ERROR, NOT ALSO A STEP (design round 2, D11).
+        # Appending it here and repeating it in `error` printed the same
+        # multi-line sentence twice -- once as progress, once as the red
+        # failure -- so a reader saw one problem scroll past and then read the
+        # second copy as a second one. Steps are what SUCCEEDED.
+        return {"ok": False, "steps": steps, "error": bundle_detail}
+    steps.append(bundle_detail)
 
     password = load_password()
     if password is None:
