@@ -430,9 +430,18 @@ SECTIONS: tuple[Section, ...] = (
     # ``Session._apply_config_change`` records.
     Section(
         "classification",
-        "Resource recommendations",
+        # THE NAME IS THE ONE THE TIPS USE, and it is the title rather than the
+        # description because the TUI paints the title on every settings frame
+        # while the description below reaches only the settings API. Round 1
+        # added the word to a row's help line and round 2 measured what that
+        # bought: the help paints on the SELECTED row's detail line, clipped
+        # from 78 columns down, so at rest the page said "Resource
+        # recommendations" twice and never the word a tip sent the user to look
+        # for (design round 2, D11). The runtime's own message is separate and
+        # unchanged: it says "Suggestion added…".
+        "Smart hints",
         Scope.NEW_SESSIONS,
-        "Advisory skills, guides and MCP servers a decision model suggests "
+        "Advisory skills, guides and MCP servers a decision model may suggest "
         "per message. Off keeps the prompt unchanged.",
     ),
     # Its own section rather than a row under "Session", and the reason is the
@@ -2003,17 +2012,21 @@ SETTINGS: tuple[Setting, ...] = (
         key="classification.auto",
         path=("classification", "auto"),
         section="classification",
-        label="Resource recommendations",
+        label="Smart hints",
         kind=Kind.BOOL,
         # Default ON since 2026-09-18, matching the package's own `DEFAULT_AUTO`
         # (`classification/service.py`, which records why the flip is worth its
         # spend). The OFF case stays a real path and stays free: with
         # `auto: false` the wiring returns before it imports the package, so the
-        # prompt is byte-identical to a harness without the layer. The help says
-        # what ON does rather than what the feature is: the row's label already
-        # names the feature.
+        # prompt is byte-identical to a harness without the layer.
+        #
+        # The flip was a deliberate change of behaviour, so it is stated once
+        # here in the comment that owns the default, and nowhere else in this
+        # file. The help says what ON does rather than what the feature is: the
+        # label already names the feature, and it now names it in the one term
+        # the tips and `guide://classification` use (design round 2, D11).
         default=True,
-        help="On: advisory resources may be added. Off: the prompt is unchanged.",
+        help="On: a decision model may add advisory resources. Off: the prompt is unchanged.",
         choices=_bool_choices(
             "a decision model may add advisory resources",
             "the prompt stays exactly as it is",
