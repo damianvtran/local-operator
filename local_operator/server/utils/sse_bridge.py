@@ -150,7 +150,13 @@ def attach_broker(
     # is only needed once a host has actually decided to stream.
     from local_operator.server.utils.operator import AgentEventBridge
 
-    bridge = AgentEventBridge(status_queue=BrokerStatusSink(broker, job_id), job_id=job_id)
+    bridge = AgentEventBridge(
+        status_queue=BrokerStatusSink(broker, job_id),
+        job_id=job_id,
+        # Named so an elided ``agent_end`` row's marker can point at the
+        # transcript that still holds the text it gave up (``harness/wire.py``).
+        session_id=getattr(session, "session_id", None),
+    )
     return session.subscribe(bridge.handle)
 
 
