@@ -2479,6 +2479,19 @@ def browser_command(args: argparse.Namespace) -> int:
         assert isinstance(health, dict)
         print(f"installed:           {'yes' if result['installed'] else 'no'}")
         print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
+        # A daemon that predates capability advertisement cannot be told apart
+        # from an extension that advertised nothing by its own record, so the
+        # harness refuses the new actions with "restart the bridge" — and this is
+        # the line that makes that advice checkable from here (design §6.4 row
+        # "new harness + old daemon"; review round 1, R4). `capabilities_known`
+        # is the WRITER's own stamp: absent means the running bridge is older
+        # than the field it is being asked about, whatever its heartbeat says.
+        record = result.get("state")
+        if isinstance(record, dict) and not record.get("capabilities_known"):
+            print(
+                "bridge:              predates the file-transfer actions — "
+                "run 'lop browser restart'"
+            )
         connected = bool(health.get("extension_connected"))
         unresponsive = bool(health.get("extension_unresponsive"))
         print(f"extension connected: {'yes' if connected else 'no'}")

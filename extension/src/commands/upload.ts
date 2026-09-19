@@ -17,7 +17,11 @@ import { nodeIdFor } from "./input";
  *      read back and COMPARED, because a call that silently did nothing must not
  *      be reported as a filled input. A mismatch is an error naming both sides —
  *      a form that ignores the attach is exactly the failure a page would like us
- *      to report as success.
+ *      to report as success. A read that could not be TAKEN at all is the other
+ *      case, and it is reported as an UNVERIFIED attach rather than as a failure:
+ *      the attach has already resolved by then, so "nothing was sent" would be a
+ *      claim about bytes that have gone (and a double-send invitation). See the
+ *      catch in `upload`.
  *   2. `accept=` IS REPORTED AND NEVER OBEYED. A site's own filter protects
  *      nothing (it exists to help a human pick a file) and honouring it would let
  *      the page steer which local files we try to attach. It rides the result as
@@ -35,6 +39,77 @@ import { nodeIdFor } from "./input";
 interface ResolvedNode { object: { objectId: string } }
 interface CallResult { result: { value?: unknown } }
 interface FileReadback { count: number; names: string[]; sizes: number[]; accept: string }
+
+/* CDP failures that mean the page NAVIGATED out from under the read-back.
+ *
+ * Used for WORDING only, never as the gate: every read-back failure is reported as
+ * an unverified attach (see the catch in `upload`), and this list decides whether
+ * the note blames the page's navigation or names the error instead. Matched on the
+ * MESSAGE because `-32000` is CDP's generic "something went wrong"; the strings are
+ * the concrete ones Chrome 153 returns for a destroyed/replaced execution context
+ * or a detached node.
+ */
+const CONTEXT_GONE = [
+  "Cannot find context with specified id",
+  "Cannot find execution context",
+  "Execution context was destroyed",
+  "Inspected target navigated or closed",
+  "Node with given id does not belong to the document",
+  "No node with given id found",
+  "Could not find node with given id",
+];
+
+function isContextGone(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return CONTEXT_GONE.some((marker) => message.includes(marker));
+}
+
+/* One readable line for an error that failed a READ, for the note and the row.
+ *
+ * Trimmed to a single line and capped: the text comes from Chrome, lands in the
+ * operator's transcript and in the audit file, and a multi-line CDP payload there
+ * would push the rest of the row out of sight.
+ */
+function describeError(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ");
+  return message.slice(0, 120).trim() || "no detail";
+}
+
+/* The DOM's answer for what the input now holds, or null when it holds no files.
+ *
+ * READ THROUGH THE PROTOTYPE'S OWN GETTER, never `this.files`. The page is the
+ * adversary this read-back exists for, and `this.files` is an own property a
+ * hostile page can shadow with `Object.defineProperty` to answer with anything
+ * — a real gap, since the page can run between the attach and the read.
+ */
+async function readInputFiles(tabId: number, nodeId: number): Promise<FileReadback | null> {
+  const resolved = await cdp<ResolvedNode>(tabId, "DOM.resolveNode", { nodeId });
+  const read = await cdp<CallResult>(tabId, "Runtime.callFunctionOn", {
+    objectId: resolved.object.objectId,
+    functionDeclaration: `function(){
+      const input = this;
+      if(!input || !('files' in input)) return null;
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files');
+      // A non-input element has no business here; the getter throws for one and
+      // that is a null read, not a fabricated count.
+      let files;
+      try { files = descriptor && descriptor.get ? descriptor.get.call(input) : input.files; }
+      catch (err) { return null; }
+      if(!files) return null;
+      const list = [...files];
+      return JSON.stringify({
+        count: list.length,
+        names: list.map((f) => f.name),
+        sizes: list.map((f) => f.size),
+        accept: String(input.getAttribute('accept') || ''),
+      });
+    }`,
+    returnByValue: true,
+  });
+  return typeof read.result?.value === "string"
+    ? (JSON.parse(read.result.value) as FileReadback)
+    : null;
+}
 
 export async function upload(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
@@ -67,27 +142,67 @@ export async function upload(params: Record<string, unknown>): Promise<Record<st
   if (paths.length === 0) {
     // Nothing to attach: report the refusals rather than driving the input with
     // an empty list, which a page would see as "the agent cleared my field".
-    return { inputs: [], accepted: [], refused, accept: "" };
+    return { inputs: [], accepted: [], refused, accept: "", readback: "" };
   }
 
   const nodeId = await nodeIdFor(surface, selector);
   await cdp(surface.tabId, "DOM.setFileInputFiles", { nodeId, files: paths });
 
-  const resolved = await cdp<ResolvedNode>(surface.tabId, "DOM.resolveNode", { nodeId });
-  const read = await cdp<CallResult>(surface.tabId, "Runtime.callFunctionOn", {
-    objectId: resolved.object.objectId,
-    functionDeclaration: `function(){
-      if(!this || !('files' in this)) return null;
-      return JSON.stringify({
-        count: this.files.length,
-        names: [...this.files].map((f) => f.name),
-        sizes: [...this.files].map((f) => f.size),
-        accept: String(this.getAttribute('accept') || ''),
-      });
-    }`,
-    returnByValue: true,
-  });
-  const payload = typeof read.result?.value === "string" ? (JSON.parse(read.result.value) as FileReadback) : null;
+  /* The read-back is mandatory, but a read that could not be TAKEN is not a
+   * failed attach.
+   *
+   * A page that submits itself from the change handler — the standard "pick a
+   * file and it uploads" form — navigates in the same tick as the attach, which
+   * destroys the execution context the read-back runs in. The attach itself has
+   * already happened (the `DOM.setFileInputFiles` above RESOLVED) and the bytes
+   * have already gone. Reporting the raw CDP error for that is wrong twice: the
+   * model cannot learn the files were sent (so it retries and double-sends) and
+   * the audit row for a real egress is never written.
+   *
+   * So the rule is stated once and stated generally: **the calls in this `try`
+   * are READS, and a read that failed is evidence of nothing.** What the
+   * read-back exists to catch — a page that ignored the attach — is a MISMATCH,
+   * found by a read that SUCCEEDED, and every mismatch still throws below. A
+   * narrower catch keyed on "context gone" strings would leave the same false
+   * failure reachable through our own per-call deadline (a stall on the read,
+   * which QA measured once as a flake) or any other Chrome error, and each of
+   * those would report "nothing was sent" over bytes that had gone. The wording
+   * still distinguishes the navigation, and Python's own re-stat + digest is what
+   * the facts are built from either way.
+   */
+  let payload: FileReadback | null = null;
+  let readback = "";
+  try {
+    payload = await readInputFiles(surface.tabId, nodeId);
+  } catch (error) {
+    readback = isContextGone(error)
+      ? "unavailable — the page navigated out of the change event before the input could be read back"
+      : `unavailable — the read-back failed (${describeError(error)})`;
+  }
+  const expected = paths.map((path) => safeName(path));
+  if (readback) {
+    // Checked BEFORE the count comparison below, because there is no payload to
+    // compare against: the read is what failed, not the attach. Nothing is
+    // claimed ABOUT the DOM — the paths are reported as attached because the
+    // attach is what was just sent, `bytes` is -1 for "unknown here" (Python
+    // stats every path from disk, and that is the verification which survives
+    // the page), and the marker travels so Python can report the attach as
+    // unverified instead of turning a completed egress into an error.
+    return {
+      inputs: [String(selector ?? "")],
+      accepted: paths.map((path, index) => ({
+        name: expected[index],
+        path,
+        bytes: -1,
+        mime: "",
+        sniffed: "",
+        sha256: "",
+      })),
+      refused,
+      accept: "",
+      readback,
+    };
+  }
   if (!payload || payload.count !== paths.length) {
     throw new BridgeCommandError(
       "internal",
@@ -95,7 +210,6 @@ export async function upload(params: Record<string, unknown>): Promise<Record<st
         + `after ${paths.length} were set`,
     );
   }
-  const expected = paths.map((path) => safeName(path));
   if (payload.names.join("\u0000") !== expected.join("\u0000")) {
     throw new BridgeCommandError(
       "internal",
@@ -111,12 +225,13 @@ export async function upload(params: Record<string, unknown>): Promise<Record<st
     accepted: paths.map((path, index) => ({
       name: expected[index],
       path,
-      bytes: payload.sizes[index] ?? 0,
+      bytes: payload!.sizes[index] ?? 0,
       mime: "",
       sniffed: "",
       sha256: "",
     })),
     refused,
-    accept: payload.accept,
+    accept: payload!.accept,
+    readback: "",
   };
 }

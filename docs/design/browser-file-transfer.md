@@ -1,6 +1,6 @@
 # Design: safe download and upload for the `browser` tool, on both hosts
 
-Status: proposal (architect), **AMENDED BY PR #1318** — see §17, which carries
+Status: proposal (architect), **AMENDED BY PR #1323** — see §17, which carries
 the experiments §12.4 asked for and the three places they proved this document
 wrong. Read §17 before implementing from anything below it. Two PRs, both named
 at §13; §17.5 records what the operator's decision on the extension's download
@@ -233,7 +233,12 @@ Properties, each of which the design then depends on:
 
 - **Private by construction**: created 0700, files 0600, under the config root
   the harness already owns (the same root whose 0600/0700 discipline
-  `ui_browser/state.py:1-20` documents for its own namespace).
+  `ui_browser/state.py:1-20` documents for its own namespace). The DIRECTORY is
+  made 0700 when it is created; the FILE's 0600 is applied by the harness to each
+  artifact it keeps, because the host performs the write and therefore chooses
+  the mode it lands with (an Electron/Chromium write lands 0644 by umask). It is
+  best-effort — a chmod that failed must not cost the user the file it protects —
+  and bounded by the 0700 parent either way (§17.9).
 - **Isolated per session**, which is what makes the *directory diff* a sound way
   to learn what landed (§5.3) with several sessions on one machine.
 - **Isolated per call** in time (the `<stamp>`), so two downloads of a file the
@@ -324,6 +329,14 @@ filesystem, in the same spirit as `screenshot`'s magic check:
      sniffed extension and say so;
    - `deny` → delete, report the typed refusal and what was deleted;
    - `unknown` → keep, flagged `unverified: true`, never opened.
+
+   **What is deleted or renamed is the candidate ENTRY, never the path
+   `resolve()` produced.** The containment check reads the resolved path — that is
+   what decides whether the entry escapes — but every destructive act that follows
+   is applied to the entry inside the session root. A refusal that unlinked the
+   resolved path deleted a file OUTSIDE the root (the user's own) while leaving
+   the escaping entry in place, which is both the data loss the rule exists to
+   prevent and a failure to remove the escape (§17.9).
 5. Emit the audit row and the model-facing text from those facts, with bytes and
    sha256.
 
@@ -466,12 +479,12 @@ the table the tests in §12.2 assert.
 
 | peer pair | direction of the new thing | behaviour | answer |
 |---|---|---|---|
-| new extension + old daemon | extension advertises `capabilities` | old daemon drops the unknown event; never sends `download` | unaffected; neither new action works, and `lop browser status` shows the daemon as old |
+| new extension + old daemon | extension advertises `capabilities` | old daemon drops the unknown event; never sends `download` | unaffected; neither new action works, and `lop browser status` reports `bridge: predates the file-transfer actions` (the record's `capabilities_known` stamp is absent, which is what names the WRITER rather than the extension) |
 | old extension + new daemon | daemon would send `download` | **refused before sending** — extension advertises nothing | typed `capability_unsupported`; ordinary actions unaffected |
 | new extension + new daemon | full path | works | `download`/`upload` available |
 | new app host + old harness | host advertises `capabilities` in `host.json` + `/health` | old harness has no such action in its schema; never calls it | unaffected |
 | old app host + new harness | tool reads a record with no `capabilities` | `download`/`upload` refused | typed `capability_unsupported`, remedy "update the desktop app" |
-| new harness + old daemon | tool reads an old record | refused at the record check, no socket call | typed `capability_unsupported`, remedy "restart the browser bridge" |
+| new harness + old daemon | tool reads an old record | refused at the record check, no socket call | typed `capability_unsupported` naming `lop browser restart` — the record carries no `capabilities_known` stamp, so the copy attributes the empty list to the bridge and NOT to the extension (an extension toggle here would be advice that cannot help) |
 | cmux-only host | n/a | `CMUX_UNSUPPORTED_BROWSER_ACTIONS` (C5) | typed refusal naming the hosts that can |
 
 `PROTO_VERSION` and `MIN_SUPPORTED_PROTO` are **unchanged at 1** (C2). The
@@ -579,7 +592,7 @@ told to use the browser and was not told why reached for playwright anyway
 | host is current but wedged | the existing wedge copy, naming the extension toggle (`guide://browser`) |
 | no download started | "no download started within N s; if the page needs a click first, `click` it and retry, or the file may be behind a login" |
 | cancelled by the name policy | "refused: `<name>` is an executable/script type (`<why>`); nothing was saved" |
-| sniff disagrees with the name | kept, renamed, and said so: "saved as `x.pdf` (the server called it `x.zip`; content is PDF)" |
+| sniff disagrees with the name | kept, renamed, and said so: "saved as `x.pdf` (the name said `zip`; the server said `application/zip`; the content is a PDF document)" — the declared type is quoted only when there is one to quote, and it never changes the verdict |
 | executable content | "refused and deleted: the file at `<path>` is a `<type>`. Nothing executable is ever kept." |
 | over cap | "refused: `<name>` is `<n>` bytes, over the `<cap>` limit" |
 | upload refused | the specific reason: "that file is inside Local Operator's own config directory", "`<basename>` matches the credential deny-list (`<pattern>`)", "`<basename>` is inside a `<component>` directory, which holds credentials", "not a regular file", "`<n>` bytes over the `<cap>` limit", "`<path>` does not exist", "the file is empty" |
@@ -878,6 +891,18 @@ before writing (it knows the total size in `item.getTotalBytes()`); the extensio
 cannot reliably abort mid-flight, so its cap is enforced **after** the file lands,
 by Python's `stat()` — meaning an over-cap file exists briefly on disk before
 deletion, and the response says so. That is residual risk R2 (§11.6).
+
+The three downloads caps fire at three different moments, and each is named for
+the one it is:
+
+- **per file (256 MB)** — on the landed file, before it is kept.
+- **per call (20 files)** — on the CANDIDATE list, before anything is classified,
+  renamed or audited, so the files that are dropped leave a `deny` row naming the
+  cap and no kept file is ever described by a row whose path is already gone.
+- **per session (2 GB)** — checked BEFORE the call is armed, so the refusal costs
+  no socket round trip and no bytes land. It bounds the NEXT call rather than the
+  directory: a session can sit up to one call's worth above the ceiling, which is
+  what `docs/BROWSER.md` and the module constant now both say (§17.9).
 
 ### 10.4 The tables are generated, so the two hosts cannot drift
 
@@ -1373,7 +1398,7 @@ rather than after.
 
 ---
 
-## 17. Amendment: what PR #1318 measured, and what it changed
+## 17. Amendment: what PR #1323 measured, and what it changed
 
 Written by the implementing agent, on branch `feat/browser-file-transfer`, after
 running the experiments §12.4 demanded. Three claims in this document proved
@@ -1575,3 +1600,25 @@ which needs the operator's own logged-in profile.
   on the app host, which §16.2/§16.4 raise for PR B.
 * Whether the extension could serve downloads through some future Chrome API
   (nothing in the current API surface does; §17.1 is the state at Chrome 153).
+
+### 17.9 The round-1 review and QA round, and what each finding changed
+
+Both streams ran against head `f4a27d0d` and are on the PR (`### Agent review —
+round 1`, `### QA report — round 1`). This section records what the CODE now does,
+so a later reader does not have to reconstruct it from the diff; the per-finding
+remediation comments on the PR carry the evidence.
+
+| finding | what changed |
+|---|---|
+| **R1 (major)** — the out-of-quarantine refusal unlinked the RESOLVED path, deleting a file outside the root and leaving the escaping entry in place | the containment check still reads `resolve()`, but every delete and rename now applies to the candidate ENTRY (§5.3 step 4). A symlink dies, its target does not, and the sentence and the audit row say which of the two outcomes happened (`refused and deleted` vs `refused, NOT deleted`) |
+| **R2** — files dropped by the per-call cap kept `verdict=allow` rows naming dead paths, and no row named the cap | the cap is applied to the CANDIDATE list, before classification, rename and audit; each dropped file gets its own `deny` row naming the cap, so every `allow` row names a file that exists (§10.3) |
+| **R3** — `declared_mime` was accepted and never read | it is quoted in the rename sentence when it is not generic, sanitised (control/bidi stripped, length capped) because it is a string from outside, and it never changes a verdict. §7.4's row is updated to the shipped sentence |
+| **R4** — §6.4 rows 469/474 promised a stale-daemon remedy and a `lop browser status` field that did not exist | the daemon now stamps its own record (`capabilities_known`), so an empty `capabilities` list is attributed to the bridge that wrote it rather than to the extension: the refusal names `lop browser restart`, and `lop browser status` prints `bridge: predates the file-transfer actions` |
+| **R5** — the 2 GB session ceiling is a pre-call check while `docs/BROWSER.md` stated it as a cap on what is kept | the doc and §10.3 now say what it is: a refusal that bounds the NEXT call, so a session can sit up to one call's worth above it. The behaviour is unchanged, and deliberately so — deleting files the operator was about to attach is the worse failure (§4.1) |
+| **N1** | the PR number is corrected to #1323 in all six places across the four files (the design's own pointers had sent readers to an unrelated PR) |
+| **N2** | `browser-extension.md` §4.4 (the error taxonomy, which §4.3 and §4.5 both reference) now precedes §4.5 |
+| **N3** | `_capability_problem` treats a `None` client as "told us nothing" and refuses, instead of raising `AttributeError` in the one function whose purpose is to answer before touching a socket |
+| **N4** | `browser_files.is_within` is public and is the ONE spelling of containment, used by both the upload gate and the download half |
+| **N5** | the extension reads the input's `files` through `HTMLInputElement.prototype`'s own getter (an own-property shadow was a real bypass for the read-back), and the size-only limit of the comparison is stated in the code and in `BROWSER.md` rather than implied |
+| **Q-1 (major)** — an auto-submitting form returned a bare CDP internal error while the bytes had really gone, with no facts and no audit row | the read-back failure is classified BY ITS PROOF VALUE rather than by a list of error strings: the attach has already resolved by the time the read runs, so a read that failed is evidence of nothing and the call is reported as an **unverified attach** — `accepted` facts from the harness's own stat + digest, the audit row written with the marker in `reason`, and the marker in the model-facing text. What the read-back exists to catch (a page that ignored the attach) is a MISMATCH, found by a read that succeeded, and every mismatch still fails the call; the control test asserts the marker is not a bypass |
+| **Q-2** — §4.1's "files 0600" was enforced nowhere | the harness tightens each artifact it keeps to 0600 (`browser_files.chmod_private`), best-effort, after the content-corrected rename has settled the final name |

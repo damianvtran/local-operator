@@ -72,7 +72,7 @@ def proto_supported(
 #: unusable — the store decides when a newer version is actually offered.
 #:
 #: 0.1.18 is the first tree that advertises capabilities and serves `upload`
-#: (PR #1318). `download` is deliberately NOT among the methods any extension
+#: (PR #1323). `download` is deliberately NOT among the methods any extension
 #: build can serve: E1x in `docs/design/browser-file-transfer.md` measured that
 #: Chrome refuses the only two CDP primitives that could put a file somewhere the
 #: harness chooses to a tab-scoped `chrome.debugger` session — see

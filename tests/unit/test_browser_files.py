@@ -152,11 +152,71 @@ def test_session_bytes_spans_every_stamped_directory_for_that_session() -> None:
     assert bf.session_bytes("nobody") == 0
 
 
+def test_is_within_is_the_one_public_containment_rule(tmp_path: Path) -> None:
+    """Both halves of the feature share this; a private copy in the caller drifts."""
+    root = tmp_path / "root"
+    (root / "inner").mkdir(parents=True, exist_ok=True)
+    assert bf.is_within(root, root)
+    assert bf.is_within(root / "inner" / "x.pdf", root)
+    assert not bf.is_within(tmp_path / "outside.pdf", root)
+    # A sibling whose NAME merely starts with the root's is not inside it, which
+    # is the bug a string-prefix test would have.
+    assert not bf.is_within(tmp_path / "root-elsewhere" / "x.pdf", root)
+
+
+def test_a_kept_artifact_can_be_tightened_to_the_private_mode(tmp_path: Path) -> None:
+    """§4.1's "files 0600": the chmod helper the download half calls (Q-2)."""
+    path = tmp_path / "receipt.pdf"
+    path.write_bytes(b"%PDF-1.4\n")
+    path.chmod(0o644)
+    assert bf.chmod_private(path) is True
+    assert stat.S_IMODE(path.stat().st_mode) == bf.PRIVATE_FILE_MODE == 0o600
+    # Best-effort: a path that is not there reports the failure instead of raising.
+    assert bf.chmod_private(tmp_path / "gone.pdf") is False
+
+
 def test_dir_size_and_snapshot_survive_a_missing_directory(tmp_path: Path) -> None:
     missing = tmp_path / "nope"
     assert bf.dir_size(missing) == 0
     assert bf.snapshot(missing) == {}
     assert bf.session_bytes("sess", root=missing) == 0
+
+
+# --- the copy the model reads (R3) ------------------------------------------
+
+
+def test_declared_mime_label_drops_generic_types_and_sanitises_the_rest() -> None:
+    """The declared type is quoted into the transcript and the audit row (R3).
+
+    It is a string from OUTSIDE, so it gets the treatment a name gets: control
+    characters and overrides out, length capped. A generic type is dropped rather
+    than quoted, because quoting it would read as a signal the server never sent.
+    """
+    assert bf.declared_mime_label("application/zip") == "application/zip"
+    assert bf.declared_mime_label("  text/html \n") == "text/html"
+    assert bf.declared_mime_label("application/octet-stream") == ""
+    assert bf.declared_mime_label("") == ""
+    assert bf.declared_mime_label("application\u202eevil") == "applicationevil"
+    assert bf.declared_mime_label("text/\u0000html") == "text/html"
+    assert len(bf.declared_mime_label("x/" + "a" * 400)) <= bf.MAX_MIME_BYTES
+
+
+def test_the_rename_sentence_names_the_server_type_when_there_is_one() -> None:
+    """Design §7.4's "the server called it …": the parameter is READ, not dropped."""
+    verdict = bf.classify_bytes(
+        "invoice.zip", b"%PDF-1.4\n1 0 obj\n", declared_mime="application/zip"
+    )
+    assert verdict.kind == "allow"
+    assert verdict.safe_name == "invoice.pdf"
+    assert "the server said 'application/zip'" in verdict.reason
+    assert "the name said 'zip'" in verdict.reason
+    # Still a HINT: the declared type can lie without changing the verdict, and a
+    # generic one is not quoted at all.
+    generic = bf.classify_bytes(
+        "invoice.zip", b"%PDF-1.4\n1 0 obj\n", declared_mime="application/octet-stream"
+    )
+    assert generic.safe_name == "invoice.pdf"
+    assert "the server said" not in generic.reason
 
 
 # --- uploads -----------------------------------------------------------------
