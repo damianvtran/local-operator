@@ -435,8 +435,10 @@ class TuiSessionHandle(SessionHandle):
         round 2 measured. This bind is the one hop whose caller is not a client
         waiting for an answer: it runs in the runtime's ``_serve_frontend_sync``
         task, no request is parked on it, and the connection is already usable
-        without it — the welcome is on the wire, health checks and the four
-        control verbs are admitted while it is pending, and
+        without it — the welcome is on the wire, ``ping`` and the four control
+        verbs the runtime admits pre-sync (``stop``, ``abort``, ``steer``,
+        ``cancel`` — its ``_SYNC_PRIORITY_OPS`` set) are served while it is
+        pending, and
         ``frontend_sync_pending`` keeps everything heavier refused until it
         lands. Giving it the interactive budget therefore bought nothing and cost
         the session: with a busy terminal, a viewer was welcomed in 0.00 s and

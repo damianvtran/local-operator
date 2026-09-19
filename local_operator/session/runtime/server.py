@@ -761,10 +761,12 @@ _PAYLOAD_OPS = {
 #: necessary: a connection that is reachable but not yet AUTHORITATIVE must not be
 #: allowed to act on state it has not been told about.
 #:
-#: So: health, and the three ways to regain control of a turn. ``stop``/``abort``/
-#: ``cancel`` are the kill switch in its three rungs, and withholding them until a
-#: sync lands would deny a supervisor the ability to stop a runaway session
-#: precisely when its loop is stuck — the situation this set exists for.
+#: So: health, and the FOUR ways to regain control of a turn — ``stop``,
+#: ``abort``, ``steer`` and ``cancel``. The first three (with ``cancel``, whose
+#: ``immediate`` mode routes to ``abort``) are the kill switch in its rungs, and
+#: withholding them until a sync lands would deny a supervisor the ability to
+#: stop a runaway session precisely when its loop is stuck — the situation this
+#: set exists for.
 _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 
 #: Ops exempt from their connection's op CHAIN. A different question from
@@ -2358,6 +2360,29 @@ class RuntimeServer:
         into a hang. After the grace the shutdown proceeds and drops the
         connection — the pre-existing behaviour — with a warning naming how many
         requests were still open.
+
+        THE GRACE IS BOUNDED AGAINST THE CLIENT, NOT AGAINST THE CALLER, and
+        that distinction is the whole reason the two numbers differ. Every
+        client speaking to this socket gives a reply 15 s
+        (``attach_client.ACK_TIMEOUT_S``), so five seconds is what gets an ack
+        out while staying well inside its patience. A thread-hosted runtime's
+        own caller waits less — ``aclose_remote`` awaits ``close``, whose join
+        of the runtime thread is 2 s (``daemon=True``) — so THIS WAIT CAN
+        OUTLIVE THE CALLER THAT ASKED FOR THE SHUTDOWN, and that is safe rather
+        than an oversight: ``close`` already documents returning with the thread
+        still finishing its own teardown, the thread owns this fence, and what
+        the ack needs in order to land is the LOOP still running — not the
+        caller still waiting. Matching the grace to the join instead would trade
+        a live client's reply for the caller's tidiness. Measured in composition
+        (``aclose_remote`` → ``close``, a real thread-hosted runtime with one
+        admitted ``stop`` parked in its hook): a 1.5 s park — inside the grace —
+        has the caller return at 1.51 s with the ack already written and nothing
+        left in flight; a 6.0 s park — beyond both bounds — has the caller return
+        at its 2.00 s join while the fence runs on to its grace, warns, and then
+        proceeds to drop the connection. In that second case the parked op is
+        left to unwind on its own, exactly as it was before this fence existed
+        (``_dispatch_frame`` documents why op tasks are never cancelled), so the
+        composition costs nothing that was not already spent.
         """
         idle = self._in_flight_idle
         if idle is None or not self._in_flight_requests:
@@ -2618,13 +2643,32 @@ class RuntimeServer:
             # how a later reader concludes that one of them is redundant and
             # removes the wrong one.
             #
-            # It is also the one hop that can be SLOW, and that is the admitted
-            # cost of this change rather than an oversight: a guest joining
-            # mid-turn still waits for the turn's current synchronous step,
-            # exactly as the TUI kind does today. What this change buys is that
-            # the wait is a hop whose result is awaited, not the runtime's own
-            # loop parked — so the welcome, the `ping` and the heartbeat keep
-            # flowing while it happens (see ``_serve``'s registrations).
+            # It is also the one hop that can be SLOW, and what that slowness
+            # costs is the viewer's canonical state and nothing else: this call
+            # is made from ``_serve_frontend_sync``, a per-connection task, so
+            # the connection is already in its reader loop and being served
+            # while the hop is parked — and the accept, the heartbeat and every
+            # other connection keep flowing for the same reason, because the
+            # wait is on this task rather than on the runtime's loop.
+            #
+            # AND THE HOP IS DELIBERATELY LEFT UNBOUNDED, which reads at first
+            # like the opposite of a fix. A budget belongs to a CALLER that is
+            # waiting for an answer; the only caller here is a task nothing
+            # awaits, so a budget buys it nothing and costs a live viewer its
+            # connection (``mobile/tui_handle._on_app``'s unbounded branch
+            # carries that measurement: a viewer dialled into a busy terminal
+            # was welcomed and then killed at 10.01 s with ``owner exited``
+            # while the app was merely busy). The bind therefore lands late
+            # instead, and the interactive budget stays where a caller is
+            # actually waiting.
+            #
+            # The seam is SINGLE for both handle shapes, and that is why no hop
+            # is added here: ``ServingSessionHandle.subscribe_frontend`` carries
+            # ``@_on_session_loop`` (daemon/exec), and the TUI handle hops
+            # through its own ``_on_app`` — a handle that publishes no
+            # ``session_loop`` is served inline by
+            # ``_handle_call_on_session_loop``, so the TUI kind keeps the hop it
+            # already had rather than gaining a second.
             async def bind() -> Any:
                 outcome = (
                     subscribe_frontend(on_update, display_window=True)
