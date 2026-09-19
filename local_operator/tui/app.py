@@ -707,6 +707,27 @@ DRAIN_NOTICE_OTHER = (
     "this session is finishing in-flight work first, so a new message will not " "start a turn"
 )
 
+#: What the viewer says when the runtime answers a prompt with the SPOOL receipt
+#: (``inbox.SPOOL_RECEIPT_PROMPT``) rather than the durable admission.
+#:
+#: IT IS NOT A REFUSAL, and painting it as one would be the incident's copy one
+#: layer down: the message was accepted, just not by the runtime that is leaving —
+#: it is on the successor's spool and the successor runs it (memo §4.2/§4.4). So
+#: there is nothing to hand back and nothing for the user to do, which is the
+#: whole reason the ``retiring`` refusal branch's two behaviours — withdraw the
+#: echo, restore the draft — are exactly WRONG here: the echo row stands because
+#: the message is real, and the composer stays empty because it is no longer
+#: holding the user's only copy.
+#:
+#: The first clause is :data:`DRAIN_NOTICE`'s own words for the same event, so
+#: the standing notice and this receipt read as one story rather than two; the
+#: second says what happens next. ``note`` ink, like the drain notice it
+#: continues, because nothing has gone wrong.
+PROMPT_QUEUED_NOTICE = (
+    "this session is switching to a newer build — your message is queued and "
+    "will run as soon as it is up"
+)
+
 #: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
 #: ``leaving`` phrase the runtime publishes on its record and now sends in the
 #: frame, so the app and the fleet surfaces quote one vocabulary instead of two
@@ -24605,11 +24626,27 @@ class OperatorApp(App[None]):
             error_text: str | None = None
             try:
                 async with source.turn.provider_lock:
-                    await session.prompt(text, images, **echo.prompt_kwargs())
+                    receipt = await session.prompt(text, images, **echo.prompt_kwargs())
                 # DELIVERED — so if the transport had to shrink an attachment to
                 # get it here, this is the moment the user can be told. See
                 # `_report_wire_refit_for`.
                 self._report_wire_refit_for(source)
+                # QUEUED FOR THE SUCCESSOR, which is a THIRD outcome beside
+                # "admitted" and "refused" and the one the two branches further
+                # down cannot express: the runtime that took the message is
+                # leaving and has spooled it for the build that replaces it
+                # (`inbox.SPOOL_RECEIPT_PROMPT`). Nothing failed, so nothing is
+                # reported as a failure — no withdrawal of the echo row, no
+                # draft restored to a composer that no longer holds the user's
+                # only copy — and the row states where the message went, which
+                # is the fact the operator cannot otherwise see (memo §4.4).
+                # Compared by IDENTITY against the one constant the runtime
+                # answers with, never by matching words: "queued" in the ack is
+                # the receipt's own, and a runtime older than it cannot send it.
+                from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
+
+                if receipt == SPOOL_RECEIPT_PROMPT:
+                    self._notice_for(source, PROMPT_QUEUED_NOTICE, "note")
             except asyncio.CancelledError:
                 # NOT OPTIONAL, and not covered by the clause below:
                 # `CancelledError` is a `BaseException`, so it slides straight
