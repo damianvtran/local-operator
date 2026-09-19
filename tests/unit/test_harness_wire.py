@@ -26,6 +26,8 @@ import queue
 from contextlib import redirect_stdout
 from typing import Any, cast
 
+import pytest
+
 from local_operator.harness import wire
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -67,7 +69,7 @@ def _lorem(n: int, seed: int = 0) -> str:
 
 
 def _conversation(rows: int = 50) -> list[AgentMessage]:
-    """A 104-message turn when ``rows`` is 50, matching the design's fixture."""
+    """A 102-message turn when ``rows`` is 50: 1 user, 50 pairs, 1 closing turn."""
     msgs: list[AgentMessage] = [Message(role="user", content=[TextContent(text=_lorem(1_100))])]
     oversized = [72_000, 66_000, 51_000, 24_000, 21_000]
     sizes = (oversized + [7_000] * 5 + [1_500] * max(0, rows - len(oversized) - 5))[:rows]
@@ -101,6 +103,33 @@ def _conversation(rows: int = 50) -> list[AgentMessage]:
 
 def _conversation_event(rows: int = 50) -> AgentEndEvent:
     return AgentEndEvent(messages=_conversation(rows), generation=831, context_tokens=214_000)
+
+
+def _many_row_turn(rows: int, per_row: int, details_chars: int) -> AgentEndEvent:
+    """A turn of ``rows`` tool rows, each ``per_row`` chars, each with bookkeeping.
+
+    The shape that decides whether the budget holds on every encoder: past
+    ``AGENT_END_PREVIEW_ROWS_MAX`` every row keeps a preview AND its
+    ``provider_payload``, so a share measured against a frame that dropped that
+    key is spent twice over (``wire._spendable_share`` states the measurement).
+    """
+    msgs: list[AgentMessage] = [Message(role="user", content=[TextContent(text="go")])]
+    for i in range(rows):
+        call = ToolCall(id=f"call_{i:05d}", name="Read", arguments={"path": f"src/f{i}.py"})
+        msgs.append(
+            Message(role="assistant", content=[TextContent(text="reading")], tool_calls=[call])
+        )
+        msgs.append(
+            Message.tool_result(
+                ToolResult(
+                    tool_call_id=call.id,
+                    tool_name="Read",
+                    content=[TextContent(text="x" * per_row)],
+                    details={"path": "d" * details_chars} if details_chars else {"p": "f"},
+                )
+            )
+        )
+    return AgentEndEvent(messages=msgs, generation=1)
 
 
 def _small_event() -> AgentEndEvent:
@@ -151,8 +180,8 @@ def _ndjson_line(event: AgentEndEvent, *, session_id: str | None = SESSION_ID) -
     return out.getvalue().encode("utf-8")
 
 
-def _sse_frame(event: AgentEndEvent) -> bytes:
-    """The SSE frame the broker publishes, through the real bridge."""
+def _sse_payload(event: AgentEndEvent) -> dict[str, Any]:
+    """The payload the SSE bridge hands the broker, before any framing."""
     captured: queue.Queue[Any] = queue.Queue()
     bridge = AgentEventBridge(status_queue=captured, job_id=JOB_ID, session_id=SESSION_ID)
     bridge.handle(event)
@@ -162,9 +191,28 @@ def _sse_frame(event: AgentEndEvent) -> bytes:
         if kind == "agent_event":
             payload = body
     assert payload is not None, "the bridge published no agent_event"
+    return cast("dict[str, Any]", payload)
+
+
+def _sse_frame(event: AgentEndEvent) -> bytes:
+    """The SSE frame the broker publishes, through the real bridge."""
+    payload = _sse_payload(event)
     body = {key: value for key, value in payload.items() if key != "type"}
     body["job_id"] = JOB_ID
     return frame("agent.end", envelope("agent.end", body)).encode("utf-8")
+
+
+def _tool_texts(payload: dict[str, Any]) -> list[str]:
+    """Every tool row's text in a payload, in order."""
+    return [
+        "".join(
+            block["text"]
+            for block in (message.get("content") or [])
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+        for message in payload.get("messages") or []
+        if isinstance(message, dict) and message.get("role") == "tool"
+    ]
 
 
 def _socket_payload(event: AgentEndEvent) -> dict[str, Any]:
@@ -213,8 +261,8 @@ def test_a_frame_already_under_budget_is_the_dump_it_always_was() -> None:
     assert line.decode() == expected
 
 
-def test_every_encoder_bounds_the_104_message_conversation() -> None:
-    """The three transports, each measured on the line/payload it emits."""
+def test_every_encoder_bounds_the_conversation_fixture() -> None:
+    """The transports, each measured on the line/payload it emits."""
     event = _conversation_event()
     budget = wire.AGENT_END_FRAME_BUDGET_BYTES
 
@@ -224,6 +272,106 @@ def test_every_encoder_bounds_the_104_message_conversation() -> None:
     assert _size_of(_socket_payload(event)) <= budget
     assert _size_of(_tui_socket_payload(event)) <= budget
     assert len(sse) <= budget + 1024, f"SSE frame {len(sse)} bytes"
+
+
+@pytest.mark.parametrize("details_chars", [0, 200])
+def test_a_full_preview_window_is_bounded_on_every_encoder(details_chars: int) -> None:
+    """100 rows, each keeping a preview AND its provider payload (review R1-1).
+
+    This is the shape the budget did not hold on: every row past
+    ``AGENT_END_PREVIEW_ROWS_MAX`` here is INSIDE the preview window, so every
+    row keeps its ``provider_payload``, while the share measured its residual
+    against a frame that had dropped the key. Measured on the previous
+    revision: SSE and socket payloads of 267,626 B with no extra ``details`` and
+    287,826 B with a 200-char one, against a 262,144 B budget — the NDJSON path
+    is immune (``strip_provider_payload`` runs first) which is why only that
+    path's line was asserted before.
+    """
+    budget = wire.AGENT_END_FRAME_BUDGET_BYTES
+    event = _many_row_turn(
+        rows=wire.AGENT_END_PREVIEW_ROWS_MAX, per_row=2_500, details_chars=details_chars
+    )
+    assert wire._frame_bytes(event.model_dump(mode="json")) > budget  # the bound really runs
+
+    assert len(_ndjson_line(event)) <= budget
+    assert _size_of(_sse_payload(event)) <= budget
+    assert _size_of(_socket_payload(event)) <= budget
+    assert _size_of(_tui_socket_payload(event)) <= budget
+
+
+def test_a_single_oversized_row_lands_inside_the_budget() -> None:
+    """One long result is the narrowest case of the same accounting (R1-1).
+
+    The frame is nothing but the row, so the share is the whole residual: a
+    residual that ignores the scalars this function appends, or the clip marker
+    it appends to a block, lands a few bytes OVER the budget — measured at
+    262,163 B for a 300,000-char result before the scalars were counted.
+    """
+    budget = wire.AGENT_END_FRAME_BUDGET_BYTES
+    for chars in (300_000, 3_000_000):
+        event = _many_row_turn(rows=1, per_row=chars, details_chars=0)
+        assert len(_ndjson_line(event)) <= budget
+        payload = wire.bound_agent_end_for_wire(event.model_dump(mode="json"))
+        assert wire._frame_bytes(payload) <= budget
+
+
+def test_the_row_counters_report_every_row_that_lost_content() -> None:
+    """A zero beside a multi-kilobyte ``elided_bytes`` reads as "nothing cut" (R1-4).
+
+    The fixture's 50 rows mostly fit their share, so ``elided_tool_rows`` is
+    honestly 0 while ``clipped_tool_rows`` (measured: 10 of the 50) is what says
+    content was cut. The 120-row case splits the other way, and exactly: 20
+    elided in whole, 100 clipped.
+    """
+    line = json.loads(_ndjson_line(_conversation_event()))
+    assert line["elided_bytes"] > 0
+    assert line["elided_tool_rows"] == 0
+    assert line["clipped_tool_rows"] > 0
+
+    wide = json.loads(_ndjson_line(_conversation_event(rows=wire.AGENT_END_PREVIEW_ROWS_MAX + 20)))
+    assert wide["elided_tool_rows"] == 20
+    assert wide["clipped_tool_rows"] == wire.AGENT_END_PREVIEW_ROWS_MAX
+
+
+def test_the_sse_string_cap_supersedes_the_bound_for_one_long_string() -> None:
+    """The seam R1-2 names, pinned: ONE long result is bounded here and then
+    clipped again by the SSE transport's per-string cap, with its own
+    un-referenceable marker, while the socket relay and the supervisor keep the
+    longer text. ``elided_bytes`` counts this bound's own reduction only, and
+    this test is what stops that number being read as "what the SSE reader
+    lost"."""
+    from local_operator.server.utils.operator import STREAM_TRUNCATION_MARKER
+
+    event = _many_row_turn(rows=1, per_row=300_000, details_chars=0)
+    sse_text = _tool_texts(_sse_payload(event))[0]
+    socket_text = _tool_texts(_socket_payload(event))[0]
+
+    assert sse_text.endswith(STREAM_TRUNCATION_MARKER)
+    assert len(sse_text) < 20_000, "the per-string cap is what the SSE reader meets"
+    assert len(socket_text) > len(sse_text) * 10
+    # The bound's own number explains a fraction of what the SSE reader lost.
+    assert _sse_payload(event)["elided_bytes"] < 300_000 - len(sse_text)
+
+
+def test_a_row_with_no_entry_id_says_so_instead_of_naming_a_fake_entry() -> None:
+    """The marker's contract is a RESOLVABLE reference (R1-5)."""
+    event = _conversation_event(rows=wire.AGENT_END_PREVIEW_ROWS_MAX + 5)
+    payload = event.model_dump(mode="json")
+    for message in payload["messages"]:
+        message.pop("id", None)
+
+    bounded = wire.bound_agent_end_for_wire(payload, session_id=SESSION_ID)
+    markers = [
+        block["text"]
+        for message in bounded["messages"]
+        if message.get("role") == "tool"
+        for block in (message.get("content") or [])
+        if isinstance(block.get("text"), str) and block["text"].startswith("[tool output elided")
+    ]
+    assert markers
+    for marker in markers:
+        assert "unknown" not in marker
+        assert "no transcript entry" in marker
 
 
 def test_every_usage_receipt_and_all_conversation_text_survives() -> None:

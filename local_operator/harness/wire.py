@@ -97,14 +97,10 @@ AGENT_END_PREVIEW_ROWS_MAX = 100
 
 #: One elided tool row's whole content. Three facts, because a reader has to be
 #: able to tell three things apart: that something was cut (elided), how much
-#: (the character count of what is gone), and where the real text is (the
-#: durable transcript entry — an id ``transcript.read_transcript_page``
-#: resolves, plus the session whose transcript holds it). The session clause is
-#: dropped rather than guessed when an encoder does not know it.
-_ELIDED_ROW_MARKER = (
-    "[tool output elided from this event: {chars:,} chars · {tool}"
-    " · full text: transcript entry {entry_id}{session}]"
-)
+#: (the character count of what is gone), and where the real text is. The
+#: destination is filled in by :func:`_elided_row_marker`, which states a
+#: reference only when it can be resolved.
+_ELIDED_ROW_MARKER = "[tool output elided from this event: {chars:,} chars · {tool} · {reference}]"
 
 #: Stand-in for a block the clip cannot keep whole (an image's base64, or any
 #: future payload under a key this module has never heard of) inside a row that
@@ -170,12 +166,26 @@ def bound_agent_end_for_wire(
        their own store refuses; fail-closed belongs to redaction, not to a
        frame budget.
 
-    Two additive scalars are set on the bounded payload — ``elided_tool_rows``
-    (rows whose content was elided in whole) and ``elided_bytes`` (what the
-    bound removed, computed LAST so it cannot understate what a later stage
-    took). They are payload keys rather than model fields: ``AgentEvent`` is
-    ``extra="allow"``, so no protocol version changes and older and newer
-    readers both keep working.
+    Three additive scalars are set on the bounded payload, and they are two
+    counters rather than one because the two things they count are different:
+    ``elided_tool_rows`` (rows elided IN WHOLE — each carries the marker naming
+    its transcript entry) and ``clipped_tool_rows`` (rows that kept a preview
+    but lost content to it — each ends in ``…``). A single counter named for the
+    first left a consumer reading ``0`` next to a multi-kilobyte
+    ``elided_bytes``, which is the one reading that must not happen. The third
+    is ``elided_bytes``, what this bound removed, computed LAST so it cannot
+    understate what an earlier stage took. They are payload keys rather than
+    model fields: ``AgentEvent`` is ``extra="allow"``, so no protocol version
+    changes and older and newer readers both keep working.
+
+    ``elided_bytes`` is this bound's own arithmetic, measured against the
+    payload it was handed. A transport that clips afterwards is not counted —
+    the SSE encoder caps a single STRING at ``STREAM_VALUE_LIMIT`` (16 KiB)
+    and does so with its own marker, so a frame whose surviving string the
+    bound left above that limit loses more than this number says. The bound
+    cannot know what an encoder will do next, and inventing a number for it
+    would be the worse lie; the SSE path is where the two meet, and
+    ``AgentEventBridge._raw`` states the ordering.
 
     ``session_id``, when the encoder knows it, is what makes the marker's
     reference resolvable — the transcript is per session. An encoder that does
@@ -224,6 +234,14 @@ def _bound_agent_end(
     frame = dict(payload)
     bounded_messages = list(messages)
     frame["messages"] = bounded_messages
+    # The two scalars are set at the END, but they are part of the frame the
+    # stages below are measured against and must be counted from the start:
+    # leaving them out is how a one-row clip landed 19 bytes over the budget
+    # (262,163 against 262,144) with the payload's own report of what it had
+    # removed as the only thing over it.
+    frame["elided_tool_rows"] = 0
+    frame["clipped_tool_rows"] = 0
+    frame["elided_bytes"] = 0
 
     row_positions = [
         index
@@ -231,8 +249,9 @@ def _bound_agent_end(
         if isinstance(message, dict) and message.get("role") == "tool"
     ]
     elided_rows = 0
+    clipped_rows = 0
     if row_positions:
-        elided_rows = _elide_tool_rows(
+        elided_rows, clipped_rows = _elide_tool_rows(
             frame,
             bounded_messages,
             row_positions,
@@ -254,6 +273,7 @@ def _bound_agent_end(
         _truncate_oversized_strings(frame, cap_bytes, total=total)
 
     frame["elided_tool_rows"] = elided_rows
+    frame["clipped_tool_rows"] = clipped_rows
     frame["elided_bytes"] = max(0, total - _frame_bytes(frame))
     return frame
 
@@ -269,29 +289,44 @@ def _spendable_share(
     """Budget one stage may spend PER ROW, in characters.
 
     Measured, not assumed: the residual is the frame as this stage will LEAVE
-    it with no content kept — every block still present, carrying only the clip
-    marker — so the share is what is actually left once every other message
-    (receipts, assistant text, identity) and the stage's own residue have been
-    paid for. A frame that is over budget for reasons this stage cannot touch
-    yields a floor-level share rather than a negative one.
+    it with no content kept — every block still present carrying only the clip
+    marker, every other key of the row UNTOUCHED, and the frame's own scalars
+    counted — so the share is what is actually left once everything the stage
+    does not spend has been paid for. A frame that is over budget for reasons
+    this stage cannot touch yields a floor-level share rather than a negative
+    one.
 
-    Counting the emptied blocks rather than deleting them is the difference
-    between a share that fits and one that overshoots by the block count — the
-    floor x N trap ``frontend_state`` documents for the live seed, which a row
-    of 1,000 blocks reaches here. Measured before this: a 1,000-block row
-    bounded to 293,199 B against a 262,144 B budget.
+    Both parts of "what the stage leaves" were learned the hard way, and each
+    is worth about a quarter of the budget when it is wrong:
+
+    - Counting the emptied BLOCKS rather than deleting them is the difference
+      between a share that fits and one that overshoots by the block count —
+      the floor x N trap ``frontend_state`` documents for the live seed, which
+      a row of 1,000 blocks reaches here (293,199 B against a 262,144 B budget
+      before this, 260,445 B after).
+    - Keeping ``provider_payload`` is the same difference for a PREVIEW row: a
+      row elided in whole loses it, but the clip only ever trims ``details``
+      inside it (and only when that is oversized), so a residual that dropped
+      the key spent its share against a frame smaller than the one emitted —
+      measured at 267,793 B on the SSE and socket paths for an ordinary
+      100-tool-row turn, 289,793 B with a small ``details`` per row, against a
+      262,144 B budget. The overshoot is bounded by the same rule that hid it
+      (a kept ``details`` may stay up to a quarter of the row's share).
     """
     emptied = list(messages)
     for index in positions:
         row = messages[index]
+        # A shallow copy: every key stays as it is, including
+        # ``provider_payload``, and only the content is reduced to what the clip
+        # leaves of it.
         emptied[index] = {
-            key: value for key, value in row.items() if key not in ("content", "provider_payload")
+            **row,
+            "content": [
+                {"type": "text", "text": "…"}
+                for block in (row.get("content") or [])
+                if isinstance(block, dict)
+            ],
         }
-        emptied[index]["content"] = [
-            {"type": "text", "text": "…"}
-            for block in (row.get("content") or [])
-            if isinstance(block, dict)
-        ]
     residual = cap_bytes - _frame_bytes({**frame, "messages": emptied})
     return max(floor_chars, residual // max(1, len(positions)))
 
@@ -305,8 +340,8 @@ def _elide_tool_rows(
     cap_bytes: int,
     floor_chars: int,
     bound_row: Any,
-) -> int:
-    """Spend the tool-row share, returning how many rows were elided in whole.
+) -> tuple[int, int]:
+    """Spend the tool-row share, returning (rows elided in whole, rows clipped).
 
     The NEWEST ``AGENT_END_PREVIEW_ROWS_MAX`` rows keep a preview and the older
     ones are elided in whole — the same ordering, for the same reason, as the
@@ -315,6 +350,13 @@ def _elide_tool_rows(
     against: at ~150 bytes each, 2,000 of them are most of a 256 KiB budget,
     and a share computed without them would hand the previews bytes that are
     already spent.
+
+    The two counts are returned separately rather than summed (``elided_tool_rows``
+    and ``clipped_tool_rows`` on the payload): a clipped row lost content just
+    as surely as an elided one, and a single counter named for one of the two
+    left a consumer reading ``0`` beside a multi-kilobyte ``elided_bytes``. Each
+    number is also what its row actually shows — whole-row elision leaves the
+    marker naming the transcript entry, a clip leaves ``…``.
     """
     preview_count = max(0, len(positions) - AGENT_END_PREVIEW_ROWS_MAX)
     elided = 0
@@ -325,12 +367,7 @@ def _elide_tool_rows(
         row["content"] = [
             {
                 "type": "text",
-                "text": _ELIDED_ROW_MARKER.format(
-                    chars=chars,
-                    tool=_tool_label(row),
-                    session=f" of session {session_id}" if session_id else "",
-                    entry_id=str(row.get("id") or "unknown"),
-                ),
+                "text": _elided_row_marker(row, chars=chars, session_id=session_id),
             }
         ]
         # The provider-native replay payload is dead weight once the row has
@@ -342,13 +379,15 @@ def _elide_tool_rows(
 
     previews = positions[preview_count:]
     if not previews:
-        return elided
+        return elided, 0
     share = _spendable_share(
         frame, messages, previews, cap_bytes=cap_bytes, floor_chars=floor_chars
     )
+    clipped = 0
     for index in previews:
         row = copy.deepcopy(messages[index])
         messages[index] = row
+        before = _frame_bytes(row)
         # The bound reads ``details`` off the row itself; the harness keeps it
         # under ``provider_payload["details"]`` (see ``harness/types.py``), so
         # it is moved in for the call and moved back after — on the copy only.
@@ -359,7 +398,28 @@ def _elide_tool_rows(
         bound_row(row, share=share, placeholder=_ELIDED_BLOCK_MARKER)
         if moved_details:
             provider_payload["details"] = row.pop("details", None)
-    return elided
+        if _frame_bytes(row) < before:
+            clipped += 1
+    return elided, clipped
+
+
+def _elided_row_marker(row: dict[str, Any], *, chars: int, session_id: str | None) -> str:
+    """The marker for a row whose content was elided in whole.
+
+    The reference is what makes the elision recoverable, so it is only stated
+    when it can be resolved: a row with no entry id (never one the loop emits —
+    ``harness/types.py`` generates one — but a host can hand this function
+    anything) says so instead of naming an entry that does not exist.
+    """
+    entry_id = row.get("id")
+    if not isinstance(entry_id, str) or not entry_id:
+        reference = "no transcript entry: this row carries no entry id"
+    else:
+        located = f"transcript entry {entry_id}"
+        if session_id:
+            located += f" of session {session_id}"
+        reference = f"full text: {located}"
+    return _ELIDED_ROW_MARKER.format(chars=chars, tool=_tool_label(row), reference=reference)
 
 
 def _clip_non_tool_rows(
