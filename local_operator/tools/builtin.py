@@ -2192,7 +2192,11 @@ class _PipeRedactor:
         # notice either (QA's Q4-F1). The text after the header is passed through
         # unchanged; a real newline there is stripped by ``lstrip`` only when it is
         # really a newline.
-        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :].lstrip("\n"))
+        # NO SEPARATOR REWRITING: stripping the leading newline here (or splicing one in,
+        # as an earlier round did) changes the bytes the shape table is about to read, and
+        # a rewritten separator is a shape the table cannot match. The remainder is
+        # passed through exactly as read.
+        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :])
 
     def _release_point(self, text: str, *, final: bool) -> int:
         """Where the decidable prefix ends: after the last newline, capped."""
