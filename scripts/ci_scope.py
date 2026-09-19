@@ -360,6 +360,16 @@ PERMISSIVE_DEPS: dict[tuple[str, str], str] = {}
 #: assertion still compares the TOOL the job runs against ci.yml.
 BOUNDED_WRAPPER_NAME = "run_bounded.py"
 
+#: The local bound for a wrapped gate, in seconds. **Deliberately NOT ci.yml's
+#: `timeout-minutes: 15`**: a whole-tree `pyright` measures 508 s on a quiet host
+#: and 1170 s under load on this fleet, and CI's 15 minutes also cover checkout,
+#: dependency install and that job's protocol-sync step. A bound that fires on a
+#: legitimately slow host reds a gate CI would pass, which is a worse failure than
+#: a slow gate, so the local bound is twice CI's provision and a fired bound
+#: prints its remedy (see `run_jobs`). The `type-check` Makefile target defaults
+#: to the same number and a test asserts the two agree.
+BOUNDED_GATE_TIMEOUT = 1800
+
 JOB_COMMANDS: dict[str, tuple[str, ...]] = {
     "lint": (
         ".venv/bin/python -m flake8 .",
@@ -374,9 +384,9 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
         # alive 81 minutes after its parent died. `timeout(1)` is not the villain
         # here (on this host it signals the group); what it cannot cover is a
         # leader that exits while a descendant lives on, which the wrapper sweeps.
-        # `900` mirrors this job's `timeout-minutes: 15` in ci.yml, so the local
-        # bound IS CI's bound.
-        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --timeout 900 -- "
+        # The bound is `BOUNDED_GATE_TIMEOUT`, above: generous on purpose, because
+        # timing out a legitimately slow gate is worse than waiting for it.
+        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --timeout {BOUNDED_GATE_TIMEOUT} -- "
         ".venv/bin/python -m pyright --pythonpath .venv/bin/python .",
         # The protocol-sync check is a *step of this job* in ci.yml, not a job
         # of its own: a Python-only protocol edit must fail even when the
@@ -839,7 +849,7 @@ def _invoked_tool(command: str) -> str:
         if tail[:1] == ["-m"] and len(tail) > 1:
             return tail[1]
         if tail and Path(tail[0]).name == BOUNDED_WRAPPER_NAME:
-            # `.venv/bin/python scripts/run_bounded.py --timeout 900 -- <gate>`
+            # `.venv/bin/python scripts/run_bounded.py --timeout N -- <gate>`
             # bounds and reaps a gate; the tool it reports is the WRAPPED one.
             # Reporting the wrapper would compare its name against ci.yml and
             # fail the drift assertion whenever a gate is correctly bounded.
@@ -862,10 +872,29 @@ def _unwrap_bounded(tokens: Sequence[str]) -> list[str]:
     so the wrapper's argument shape has one reader rather than two.
     """
     rest = list(tokens)
+    if "--" in rest:
+        return rest[rest.index("--") + 1 :]
+    # No separator: the wrapper was invoked without a command, so there is no tool
+    # to report. Counting flags instead used to slice into the command's own
+    # arguments — a `--grace` before the separator returned the token after it
+    # (`tests`), which would have compared a directory against ci.yml.
     for flag in ("--timeout", "--grace"):
         if flag in rest:
             rest = rest[rest.index(flag) + 2 :]
-    return rest[1:] if rest[:1] == ["--"] else rest
+    return rest
+
+
+def _command_bound(command: str) -> str:
+    """The bound a wrapped command carries, named in the fired-bound message.
+
+    Reported from the COMMAND rather than from `BOUNDED_GATE_TIMEOUT`: a command
+    may carry its own (the Makefile's `BOUND_TIMEOUT`), and a message that quotes
+    the wrong number sends a developer to raise the bound that did not fire.
+    """
+    tokens = shlex.split(command)
+    if "--timeout" in tokens:
+        return f"--timeout {tokens[tokens.index('--timeout') + 1]}s"
+    return f"the configured {BOUNDED_GATE_TIMEOUT}s"
 
 
 def run_jobs(jobs: Sequence[str], root: Path) -> int:
@@ -877,6 +906,19 @@ def run_jobs(jobs: Sequence[str], root: Path) -> int:
             proc = subprocess.run(command, shell=True, cwd=str(root), check=False)
             if proc.returncode != 0:
                 print(f"!!! {job} failed (rc={proc.returncode}): {command}")
+                if proc.returncode == 124:
+                    # This is the BOUND firing, not the gate failing, and the
+                    # difference decides what a developer does next: on a loaded
+                    # host a whole-tree pyright can legitimately exceed the bound,
+                    # and re-running (or raising it) is the fix — never reading it
+                    # as a red.
+                    print(
+                        f"    rc=124 is the BOUND ({_command_bound(command)}) firing, not the gate "
+                        "failing: the gate was still working. Re-run it; if it fires again, "
+                        "raise the bound (`make type-check BOUND_TIMEOUT=<seconds>`, or "
+                        f"BOUNDED_GATE_TIMEOUT in scripts/{Path(__file__).name} for "
+                        "`make check-changed`)."
+                    )
                 failures.append(f"{job}: {command} (rc={proc.returncode})")
     print()
     if failures:
