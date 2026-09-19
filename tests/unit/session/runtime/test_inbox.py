@@ -21,12 +21,14 @@ from local_operator.harness.types import StreamEndEvent
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime.inbox import (
     MAX_INBOX_ROWS,
+    SOURCE_PEER,
     SOURCE_USER,
     InboxLine,
     append_inbox,
     drain_inbox,
     inbox_path,
     peek_inbox,
+    withdraw_inbox,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
@@ -418,3 +420,54 @@ async def test_a_twice_spooled_owner_row_steers_once_inside_the_first_turn(tmp_p
 
     queued = session.queued_steering()
     assert len(queued) == 1, [getattr(item, "id", "") for item in queued]
+
+
+def test_a_recall_marker_withholds_its_row_from_both_readers(tmp_path: Path) -> None:
+    """The recall is an append-only marker, and both readers honour it.
+
+    Rewriting the spool instead — the obvious shape — cannot be made safe here:
+    ``append_inbox`` proceeds unlocked when it cannot take the lock, so a
+    concurrent append is either cut by an in-place truncate or orphaned by a
+    staged replace (measured: 14 of 42 acked rows lost with the staged shape, 1
+    of 241 and 8 of 488 with the truncate, in the PR thread). So the withdrawal
+    appends ``SOURCE_RECALL`` and nothing is rewritten; the marker and the row it
+    names both leave with the batch.
+    """
+    assert append_inbox(
+        tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="p" * 8, wake=True)
+    )
+    assert append_inbox(tmp_path, _line("fyi from a peer"))
+
+    assert withdraw_inbox(tmp_path, "p" * 8) is True
+
+    # READERS: the recalled row is not deliverable, and neither is the marker.
+    assert [line.text for line in peek_inbox(tmp_path)] == ["fyi from a peer"]
+    assert [line.text for line in drain_inbox(tmp_path)] == ["fyi from a peer"]
+    # CONSUMED TOGETHER: the batch took the marker with it, so nothing is left
+    # asserting a recall whose message can no longer arrive.
+    assert peek_inbox(tmp_path) == []
+
+
+def test_a_recall_of_a_row_that_is_gone_is_refused(tmp_path: Path) -> None:
+    """A drained row cannot be recalled, and the caller is told so."""
+    assert append_inbox(tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="p" * 8))
+    assert drain_inbox(tmp_path) != []
+
+    assert withdraw_inbox(tmp_path, "p" * 8) is False
+    assert withdraw_inbox(tmp_path, "") is False
+
+
+def test_a_recall_never_touches_a_peer_row_with_the_same_id(tmp_path: Path) -> None:
+    """Only the OWNER's rows carry a recallable identity."""
+    assert append_inbox(
+        tmp_path,
+        InboxLine(
+            text="peer words",
+            sender={"pid": 2},
+            source=SOURCE_PEER,
+            command_id="p" * 8,
+        ),
+    )
+
+    assert withdraw_inbox(tmp_path, "p" * 8) is False
+    assert [line.text for line in drain_inbox(tmp_path)] == ["peer words"]

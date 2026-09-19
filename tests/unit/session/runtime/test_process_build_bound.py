@@ -880,3 +880,60 @@ async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
 
     assert await child_mod._drain_inbox_into(Handle()) == 2
     assert prompts == ["deploy the fix"], f"the message ran {len(prompts)} times"
+
+
+@pytest.mark.asyncio
+async def test_a_retried_owner_row_still_runs_after_a_failed_first_attempt(tmp_path: Path) -> None:
+    """The batch's repeat is the RETRY the at-least-once contract promises.
+
+    ``drain_inbox`` documents an at-least-once crash contract, so two rows
+    carrying one id in a single batch are the shape a crash between the read and
+    its receipt produces — and the second exists precisely to cover a FIRST that
+    did not land. Recording the id before the attempt instead of after it turned
+    that into at-most-once for the batch: the first raised, the second was
+    skipped as a repeat, and the user's message was gone (agent review round 2,
+    MINOR-2).
+    """
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    for _ in range(2):
+        append_inbox(
+            tmp_path,
+            InboxLine(
+                text="deploy the fix",
+                sender={},
+                mode="mailbox",
+                wake=True,
+                source=SOURCE_USER,
+                command_id="r" * 8,
+            ),
+        )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    attempts: list[str] = []
+    delivered: list[str] = []
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path), session_id="s1")
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            # The provider lane fails on the FIRST attempt only, which is the
+            # half of the pair the batch's second row is there for.
+            attempts.append(command_id or "")
+            if len(attempts) == 1:
+                raise RuntimeError("the provider lane died")
+            delivered.append(text)
+            return "prompt admitted"
+
+    total = await child_mod._drain_inbox_into(Handle())
+
+    assert attempts == ["r" * 8, "r" * 8], attempts
+    assert delivered == ["deploy the fix"], delivered
+    assert total == 1, "only the row that actually ran may be counted as delivered"

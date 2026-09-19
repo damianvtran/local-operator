@@ -1402,7 +1402,7 @@ async def test_a_draining_record_is_never_reported_as_a_completed_errand(
 
 
 @pytest.mark.asyncio
-async def test_a_successor_is_engaged_while_its_predecessor_drains(
+async def test_a_draining_record_is_reported_as_leaving_then_the_next_engage_spawns(
     fleet: FakeRuntimeFleet, tmp_path: Path
 ) -> None:
     """What the change actually ships, stated as the code behaves.
