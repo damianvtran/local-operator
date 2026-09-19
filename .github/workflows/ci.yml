@@ -552,8 +552,34 @@ jobs:
 
       - name: Run test shard with coverage
         run: |
-          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report=
+          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report= \
+            --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
           mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+      - name: Upload junit timings
+        # WHY THE SUITE PAYS FOR A JUNIT FILE EVERY RUN: this is the only
+        # channel that turns committed shard weights into MEASURED ones on
+        # dedicated hardware. `tests/durations.json` is currently measured on a
+        # developer machine, whose load distorts the event-loop-bound TUI files
+        # that carry 82% of the tree's weight (scripts/gen_test_durations.py
+        # says so and names CI as the better source, blocked only because the
+        # workflow emitted nothing to read). With this artifact,
+        # `gh run download <run> -n junit-timings-<py>-*` then
+        # `python scripts/gen_test_durations.py --tree unit --junit '*.xml'`
+        # regenerates the manifest from the run that actually suffered the
+        # imbalance — no local full-suite run needed.
+        #
+        # `if: always()` is deliberate: a shard that dies at the cap still has
+        # per-file timings for every test that DID complete, and that is
+        # exactly the run whose weights most need correcting. An empty or
+        # absent file is skipped by the downloader's glob.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-timings-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Print the shard stall report
         # `always()` unconditionally: the report exists exactly when this job is
@@ -833,10 +859,27 @@ jobs:
     #
     # `fail-fast: false` so a macOS queue delay or a Linux-only regression each
     # report on their own rather than cancelling the other leg's evidence.
+    #
+    # TWO axes, and each one answers a different requirement.
+    #
+    # `os` is the guard's own requirement: macOS is the only platform where the
+    # #401 event-loop freeze can go red at all (see the long note above), so
+    # dropping the leg disarms the stage. Both OSes run every shard.
+    #
+    # `shard` is how this stage stopped being the longest job in the run. The
+    # whole tree ran serially on each leg — `-n0` is required (a fired watchdog
+    # kills the process, which under xdist takes unrelated tests with it) — and
+    # measured `184 passed, 7 skipped ... in 1111.95s` on run 35414372114: 19.1
+    # and 19.8 min, the critical path of the entire workflow. Splitting the
+    # TREE across RUNNERS is the one axis that leaves the `-n0` requirement
+    # untouched: each matrix leg is its own machine, with its own process, its
+    # own `flock` files and its own app lifecycles, so no shard can see a
+    # sibling's hang.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [0, 1, 2]
     runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
     # need a real OpenRouter key, so they are skipped on fork PRs that cannot
@@ -891,6 +934,17 @@ jobs:
     # dump — a pre-fix red lands in ~63 s. This ceiling is only the backstop
     # for a hang that escapes those, so it should never be what reports a
     # freeze; it is sized to absorb macOS install and queue time instead.
+    #
+    # NOT tightened now that the tree is sharded, deliberately. The split cut
+    # the measured wall to a fraction of it, so this ceiling is now several
+    # times the healthy cost — but the thing it exists to leave room for is NOT
+    # the healthy cost: it is install + queue on a slow macOS runner, and a
+    # genuine freeze is reported by the per-test `faulthandler` bound (see
+    # tests/e2e/watchdog.py) long before this fires. Tightening it toward the
+    # measured wall would turn runner slowness into red shards without making a
+    # real hang report any sooner. `tests/unit/test_ci_hygiene.py` pins the
+    # relationship in the direction that matters: the ceiling must exceed every
+    # shard wall the manifest projects.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -909,6 +963,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Partition the e2e suite
+        # Same partitioner as the unit matrix, pointed at the other tree: the
+        # LPT split by measured per-file duration (tests/durations-e2e.json),
+        # not by file count. `--total` must equal the matrix length above, and
+        # tests/unit/test_ci_hygiene.py checks that coupling rather than
+        # trusting it — an orphaned shard is a set of tests that never runs.
+        #
+        # The file list is written rather than passed through `$()` so the job
+        # log records exactly which files ran in this shard, on this leg.
+        run: |
+          python scripts/shard_tests.py \
+            --tree e2e --shard ${{ matrix.shard }} --total 3 --out e2e_tests.txt
+      - name: Print the shard's file list
+        # Cheap, and it is the difference between "a shard failed" and "which
+        # tests were in it". Ordered as the partitioner ordered it.
+        run: cat e2e_tests.txt
       - name: Run headless TUI end-to-end tests
         # `-m e2e` overrides the `-m "not e2e"` in pyproject's addopts, which
         # keeps this stage out of the unit run (a fired watchdog exits the
@@ -917,9 +987,31 @@ jobs:
         # app lifecycles, so they run serially rather than under xdist.
         # `env -u NO_COLOR TERM=xterm-256color` is what the TUI suite needs to
         # compose a real frame, same as the documented local invocation.
+        #
+        # The file list is this shard's slice of tests/e2e, written by the
+        # step above; `-m e2e` still applies, because the marker is added by
+        # tests/e2e/conftest.py AT COLLECTION by path, so naming files
+        # explicitly does not drop it.
+        #
+        # `--junit-xml` for the same reason the unit shards write one: it is
+        # the only measurement of this tree taken on a runner rather than on a
+        # loaded developer box, and regenerating tests/durations-e2e.json from
+        # it costs one `gh run download` instead of a 20-minute local run.
         run: |
           env -u NO_COLOR TERM=xterm-256color \
-            python -m pytest tests/e2e -m e2e -n0 -q
+            python -m pytest $(cat e2e_tests.txt | tr '\n' ' ') -m e2e -n0 -q \
+              --junit-xml=junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+      - name: Upload e2e junit timings
+        # `if: always()` — a shard that tripped its watchdog still has timings
+        # for every test that completed before the hang, which is precisely the
+        # shard whose weights want correcting.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
+          path: junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+          retention-days: 1
+          if-no-files-found: ignore
       - name: Report a hang's thread dump
         # A tripped watchdog kills the process, so pytest never gets to print
         # anything: the stacks of the parked threads live only in a dump file,
