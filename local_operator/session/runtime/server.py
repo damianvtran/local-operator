@@ -3520,6 +3520,15 @@ class RuntimeServer:
             return
         self._updating = pair
         self._record.updating = pair
+        if pair:
+            # A NEW WINDOW SUPERSEDES THE LAST FAILURE (agent review round 1, NIT 4).
+            # Without this the record keeps describing an abandoned move for the rest
+            # of the process's life — a fleet row that says "update failed" about a
+            # session which has since moved on, or is moving right now — because
+            # nothing else clears the field: the success arm's exit takes the whole
+            # record away, and the abandon arm is what writes it. The field is
+            # re-published by ``note_update_failed`` if THIS attempt fails too.
+            self._record.update_failed = ""
         self._republish()
 
     async def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
@@ -3563,9 +3572,7 @@ class RuntimeServer:
             UPDATE_FAILED_CAUSE, detail=f"({pair})" if pair else ""
         )
         try:
-            await write_incident(
-                UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered
-            )
+            await write_incident(UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered)
         except Exception:  # noqa: BLE001 — a failure notice never breaks the runtime
             logger.warning("could not journal the failed update", exc_info=True)
 

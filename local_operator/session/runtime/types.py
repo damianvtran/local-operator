@@ -587,7 +587,43 @@ UPDATE_FAILED_CAUSE = "runtime-update-failed"
 #: still move to the build on disk (``buildwatch.proves_a_move`` is the guard on the
 #: ACT, not on the reading), and a window that said nothing about which build would
 #: leave the operator unable to tell a rebuild from a version bump.
-_UPDATE_UNNAMED_BUILD = "the build on disk"
+#:
+#: IT IS ALSO THE PUBLISHED FALLBACK, so a window is never opened with an empty
+#: pair: ``""`` is simultaneously the record's "no window" sentinel and the
+#: admission gate, so a window that stored it would be invisible AND would queue
+#: nothing while the sender got a receipt (agent review round 1, NIT 2).
+#: ``process._refresh_for`` substitutes this when ``buildwatch.update_pair_text``
+#: cannot name the pair, and ``begin_update`` refuses an empty one outright.
+UPDATE_UNNAMED_PAIR = "the build on disk"
+
+
+def update_phase(
+    updating: str = "", updated: str = "", update_failed: str = ""
+) -> "tuple[str, str]":
+    """``(phase, pair)`` for a record's three update fields: the ONE reading of them.
+
+    WHY A READER AND NOT THREE FIELDS ON EVERY SURFACE. The record keeps the three
+    facts apart because they are written at different times by different processes
+    (a window opens, a window fails, a successor boots having applied one), and each
+    has to survive the wire on its own. Every READER wants the same single answer —
+    which phase is this session in, and about which build — so the precedence lives
+    here rather than being re-derived (differently) by ``lop sessions``, the info
+    panel and the phone.
+
+    PRECEDENCE, and each step is a fact about time: an OPEN window is the live state
+    and outranks both terminal facts; a FAILED one is the newest terminal fact about
+    the last attempt (and the runtime that owns it is still serving, which is what a
+    reader must act on); ``updated`` is the oldest — it is true of this process's
+    whole life, so it loses to anything newer. An EMPTY pair is not a phase: all
+    three fields empty returns ``("", "")``, which is the ordinary idle row.
+    """
+    if updating:
+        return UPDATING, updating
+    if update_failed:
+        return UPDATE_FAILED, update_failed
+    if updated:
+        return UPDATING_DONE, updated
+    return "", ""
 
 
 def update_phrase(phase: str, pair: str = "") -> str:
@@ -605,7 +641,7 @@ def update_phrase(phase: str, pair: str = "") -> str:
     who cannot tell the last one from the first would keep waiting for a handover
     that has already been abandoned.
     """
-    where = pair or _UPDATE_UNNAMED_BUILD
+    where = pair or UPDATE_UNNAMED_PAIR
     if phase == UPDATING:
         return (
             f"updating to {where} — messages are queued and will be sent when the new "
@@ -630,12 +666,18 @@ def update_short(phase: str, pair: str = "") -> str:
     ``server._refresh_if_idle`` answers with ``retiring to <label>``). "" for a
     phase this build cannot place, which renders as no cell at all rather than as
     another phase's words.
+
+    A PAIR THIS BUILD CANNOT PARSE NAMES NO BUILD. The phase alone is the cell then,
+    for the reason the failed phase gives below and because the alternative —
+    ``"updating → the build on disk"`` — was 28 cells into a 26-cell column, i.e. a
+    silent cut of the one string whose job is to say the destination is unknown
+    (design review round 1, D3).
     """
-    to = (pair.split("→", 1)[1].strip() if "→" in pair else "") or _UPDATE_UNNAMED_BUILD
+    to = pair.split("→", 1)[1].strip() if "→" in pair else ""
     if phase == UPDATING:
-        return f"updating → {to}"
+        return f"updating → {to}" if to else "updating"
     if phase == UPDATING_DONE:
-        return f"updated → {to}"
+        return f"updated → {to}" if to else "updated"
     if phase == UPDATE_FAILED:
         # PHASE ONLY, and the missing pair is the point rather than an omission: the
         # move this names did NOT happen, so the build pair belongs to the failure

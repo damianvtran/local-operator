@@ -34,6 +34,7 @@ import asyncio
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -43,6 +44,8 @@ from local_operator.session.runtime.inbox import (
     SOURCE_USER,
     SPOOL_RECEIPT_PROMPT,
     SPOOL_RECEIPT_WAKE,
+    InboxLine,
+    append_inbox,
     peek_inbox,
     read_update_window,
     write_update_window,
@@ -76,6 +79,14 @@ class WindowHost(PromptHost):
     begin_update = ServingSessionHandle.begin_update
     heartbeat_update = ServingSessionHandle.heartbeat_update
     end_update = ServingSessionHandle.end_update
+    # The three readers of the window's state, bound rather than re-implemented for
+    # the reason every other production method here is: the cells below assert what
+    # the RUNTIME publishes, not what a stub kept.
+    note_update_failed = ServingSessionHandle.note_update_failed
+    updating = ServingSessionHandle.updating
+    update_failed_pair = ServingSessionHandle.update_failed_pair
+    update_lock_remaining = ServingSessionHandle.update_lock_remaining
+    lock_held = property(lambda self: self._update_lock.held)
     # The marker's own two-hop read of the session directory, bound for the reason
     # the other production methods here are: ``begin_update`` writes the marker
     # through it, and a stubbed directory would pin nothing about which one it means.
@@ -85,6 +96,9 @@ class WindowHost(PromptHost):
         super().__init__(session, busy=busy)
         self._updating = ""
         self._update_failed = ""
+        #: The pair whose ONE retry has been spent (``ServingSessionHandle``), owned
+        #: by the production ``begin_update`` this host binds.
+        self._update_retried = ""
         self._update_lock = buildwatch.UpdateLock()
         self._applied_update = ""
 
@@ -354,21 +368,374 @@ def test_a_second_holder_cannot_take_the_lock() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_failed_pair_is_not_retried_by_the_reaper(tmp_path: Path) -> None:
-    """A failure that keeps retrying is a failure nobody can see.
+async def test_a_failed_pair_gets_one_retry_and_then_stops(tmp_path: Path) -> None:
+    """The anti-churn rule, with a retry rather than a dead flag.
 
-    The window has no successor while it fails, so re-opening it for the same
-    build would re-refuse nothing but churn the loop every check. The pair is
-    remembered and the reaper's rung declines it; an explicit operator refresh
-    may still ask.
+    The first version of this took ``retry_failed=True`` from an "explicit operator
+    refresh" that does not exist in the tree, so a failed window was never tried
+    again and the pair stayed refused until the process EXITED — the stale session
+    the incident was about, made permanent (agent review round 1, NIT 1). One retry
+    answers that: a transient stall is survivable, and a move that fails the bound
+    twice stops being retried, because a third attempt repeats the second.
     """
     host, _session = _window_host(tmp_path)
     assert host.begin_update(PAIR) is True
     host.end_update()
-    host._update_failed = PAIR
+    host.note_update_failed(PAIR, buildwatch.UPDATE_LOCK_S)
 
-    assert host.begin_update(PAIR) is False
-    assert host.begin_update(PAIR, retry_failed=True) is True
+    assert host.begin_update(PAIR) is True, "the first failure must not be final"
+    host.end_update()
+    host.note_update_failed(PAIR, buildwatch.UPDATE_LOCK_S)
+
+    assert host.begin_update(PAIR) is False, "a second failure for one pair is final"
+    assert (
+        "retry_failed" not in inspect.signature(ServingSessionHandle.begin_update).parameters
+    ), "the flag that had no caller must not come back as a parameter nothing passes"
+
+
+# -- the two arms of a window that did NOT hand over (agent review round 1, MAJOR 1) ---
+#
+# ``_announce_and_latch`` returns False for two facts that need OPPOSITE answers, and
+# the stop arm is the one that destroyed a message: the window's spooled row was
+# drained into a runtime that was taking its exit, so the owner's text left
+# ``inbox.jsonl`` for a queue ``dispose`` then rejected — while the receipt told them
+# the successor would run it.
+
+
+@pytest.mark.asyncio
+async def test_the_stop_arm_leaves_the_spooled_message_for_the_next_boot(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """MAJOR 1: a stop that lands mid-announce must not eat the queue.
+
+    The rig is the incident's own shape: the window is open while the announce runs,
+    so the owner's prompt arrives in it and is SPOOLED. Then a stop lands — the
+    supervisor's SIGTERM, or the operator's ``/stop`` — and this runtime is going
+    away. The row is the next boot's to deliver, which is exactly what the receipt
+    promised; running it here runs it in a process that is about to disappear.
+    """
+    _patch_build(monkeypatch, bound=5.0)
+    host, session = _handover_host(tmp_path)
+    stop = asyncio.Event()
+    drained: list[object] = []
+
+    async def record_drain(handle: object) -> int:
+        drained.append(handle)
+        return 0
+
+    monkeypatch.setattr(child_mod, "_drain_inbox_into", record_drain)
+    runtime = _SpoolingRuntime(message="now summarise the build staleness fix", press_stop=stop)
+    runtime.handle = host
+
+    exited = await child_mod._refresh_for(NEW, host, runtime, stop)
+
+    assert drained == [], (
+        "the stop arm must NOT drain the spool back in: that is what destroyed the "
+        "operator's message (agent review round 1, MAJOR 1)"
+    )
+    assert exited is False, "the stop's own path owns the exit, not this rung"
+    assert stop.is_set() is True
+    assert runtime.receipt == SPOOL_RECEIPT_PROMPT, runtime.receipt
+    assert session.prompt_calls == [], (
+        "the message was run on a runtime that is EXITING: ``dispose`` rejects exactly "
+        "that admission, so it would exist in no transcript at all"
+    )
+    rows = peek_inbox(session.transcript.directory)
+    assert len(rows) == 1, "the spool belongs to the next boot, which is the reader promised"
+    assert rows[0].text == runtime.message, rows[0].text
+    assert rows[0].source == SOURCE_USER
+    assert host.updating == "", "the window still closes: it queues for nobody now"
+    assert host.lock_held is False, "and the lock goes with it"
+    assert runtime.failures == [], "a stop is not a failed update"
+
+
+@pytest.mark.asyncio
+async def test_the_keep_arm_runs_the_spooled_message_here(tmp_path: Path, monkeypatch: Any) -> None:
+    """The other arm, and the reason the two had to be told apart.
+
+    Work arrived during the announce, so the runtime KEEPS: the window closes and
+    the message it was holding is the runtime's own again — the only writer that
+    owes it a turn. It lands either as a prompt or, if the work that arrived is a
+    turn still in flight, as a steer; both are the same guarantee and which one it
+    is is the mid-turn rule ``_run_owner_prompt`` documents.
+    """
+    _patch_build(monkeypatch, bound=5.0)
+    host, session = _handover_host(tmp_path)
+    drained: list[object] = []
+
+    async def record_drain(handle: object) -> int:
+        drained.append(handle)
+        return 0
+
+    monkeypatch.setattr(child_mod, "_drain_inbox_into", record_drain)
+    # ``busy`` flips DURING the announce, which is the race ``begin_retire`` exists to
+    # close: the idle sample that admitted this rung is not true any more.
+    runtime = _SpoolingRuntime(message="carry on with the other provider", then_busy=host)
+    runtime.handle = host
+
+    exited = await child_mod._refresh_for(NEW, host, runtime, asyncio.Event())
+
+    assert exited is False
+    assert host._busy is True, "premise: work arrived, so this runtime is keeping"
+    assert drained == [host], (
+        "the keep arm hands the spool back to the ONLY writer that owes it a turn — " "this runtime"
+    )
+    assert host.updating == ""
+    # And the delivery itself is the drain's own contract, pinned below on a real
+    # session directory rather than through a stub admission.
+    assert session.prompt_calls == [], "premise: the spool is delivered by the drain"
+
+
+# -- the spool on an unengaged session (agent review round 1, MAJOR 2) ----------------
+
+
+@pytest.mark.asyncio
+async def test_a_pristine_session_runs_the_message_the_window_queued(tmp_path: Path) -> None:
+    """MAJOR 2: no durable history is not "nobody is here".
+
+    ``_drain_inbox_into`` returned 0 without draining when the transcript had no real
+    turn, which is right for a PEER row on a cold session and wrong for the owner's
+    own: the row exists because the owner typed it into a runtime that was moving,
+    and nothing else in the process will run it — the once-per-lifetime first-turn
+    drain only fires if they type a SECOND message.
+    """
+    # No transcript file at all: the pristine case.
+    entity = _DrainEntity(tmp_path)
+    append_inbox(
+        entity.directory,
+        InboxLine(text="ship it", sender={}, wake=True, source=SOURCE_USER, command_id="c" * 8),
+    )
+
+    delivered = await child_mod._drain_inbox_into(entity)
+
+    assert delivered == 1, "the gate returned 0 without draining, so nothing ran the row"
+    assert entity.prompt_calls + entity.steered == [
+        "ship it"
+    ], f"the owner's message never ran: {entity.prompt_calls}, {entity.steered}"
+    assert peek_inbox(entity.directory) == []
+
+
+@pytest.mark.asyncio
+async def test_a_pristine_session_still_defers_a_peer_row(tmp_path: Path) -> None:
+    """The gate this change scoped rather than removed, pinned as it was.
+
+    A peer row on a session whose owner has not started a conversation must not open
+    its history: the boot drain runs before the socket listens, which is also before
+    the owner's first turn. The row is put BACK — ``drain_inbox`` empties the file by
+    contract, so a reader that discards what it will not deliver has destroyed it.
+    """
+    entity = _DrainEntity(tmp_path)
+    append_inbox(
+        entity.directory,
+        InboxLine(text="build is green", sender={"session_id": "peer"}, wake=False),
+    )
+
+    delivered = await child_mod._drain_inbox_into(entity)
+
+    assert delivered == 0, "a peer note must not drive a turn on a cold session"
+    assert entity.peer_calls == []
+    left = peek_inbox(entity.directory)
+    assert [row.text for row in left] == ["build is green"], left
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_cannot_be_delivered_is_kept_rather_than_destroyed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """MAJOR 2's sibling (agent review round 1, MINOR 5): the failure arm.
+
+    Measured by the reviewer with a host that reached delivery and then raised: the
+    row was consumed by the read and gone, with an ERROR line as its only trace —
+    while the sender's receipt said the successor would run it. The file's contract
+    is at-least-once and the durable command index makes a redelivery idempotent, so
+    putting the row back is the correct failure behaviour rather than a hopeful one.
+    """
+    entity = _DrainEntity(tmp_path, fail_delivery=True)
+    append_inbox(
+        entity.directory,
+        InboxLine(text="keep me", sender={}, wake=True, source=SOURCE_USER, command_id="d" * 8),
+    )
+
+    delivered = await child_mod._drain_inbox_into(entity)
+
+    assert delivered == 0
+    left = peek_inbox(entity.directory)
+    assert [row.command_id for row in left] == [
+        "d" * 8
+    ], "an undelivered row must still exist somewhere: it is the only copy"
+
+
+@pytest.mark.asyncio
+async def test_the_abandon_arm_runs_the_spool_on_a_pristine_session(tmp_path: Path) -> None:
+    """Both arms of the pristine gate, because MAJOR 2 measured both.
+
+    The abandon arm is the one that runs on the OWNER's own machine without a
+    successor: the bound expires, the runtime keeps its build, and the message it
+    promised to hold must run HERE — on a session whose transcript has no turn yet,
+    which is where the gate used to drop it.
+    """
+    entity = _DrainEntity(tmp_path)
+    append_inbox(
+        entity.directory,
+        InboxLine(text="run it here", sender={}, wake=True, source=SOURCE_USER, command_id="e" * 8),
+    )
+    runtime = _SpoolingRuntime()
+
+    await child_mod._abandon_update_window(entity, runtime, PAIR, 0.05)
+
+    assert entity.prompt_calls + entity.steered == [
+        "run it here"
+    ], f"the fail-open arm must deliver what it promised: {entity.prompt_calls}"
+    assert peek_inbox(entity.directory) == []
+    assert runtime.failures == [PAIR], "and it is published as a failure"
+
+
+# -- the exit leg is bounded too (agent review round 1, MINOR 1) ---------------------
+
+
+@pytest.mark.asyncio
+async def test_the_exit_leg_is_bounded_without_cancelling_the_exit(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The window must not outlive the bound while the process disposes.
+
+    ``_clean_exit`` awaits the turn abort and every viewer's writer — the stage that
+    measured at MINUTES in the incident — and the window used to stay open and beating
+    across all of it, handing out receipts for a successor that had not been spawned
+    yet. It is bounded now, and the exit is still never cancelled: a dispose cut in
+    half is worse than a slow one, so the window's promise is what gets withdrawn.
+    """
+    _patch_build(monkeypatch, bound=0.05)
+    host, _session = _handover_host(tmp_path, dispose_delay=0.4)
+    runtime = _SpoolingRuntime()
+
+    exited = await child_mod._refresh_for(NEW, host, runtime, asyncio.Event())
+
+    assert exited is True, "a slow exit is still an exit"
+    assert host.disposed is True, "the dispose ran to completion"
+    assert runtime.retiring == ["stale-build"], "the handover was announced and latched"
+    assert host.updating == "", "the window is retracted once its bound is spent"
+    assert host.lock_held is False, "and the lock is released with it"
+
+
+# -- the bound is the HEARTBEAT's (agent review round 1, MINOR 2) --------------------
+
+
+@pytest.mark.asyncio
+async def test_a_handover_that_keeps_beating_is_not_bounded(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A slow handover that keeps proving progress must NOT be failed.
+
+    This is the cell that makes the pump load-bearing: with the beats arriving, the
+    lock's deadline keeps moving, so an announce that runs four times the bound is a
+    healthy handover rather than a stalled one. Deleting the pump (the reviewer's own
+    mutation) makes this cell fail, which is the property the previous shape lacked —
+    there, the timeout was a total duration and no beat decided anything.
+    """
+    _patch_build(monkeypatch, bound=0.05, heartbeat=0.005)
+    host, _session = _handover_host(tmp_path)
+    runtime = _SpoolingRuntime(announce_delay=0.2)
+
+    exited = await child_mod._refresh_for(NEW, host, runtime, asyncio.Event())
+
+    assert runtime.retiring == ["stale-build"], "the announce completed"
+    assert exited is True, "a beating handover takes the exit however long it takes"
+    assert runtime.failures == [], "no failure is published for a live window"
+
+
+@pytest.mark.asyncio
+async def test_the_window_expires_when_the_beats_stop(tmp_path: Path, monkeypatch: Any) -> None:
+    """The same rig, with the pump removed: the bound is the beats, or it is nothing.
+
+    Written as its own cell rather than as a comment about the one above, because the
+    reviewer's measurement was exactly this: with ``_pump_update_heartbeat`` returning
+    immediately, EVERY cell stayed green. Here the difference is the assertion.
+    """
+    _patch_build(monkeypatch, bound=0.05, heartbeat=0.005)
+    monkeypatch.setattr(child_mod, "_pump_update_heartbeat", _dead_pump)
+    host, _session = _handover_host(tmp_path)
+    runtime = _SpoolingRuntime(announce_delay=0.2)
+
+    exited = await child_mod._refresh_for(NEW, host, runtime, asyncio.Event())
+
+    assert exited is False, "with no beats the window is DEAD at the bound"
+    assert runtime.failures == [PAIR], "and the failure is published"
+    assert host.lock_held is False
+
+
+# -- the marker (agent review round 1, MINOR 4) --------------------------------------
+
+
+def test_the_marker_survives_two_writers_in_one_directory(tmp_path: Path) -> None:
+    """Two runtimes can serve one session directory: the temporary must not be shared.
+
+    Measured by the reviewer at 2 threads x 3000 writes against the old
+    ``path.with_suffix('.tmp')``: 59 reads of an absent-or-corrupt marker and 2374
+    writes reporting failure, because both writers renamed ONE temporary. The silent
+    half is the worse one — a writer whose ``os.replace`` installs the other's
+    truncated file returns ``True``, and the successor then publishes no ``updated``
+    fact at all. ``mkstemp`` gives each writer its own name and O_EXCL.
+    """
+    import threading
+
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    failures: list[bool] = []
+    corrupt: list[str] = []
+
+    def hammer(pair: str) -> None:
+        for _ in range(300):
+            if not write_update_window(directory, pair):
+                failures.append(False)
+            read = read_update_window(directory)
+            if read not in (PAIR, "0.59.10 → 0.59.11@ead71b6"):
+                corrupt.append(read)
+
+    threads = [
+        threading.Thread(target=hammer, args=(PAIR,)),
+        threading.Thread(target=hammer, args=("0.59.10 → 0.59.11@ead71b6",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == [], f"{len(failures)} writes could not install their marker"
+    assert corrupt == [], f"{len(corrupt)} reads saw an absent or malformed marker"
+
+
+@pytest.mark.asyncio
+async def test_a_window_cannot_be_opened_without_a_pair(tmp_path: Path) -> None:
+    """``""`` is the sentinel AND the gate, so a window must never hold it.
+
+    Agent review round 1 (NIT 2): a pair-less window would be invisible on every
+    surface and would queue nothing, while the sender still got a receipt for it — an
+    unreachable state today, and one the sentinel makes reachable tomorrow.
+    """
+    host, _session = _handover_host(tmp_path)
+
+    assert host.begin_update("") is False
+    assert host.updating == ""
+    assert host.lock_held is False
+
+
+def test_opening_a_window_clears_the_previous_failure() -> None:
+    """Agent review round 1 (NIT 4): a record must not describe an abandoned move forever.
+
+    Nothing else clears the field — the successor's record never had it, and the arm
+    that writes it is the one that keeps serving — so a retry that succeeds would leave
+    the fleet saying "update failed" about a session that had moved on.
+    """
+    from local_operator.session.runtime.server import RuntimeServer
+
+    record = SimpleNamespace(updating="", update_failed=PAIR)
+    stub = SimpleNamespace(_record=record, _updating="", _republish=lambda: None, _failed_retries=0)
+
+    RuntimeServer.note_updating(cast("RuntimeServer", stub), PAIR)
+
+    assert record.updating == PAIR
+    assert record.update_failed == "", "a new window supersedes the last failure"
 
 
 # -- the record field ----------------------------------------------------------
@@ -430,6 +797,148 @@ def test_the_phrase_vocabulary_renders_the_pair_once() -> None:
 # -- the process-level rig -----------------------------------------------------
 
 
+class _DrainEntity:
+    """The drain's own collaborators over a REAL session directory.
+
+    Deliberately not ``WindowHost``: the cells that use this are about the GATE (which
+    rows a drain may deliver on a session nobody has engaged yet) and about a row's
+    fate when delivery FAILS — and the production ``prompt`` needs a whole runtime
+    behind it (it names the conversation, then pumps a queue against a session that
+    can ``subscribe``), which those two questions never touch. The directory, the
+    inbox and the drain are all production; only where the message lands is recorded.
+    """
+
+    def __init__(self, root: Path, *, fail_delivery: bool = False) -> None:
+        self._session = SimpleNamespace(
+            transcript=SimpleNamespace(directory=root / "sessions" / "s1")
+        )
+        self.directory = self._session.transcript.directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.fail_delivery = fail_delivery
+        self.prompt_calls: list[str] = []
+        self.steered: list[str] = []
+        self.peer_calls: list[str] = []
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        return False
+
+    async def prompt(self, text: str, images: Any = None, command_id: str | None = None) -> None:
+        if self.fail_delivery:
+            raise RuntimeError("the session refused the row")
+        self.prompt_calls.append(text)
+
+    async def steer(self, text: str, images: Any = None, **kwargs: Any) -> None:
+        self.steered.append(text)
+
+    async def receive_peer_message(self, text: str, **kwargs: Any) -> str:
+        self.peer_calls.append(text)
+        return "delivered"
+
+
+class _HandoverHost(WindowHost):
+    """``WindowHost`` plus the rung's other collaborators: the gate, the latch, the exit.
+
+    The production methods over a stub session, the way ``test_serving_drain`` builds
+    its hosts, so the assertions land on the rung's ORDERING rather than on a boot.
+    """
+
+    begin_retire = ServingSessionHandle.begin_retire
+
+    def __init__(self, session: PromptSession, *, busy: bool = False, dispose_delay: float = 0.0):
+        super().__init__(session, busy=busy)
+        self._draining = False
+        self._disposing = False
+        self._exit_committed = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self.dispose_delay = dispose_delay
+        self.dispose_calls = 0
+
+    async def dispose(self) -> None:
+        self.dispose_calls += 1
+        await asyncio.sleep(self.dispose_delay)
+        self.disposed = True
+
+
+class _SpoolingRuntime:
+    """A handover whose announce takes a message: the incident's own shape.
+
+    The window is OPEN while the announce runs — that is what it was opened for — so
+    a prompt that arrives during it goes through the production admission and comes
+    back with the spool receipt. What happens to that row afterwards is the fact the
+    two arms disagree about, and this rig is the same one for both.
+    """
+
+    _boot_build = OLD
+
+    def __init__(
+        self,
+        *,
+        announce_delay: float = 0.0,
+        message: str = "",
+        press_stop: "asyncio.Event | None" = None,
+        then_busy: Any = None,
+    ) -> None:
+        self.announce_delay = announce_delay
+        self.message = message
+        self.press_stop = press_stop
+        self.then_busy = then_busy
+        #: The handle whose admission the announce uses. Named on the runtime rather
+        #: than passed in because the rung's own seam gives ``announce_retiring`` no
+        #: handle — the frame's pair rides the RECORD — which is the shape modelled.
+        self.handle: Any = None
+        self.receipt = ""
+        self.retiring: list[str] = []
+        self.failures: list[str] = []
+
+    async def announce_retiring(
+        self,
+        reason: str,
+        *,
+        to: str = "",
+        draining: bool = False,
+        leaving: str = "",
+        updating: str = "",
+    ) -> None:
+        await asyncio.sleep(self.announce_delay)
+        self.retiring.append(reason)
+        if self.message and self.receipt == "":
+            # A message arriving DURING the announce: the window is open, so this is
+            # the production admission answering with the spool receipt.
+            self.receipt = await self.handle.prompt(self.message, command_id="a" * 8)
+        if self.press_stop is not None:
+            # The stop lands between the spool and the latch — the ordering the two
+            # arms of ``_announce_and_latch`` are decided by.
+            self.press_stop.set()
+        if self.then_busy is not None:
+            self.then_busy._busy = True
+
+    async def note_update_failed(self, pair: str, bound: float) -> None:
+        """The rung's publication seam, recorded rather than written to a journal."""
+        self.failures.append(pair)
+
+
+def _handover_host(
+    tmp_path: Path, *, busy: bool = False, dispose_delay: float = 0.0
+) -> "tuple[_HandoverHost, PromptSession]":
+    session = PromptSession(tmp_path / "sessions" / "s1", busy=busy)
+    session.transcript.directory.mkdir(parents=True, exist_ok=True)
+    return _HandoverHost(session, busy=busy, dispose_delay=dispose_delay), session
+
+
+async def _dead_pump(handle: object, *, interval: float) -> None:
+    """``_pump_update_heartbeat`` with the beats removed — the reviewer's own mutation."""
+    return
+
+
+def _patch_build(monkeypatch: Any, *, bound: float, heartbeat: float = 1.0) -> None:
+    """Pin the rung's build decision and shorten its bound for one cell."""
+    monkeypatch.setattr(child_mod, "_build_stagger_seconds", lambda: 0.0)
+    monkeypatch.setattr(child_mod, "_build_changed", lambda _boot: NEW)
+    monkeypatch.setattr(buildwatch, "update_lock_seconds", lambda: bound)
+    monkeypatch.setattr(buildwatch, "update_lock_heartbeat_seconds", lambda: heartbeat)
+
+
 class _WindowHandle:
     """The window API the refresh rung drives, over no session at all.
 
@@ -438,16 +947,19 @@ class _WindowHandle:
     would bury in a provider.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, dispose_delay: float = 0.0) -> None:
         self.updating = ""
         self.lock = buildwatch.UpdateLock()
         self.disposed = False
         self.spool_drains = 0
+        #: How long the dispose takes. The exit leg's bound is the cell that needs
+        #: this to be a number rather than a speed (agent review round 1, MINOR 1).
+        self.dispose_delay = dispose_delay
 
     def may_refresh(self) -> str:
         return ""
 
-    def begin_update(self, pair: str, holder: str = "", *, retry_failed: bool = False) -> bool:
+    def begin_update(self, pair: str, holder: str = "") -> bool:
         if self.lock.acquire(pair, holder):
             self.updating = pair
             return True
@@ -468,6 +980,7 @@ class _WindowHandle:
         return True
 
     async def dispose(self) -> None:
+        await asyncio.sleep(self.dispose_delay)
         self.disposed = True
 
 

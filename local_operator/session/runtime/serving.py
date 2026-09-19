@@ -721,10 +721,15 @@ class ServingSessionHandle(SessionHandle):
         #: The pair a window FAILED to move to, so the reaper's rung does not
         #: re-open a window for it on every check. A failure that keeps retrying
         #: with no successor to hand anything to is churn, and it hides the one
-        #: thing the operator needs to see (``record.update_failed``). An explicit
-        #: operator refresh passes ``retry_failed=True`` and is not refused: this
-        #: suppresses the AUTOMATIC rung, never the person.
+        #: thing the operator needs to see (``record.update_failed``). ONE retry is
+        #: allowed before that latch closes (``_update_retried``), because zero
+        #: retries left a stale session stale until its process exited.
         self._update_failed = ""
+        #: The pair whose ONE retry has already been spent, so a second failure of
+        #: the same move is final (see :meth:`begin_update`). Kept beside
+        #: ``_update_failed`` rather than folded into it so the two facts a reader
+        #: needs — "this failed" and "it is not being tried again" — stay separable.
+        self._update_retried = ""
         #: The window's heartbeat lock (``buildwatch.UpdateLock``). Held only while
         #: a window is open, and NEVER waited on by an admission — the admission
         #: paths read :attr:`_updating` and spool, which is what makes "no
@@ -1693,16 +1698,27 @@ class ServingSessionHandle(SessionHandle):
     # announce, exactly as ``process._begin_drain`` announces before it latches. A
     # window opened after the exit was committed would be a queue nobody drains.
 
-    def begin_update(
-        self, pair: str, handler: str = "stale-build", *, retry_failed: bool = False
-    ) -> bool:
+    def begin_update(self, pair: str, handler: str = "stale-build") -> bool:
         """Open the admission window for a move to ``pair``. False: not ours.
 
         Returns False when a live window is already open (the lock is held and
-        beating) or when ``pair`` is the one a previous window FAILED on. The
-        second is the anti-churn rule, and it is scoped to the automatic rung:
-        ``retry_failed=True`` is what an explicit operator refresh passes, because
-        "stop trying" is advice for the reaper and never for the person.
+        beating), when ``pair`` is EMPTY, or when this pair has already spent its
+        retry.
+
+        ONE RETRY, THEN STOP, and the count lives here rather than in a caller
+        flag (agent review round 1, NIT 1). The previous shape took
+        ``retry_failed=True`` from "an explicit operator refresh" — a caller that
+        did not exist — so a failed window was never retried by anything and the
+        pair stayed refused until the process exited: the stale session the
+        incident was about, made permanent. A second failure for the SAME pair is
+        final instead, because a handover that fails the bound twice is failing
+        for a reason a third attempt repeats.
+
+        AN EMPTY PAIR IS REFUSED, not opened. ``""`` is the record's "no window"
+        sentinel and the admission gate both, so a window holding it would be
+        invisible on every surface AND would queue nothing — while the sender got
+        a receipt for it (agent review round 1, NIT 2). Callers that cannot name
+        the pair publish ``types.UPDATE_UNNAMED_PAIR`` instead.
 
         The marker is written here, synchronously, so the successor can report the
         move as applied even if this process dies between the announce and the
@@ -1713,12 +1729,18 @@ class ServingSessionHandle(SessionHandle):
         decision, and an await would let a turn open between the idle sample and
         the commit — the gap ``begin_retire`` exists to close.
         """
+        if not pair:
+            return False
         if self._updating:
             return False
-        if pair and pair == self._update_failed and not retry_failed:
+        if pair == self._update_failed and pair == self._update_retried:
             return False
         if not self._update_lock.acquire(pair, handler):
             return False
+        if pair == self._update_failed:
+            # The ONE retry: recorded on the attempt rather than after a second
+            # failure, so a retry that itself dies mid-handover still counts.
+            self._update_retried = pair
         self._updating = pair
         directory = self._session_directory()
         if directory is not None:
@@ -1805,9 +1827,13 @@ class ServingSessionHandle(SessionHandle):
     def update_lock_remaining(self) -> float:
         """Seconds left before the open window is DEAD. ``0.0`` when none is open.
 
-        Read by a front end that has to say whether a session is still moving (and
-        by the rung's own tests); the expiry itself is always decided by the holder
-        (``_refresh_for``), never by a reader, so this is a report and not a gate.
+        THIS IS THE BOUND THE HOLDER APPLIES, not a convenience report (agent review
+        round 1, MINOR 2, which measured the previous shape: ``asyncio.wait_for``
+        applied a total-duration bound of its own, so neither this reading nor the
+        heartbeat it is derived from decided anything and deleting the pump changed
+        no test). ``_await_live_window`` polls it, so the window expires at
+        ``UPDATE_LOCK_S`` after the last BEAT — which is what makes a blocked event
+        loop the failure the bound holds, and a slow-but-beating handover not one.
         """
         return self._update_lock.remaining()
 
