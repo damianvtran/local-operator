@@ -376,21 +376,57 @@ class WebSearchService:
         # formatting artefact -- leading with either is how the cropped card came to
         # show `Web search failed: not configured` while the leg that actually failed
         # on the wire was named later (round-2 N4/Q2-2).
-        lead = next(
-            (reason for _provider, reason in tried if reason and reason != "not configured"),
-            tried[-1][1] if tried else "no candidates",
+        lead = _short_reason(
+            next(
+                (reason for _provider, reason in tried if reason and reason != "not configured"),
+                tried[-1][1] if tried else "no candidates",
+            ),
+            LEAD_REASON_CELLS,
         )
         # COUNT FIRST, because the collapsed tool card paints ~25 cells of this
         # string and the trailing list is always cropped: `6/6 providers failed: …`
         # puts the count, the fact and the start of the cause inside that budget,
         # and the tried list stays for the expansion (round-2 D2-1).
-        # ...and every leg's own reason stays after it: the expansion is where a
-        # diagnostic belongs, and round 2 asked for the per-leg breakdown back
-        # (`tried:` names the order the legs were attempted in, which under
-        # round-robin is this call's order and not a stable chain order).
-        raise RuntimeError(
-            f"{len(candidates)}/{len(candidates)} providers failed: {lead} (tried: {summary})"
+        # ...and every leg stays named after it, each with a SHORT reason: the
+        # expansion is where a diagnostic belongs, and round 2 asked for the
+        # per-leg breakdown back (`tried:` names the order the legs were attempted
+        # in, which under round-robin is this call's order and not a stable chain
+        # order). Short because six legs carrying their FULL reason text blew the
+        # card's 432-cell reason budget and re-truncated the expansion the round-2
+        # shape had just fixed (round-3 D3-2) -- the lead already carries one reason
+        # in full, and the rest only have to be recognisable.
+        breakdown = "; ".join(
+            f"{provider_id}: {_short_reason(reason, PER_LEG_REASON_CELLS)}"
+            for provider_id, reason in tried
         )
+        raise RuntimeError(
+            f"{len(candidates)}/{len(candidates)} providers failed: {lead} " f"(tried: {breakdown})"
+        )
+
+
+#: How much of a reason the failure digest keeps, per part of the message.
+#:
+#: The tool card renders the whole message inside `REASON_MAX_CELLS` (432 cells /
+#: 8 rows, `tui/widgets/tool_card.py`). Six legs quoting their FULL reason is
+#: ~1400 cells, so round 3's expansion truncated at `… 11 more lines` and the
+#: reader could not see which other legs failed (round-3 D3-2). The two caps below
+#: keep the message inside that budget on the longest real reason -- a provider's
+#: 503 HTML body, ~200 cells -- with the arithmetic measured, not guessed: the
+#: fixed text is ~31 cells, six legs cost `len(id) + 2 + cap + 2`, and the lead
+#: gets the rest, so 128 + 6x30 lands at ~424 of 432.
+#:
+#: The lead keeps the most room because it is what the collapsed card shows; the
+#: per-leg cap is 30 because that is exactly the common transport reason
+#: (`All connection attempts failed`), so the usual case is not truncated at all.
+LEAD_REASON_CELLS = 128
+PER_LEG_REASON_CELLS = 30
+
+
+def _short_reason(reason: str, cap: int) -> str:
+    """A reason cut to ``cap`` cells, with an ellipsis when it was cut."""
+    if len(reason) <= cap:
+        return reason
+    return reason[: cap - 1].rstrip() + "…"
 
 
 def search_settings_dict(settings: WebSearchSettings) -> dict[str, Any]:

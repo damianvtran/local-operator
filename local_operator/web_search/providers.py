@@ -1950,9 +1950,15 @@ def provider_state_label(status: ProviderStatus) -> str:
 STATE_MEANINGS: dict[str, str] = {
     "enabled": "in your priority order",
     "enabled (paid)": "listed, and tried in the paid band after every free leg",
-    "enabled (best-effort)": "listed, and tried after the free pool",
+    # NOT "tried after the free pool": only a METERED listed leg is hoisted, so a
+    # listed best-effort leg stays in the prefix -- inside the rotating pool, ahead
+    # of the auto-joined free band this entry would be describing (round-3 D3-1,
+    # measured on the operator's own config, where the listed perplexity is itself a
+    # distinct first attempt). The auto-joined tier really does run after the pool,
+    # and it has its own word.
+    "enabled (best-effort)": "listed; the tier that gets walled most often, tried in the pool",
     "auto free": "with the free providers",
-    "auto best-effort": "after the free providers",
+    "auto best-effort": "joined automatically; tried after the free pool",
     "auto paid": "tried after the free providers, never before a free leg",
     "excluded": "never used, whatever else is configured",
     # NOT "not in any chain": a LISTED leg with no credential is deliberately kept
@@ -1963,18 +1969,26 @@ STATE_MEANINGS: dict[str, str] = {
 }
 
 
-def state_legend() -> str:
-    """One line defining every state word, derived from the table it explains.
+def state_legend(statuses: list[ProviderStatus]) -> str:
+    """One line defining the state words THIS listing paints, from the table above.
 
-    It prints the MEANINGS, not just the words. A legend that lists a closed
-    vocabulary is worth something, but the reader who lands on `/search` cold needs
-    to know what `auto best-effort` or `(paid)` costs them, and the wording already
-    exists here -- so the line carries it rather than making the reader infer it
-    from the row above (round-2 U2-5, D2-4).
+    It prints the MEANINGS, not just the words: the reader who lands on `/search`
+    cold needs to know what `auto best-effort` or `(paid)` costs them, and the
+    wording already exists in this module -- so the line carries it rather than
+    making them infer it from the row above (round-2 U2-5, D2-4).
+
+    Scoped to the words on screen, because the full table is 477 cells: 6 of the
+    listing's 26 painted rows at 110x44 and 8 of 15 at 80x24, most of it defining
+    states the install does not have, while the header rows of the same listing are
+    what a narrow terminal folds away (round-3 D3-3). Order is first appearance, so
+    the line reads in the order the rows above it do.
     """
-    return "States: " + " · ".join(
-        f"{word} = {meaning}" for word, meaning in STATE_MEANINGS.items()
-    )
+    words: list[str] = []
+    for status in statuses:
+        word = provider_state_label(status)
+        if word not in words:
+            words.append(word)
+    return "States: " + " · ".join(f"{word} = {STATE_MEANINGS[word]}" for word in words)
 
 
 def provider_setup_hint(provider_id: SearchProviderId) -> str:

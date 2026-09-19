@@ -66,10 +66,15 @@ async def test_search_listing_prints_the_state_legend_and_the_ring_rule(
         await pilot.pause()
         text = _transcript_text(app)
 
+    # The legend defines the words this listing paints, with their meanings, and it
+    # does not define words the install does not have (round-3 D3-3).
     assert "states" in text
-    for state in ("enabled", "auto free", "auto best-effort", "auto paid", "excluded"):
+    for state in ("enabled", "auto free", "auto best-effort", "needs setup"):
         assert state in text, state
-    assert "needs setup" in text
+    assert "enabled = in your priority order" in text
+    assert "auto free = with the free providers" in text
+    assert "auto paid" not in text  # no DeepSeek credential in this fixture
+    assert "excluded = " not in text  # nothing is excluded in this fixture
 
 
 @pytest.mark.asyncio
@@ -227,7 +232,7 @@ async def test_search_listing_labels_the_stored_order_and_defines_the_legend(
     # than as a rival list.
     assert "order:" in text
     # The legend carries the meanings, not just the words.
-    assert "auto paid = tried after the free providers, never before a free leg" in text
+    assert "auto free = with the free providers" in text
     assert "needs setup = cannot serve yet" in text
 
 
