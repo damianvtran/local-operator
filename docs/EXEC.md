@@ -57,23 +57,40 @@ Pass a new loop option explicitly to start another loop.
 ## What may not start a session: an agent's shell
 
 A `lop` invocation that descends from an agent's `bash` tool call
-(`LOCAL_OPERATOR_AGENT_SHELL`, set by that tool on every command it runs) may
-not open a session. Both entry points refuse it — `exec`, and the interactive
-path (`lop`, `lop --resume ID`, `--tui`) — because what such a run starts is a
-TOP-LEVEL conversation: an ordinary session directory with no `origin.json`, so
-`is_user_session` reports that the operator opened it, and the session list, the
-desktop sidebar and the phone's history all offer it as their own work.
+(`LOCAL_OPERATOR_AGENT_SHELL`, set by that tool on every command it runs) may not
+open a session, with ONE allowance that follows the calling session's own tools.
+The two entry points differ, and the asymmetry is deliberate:
+
+* **`lop exec` is allowed when the calling session may delegate** — when its
+  LIVE tool inventory holds `task`, which the `bash` tool reports to the command
+  it spawns as `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1`. That is the case the
+  operator asks for by asking for it: "spin up parallel sessions and fully
+  delegate this work", or a fan-out of long-lived independent workstreams, is a
+  shape a `task` child cannot be — a child is one prompt and ends. A session that
+  does NOT hold `task` is refused exactly as before, because for that session
+  `lop exec` is a way around a missing tool rather than a way to delegate.
+  `task` in the inventory is the whole test: the role's own `task` is pruned when
+  it does not delegate, and a declared inventory narrows the same list, so
+  "holds `task`" and "may delegate" cannot disagree. An absent marker reads as
+  NO.
+* **the interactive path stays refused for EVERY agent shell**, delegating or not
+  (`lop`, `lop --resume ID`, `--tui`). An agent has no terminal, so what that
+  path opens is a front end on the OPERATOR's screen — not the separate session
+  the relaxation above is about.
+
+`lop exec --status` starts nothing and is unaffected.
+
+What a refused run prints:
 
 ```
-exec failed: a `lop` invocation from inside an agent session cannot open one — the session it would start is a top-level conversation the operator never opened, listed in their session list and desktop sidebar as if they had, and running outside the job manager that lets this session see, steer, cancel and account for delegated work.
+exec failed: this `lop` invocation from inside an agent session cannot open one — the session it would start is a top-level conversation the operator never opened, listed in their session list and desktop sidebar as if they had, and running outside the job manager that lets this session see, steer, cancel and account for delegated work.
 Delegated work is launched with the `task` tool. A session that does not hold `task` may not create subagents at all: do the work yourself, and say so with `hub` if the slice genuinely cannot be done alone — `hub` reaches the session that delegated to you and the brief travels in the message. Work that must happen later is not a child session's to arm — `wake` is pruned from every child — so a child routes it back to the session that delegated to it, while a session that holds `wake` arms it there itself.
 ```
 
 The incident this answers (2026-09-18): a subagent owed a review round on a PR,
 held no `task` tool to run it with, and reached for `lop exec --profile reviewer
 --background`. Two sessions — `lo-1281-review` and `lo-1281-qa`, 7 ms apart —
-appeared in the operator's sidebar as chats they had opened. `lop exec --status`
-starts nothing and is unaffected.
+appeared in the operator's sidebar as chats they had opened.
 
 The other half of that incident is the role's allowance, and it is the half the
 guard does not fix: whether a subagent may delegate at all is its ROLE's answer
@@ -82,6 +99,25 @@ depth. A role that does not delegate — a `coder`, a `reviewer`, a `scout` — 
 holds it, and is expected to do the work itself rather than route around the
 rule. So a team brief that owes a review round to a slice gives that slice a role
 that may delegate, or keeps the round with the session that delegates.
+
+**When to use `lop exec` from inside a session.** Default to `task`. Reach for
+`exec` when the USER has explicitly asked for separate top-level sessions —
+independent workstreams that must outlive this turn, or a large fan-out of them —
+and never as a way to get around a `task` tool this session does not hold. A
+session without `task` does the work itself and reports a genuine blocker with
+`hub`. `guide://agents` carries the same rule to the agent.
+
+**The stamp, and why neither route is silent.** A session opened this way is
+stamped `origin.json` = `agent-shell` (`ORIGIN_AGENT_SHELL`): it is a TOP-LEVEL
+conversation by every other test the store applies — an ordinary session
+directory with no origin — so without the stamp `is_user_session` reports that
+the operator opened it, and the session list, the desktop sidebar and the
+phone's history all offer it as their own work. The stamp is written for BOTH
+routes (the escape hatch below, and an allowed delegating run), and only for a
+session the run CREATES: a conversation it merely RESUMES is the operator's own
+work and is left alone. It is not a lock — the session is on disk at
+`<config>/sessions/<id>` and `lop sessions` lists the live run; the id is in the
+run's own output, and `lop --resume <id>` opens it.
 
 **The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
 waives the refusal for one invocation, on BOTH entry points. It exists because
@@ -114,7 +150,11 @@ forgets.
 
 * The marker is set by the `bash` tool alone. A subprocess spawned by the
   `eval` tool, or one started with `env -u LOCAL_OPERATOR_AGENT_SHELL`, does not
-  carry it, so it is not refused.
+  carry it, so it is not refused. The same is true of the
+  `LOCAL_OPERATOR_AGENT_MAY_DELEGATE` allowance: it is the session's answer about
+  itself, reported by the tool that spawns the command and not a secret, so a
+  shell that scrubs it looks like a session that may not delegate (which is the
+  direction that FAILS CLOSED).
 * The guard lives at `cli.main`: a marked process that starts `lop serve`, or
   engages a runtime, mints sessions through the server/runtime composition root
   and is not refused there.
@@ -122,7 +162,9 @@ forgets.
   exempt — the TUI restart, `/fork`'s new window and a notification click's
   terminal all drop the marker before they re-exec
   (`agent_shell.without_agent_shell_marker`), because those are the user's
-gestures, not an agent's command.
+gestures, not an agent's command. That helper drops BOTH markers: a restarted or
+forked window is a SESSION, so it must not be handed its parent's delegation
+allowance either.
 
 ## Divergence from `/goal`
 

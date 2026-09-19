@@ -8716,6 +8716,17 @@ class Session:
             browser=self._browser,
             web_io=self._web_io,
             subagent_launcher=self._launch_subagent,
+            # DERIVED from the live inventory every turn, never configured.
+            # ``task`` is the signal and ``subagent_launcher`` above is not: the
+            # launcher is installed unconditionally, while the prune in
+            # ``harness.subagent`` strips ``task`` from a child whose role does
+            # not delegate and ``_filter_declared`` narrows a declared
+            # inventory — so "holds ``task``" IS "may delegate". Read from
+            # ``self._tools`` rather than latched, so a mid-session inventory
+            # change is reflected. The ``bash`` tool turns this into
+            # ``agent_shell.MAY_DELEGATE_ENV`` for the commands it runs; see
+            # ``agent_shell.py`` for what reads it and why it is asymmetric.
+            may_delegate=any(tool.name == "task" for tool in self._tools),
             jobs=self.jobs,
             peer_arrival=self._peer_arrival,
             subagent_comms=self.subagent_comms,

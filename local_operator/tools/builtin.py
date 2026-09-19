@@ -76,7 +76,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
-from local_operator.agent_shell import AGENT_SHELL_ENV
+from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.subagent import (
@@ -2245,6 +2245,22 @@ async def execute_bash(
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
+    # The DELEGATION ALLOWANCE rides the child environment for the same reason
+    # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
+    # that holds ``task`` is a legitimate way to open separate top-level sessions
+    # when the user asked for them, and the session guard
+    # (``local_operator/agent_shell.py``) runs in the CHILD process, so the only
+    # way it can tell that shell from one with no ``task`` to delegate with is
+    # for the answer to travel with the command. The name lives in
+    # ``agent_shell`` and this is the one writer — one name, two consumers, the
+    # same rule the marker above follows.
+    #
+    # FAIL CLOSED: no context (a test double, an embedder with no session) leaves
+    # the variable unset, which the guard reads as "may not delegate" and
+    # refuses. The refusal is the cheap failure; the expensive one is a session
+    # in the operator's list that they never opened.
+    if context is not None and context.may_delegate:
+        injections[MAY_DELEGATE_ENV] = "1"
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 
