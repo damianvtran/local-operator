@@ -236,12 +236,16 @@ def ensure_secrets_dir(base: Path | None = None) -> Path:
     ``mode=DIR_MODE`` is passed as well as chmod'ed, and the two are not
     redundant on Windows: there ``os.chmod`` can only toggle the read-only flag
     (CPython's docs: "All other bits are ignored"), so the mode argument is the
-    only thing that can *create* a directory ACL — on CPython ≥ 3.13, where
-    ``mkdir(mode=0o700)`` is specially handled to grant only the current user
-    and administrators. On POSIX the argument is masked by the umask and the
-    chmod that follows is what makes the mode exact. See
-    :func:`at_rest_protection_note` for what this is and is not worth on
-    Windows.
+    only thing that can *create* a directory ACL — where it is supported at all.
+    That is ``3.12.6`` and later on the 3.12 line (and 3.11.10+ / 3.13+), which
+    is CVE-2024-4030: before those versions the argument was silently ignored on
+    Windows and the directory took the inherited ACL. THIS PROJECT SUPPORTS
+    ``>= 3.12``, so on 3.12.0-3.12.5 a Windows store gets no ACL from either
+    call — the fact the sentence above this one used to overstate as "CPython
+    >= 3.13". Nothing here can repair that, which is why
+    :func:`at_rest_protection_note` reports the tier instead of claiming it.
+    On POSIX the argument is masked by the umask and the chmod that follows is
+    what makes the mode exact.
     """
     directory = secrets_dir(base)
     directory.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
