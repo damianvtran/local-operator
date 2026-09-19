@@ -863,6 +863,11 @@ async def test_an_admitted_prompt_paints_no_handover_row() -> None:
         assert _user_texts(app) == ["an ordinary message"]
 
 
+def _editor(app: OperatorApp) -> Any:
+    """The app's composer, wherever the interaction hides it."""
+    return app._editor()
+
+
 def _durable_row_for(app: OperatorApp, command_id: str) -> None:
     """Write the row the successor appends when it RUNS a spooled message.
 
@@ -1082,3 +1087,47 @@ async def test_the_joiner_row_is_taken_down_when_the_spool_empties() -> None:
         assert QUEUED_ELSEWHERE_NOTICE not in [n._text for n in _notices(app)], [
             n._text for n in _notices(app)
         ]
+
+
+@pytest.mark.asyncio
+async def test_a_bind_with_an_empty_queue_replays_no_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR-3 (review round 3): the settle runs on EVERY bind, so it must be free.
+
+    ``Transcript(directory)`` replays the whole journal eagerly — measured on this
+    store's own 252.7 MB / 22,334-row journal at 3,916 ms synchronously on the
+    event loop — and the settle is called after every successful bind, which is
+    the join path the operator's requirement is about. With nothing queued there
+    is nothing to settle, so nothing may be read.
+    """
+    from local_operator.session import transcript as transcript_mod
+
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        assert app._interaction is not None
+        built: list[tuple[Any, ...]] = []
+        real = transcript_mod.Transcript
+
+        class Counting(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                built.append(args)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(transcript_mod, "Transcript", Counting)
+
+        app._settle_handed_over_queues(app._interaction)
+        await pilot.pause()
+        assert built == [], "an empty queue must not replay the journal"
+
+        # NOT A REMOVAL OF THE FEATURE: with something queued and a durable row
+        # for it, the read happens and the settle lands.
+        await _send_queued(pilot, editor=_editor(app), text="deploy the fix", session=session)
+        command_id = session.queued_ids[-1]
+        _durable_row_for(app, command_id)
+        app._settle_handed_over_queues(app._interaction)
+        await pilot.pause()
+        assert built, "a queued message must still be settled from the transcript"
+        assert app._interaction.turn.queued_prompts == {}
