@@ -33388,8 +33388,8 @@ class OperatorApp(App[None]):
             SearchStrategy,
         )
         from local_operator.web_search.providers import (
-            chain_label,
             provider_landing_line,
+            provider_order_note,
             provider_statuses,
             state_legend,
         )
@@ -33414,8 +33414,12 @@ class OperatorApp(App[None]):
                 items: list[tuple[str, str | Text]] = [
                     (
                         "Web search",
+                        # Labelled, because the row below it carries the same arrow
+                        # notation for a different fact: unlabelled, a cold reader
+                        # takes this one for the order searches run in and reads the
+                        # `chain` row as contradicting it (round-2 U2-2/D2-4).
                         f"{'On' if settings.enabled else 'Off'} · {strategy} · "
-                        f"{order or 'No providers'}",
+                        f"order: {order or 'No providers'}",
                     ),
                     # `order:` above is the stored prefix, which on an install that
                     # LISTS a paid provider cannot show where that leg lands. This
@@ -33423,7 +33427,7 @@ class OperatorApp(App[None]):
                     # the paid ones marked. It replaced a summary that named only
                     # the auto-joined bands and therefore printed a paid band of
                     # `(none)` while a model-turn leg sat in the chain (round-1 D1).
-                    ("chain", chain_label(statuses)),
+                    ("chain", _search_chain_text(statuses)),
                     # Same header fact as the CLI's, because the two surfaces
                     # disagreed about the one thing an exclusion is FOR: the CLI
                     # said `excluded: exa` and this listing said nothing at all
@@ -33513,7 +33517,12 @@ class OperatorApp(App[None]):
                         if row is not None
                         else f"{provider} enabled"
                     )
-                    notice(f"{landing}; applies now")
+                    # `; applies now` belongs to a sentence about a CHANGE. The
+                    # needs-setup arm is a sentence about a STATE that has not
+                    # become usable, so the tail was reading as "your search is
+                    # about to use this" (round-2 D2-5).
+                    tail = "" if row is not None and not row.available else "; applies now"
+                    notice(f"{landing}{tail}")
                 return
             if command == "balance" and len(words) == 2:
                 strategy = words[1].lower()
@@ -33532,14 +33541,17 @@ class OperatorApp(App[None]):
                 providers: list[SearchProviderId] = [
                     cast(SearchProviderId, word) for word in provider_words
                 ]
-                set_provider_order(manager, providers)
-                # Word-for-word the CLI's sentence: "tried first" is the word that
-                # says the list is a priority PREFIX and not the whole chain, and
-                # dropping it here was the drift (round-1 U6).
+                settings = set_provider_order(manager, providers)
+                # The tail is DERIVED from the resolver, word-for-word what the CLI
+                # prints: "tried first" is true of the ids that land in a free band
+                # and false of a paid one the resolver hoists behind them, so a
+                # hardcoded version promises something this very command breaks
+                # (round-2 U2-1; round-1 U6 wanted the two surfaces to match).
                 notice(
                     "search order: "
                     + ", ".join(providers)
-                    + " (tried first; any exclusion named here was cleared)"
+                    + " "
+                    + provider_order_note(providers, settings, credentials)
                 )
                 return
             if command == "setup" and len(words) == 2:
@@ -43125,12 +43137,50 @@ def _receipts_failure(root: Path) -> StoreFailure | None:
 _SEARCH_STATE_TOKENS: dict[str, str] = {
     "enabled": "muted",
     "enabled (paid)": "warning",
+    "enabled (best-effort)": "muted",
     "auto free": "muted",
     "auto best-effort": "muted",
     "auto paid": "warning",
-    "excluded": "faint",
-    "needs setup": "faint",
+    # `muted`, not `faint`: these two words tell the reader something must be DONE,
+    # and round 2 measured `faint` at 3.89:1 -- below AA and quieter than the prose
+    # describing the provider beside them (round-2 D2-3).
+    "excluded": "muted",
+    "needs setup": "muted",
 }
+
+
+def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
+    """The `chain` row: every leg in try order, each marker in its own ink.
+
+    The markers come from the provider module's single table
+    (``chain_leg_marker``), so the CLI prints exactly the ones this row paints, and
+    the ink comes from ``CHAIN_MARKER_TOKENS`` -- round 2 measured the same `(paid)`
+    fact at plain dim here and amber on the provider row two lines below, which
+    made the row that says a leg will spend the least emphatic one on screen
+    (round-2 D2-3).
+    """
+    from local_operator.web_search.providers import (
+        CHAIN_MARKER_TOKENS,
+        chain_leg_marker,
+    )
+
+    dim = Style(color=theme_mod.semantic_color("dim"))
+    row = Text()
+    legs = [status for status in statuses if status.enabled]
+    if not legs:
+        row.append("(none)", style=dim)
+        return row
+    for index, status in enumerate(legs):
+        if index:
+            row.append(" → ", style=dim)
+        row.append(status.label, style=dim)
+        marker = chain_leg_marker(status)
+        if marker:
+            row.append(
+                f" {marker}",
+                style=Style(color=theme_mod.semantic_color(CHAIN_MARKER_TOKENS[marker])),
+            )
+    return row
 
 
 def _search_status_detail(status: "ProviderStatus") -> Text:

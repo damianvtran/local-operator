@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -10,6 +10,7 @@ import pytest
 from local_operator.credentials import CredentialManager
 from local_operator.web_search.models import (
     PROVIDER_IDS,
+    SearchProviderId,
     SearchResponse,
     SearchSource,
     WebSearchSettings,
@@ -1067,13 +1068,145 @@ async def test_a_multi_leg_failure_leads_with_the_actionable_sentence(
         await service.search("query")
 
     message = str(raised.value)
-    assert message.startswith("Web search failed: Fetch a page directly")
-    assert "all 4 providers in the chain failed" in message
-    # Rotation decides the order the legs were TRIED in, so the list is asserted
-    # as a set: the message names every leg and no other.
-    listed = message.split("chain failed: ")[1].rstrip(")")
-    assert set(listed.split(", ")) == {"duckduckgo", "tavily", "exa", "deepseek"}
+    # COUNT FIRST, then the cause: the collapsed tool card paints ~25 cells, so a
+    # count sitting after the reason can never be seen (round-2 D2-1).
+    assert message.startswith("4/4 providers failed: Fetch a page directly")
+    # Rotation decides the order the legs were TRIED in, so the list is asserted as a
+    # set: the breakdown names every leg, in the order this call attempted them, and
+    # no other.
+    tried = message.split("tried: ", 1)[1].rstrip(")")
+    assert {entry.split(": ")[0] for entry in tried.split("; ")} == {
+        "duckduckgo",
+        "tavily",
+        "exa",
+        "deepseek",
+    }
     assert "configured" not in message
+
+
+@pytest.mark.asyncio
+async def test_the_failure_lead_skips_empty_and_unconfigured_reasons(tmp_path, monkeypatch) -> None:
+    """Round-2 N4/Q2-2: the lead must be the first reason that says something.
+
+    A stalled leg reports `httpx.ReadTimeout`, whose `str()` is empty, and a listed
+    leg with no credential reports `not configured` -- leading with either buried the
+    leg that actually failed on the wire.
+    """
+    from local_operator.web_search import providers as module
+    from local_operator.web_search.service import WebSearchService
+
+    monkeypatch.setattr(
+        module,
+        "provider_auth_mode",
+        lambda provider_id, _credentials, _settings: {
+            "duckduckgo": "credential-free",
+            "tavily": "keyless",
+            # No mode for brave: listed, so it stays in the prefix and reports
+            # `not configured` without touching the network.
+            "exa": "keyless-mcp",
+        }.get(provider_id, ""),
+    )
+    # `ordered`, so the legs are attempted in the stored order: under round_robin the
+    # lead depends on which leg the rotation put first, and this test is about WHICH
+    # REASON is chosen, not about the rotation.
+    service = WebSearchService(
+        WebSearchSettings(providers=["duckduckgo", "tavily", "brave"], strategy="ordered"),
+        _credentials(tmp_path),
+    )
+
+    async def stalled(*_args: object, **_kwargs: object):
+        raise httpx.ReadTimeout("")
+
+    async def refused(*_args: object, **_kwargs: object):
+        raise RuntimeError("returned HTTP 503")
+
+    monkeypatch.setitem(PROVIDERS, "duckduckgo", SimpleNamespace(search=refused))
+    monkeypatch.setitem(PROVIDERS, "tavily", SimpleNamespace(search=stalled))
+    monkeypatch.setitem(PROVIDERS, "exa", SimpleNamespace(search=stalled))
+
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("query")
+
+    message = str(raised.value)
+    assert message.startswith("4/4 providers failed: returned HTTP 503")
+    assert "not configured" in message  # every leg's reason is still in the digest
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_leg_reports_its_error_class_not_an_empty_reason(
+    tmp_path, monkeypatch
+) -> None:
+    """Round-2 N4: `str(httpx.ReadTimeout())` is `''`, so the digest said nothing."""
+    from local_operator.web_search import providers as module
+    from local_operator.web_search.service import WebSearchService
+
+    monkeypatch.setattr(
+        module,
+        "provider_auth_mode",
+        lambda provider_id, _credentials, _settings: {
+            "duckduckgo": "credential-free",
+            "brave": "api-key",
+        }.get(provider_id, ""),
+    )
+
+    async def stalled(*_args: object, **_kwargs: object):
+        raise httpx.ReadTimeout("")
+
+    async def refused(*_args: object, **_kwargs: object):
+        raise RuntimeError("BRAVE_API_KEY is not set")
+
+    monkeypatch.setitem(PROVIDERS, "duckduckgo", SimpleNamespace(search=stalled))
+    monkeypatch.setitem(PROVIDERS, "brave", SimpleNamespace(search=refused))
+    service = WebSearchService(
+        WebSearchSettings(providers=["duckduckgo", "brave"], strategy="ordered"),
+        _credentials(tmp_path),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("query")
+
+    message = str(raised.value)
+    assert message.startswith("2/2 providers failed: ReadTimeout")
+    assert "duckduckgo: ReadTimeout" in message
+    assert "duckduckgo: ;" not in message
+
+
+def test_the_copy_helpers_are_total_for_an_id_outside_the_catalogue() -> None:
+    """Round-2 N6: the refusal path must not raise a KeyError of its own.
+
+    No validated surface can reach this (the tool schema is a closed Literal, the CLI
+    uses `choices`), which is exactly why the error path is the wrong place to depend
+    on it.
+    """
+    from local_operator.web_search.providers import provider_setup_hint
+
+    hint = provider_setup_hint(cast(SearchProviderId, "not-a-provider"))
+    assert "search setup not-a-provider" in hint
+
+
+def test_chain_markers_name_paid_unready_and_best_effort_legs(tmp_path) -> None:
+    """Round-2 D2-2/U2-6: the chain row must agree with each leg's state word."""
+    from local_operator.web_search.providers import chain_label, provider_statuses
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    settings = WebSearchSettings(providers=["duckduckgo", "brave", "perplexity", "deepseek"])
+    label = chain_label(provider_statuses(settings, credentials))
+
+    # A listed leg with no credential IS walked, so the row says why it is there.
+    assert "Brave (setup needed)" in label
+    assert label.endswith("DeepSeek (paid)")
+    # A listed best-effort leg keeps its tier in the chain row as well as on its row.
+    assert "Perplexity (best-effort)" in label
+
+
+def test_the_legend_defines_the_words_and_the_meanings_agree_with_the_code() -> None:
+    """Round-2 U2-5/D2-4: the legend printed the vocabulary without its meanings."""
+    from local_operator.web_search.providers import STATE_MEANINGS, state_legend
+
+    legend = state_legend()
+    for word, meaning in STATE_MEANINGS.items():
+        assert f"{word} = {meaning}" in legend
 
 
 @pytest.mark.asyncio
@@ -1839,5 +1972,6 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
     for state in STATE_MEANINGS:
         assert state in legend
     assert set(STATE_MEANINGS) == {provider_state_label(status) for status in statuses.values()} | {
-        "enabled (paid)"
+        "enabled (paid)",
+        "enabled (best-effort)",
     }

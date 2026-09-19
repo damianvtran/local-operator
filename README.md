@@ -578,15 +578,16 @@ lop search list
 lop search test "Python 3.13 release notes"
 lop search enable perplexity          # clears an exclusion
 lop search disable brave             # excludes it from every search
-lop search order duckduckgo tavily   # the priority prefix (also clears exclusions)
+lop search order duckduckgo tavily   # the priority prefix: free legs first, paid ids run after them
 lop search setup brave --api-key
 lop search setup tavily --oauth      # official Tavily MCP server
 lop search setup searxng --endpoint https://search.example.com
 ```
 
 `web_search.providers` is a **priority prefix, not an allowlist**, and its
-authority is over order **within a band**: those providers are tried first, in
-that order, and every other usable provider joins automatically behind them.
+authority is over order **within a band**: a named free provider is tried first, in
+the order you named it, and every other usable provider joins automatically behind
+the ones you named.
 `web_search.excluded_providers` is the only way to say never — an id there is
 skipped in the prefix *and* in the automatic bands. A provider that becomes
 usable mid-session (a DeepSeek login, an Exa key) joins its band on the next

@@ -52,8 +52,12 @@ def add_search_subparser(
     strategy = commands.add_parser("balance", help="Choose load-balancing strategy")
     strategy.add_argument("strategy", choices=("round_robin", "ordered"))
 
+    # The help line says what the verb does to the CHAIN, in both bands: a paid id is
+    # held back to the paid band by the strengthening, so an unconditional "tried
+    # first" here is the same false promise the receipt used to make (round-2 U2-1).
     order = commands.add_parser(
-        "order", help="Set the priority prefix (tried first; also clears exclusions)"
+        "order",
+        help="Set the priority prefix (free legs tried first, paid legs run after them)",
     )
     order.add_argument("providers", nargs="+", choices=PROVIDER_IDS)
 
@@ -238,10 +242,12 @@ def _setup_provider(args: argparse.Namespace) -> int:
             print(f"Enabled {provider_id} (keyless MCP tier: free, rate-limited).")
         return 0
     if provider_id == "deepseek":
-        print(
-            "Enabled deepseek (auto paid; tried after the free providers, never before "
-            "a free leg). It joins the chain automatically once a key or login exists."
-        )
+        # The setup sentence above says what the provider IS; where it LANDED comes
+        # from the resolver, like every other surface's landing line. The hardcoded
+        # `auto paid` this replaces described a LISTED leg as if the user had not
+        # listed it, two commands after `search enable deepseek` learned to say
+        # `enabled (paid)` on the same install (round-2 U2-4).
+        _print_landing(settings, credentials, provider_id)
         return 0
     _print_landing(settings, credentials, provider_id)
     return 0
@@ -303,6 +309,7 @@ async def _test_search(args: argparse.Namespace) -> int:
 
 def search_command(args: argparse.Namespace) -> int:
     """Dispatch ``search`` configuration and smoke-test commands."""
+    from local_operator.web_search.providers import provider_order_note
     from local_operator.web_search.service import (
         set_provider_enabled,
         set_provider_order,
@@ -340,13 +347,16 @@ def search_command(args: argparse.Namespace) -> int:
         print(f"Web search balance strategy: {args.strategy}")
         return 0
     if command == "order":
-        set_provider_order(manager, args.providers)
-        # The prefix is only the first part of the chain now, and naming an id here
-        # also clears an exclusion for it -- both facts belong in the reply.
+        settings = set_provider_order(manager, args.providers)
+        # The receipt is DERIVED from the resolver, not hardcoded: naming a paid
+        # provider writes a prefix entry that the resolver hoists into the paid band,
+        # so "tried first" would be a promise this very command breaks (round-2
+        # U2-1). The helper states the landing for each half of the named list.
         print(
             "Web search order: "
             + ", ".join(args.providers)
-            + " (tried first; any exclusion named here was cleared)"
+            + " "
+            + provider_order_note(list(args.providers), settings, credentials)
         )
         return 0
     if command == "setup":

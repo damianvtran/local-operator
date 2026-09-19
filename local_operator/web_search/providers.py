@@ -1926,8 +1926,15 @@ def provider_state_label(status: ProviderStatus) -> str:
     if status.listed:
         # A listed leg whose transport spends money or a model turn is in the PAID
         # band, and plain `enabled` is what made the operator's own frame read as
-        # "nothing paid is involved" (round-1 D1/U2).
-        return "enabled (paid)" if status.tier == "metered" else "enabled"
+        # "nothing paid is involved" (round-1 D1/U2). A listed BEST-EFFORT leg keeps
+        # its tier visible for the same reason in the other direction: `perplexity`
+        # is listed on the operator's config and is the tier the product documents
+        # as walled in practice, so plain `enabled` would hide a fact the auto row
+        # prints for the same provider on an install that did not list it
+        # (round-2 U2-6).
+        if status.tier == "metered":
+            return "enabled (paid)"
+        return "enabled (best-effort)" if status.tier == "fallback" else "enabled"
     if status.tier == "rotate":
         return "auto free"
     if status.tier == "fallback":
@@ -1943,17 +1950,31 @@ def provider_state_label(status: ProviderStatus) -> str:
 STATE_MEANINGS: dict[str, str] = {
     "enabled": "in your priority order",
     "enabled (paid)": "listed, and tried in the paid band after every free leg",
+    "enabled (best-effort)": "listed, and tried after the free pool",
     "auto free": "with the free providers",
     "auto best-effort": "after the free providers",
     "auto paid": "tried after the free providers, never before a free leg",
     "excluded": "never used, whatever else is configured",
-    "needs setup": "not in any chain until it can serve",
+    # NOT "not in any chain": a LISTED leg with no credential is deliberately kept
+    # in the chain and walked, where it fails locally in the availability check --
+    # so the old wording was a claim the `chain:` line above it disproved
+    # (round-1 N5, round-2 Q2-1/D2-2/U2-3).
+    "needs setup": "cannot serve yet; a listed one is still tried and reports `not configured`",
 }
 
 
 def state_legend() -> str:
-    """One line naming every state word, derived from the table it explains."""
-    return "States: " + " · ".join(STATE_MEANINGS)
+    """One line defining every state word, derived from the table it explains.
+
+    It prints the MEANINGS, not just the words. A legend that lists a closed
+    vocabulary is worth something, but the reader who lands on `/search` cold needs
+    to know what `auto best-effort` or `(paid)` costs them, and the wording already
+    exists here -- so the line carries it rather than making the reader infer it
+    from the row above (round-2 U2-5, D2-4).
+    """
+    return "States: " + " · ".join(
+        f"{word} = {meaning}" for word, meaning in STATE_MEANINGS.items()
+    )
 
 
 def provider_setup_hint(provider_id: SearchProviderId) -> str:
@@ -1964,7 +1985,12 @@ def provider_setup_hint(provider_id: SearchProviderId) -> str:
         # DeepSeek search has no search-specific secret: it bills the model key, and
         # `login` is where that key lives. `search setup` says so too.
         return f"`local-operator login deepseek` (or `local-operator search setup {provider_id}`)"
-    keys = PROVIDERS[provider_id].credential_keys
+    # `.get`, not `PROVIDERS[...]`: this runs on the REFUSAL path, and an id that is
+    # not in the catalogue must produce a sentence rather than a KeyError inside the
+    # error message (round-2 N6 -- the validation that keeps bad ids out lives at the
+    # tool/CLI boundary, which is not where a copy helper should depend on it).
+    definition = PROVIDERS.get(provider_id)
+    keys = definition.credential_keys if definition is not None else ()
     suffix = f" ({', '.join(keys)})" if keys else ""
     return f"`local-operator search setup {provider_id}`{suffix}"
 
@@ -2017,21 +2043,92 @@ def provider_landing_line(provider_id: SearchProviderId, status: ProviderStatus)
     return f"{provider_id} enabled ({state}; {meaning})"
 
 
+def chain_leg_marker(status: ProviderStatus) -> str:
+    """The parenthetical for one chain leg, or "" when the leg needs no warning.
+
+    ONE table for the two surfaces: the CLI prints the marker as text and the TUI
+    paints it in the ink its fact deserves, and both read this function, so a
+    marker cannot appear on one surface and not the other (round-2 D2-3).
+
+    - `(paid)` -- the effective transport spends money or a model turn.
+    - `(setup needed)` -- the leg cannot serve yet, so a reader who sees it in the
+      chain (a LISTED leg is walked and fails locally, which is deliberate) is told
+      why the same provider's row says `needs setup` (round-2 D2-2/Q2-1/U2-3).
+    - `(best-effort)` -- the best-effort tier, walled often in practice. Printed for
+      a listed leg as well as an auto-joined one: the operator lists `perplexity`,
+      and hiding its tier was the disclosure gap U2-6 found.
+    """
+    if status.tier == "metered":
+        return "(paid)"
+    if not status.available:
+        return "(setup needed)"
+    if status.tier == "fallback":
+        return "(best-effort)"
+    return ""
+
+
+#: Ink token for each marker, so the chain row emphasises what the row below it
+#: emphasises: `(paid)` is the same amber as `enabled (paid)`, and the other two
+#: carry the same weight as the state words they echo (round-2 D2-3).
+CHAIN_MARKER_TOKENS: dict[str, str] = {
+    "(paid)": "warning",
+    "(setup needed)": "muted",
+    "(best-effort)": "muted",
+}
+
+
 def chain_label(statuses: list[ProviderStatus]) -> str:
     """The whole chain in try order: `DuckDuckGo → Exa → DeepSeek (paid)`.
 
     It spans EVERY leg in the chain, listed ones included, because the summary it
     replaces reported only the auto-joined bands -- so on an install that listed a
     paid provider it printed `paid: (none)` while a model-turn leg sat in the
-    chain (round-1 D1). A leg whose effective transport spends is marked `(paid)`,
-    whatever put it there.
+    chain (round-1 D1). See :func:`chain_leg_marker` for what a leg is marked with
+    and why.
     """
     legs = [status for status in statuses if status.enabled]
     if not legs:
         return "(none)"
     return " → ".join(
-        f"{status.label} (paid)" if status.tier == "metered" else status.label for status in legs
+        f"{status.label} {marker}".strip() for status, marker in _chain_legs(statuses)
     )
+
+
+def _chain_legs(statuses: list[ProviderStatus]) -> list[tuple[ProviderStatus, str]]:
+    """The in-chain statuses paired with their marker, in try order."""
+    return [(status, chain_leg_marker(status)) for status in statuses if status.enabled]
+
+
+def provider_order_note(
+    provider_ids: list[SearchProviderId],
+    settings: WebSearchSettings,
+    credentials: CredentialManager,
+) -> str:
+    """The tail of the `search order` receipt, derived from where each id LANDS.
+
+    `search order` writes the priority prefix, and "tried first" was true of that
+    verb until the paid legs were hoisted behind every free one: naming a paid
+    provider now produces a chain that reaches the free legs first, so a receipt
+    promising otherwise contradicts the chain the command just wrote -- printed by
+    the same CLI that prints the truth two commands later (round-2 U2-1, carried by
+    the code reviewer). The sentence is therefore read off the resolver, and it
+    keeps both halves: the ids that DO lead, and the ones that are held back.
+    """
+    bands = resolve_provider_bands(settings, credentials)
+    leads = [provider_id for provider_id in provider_ids if provider_id not in bands.metered]
+    held = [provider_id for provider_id in provider_ids if provider_id in bands.metered]
+    clauses: list[str] = []
+    if leads:
+        clauses.append("tried first")
+    if held:
+        joined = ", ".join(held)
+        clauses.append(
+            f"{joined} is paid and runs after the free legs"
+            if len(held) == 1
+            else f"{joined} are paid and run after the free legs"
+        )
+    clauses.append("any exclusion named here was cleared")
+    return "(" + "; ".join(clauses) + ")"
 
 
 def provider_statuses(

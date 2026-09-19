@@ -121,6 +121,46 @@ async def test_search_setup_names_the_route_for_every_provider_that_has_one(
     assert "DuckDuckGo needs no setup" not in text
 
 
+def test_chain_markers_carry_the_shared_ink(tmp_path) -> None:
+    """Round-2 D2-3: `(paid)` was plain dim on the chain row, amber two rows below.
+
+    The TUI reads the provider module's marker table and paints each marker in the
+    token that table names, so one fact cannot have two weights.
+    """
+    from rich.style import Style
+
+    from local_operator.credentials import CredentialManager
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.app import _search_chain_text
+    from local_operator.web_search.models import WebSearchSettings
+    from local_operator.web_search.providers import (
+        CHAIN_MARKER_TOKENS,
+        chain_label,
+        chain_leg_marker,
+        provider_statuses,
+    )
+
+    credentials = CredentialManager(tmp_path / "config")
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    settings = WebSearchSettings(providers=["duckduckgo", "brave", "deepseek"])
+    statuses = provider_statuses(settings, credentials)
+
+    markers = {chain_leg_marker(status) for status in statuses if status.enabled}
+    assert "" in markers and "(paid)" in markers and "(setup needed)" in markers
+    # "" is the unmarked case (a free, ready leg), so only the markers must be covered.
+    assert markers - {""} <= set(CHAIN_MARKER_TOKENS)
+    assert CHAIN_MARKER_TOKENS["(paid)"] == "warning"
+
+    # The TUI row is the CLI line with the markers in their own ink.
+    row = _search_chain_text(statuses)
+    assert row.plain == chain_label(statuses)
+    paid = next(span for span in row.spans if "(paid)" in row.plain[span.start : span.end])
+    # `Text.spans[].style` is `str | Style` in Rich's own typing, so narrow before
+    # reading the colour out of it.
+    assert isinstance(paid.style, Style)
+    assert paid.style.color == Style(color=theme_mod.semantic_color("warning")).color
+
+
 def test_every_state_word_has_its_own_ink() -> None:
     """Round-1 D5: the spending words painted exactly like the prose beside them.
 
@@ -134,10 +174,81 @@ def test_every_state_word_has_its_own_ink() -> None:
     from local_operator.web_search.providers import STATE_MEANINGS
 
     assert set(_SEARCH_STATE_TOKENS) == set(STATE_MEANINGS)
-    # The two spending words carry the caution ink; the two out-of-play words are
-    # dimmer than the prose they sit in; the free in-play words stay a step above it.
+    # The two spending words carry the caution ink; every other word is at least the
+    # prose weight -- round 2 measured `faint` at 3.89:1, below AA and quieter than
+    # the description beside it, for the two words that tell a reader to act.
     assert _SEARCH_STATE_TOKENS["auto paid"] == "warning"
     assert _SEARCH_STATE_TOKENS["enabled (paid)"] == "warning"
-    assert _SEARCH_STATE_TOKENS["excluded"] == "faint"
-    assert _SEARCH_STATE_TOKENS["needs setup"] == "faint"
+    assert _SEARCH_STATE_TOKENS["excluded"] == "muted"
+    assert _SEARCH_STATE_TOKENS["needs setup"] == "muted"
     assert _SEARCH_STATE_TOKENS["auto free"] == "muted"
+
+
+@pytest.mark.asyncio
+async def test_search_order_notice_names_the_paid_landing(monkeypatch, tmp_path) -> None:
+    """Round-2 U2-1 on this surface: the receipt is derived, not hardcoded."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    from local_operator.credentials import CredentialManager
+    from local_operator.paths import config_dir
+
+    CredentialManager(config_dir()).set_credential("DEEPSEEK_API_KEY", "stored")
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/search order deepseek")
+        await pilot.pause()
+        text = _transcript_text(app)
+
+    assert "search order: deepseek (deepseek is paid and runs after the free legs;" in text
+    # The false half of the old sentence is gone: nothing in this notice promises the
+    # named paid leg is tried first.
+    notice = text.split("search order: deepseek (", 1)[1].split(")")[0]
+    assert "tried first" not in notice
+
+
+@pytest.mark.asyncio
+async def test_search_listing_labels_the_stored_order_and_defines_the_legend(
+    monkeypatch, tmp_path
+) -> None:
+    """Round-2 U2-2/D2-4/U2-5: two arrow-lists, one labelled; a legend with meanings."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/search")
+        await pilot.pause()
+        text = _transcript_text(app)
+
+    # The stored prefix is named, so the `chain` row reads as the correction rather
+    # than as a rival list.
+    assert "order:" in text
+    # The legend carries the meanings, not just the words.
+    assert "auto paid = tried after the free providers, never before a free leg" in text
+    assert "needs setup = cannot serve yet" in text
+
+
+@pytest.mark.asyncio
+async def test_needs_setup_notice_does_not_claim_it_applies_now(monkeypatch, tmp_path) -> None:
+    """Round-2 D2-5: `; applies now` belongs to a sentence about a change."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/search enable brave")
+        await pilot.pause()
+        text = _transcript_text(app)
+
+    assert "brave is allowed, but no search can use it yet" in text
+    assert (
+        "no search can use it yet: run `local-operator search setup brave` (BRAVE_API_KEY)" in text
+    )
+    assert (
+        "use it yet: run `local-operator search setup brave` (BRAVE_API_KEY); applies now"
+        not in text
+    )

@@ -319,7 +319,12 @@ class WebSearchService:
                         limit,
                     )
                 except Exception as error:  # one provider failure is the fallback trigger
-                    failures.append(f"{provider_id}: {error}")
+                    # `str(error) or type(error).__name__`: a transport error whose
+                    # message is empty -- httpx.ReadTimeout is the one that happens --
+                    # used to render as a bare `exa: ` in the digest and, once the
+                    # lead moved to the last leg, as an empty LEAD sentence in the
+                    # cropped card (round-2 N4/Q2-2, round-1 Q3).
+                    failures.append(f"{provider_id}: {str(error) or type(error).__name__}")
                     continue
                 if not response.sources and not (response.answer or "").strip():
                     failures.append(f"{provider_id}: returned no results")
@@ -342,15 +347,14 @@ class WebSearchService:
                 return response
 
         summary = "; ".join(failures) or "no candidates"
-        # Name only what was TRIED, and lead with the leg that most likely has the
-        # actionable sentence -- the LAST one, which on a free-first chain is the
-        # paid backstop whose failure is the one a reader can act on. A six-leg
-        # chain makes the old whole-prefix summary a ~1200-cell string, and the
-        # tool card crops the collapsed row to its first ~34 cells: leading with
-        # "All configured web search providers failed: brave: not configured" put
-        # the one leg that was never going to run where the reader looks (round-1
-        # D4/U7). The count and the tried list follow, where the expansion shows
-        # them.
+        # Name only what was TRIED, and put the COUNT first: a six-leg chain makes
+        # the whole-prefix summary a ~1200-cell string, and the collapsed tool card
+        # paints about 25 cells of it, so anything after the opening clause is always
+        # cropped. Two rounds of measurement got here -- round 1 dropped the false
+        # "All configured …" preamble, round 2 measured that the count sitting at
+        # cell ~57 could never appear (`D2-1`), so the shape is now
+        # `6/6 providers failed: <reason> (<tried list>)`: count, cause, and the
+        # list for the expansion.
         #
         # One candidate covers both the forced call and the one-provider install,
         # and this function cannot tell them apart -- so the message says what is
@@ -364,13 +368,28 @@ class WebSearchService:
             raise RuntimeError(
                 f"Web search failed: {detail} ({only!r} was the only provider tried)"
             )
-        last = failures[-1] if failures else "no candidates"
-        last_provider = candidates[-1]
-        redundant = f"{last_provider}: "
-        detail = last[len(redundant) :] if last.startswith(redundant) else last
+        # Split each entry back into its provider and its reason. The reasons are in
+        # the order the legs were TRIED, which is the order a reader wants them in.
+        tried = [entry.partition(": ")[::2] for entry in failures]
+        # Lead with the first reason that says something. `not configured` is a
+        # placeholder (the leg was never going to run) and an empty reason is a
+        # formatting artefact -- leading with either is how the cropped card came to
+        # show `Web search failed: not configured` while the leg that actually failed
+        # on the wire was named later (round-2 N4/Q2-2).
+        lead = next(
+            (reason for _provider, reason in tried if reason and reason != "not configured"),
+            tried[-1][1] if tried else "no candidates",
+        )
+        # COUNT FIRST, because the collapsed tool card paints ~25 cells of this
+        # string and the trailing list is always cropped: `6/6 providers failed: …`
+        # puts the count, the fact and the start of the cause inside that budget,
+        # and the tried list stays for the expansion (round-2 D2-1).
+        # ...and every leg's own reason stays after it: the expansion is where a
+        # diagnostic belongs, and round 2 asked for the per-leg breakdown back
+        # (`tried:` names the order the legs were attempted in, which under
+        # round-robin is this call's order and not a stable chain order).
         raise RuntimeError(
-            f"Web search failed: {detail} (all {len(candidates)} providers in the chain "
-            f"failed: {', '.join(candidates)})"
+            f"{len(candidates)}/{len(candidates)} providers failed: {lead} (tried: {summary})"
         )
 
 
