@@ -2604,22 +2604,47 @@ def _entries_in_directory(directory: Path, parse: Any, field: str) -> _Namespace
     get to decide that a payload it cannot read NAMED NO TREE — the whole point of
     the flag is that "says nothing" and "says something I could not read" must not
     be the same answer to a caller about to delete a tree.
+
+    AND THE ENTRY IS NAMED IN THE LOG, at ``warning`` rather than ``debug``: an
+    unreadable entry keeps EVERY generation until it is dealt with (see
+    :func:`prune_generations`), which is a state the operator has to be able to see
+    from ``~/.local-operator/logs`` on the automatic path, where nothing prints. A
+    level that only appears under ``-v`` is how this condition stayed invisible in
+    the first place (review round 2, MAJOR 1).
     """
     try:
         paths = sorted(directory.glob("*.json"))
     except OSError:
         # Cannot even see what is there. That is "unreadable", not "empty".
+        logger.warning("cannot list the record namespace %s: keeping every generation", directory)
         return _NamespaceRead(unreadable=True)
     records: list[Any] = []
     unreadable = False
     for path in paths:
         try:
             record = parse(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:  # noqa: BLE001 — one bad entry costs itself, never its neighbours
+        except Exception as exc:  # noqa: BLE001 — one bad entry costs itself, not its neighbours
+            # THE REASON IS IN THE LINE rather than in a traceback: the condition is
+            # expected from time to time (a torn write, a record from a build that
+            # is not this one), and one ``warning`` the operator can act on beats a
+            # stack they have to read. ``logger.debug`` still has the whole thing.
+            logger.warning(
+                "unreadable record %s in %s (%s): it may name any generation, so "
+                "every generation is kept until it is dealt with",
+                path.name,
+                directory,
+                type(exc).__name__,
+            )
             logger.debug("unreadable record %s", path, exc_info=True)
             unreadable = True
             continue
         if record is None:
+            logger.warning(
+                "record %s in %s is not a record of this kind: it may name any "
+                "generation, so every generation is kept until it is dealt with",
+                path.name,
+                directory,
+            )
             unreadable = True
             continue
         records.append(record)
@@ -2638,7 +2663,15 @@ def _entries_listed(config_root: Path, dirname: str) -> int | None:
     The path is spelled here rather than asked for through ``registry.run_dir``,
     which CREATES the directory: this whole traversal is a read, and the same rule
     the sidecar reader states — a read must not leave a directory behind on a
-    machine whose only problem is that something died — binds the count too.
+    machine whose only problem is that something died — binds the count too. THE
+    COUNT ALONE WAS NOT ENOUGH FOR THAT CLAIM (review round 2, MINOR 1): the
+    registry-backed readers used to call ``registry.scan`` a few lines above this,
+    and ``scan`` resolves its directory through ``run_dir``, so one
+    ``referenced_install_roots()`` on a machine with nothing under ``run/`` created
+    ``run/``, ``run/mobile`` and ``run/serve`` — measured. Both of those readers now
+    check that the namespace directory exists and answer "nothing here" without
+    calling ``scan`` at all when it does not, so the rule is a fact about the
+    traversal rather than a sentence about one function in it.
     ``None`` means the directory could not be listed at all.
     """
     try:
@@ -2659,19 +2692,42 @@ def _session_records_under(config_root: Path) -> _NamespaceRead:
     the answer. Reader mode leaves every record where it is, and the count of
     entries beside the count of parsed records is then what says whether the
     namespace was read whole.
+
+    AN ABSENT NAMESPACE IS ANSWERED WITHOUT CALLING ``scan``, because ``scan``
+    creates it (see :func:`_entries_listed`, review round 2 MINOR 1). Both branches
+    say the same thing — no records — so the only difference is the directory left
+    behind on a machine where the only thing that happened was a read.
     """
+    from local_operator.session.runtime.types import RUN_DIRNAME
+
+    if not (config_root / RUN_DIRNAME).is_dir():
+        return _NamespaceRead()
     try:
         from local_operator.session.runtime import registry
-        from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+        from local_operator.session.runtime.types import SessionRecord
 
         parsed = registry.scan(config_root, parse=SessionRecord.from_json, reap=False)
         listed = _entries_listed(config_root, RUN_DIRNAME)
+        unreadable = listed is None or listed != len(parsed)
+        if unreadable:
+            logger.warning(
+                "%s holds records this build could not read (%s listed, %s parsed): "
+                "every generation is kept until they are dealt with",
+                config_root / RUN_DIRNAME,
+                "unlistable" if listed is None else listed,
+                len(parsed),
+            )
         return _NamespaceRead(
             tuple(_roots_from([record for record, _state in parsed], "install_root")),
-            unreadable=listed is None or listed != len(parsed),
+            unreadable=unreadable,
         )
     except Exception:  # noqa: BLE001 — unreadable is not empty; see ``_records_under``
-        logger.debug("session records unreadable under %s", config_root, exc_info=True)
+        logger.warning(
+            "session records unreadable under %s: every generation is kept until "
+            "they are dealt with",
+            config_root,
+            exc_info=True,
+        )
         return _NamespaceRead(unreadable=True)
 
 
@@ -2682,19 +2738,45 @@ def _serve_records_under(config_root: Path) -> _NamespaceRead:
     for the same two reasons: this reader must not delete what it cannot read, and
     a daemon record that did not come back has to be distinguishable from one that
     was never there.
+
+    THIS NAMESPACE'S HALF OF REVIEW ROUND 2's MAJOR 1 lives in the mismatch branch
+    below. ``run/serve`` had no production reaper at all until
+    :func:`server.registry.prune_serve_records` — the daemon's own boot now reaps
+    it — so an unreadable entry here used to pin this reader to ``complete=False``
+    on every later ``lop update``, for good. The reader still does not sweep (that
+    is what makes it safe); what it does now is SAY SO, naming the namespace at a
+    level an operator reads.
     """
+    from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
+
+    if not (config_root / SERVE_RUN_DIRNAME).is_dir():
+        return _NamespaceRead()
     try:
         from local_operator.server import registry as serve_registry
-        from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
 
         parsed = serve_registry.scan(config_root, reap=False)
         listed = _entries_listed(config_root, SERVE_RUN_DIRNAME)
+        unreadable = listed is None or listed != len(parsed)
+        if unreadable:
+            logger.warning(
+                "%s holds serve records this build could not read (%s listed, %s "
+                "parsed): every generation is kept until they are dealt with, and a "
+                "`lop serve` boot reaps the namespace",
+                config_root / SERVE_RUN_DIRNAME,
+                "unlistable" if listed is None else listed,
+                len(parsed),
+            )
         return _NamespaceRead(
             tuple(_roots_from([record for record, _state in parsed], "prefix")),
-            unreadable=listed is None or listed != len(parsed),
+            unreadable=unreadable,
         )
     except Exception:  # noqa: BLE001 — same direction as above
-        logger.debug("serve records unreadable under %s", config_root, exc_info=True)
+        logger.warning(
+            "serve records unreadable under %s: every generation is kept until they "
+            "are dealt with",
+            config_root,
+            exc_info=True,
+        )
         return _NamespaceRead(unreadable=True)
 
 
@@ -3219,10 +3301,23 @@ class PrunePlan:
     remove`` with three different meanings, and made the one tree a live session
     was still running from — the single most important thing that output could
     say — invisible (design review round 1, D3).
+
+    ``references_complete`` IS PART OF THE ANSWER for the same reason, and it is
+    the one field here that is about the READ rather than about a generation
+    (review round 2, MAJOR 1). When it is ``False`` every candidate carries
+    ``_UNREADABLE_RECORD_REASON``, and a caller that prints only removals
+    therefore prints NOTHING on every subsequent run — the operator sees a prune
+    that reclaims no disk and says nothing, on a machine whose generation count is
+    the reason this function exists at all. The flag travels with the plan so that
+    the automatic path (:func:`prune_notice_lines`) can say so in one line.
     """
 
     removed: tuple[Path, ...]
     decisions: tuple[PruneDecision, ...]
+    #: Whether the record read behind this plan finished. ``False`` means at least
+    #: one namespace could not be read whole, so nothing was removed and the
+    #: condition is the one an operator has to clear (see the class docstring).
+    references_complete: bool = True
 
     @property
     def kept(self) -> tuple[PruneDecision, ...]:
@@ -3287,6 +3382,15 @@ def prune_generations(
     which is the incident this whole change set exists to end. A plain iterable of
     roots carries no such fact and is complete by construction, which is what a
     caller that resolved its own tree list is saying.
+
+    AND AN INCOMPLETE READ IS REPORTED RATHER THAN ONLY OBEYED. The read being
+    incomplete is the reason nothing is removed here, so it is carried out on the
+    plan (:attr:`PrunePlan.references_complete`) and printed by
+    :func:`prune_notice_lines` — a prune that keeps everything must not look, on
+    the upgrade path, like a prune that had nothing to do. Both readers that can
+    discover the condition already log it at ``warning`` with the file and the
+    namespace; this is the same fact on the surface the operator is actually
+    looking at.
     """
     generations = generations_dir()
     if not generations.is_dir():
@@ -3317,6 +3421,7 @@ def prune_generations(
                 PruneDecision(path, False, "the pointer does not resolve, so nothing is removed")
                 for path in everything
             ),
+            references_complete=references_complete,
         )
     if current is not None:
         wanted.add(_real(current))
@@ -3423,7 +3528,11 @@ def prune_generations(
             # call when the command's own report is the one the operator read.
             withdraw_involuntary_stops(attested, mechanism=MECHANISM_GENERATION_PRUNE)
             decisions.append(PruneDecision(path, False, _REMOVAL_FAILED_REASON))
-    return PrunePlan(removed=tuple(removed), decisions=tuple(decisions))
+    return PrunePlan(
+        removed=tuple(removed),
+        decisions=tuple(decisions),
+        references_complete=references_complete,
+    )
 
 
 def _ttl_label() -> str:
@@ -3525,8 +3634,21 @@ def prune_notice_lines(plan: PrunePlan) -> list[str]:
     upgrade is reporting a side effect it had to perform, while ``lop install
     prune`` is answering a question about the retention decision, which needs the
     keeps and their reasons (design review D3/D4).
+
+    ONE EXCEPTION, AND IT IS THE ONE THIS FUNCTION EXISTS FOR (review round 2,
+    MAJOR 1): when the record read did not finish, this path removed nothing and
+    printed nothing — forever, on every later ``lop update``, with the condition
+    only visible to someone reading the debug log. "Nothing was reclaimed because
+    a record could not be read" is not a removal, but it is exactly what an
+    operator needs to be told by the path that is supposed to reclaim disk, so the
+    incomplete read gets a line even though no generation does.
     """
     lines: list[str] = []
+    if not plan.references_complete:
+        lines.append(
+            "no generations reclaimed: a session or serve record could not be read, "
+            "so every generation is kept until it is dealt with"
+        )
     for decision in plan.decisions:
         if not decision.removed:
             continue
