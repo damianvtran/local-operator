@@ -1002,7 +1002,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "pem-private-key",
         re.compile(
-            r"-----BEGIN (?:[A-Z0-9 ]*?)PRIVATE KEY-----"
+            r"-{1,4}[\x27\x22]?-{1,4}BEGIN (?:[A-Z0-9 ]*?)PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}"
             r"[\s\S]*?-----END (?:[A-Z0-9 ]*?)PRIVATE KEY-----"
         ),
         REDACTION_MARKER,
@@ -1013,7 +1013,11 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # catch the header when the body was truncated before an END line arrived.
     Shape(
         "gcp-service-account-key",
-        re.compile(r"(?i)(\"?private[_-]?key\"?\s*:\s*\"?)(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)"),
+        re.compile(
+            r"(?i)(\"?private[_-]?key\"?\s*:\s*\"?)"
+            r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
+            r"-{1,4}[\x27\x22]?-{1,4})"
+        ),
         r"\1" + REDACTION_MARKER,
         2,
     ),
@@ -1344,7 +1348,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     ),
     Shape(
         "aws-access-key-id",
-        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]+(?:[\x27\x22][0-9A-Z]+)*\b"),
         REDACTION_MARKER,
     ),
     Shape(
@@ -1528,6 +1532,38 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     return marked
 
 
+#: A mask followed by a QUOTE and more credential-shaped characters is an
+#: INCOMPLETE mask: the rule's value class stopped at the quote while the credential
+#: continued, so the rest of the credential stayed readable under a notice that said
+#: it had been masked. Three review rounds found this in a different rule each time,
+#: which is why it is closed STRUCTURALLY rather than by widening one more class:
+#:
+#: **A credential does not end at a quote.** The tail is masked too, and the
+#: lookahead requires a real delimiter after it (whitespace or one of
+#: `,;:)]}&?=<>|`), so a quote that genuinely delimits a value
+#: (`password: "[redacted]"`) is left where it is and nothing else is touched.
+_INCOMPLETE_MASK_RE = re.compile(
+    r"\[redacted\](['\"])([^\s'\"]+(?:['\"][^\s'\"]+)*)" r"(?=['\"]?(?:[\s,;:)\]}&?=<>|]|$))"
+)
+
+
+#: The mirror case: a mask whose LEFT side is a readable run followed by a quote
+#: (``_authToken=npm_abcd'[redacted]``). The run is credential material the rule
+#: could not see, and it is masked for the same reason as the tail.
+_INCOMPLETE_MASK_LEFT_RE = re.compile(r"(?<=[\s,;:(\[=])(['\"])([^\s'\"]+)\[redacted\]")
+
+
+def _close_partial_masks(text: str) -> str:
+    """Mask the readable tail (or head) of a credential whose mask stopped at a quote."""
+    for _ in range(3):
+        closed = _INCOMPLETE_MASK_RE.sub(REDACTION_MARKER, text)
+        closed = _INCOMPLETE_MASK_LEFT_RE.sub(REDACTION_MARKER, closed)
+        if closed == text:
+            break
+        text = closed
+    return text
+
+
 def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> str:
     """Apply one group of rules, in table order."""
     for shape in shapes:
@@ -1550,7 +1586,7 @@ def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> s
                 if value:
                     hits.append(_make_hit(shape, match, value))
         text = shape.pattern.sub(shape.replacement, text)
-    return text
+    return _close_partial_masks(text)
 
 
 #: Cheap necessary conditions for the whole table, as lowercase substrings.
