@@ -452,9 +452,9 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     inherits the environment, so it starts silent rather than deciding again.
 
     STICKY AND ONE-WAY, deliberately. It is never cleared, and there is no
-    un-suppress: the flag describes what this process IS (a test surface), not
-    what it is doing at the moment. Idempotent, so the several call sites on
-    one boot path log once rather than four times.
+    un-suppress: the flag records that this process ADOPTED a test surface at
+    some point in its life, and is never re-evaluated afterwards. Idempotent, so
+    the several call sites on one boot path log once rather than four times.
 
     THE PRICE OF THAT, stated here because this is where a reader looks for it.
     A session that switches OFF the test hosting mid-run (``/model
@@ -463,9 +463,10 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     (``session.model_selection.session_uses_test_hosting``) reads the session's
     LATEST spec and would let them announce. The two can disagree, and the
     direction is the safe one — every leg asks this switch FIRST, so a silenced
-    process stays silent — but the honest statement is that the banner for such
-    a completion comes from ANOTHER surface on the machine (the operator's own
-    TUI, the desktop app), not from the process that opened the mock.
+    process stays silent — but the honest statement is that such a completion is
+    announced by ANOTHER surface on the machine (the operator's own TUI, the
+    desktop app) IF one is running, and otherwise not announced at all: the
+    banner is dropped with a debug log line and no user-visible signal.
     Making the two agree was considered and rejected: it would mean re-reading a
     session's spec in the process that decides and clearing the switch when the
     spec left the mock — and a spawned child inherits the switch, so clearing it
