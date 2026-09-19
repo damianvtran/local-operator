@@ -214,10 +214,13 @@ gh api -X PATCH "repos/<owner>/<repo>/security-advisories/<GHSA>" -f state=publi
 
 Credits are shown publicly only once the credited user accepts them, so ask
 the reporter to accept in the thank-you message. Send that thank-you **before**
-you publish: publishing closes the advisory's comment thread, the reporter's
-thread lives there, and it cannot be reopened (measured on the September 2026
-advisories — see the note at the end of phase 8). If you have already published,
-thank them in the durable record instead (phase 9).
+you publish: publishing is what leaves the advisory with no comment surface, and
+the reporter's thread lives on the advisory while it is still in draft/triage.
+The post-publication state was measured on the September 2026 advisories (see
+the note at the end of phase 8); the closing of the thread by publication itself
+follows from the reporter thread being advisory-side and advisory comments being
+unwritable afterwards. If you have already published, thank them in the durable
+record instead (phase 9).
 
 ## 6. CVE request
 
@@ -355,18 +358,32 @@ what actually reaches the databases.
   Record which escalations were filed, which are still pending a human action,
   and their links, in the repository rather than on the advisory page. A
   *published* repository advisory has no comment surface. Measured on the two
-  September 2026 advisories once published: the advisory object reports
-  `comments_url: null`; `GET
-  /repos/<owner>/<repo>/security-advisories/<GHSA>/comments` resolves to `200`
-  with an empty list `[]` (the collection route resolves, but there is nothing
-  to read); a `POST` to that same path returns `404`;
-  `https://github.com/advisories/...`-style UI shows the description, timeline
-  events and Request-CVE panel with no comment form; and the GraphQL
-  `SecurityAdvisory` type exposes no comment field while `Mutation` has no
-  advisory-comment mutation. Do not read the `200 []` as an invitation to post:
-  the `comments_url: null` on the object is the authority. Commentary exists
-  only while the advisory is in draft/triage, which is why the reporter thread
-  is visible there before publication. So record the escalation on the
+  September 2026 advisories once published:
+
+  - The advisory object has **no** comment field at all — check it with
+    `gh api "repos/<owner>/<repo>/security-advisories/<GHSA>" | jq '{has: has("comments_url"), dot: .comments_url}'`,
+    which returns `{"has": false, "dot": null}`. Do not read `.comments_url`
+    straight out of a `jq` projection: a missing key and a null key both print
+    `null`, which is how an earlier version of this runbook came to cite a
+    field that does not exist.
+  - `GET /repos/<owner>/<repo>/security-advisories/<GHSA>/comments` resolves to
+    `200` with an empty list `[]`. The collection route resolves; there is
+    nothing to read, and this `200` is **not** an invitation to post.
+  - `POST` to that same path returns `404`, with a `documentation_url` pointing
+    at a `#create-a-repository-advisory-comment` anchor that is not present on
+    the current advisory REST page.
+  - The repository advisory page, `…/security/advisories/<GHSA>`, renders the
+    description, timeline events and Request-CVE panel with no comment form.
+    (That is a different URL from `https://github.com/advisories/<GHSA>`, which
+    is the global-database entry and 404s until curation — see phase 7.)
+  - The GraphQL `SecurityAdvisory` type exposes no comment field, and no
+    `Mutation` name contains `advisory`.
+
+  Do not read the `200 []` as an invitation to post, and do not cite
+  `.comments_url` as evidence of anything: a missing key and a null key print
+  the same in `jq`. The four measurements above are the evidence. Commentary
+  exists only while the advisory is in draft/triage, which is why the reporter
+  thread is visible there before publication. So record the escalation on the
   release/announcement discussion for the advisory batch (a comment on it, via
   GraphQL `addDiscussionComment`) and/or the fix PR thread; if the advisory is
   still in draft/triage at +14d, record it on the advisory as well.
