@@ -1591,9 +1591,12 @@ def _scan_sessions(
     ``_recent_sessions_with_origin``'s docstring already states for the other
     axis of visibility.
 
-    The archive index is read ONCE per scan, and only the archived ids it holds
-    are filtered: a store with nothing archived — every store today — pays one
-    failed ``open`` of a file that does not exist and no stat or scandir at all.
+    The archive index is read AT MOST once per scan and LAZILY: only a
+    candidate that has already passed the hidden-origin gate and the
+    directory checks reaches the archive decision, so a store whose entries
+    are all hidden pays no stat and no read for an answer none of them can
+    use, and a store with nothing archived pays one stat and no read (the
+    index is stat-ed before it is opened — see ``session.archived``).
     """
     # Lazy and stdlib-only on the other side: ``retention`` imports nothing
     # heavier than ``logging``, and the CLI startup guard measures this
@@ -1620,10 +1623,16 @@ def _scan_sessions(
         revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
     rows: list[tuple[str, float, str, bool]] = []
-    # ONE read of the archive index per scan, taken here so every row is stamped
-    # from the same answer that filtered it. Read before the scandir so the
-    # filter below is a set lookup rather than a second file access per row.
-    archived = archived_ids(config_dir)
+    # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
+    # reaches the archive decision below. Not read up front, and that is a
+    # syscall budget rather than a style choice: the poll's per-directory cost
+    # is asserted in syscalls (``tests/unit/session/test_catalog_scan_cost.py``),
+    # and a store whose entries are all hidden — a machine between turns, with
+    # every directory a delegated run — must cost ONE ``scandir`` and nothing
+    # else. Reading the index eagerly added a stat (plus a read when a file is
+    # there) to exactly that scan, for an answer no hidden directory can use.
+    # ``None`` means "not read yet"; an empty store reads nothing at all.
+    archived: frozenset[str] | None = None
     # Every directory this scan established is not the user's own session. See
     # the docstring: ``load_catalog`` uses it to skip a second per-directory
     # stat.
@@ -1849,6 +1858,8 @@ def _scan_sessions(
             # a set lookup: an archived directory then costs no filesystem call
             # at all on the 2-second poll, which is the poll this branch is
             # walked by.
+            if archived is None:
+                archived = archived_ids(config_dir)
             is_archived = entry.name in archived
             if is_archived and not include_archived:
                 continue
