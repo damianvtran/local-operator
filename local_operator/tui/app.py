@@ -23896,7 +23896,25 @@ class OperatorApp(App[None]):
                 from local_operator.session.runtime.server import RuntimeServer
 
                 self._mobile_handle = TuiSessionHandle(self)
-                self._mobile_registrant = RuntimeServer(self._mobile_handle, kind="tui")
+                # THE APP OWNS THIS GATE, so the app mints the capability its
+                # own registered runtime demands and keeps it in this process's
+                # memory (issue #1310). Nothing presents it here: the app's own
+                # `/approvals auto` never crosses this socket — it calls
+                # `_set_approve_all` directly, which is the operator's own
+                # keyboard and is not routed — while a follower, the desktop
+                # app and the phone relay all arrive through this runtime and
+                # are therefore refused an authority-increasing op. That is the
+                # intended surface: a TUI-hosted session's gate can only be
+                # loosened at the terminal hosting it.
+                #
+                # Minted per registrant rather than per app, so a `takeover`
+                # that rebuilds the registrant does not leave the old value
+                # honoured anywhere.
+                from local_operator.harness.approval import mint_operator_cap
+
+                self._mobile_registrant = RuntimeServer(
+                    self._mobile_handle, kind="tui", operator_cap=mint_operator_cap()
+                )
                 self._mobile_registrant.start()
             except Exception:
                 logger.debug("mobile registrant failed to start", exc_info=True)

@@ -572,10 +572,19 @@ class SessionRecord:
     pid is the natural uniqueness token and ``kill -9`` leaves exactly one
     stale file to reap.
 
-    ``control_key`` is the whole authorization story of the control socket:
-    the record is mode 0600 under a 0700 directory, so anything that can read
-    the key is already the owning account. The daemon never transmits it
-    further — the phone never learns it.
+    ``control_key`` is the whole authorization story of the control socket for
+    ORDINARY operations: the record is mode 0600 under a 0700 directory, so
+    anything that can read the key is already the owning account. The daemon
+    never transmits it further — the phone never learns it.
+
+    It is deliberately NOT the whole story for the operations that INCREASE
+    authority (issue #1310). ``/approvals auto`` and an approved card remove the
+    gate that constrains the caller, and a model-authored tool call runs as this
+    same uid — so it can read this very file. Those two classes therefore also
+    demand the per-session operator capability, which is held only in the memory
+    of the process that started the session (``harness/approval.py``). Nothing
+    about it belongs in this record: a field here is readable under the same uid
+    and would reinstate the defect. See ``docs/design/approval-authority.md``.
     """
 
     pid: int

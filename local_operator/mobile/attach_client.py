@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Sequence
 
+from local_operator.harness.approval import frame_authority, operator_cap_for
 from local_operator.mobile.types import (
     PROTOCOL_VERSION,
     ContinuationCommand,
@@ -862,6 +863,16 @@ class AttachClient:
         # different from ``[]`` only to a reader of the frame -- both mean the
         # type was not declared, which is the one rule the runtime applies.
         self._slash_consumers = list(slash_consumers) if slash_consumers is not None else None
+        #: The operator capability for the runtime this connection dials, or
+        #: ``None`` when ANOTHER process started it (issue #1310). Resolved at
+        #: ``connect`` from the record's pid against the capabilities THIS
+        #: process minted (`harness/approval.operator_cap_for`) — which is what
+        #: makes "works iff this process started the session" the rule rather
+        #: than a per-surface special case. It rides the frame only for the ops
+        #: that increase authority; every ordinary op is byte-identical to what
+        #: this client sent before the field existed, which is why no
+        #: ``PROTOCOL_VERSION`` moves.
+        self._operator_cap: bytes | None = None
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
         #: Fired the moment a ``retiring`` frame ARRIVES, with the frame itself.
@@ -966,6 +977,13 @@ class AttachClient:
         if record.protocol < 2:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
+        # THE CAPABILITY IS RESOLVED PER DIAL, from the pid in the record being
+        # dialled, because "may I loosen this session's gate" is a property of
+        # the pairing (this process, that runtime) and not of this client. A
+        # reconnect to a SUCCESSOR runtime re-resolves it: a successor this
+        # process spawned carries its own capability, and a successor someone
+        # else started resolves to ``None``, which is the honest answer.
+        self._operator_cap = operator_cap_for(record.pid)
         # A reconnect dials what may be a different conversation (the welcome
         # below fails the identity check when it is), so no phrase the previous
         # one published may survive into this one's refusals.
@@ -1284,6 +1302,30 @@ class AttachClient:
             raise known
         raise RuntimeError(str(reply.get("message", "request failed")))
 
+    def _present_authority(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Add the operator capability to a frame that INCREASES authority.
+
+        The console's half of the rule in ``harness/approval.frame_authority``:
+        the runtime demands the capability on exactly the frames this adds it to,
+        and both sides read the one classification. Nothing is added when
+        ``_operator_cap`` is ``None`` — a viewer of a runtime another process
+        started, which the runtime then refuses with the refusal copy — nor for
+        an op that does not increase authority, so an ordinary request stays
+        wire-identical and an OLD runtime (which does not know the field) keeps
+        serving it.
+
+        Attached HERE, at the single outbound chokepoint, rather than in each
+        caller: ``slash``, ``slash_result`` and ``approval_answer`` are reached
+        from the TUI's routed slash path, the desktop command route, the phone
+        relay and the peer paths, and a per-caller field would be a field some
+        future caller forgets.
+        """
+        if frame_authority(frame) != "authority-increasing":
+            return frame
+        if self._operator_cap is None:
+            return frame
+        return {**frame, "operator_cap": self._operator_cap.hex()}
+
     async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""
         reply = await self._request_frame(op, deadline_s=deadline_s, **fields)
@@ -1324,7 +1366,7 @@ class AttachClient:
         # until the connection closes, then takes the teardown's
         # `ConnectionError` with nobody awaiting it — an "exception was never
         # retrieved" log for a refusal the caller had already handled cleanly.
-        frame = await fit_request_frame({"op": op, "req": req, **fields})
+        frame = await fit_request_frame(self._present_authority({"op": op, "req": req, **fields}))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
         try:
@@ -1358,7 +1400,7 @@ class AttachClient:
         # Fitted before the future is registered, for the reason spelled out in
         # :meth:`_request_frame`: a refusal must leave nothing parked in
         # ``_pending``.
-        frame = await fit_request_frame({"op": op, "req": req, **fields})
+        frame = await fit_request_frame(self._present_authority({"op": op, "req": req, **fields}))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
         try:

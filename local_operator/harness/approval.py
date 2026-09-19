@@ -43,13 +43,33 @@ wrong answers are silent:
 So a differently-named third parameter, ``*args``, and an unreadable signature
 all degrade to the two-argument shape — the one that always works. A host that
 wants provenance names it ``job_id`` and gets it.
+
+This module ALSO owns the gate's authority model, because the two predicates
+that decide who may move a running gate have to live together or they drift:
+:func:`loosening_is_authorised` answers "may this *settings write* loosen the
+gate?" (issue #1282, the config-file path) and :func:`transition_authority`
+answers "is this *control-plane request* one that removes the gate?" (issue
+#1310, the socket path). Both exist for one invariant — the constrained subject
+must not be able to mint the authority that removes its own approval
+requirement — and the operator capability the second one demands is minted,
+handed over and tracked here too, so there is one place to read the whole rule.
+See ``docs/design/approval-authority.md``.
 """
 
 from __future__ import annotations
 
+import hmac
 import inspect
-from collections.abc import Awaitable, Callable
-from typing import Literal, Union, cast
+import logging
+import os
+import secrets
+import socket
+import sys
+from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
+from typing import Any, Literal, Union, cast
+
+logger = logging.getLogger(__name__)
 
 #: Transcript row written when an approval gate expires with nobody attached.
 #:
@@ -184,10 +204,539 @@ LOOSENING_KEPT_BY_ASK_NOTICE = (
 )
 
 
+# ---------------------------------------------------------------------------
+# The control plane's operator capability (issue #1310)
+# ---------------------------------------------------------------------------
+#
+# ``loosening_is_authorised`` closes the CONFIG-FILE path: a settings write is
+# attributed to the operator or it may only tighten. It does not touch the
+# CONTROL-PLANE path, and that path is a different defect class: the session's
+# record publishes ``control_key`` mode 0600, ANY same-uid process may read it,
+# and the runtime accepted ``slash``/``approval_answer`` on that key alone. A
+# model-authored ``bash`` call runs as exactly that uid, so it could read the
+# record, dial the loopback port and set its own gate to ``auto`` — the
+# constrained subject minting the authority that removes its own requirement,
+# one route over from the one #1282 closed.
+#
+# The fix is one predicate (:func:`transition_authority`) and one credential
+# (:func:`mint_operator_cap`) that never reaches the filesystem: the record key
+# stays the whole authorization story for ORDINARY operations, and an
+# authority-INCREASING one additionally demands a capability held only in the
+# memory of the process that started the session and of the console whose
+# keyboard typed the command.
+
+#: Which class of control-plane request this is.
+#:
+#: A ``Literal`` rather than a bool because the seam reads as a question — "is
+#: this one of the increasing ones?" — and a bare ``True`` at the call site
+#: would say nothing about which direction was decided. An ``Authority`` is
+#: never persisted and never crosses the wire.
+Authority = Literal["authority-increasing", "ordinary"]
+
+#: 32 random bytes; 64 hex characters on the wire. Long enough that guessing is
+#: not a strategy even within one process's lifetime, and a round number of
+#: bytes so the comparison is over two equal-length byte strings.
+OPERATOR_CAP_BYTES = 32
+
+#: The arguments that move a live gate from ``ask`` to ``auto``. The SAME set
+#: both ``/approvals`` handlers already compare against — a deliberate
+#: duplication of three string literals rather than an import, because the
+#: handlers' ``elif argument in (...)`` is the SINK's own spelling of the rule
+#: and this module must classify exactly the frames that reach it. A test pins
+#: the two in step (``tests/unit/harness/test_approval_authority.py``), so
+#: widening one alone fails the suite rather than silently leaving a loosening
+#: word unguarded.
+APPROVALS_LOOSENING_WORDS = frozenset({"auto", "off", "yolo"})
+
+
+def transition_authority(command: str, args: str, *, approved: bool | None = None) -> Authority:
+    """Whether this control-plane request INCREASES authority.
+
+    Authority-INCREASING means one thing: the request removes or answers the
+    gate that constrains the caller.
+
+    * ``/approvals auto|off|yolo`` sets the running gate's ``_auto_approve`` to
+      ``True`` — in the runtime's handle, or in the TUI app for the gate the
+      app owns;
+    * ``approval_answer(approved=True)`` resolves the parked card, which is the
+      same concession one card at a time.
+
+    Everything else is ORDINARY and stays on the record key exactly as before:
+    ``ask``/``on``/``prompt`` (and any other unknown word, which the sinks
+    answer with a notice), a bare ``/approvals`` (a report), ``default …`` (a
+    persist the runtime declines anyway), ``read``/``status``/``stop``/
+    ``prompt``/``model``/``rename``, ``peer_message``, and ``ask_answer`` —
+    answering a question the MODEL asked is not a concession to the model.
+
+    ``approved=False`` is deliberately NOT increasing: a deny settles the card
+    in the safe direction, so it must keep working from every surface that can
+    reach the session. That asymmetry is the point — the routes that may loosen
+    are a subset of the routes that may tighten.
+
+    ``command`` is resolved to its registry PRIMARY name before matching, the
+    same way both dispatching hosts resolve it (``primary_slash_name``), so an
+    alias of ``/approvals`` cannot slip past this seam and reach a sink that
+    would have honoured it.
+    """
+    if approved:
+        return "authority-increasing"
+    # Imported function-locally: ``slash_commands`` is the registry and pulls a
+    # wider import graph than this stdlib-only module should carry, and this
+    # predicate is asked once per slash frame rather than on any hot path.
+    from local_operator.slash_commands import primary_slash_name
+
+    if primary_slash_name(str(command)) != "approvals":
+        return "ordinary"
+    if str(args or "").strip().lower() in APPROVALS_LOOSENING_WORDS:
+        return "authority-increasing"
+    return "ordinary"
+
+
+#: Every control op that can carry an authority-increasing request.
+#:
+#: A closed set rather than an inline condition, because TWO ends read it and
+#: they must agree: the runtime refuses such a frame unless it presents the
+#: capability (``session/runtime/server.py``) and the console presents it on
+#: exactly those frames (``mobile/attach_client.py``). A set that drifts leaves
+#: a route where the client believes it is authorising and the server believes
+#: the frame is ordinary — the failure mode of this whole mechanism, one layer
+#: down.
+#:
+#: ``tests/unit/session/runtime/test_approval_authority_seam.py`` re-derives it
+#: from ``server.py``'s own dispatch source and asserts the two are equal, so a
+#: coder who adds an op that reaches a sink fails the suite rather than shipping
+#: an unguarded way to loosen a running gate.
+AUTHORITY_OPS = frozenset({"slash", "slash_result", "approval_answer"})
+
+
+def frame_authority(frame: dict[str, Any]) -> Authority | None:
+    """The class of a control FRAME, or ``None`` when the op carries no class.
+
+    The one place that knows which field of which op carries the transition: a
+    ``slash``/``slash_result`` frame names a command and its arguments, an
+    ``approval_answer`` frame names a verdict, and every other op is ordinary by
+    construction. Callers that only care about the refusal (the runtime) and
+    callers that only care about the presentation (the console) both ask here,
+    so neither can invent its own reading of what a frame means.
+    """
+    op = frame.get("op")
+    if op not in AUTHORITY_OPS:
+        return None
+    if op == "approval_answer":
+        # Truthiness rather than ``is True``: the dispatch reads this field in a
+        # boolean position, so anything truthy IS an approval and must be judged
+        # as one. ``False`` — and an absent value, which fails the dispatch on
+        # its own — stays ordinary, so denying a card keeps working everywhere.
+        return transition_authority("", "", approved=bool(frame.get("approved")))
+    return transition_authority(str(frame.get("command", "")), str(frame.get("args", "")))
+
+
+def operator_cap_ok(*, supplied: object, held: bytes | None) -> bool:
+    """Constant-time check of a capability offered against the one held here.
+
+    ``held`` is the 32 raw bytes this process minted or received; ``supplied``
+    is whatever arrived in the frame's ``operator_cap`` field, which is a hex
+    string on the wire and may be anything at all — the validator types it, but
+    this comparison is the check that actually decides, so it must be total.
+
+    FAIL-CLOSED in every degenerate direction, and each one is a real case:
+
+    * ``held is None`` — this runtime was started by a process that did not
+      hand one over (an older console, a test that constructed the server by
+      hand, a background spawn with no console at all). There is nothing to
+      match, so nothing may loosen.
+    * ``supplied`` absent or not a string — an old client, or a forged frame.
+    * ``held`` the wrong length — a programming error on this side; refusing is
+      the only safe reading of a credential that is not the one we minted.
+
+    Compared with ``hmac.compare_digest`` over equal-length byte strings rather
+    than as strings, so the comparison cannot raise on a non-ASCII candidate
+    (Python's ``str`` form raises ``TypeError`` on non-ASCII input) and cannot
+    leak the shared prefix through timing.
+    """
+    if not isinstance(held, (bytes, bytearray)) or len(held) != OPERATOR_CAP_BYTES:
+        return False
+    if not isinstance(supplied, str) or not supplied:
+        return False
+    return hmac.compare_digest(supplied.encode("utf-8", "surrogatepass"), held.hex().encode())
+
+
+#: The ONE sentence a host hands back when a control-plane request tried to
+#: loosen a running gate without the capability (see
+#: :func:`transition_authority`).
+#:
+#: Lives here for the same reason :data:`LOOSENING_REFUSED_NOTICE` does — the
+#: runtime writes it into an ``error`` frame and the TUI would have to write it
+#: into a transcript, and two copies of one refusal is two chances for one
+#: surface to describe the rule differently from the other. Following the #1291
+#: precedent it names the ONE-STEP remedy rather than the rule, and it names the
+#: remedy for BOTH directions the caller might have wanted: loosening THIS
+#: session (type it where the session was started), or loosening NEW sessions
+#: (``default auto`` / ``--yolo``). The last clause is what makes the refusal a
+#: signpost rather than a wall — ``/approvals ask`` still works from here.
+OPERATOR_CAP_REQUIRED_NOTICE = (
+    "/approvals auto loosens a running gate and has to come from the session's console — "
+    "type it in the terminal (or app) that started this session. "
+    "/approvals default auto before starting, or --yolo, loosens new sessions. "
+    "/approvals ask works from here."
+)
+
+#: Runtime pid -> capability, for the runtimes THIS process spawned.
+#:
+#: This is "the console's memory" the design names, and a module-level dict
+#: rather than a field threaded through every console object because the
+#: question it answers is a property of the PROCESS, not of any one object in
+#: it: "did I start the runtime behind this record?". The desktop backend, the
+#: phone daemon, the TUI and the CLI are each one process that both spawns
+#: runtimes (``session/runtime/launch._spawn_runtime``) and attaches to them
+#: (``mobile/attach_client.AttachClient.connect``), and the pid is the identity
+#: both ends already agree on — the discovery record is keyed by it.
+#:
+#: Never written anywhere. It dies with the process, and a pid key is only ever
+#: added by the spawner that owns the child, so a stale entry can at worst fail
+#: to match a live record (fail-closed).
+_OPERATOR_CAPS: dict[int, bytes] = {}
+
+
+def mint_operator_cap() -> bytes:
+    """A fresh capability. Called once per spawned runtime, by the spawner."""
+    return secrets.token_bytes(OPERATOR_CAP_BYTES)
+
+
+def remember_operator_cap(pid: int, cap: bytes) -> None:
+    """Record that THIS process spawned the runtime at ``pid`` and holds its cap."""
+    _OPERATOR_CAPS[int(pid)] = bytes(cap)
+
+
+def operator_cap_for(pid: int) -> bytes | None:
+    """The capability for ``pid``, or ``None`` when another process spawned it.
+
+    ``None`` is the answer that matters: it is what makes the desktop route,
+    the phone relay, a peer send and a pane attached to a background-started
+    runtime refuse an authority-increasing command, while the process that
+    brought the session's runtime into existence keeps working.
+    """
+    return _OPERATOR_CAPS.get(int(pid))
+
+
+def forget_operator_cap(pid: int) -> None:
+    """Drop the entry for a runtime that has exited or retired."""
+    _OPERATOR_CAPS.pop(int(pid), None)
+
+
+def reset_operator_caps_for_tests() -> None:
+    """Clear the process-wide table. Tests only — nothing in production calls it."""
+    _OPERATOR_CAPS.clear()
+
+
+class OperatorCapHandoff:
+    """The spawner's end of the one-time capability handoff into a runtime.
+
+    The capability must reach the child WITHOUT touching anything the child's
+    own tool subprocesses could later read. Every other channel is one of them:
+
+    * ``argv`` is ps-readable, and so is the environment (``ps -E``) — and the
+      module docstring of ``session/runtime/process.py`` already rules argv out
+      for the session's own identity for exactly this reason;
+    * the runtime's log file is a 0600 file whose path the model can print, and
+      ``session/runtime/launch.py`` pipes the child's stdout/stderr into one of
+      those, so a capability PRINTER would defeat the whole mechanism;
+    * the discovery record is the defect itself (``control_key`` lives there).
+
+    So the value travels on an inherited descriptor that is opened for the
+    spawn, written, and closed on both sides immediately — and only its NUMBER
+    rides in argv, which is not a secret. Tool subprocesses are spawned later
+    with ``close_fds=True`` and ``start_new_session=True``
+    (``tools/builtin.py``), so by the time any of them exists the descriptor is
+    gone from this process's table as well.
+
+    Two platform paths, and the difference is a real strength difference the
+    runtime reports rather than hides (see :func:`operator_cap_guarantee`):
+
+    * POSIX — ``socketpair(AF_UNIX, SOCK_STREAM)``, the child's end handed over
+      with ``pass_fds`` so only that one descriptor survives the exec;
+    * Windows — ``pass_fds`` does not exist, so the descriptor is an anonymous
+      pipe made inheritable and ``close_fds`` has to be off for the spawn,
+      which hands the child every inheritable handle this process owns. The
+      boundary is weaker there regardless (any same-user process may read
+      another's memory); the mode report says so.
+    """
+
+    def __init__(
+        self,
+        *,
+        argv: list[str],
+        pass_fds: tuple[int, ...],
+        close_fds: bool,
+        writer: Callable[[bytes], None],
+        closer: Callable[[], None],
+    ) -> None:
+        #: Append to the child's argv. Carries the descriptor NUMBER only.
+        self.argv = argv
+        self.pass_fds = pass_fds
+        self.close_fds = close_fds
+        #: Writes the capability. Deliberately a CALLABLE taking bytes rather
+        #: than a file object: the POSIX end is a socket (``sendall``) and the
+        #: Windows end is a raw handle, and ``socket.makefile`` would hold a
+        #: second reference to the descriptor that ``close()`` below cannot
+        #: release — the exact leak this handoff exists to avoid.
+        self._writer = writer
+        self._closer = closer
+        self._closed = False
+
+    def deliver(self, cap: bytes) -> None:
+        """Write the capability and close BOTH ends of the handoff.
+
+        Called after the spawn: a 32-byte write into an empty socketpair or
+        pipe cannot block, so this is safe from the spawning thread without a
+        reader on the far side yet.
+        """
+        try:
+            self._writer(cap)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closer()
+        self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+
+#: The argv flag carrying the descriptor number. Spelled once: the spawner
+#: (``session/runtime/launch._spawn_runtime``) and the child
+#: (``session/runtime/process.main``) are different processes at different
+#: times, and a typo in either is a silent "no capability" at best.
+OPERATOR_FD_FLAG = "--operator-fd"
+
+
+def open_operator_cap_handoff() -> OperatorCapHandoff:
+    """Create the descriptor pair a spawn hands its new runtime the cap on."""
+    if os.name == "nt":  # pragma: no cover — Windows only; CI runs POSIX
+        read_handle, write_handle = _win32_inheritable_pipe()
+        return OperatorCapHandoff(
+            argv=[OPERATOR_FD_FLAG, str(int(read_handle))],
+            pass_fds=(),
+            close_fds=False,
+            writer=_win32_handle_writer(int(write_handle)),
+            closer=lambda: _win32_close(int(read_handle), int(write_handle)),
+        )
+
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    child_fd = child.fileno()
+
+    def closer() -> None:
+        # BOTH ends, and this process's copy of the CHILD's end with them: if
+        # this process kept that one, the descriptor would still be in its own
+        # table, and ``close_fds=True`` on every later tool spawn would be the
+        # only thing between it and the model. Close it here instead.
+        for sock in (parent, child):
+            try:
+                sock.close()
+            except OSError:  # pragma: no cover — closing an already-closed pair
+                logger.debug("operator cap handoff already closed", exc_info=True)
+
+    return OperatorCapHandoff(
+        argv=[OPERATOR_FD_FLAG, str(child_fd)],
+        pass_fds=(child_fd,),
+        close_fds=True,
+        writer=parent.sendall,
+        closer=closer,
+    )
+
+
+def _win32_inheritable_pipe() -> tuple[int, int]:  # pragma: no cover — Windows only
+    """An anonymous pipe whose ends are inheritable. Windows-only helper.
+
+    Split out so the POSIX path above reads without platform branching, and so
+    a future Windows job has one function to exercise.
+    """
+    import ctypes
+    import msvcrt
+
+    read_fd, write_fd = os.pipe()
+    for fd in (read_fd, write_fd):
+        handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]  (Windows-only module)
+        if not ctypes.windll.kernel32.SetHandleInformation(  # type: ignore[attr-defined]
+            ctypes.c_void_p(handle), 1, 1
+        ):
+            raise OSError("could not make the operator capability pipe inheritable")
+    return (
+        msvcrt.get_osfhandle(read_fd),  # type: ignore[attr-defined]
+        msvcrt.get_osfhandle(write_fd),  # type: ignore[attr-defined]
+    )
+
+
+class _Win32HandleWriter:  # pragma: no cover — Windows only
+    """A callable that writes bytes to a raw Windows handle."""
+
+    def __init__(self, handle: int) -> None:
+        self._handle = handle
+
+    def __call__(self, data: bytes) -> None:
+        import msvcrt
+
+        flags = os.O_WRONLY | os.O_BINARY  # type: ignore[attr-defined]  (Windows-only)
+        fd = msvcrt.open_osfhandle(self._handle, flags)  # type: ignore[attr-defined]
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+
+
+def _win32_handle_writer(handle: int) -> Callable[[bytes], None]:
+    return _Win32HandleWriter(handle)
+
+
+def _win32_close(read_handle: int, write_handle: int) -> None:  # pragma: no cover
+    import ctypes
+
+    for handle in (read_handle, write_handle):
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))  # type: ignore[attr-defined]
+
+
+def read_operator_cap_from_argv(argv: Sequence[str]) -> bytes | None:
+    """The child's end: read the capability the spawner wrote, then close.
+
+    Returns ``None`` whenever there is nothing to read — no flag (an older
+    spawner, a hand-written argv, a module run by hand), a flag with no value,
+    an unreadable descriptor. ``None`` is the fail-closed state: the runtime
+    then holds no capability and refuses every authority-increasing request,
+    while every ordinary operation is unaffected.
+
+    The descriptor is ALWAYS closed, on every path, because leaving it open is
+    what would let a later tool subprocess find it by number.
+    """
+    value: str | None = None
+    items = list(argv)
+    for index, item in enumerate(items):
+        if item == OPERATOR_FD_FLAG and index + 1 < len(items):
+            value = items[index + 1]
+            break
+        if item.startswith(f"{OPERATOR_FD_FLAG}="):
+            value = item.split("=", 1)[1]
+            break
+    if value is None:
+        return None
+    try:
+        descriptor = int(value)
+    except ValueError:
+        logger.warning("session runtime: %s carried a non-numeric value", OPERATOR_FD_FLAG)
+        return None
+
+    if os.name == "nt":  # pragma: no cover — Windows only
+        import msvcrt
+
+        try:
+            flags = os.O_RDONLY | os.O_BINARY  # type: ignore[attr-defined]  (Windows-only)
+            descriptor = msvcrt.open_osfhandle(descriptor, flags)  # type: ignore[attr-defined]
+        except OSError:
+            logger.warning("session runtime: operator capability handle was not inherited")
+            return None
+
+    buffer = bytearray()
+    try:
+        while len(buffer) < OPERATOR_CAP_BYTES:
+            chunk = os.read(descriptor, OPERATOR_CAP_BYTES - len(buffer))
+            if not chunk:
+                break
+            buffer.extend(chunk)
+    except OSError:
+        logger.warning("session runtime: could not read the operator capability")
+        return None
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:  # pragma: no cover — already closed by the reader above
+            logger.debug("operator capability descriptor was already closed", exc_info=True)
+
+    if len(buffer) != OPERATOR_CAP_BYTES:
+        logger.warning(
+            "session runtime: short operator capability handoff (%d of %d bytes)",
+            len(buffer),
+            OPERATOR_CAP_BYTES,
+        )
+        return None
+    return bytes(buffer)
+
+
+#: Reported once per process, at the first runtime that mounts a capability.
+_GUARANTEE_REPORTED = False
+
+
+def operator_cap_guarantee() -> str:
+    """How strong the capability's boundary is ON THIS HOST, as far as we can tell.
+
+    The capability separates an operator's intent from a same-uid process's
+    reach only while the operating system does. Nothing in this module may
+    assume that, and the refusal copy must not overclaim, so the runtime
+    reports the level it can detect instead of implying one:
+
+    * ``strong`` — reaching another process's memory requires a privilege this
+      uid does not have. The default on macOS.
+    * ``not-a-boundary`` — Linux with ``ptrace_scope=0``: any same-uid process
+      may attach to this one and read the capability straight out of memory, so
+      there the capability raises the cost of the attack rather than closing
+      it.
+    * ``weak`` — Windows, where same-user process access is unrestricted.
+    * ``unreported`` — Linux without the ``yama`` LSM, or an unknown platform.
+      Read as "we cannot say", never as "strong".
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            scope = Path("/proc/sys/kernel/yama/ptrace_scope").read_text().strip()
+        except OSError:
+            return "unreported"
+        return "not-a-boundary" if scope == "0" else "strong"
+    if sys.platform == "darwin":
+        return "strong"
+    if os.name == "nt":
+        return "weak"
+    return "unreported"
+
+
+def report_operator_cap_guarantee() -> str:
+    """Log the guarantee level once per process and return it.
+
+    Once, not per runtime: the answer is a property of the host, and a
+    long-lived daemon spawning twenty runtimes would otherwise write the same
+    line twenty times into a bounded log file.
+    """
+    global _GUARANTEE_REPORTED
+    level = operator_cap_guarantee()
+    if not _GUARANTEE_REPORTED:
+        _GUARANTEE_REPORTED = True
+        logger.info("operator capability boundary on this host: %s (%s)", level, sys.platform)
+    return level
+
+
 __all__ = [
+    "APPROVALS_LOOSENING_WORDS",
+    "AUTHORITY_OPS",
     "ApprovalGate",
+    "Authority",
     "LOOSENING_KEPT_BY_ASK_NOTICE",
     "LOOSENING_REFUSED_NOTICE",
+    "OPERATOR_CAP_BYTES",
+    "OPERATOR_CAP_REQUIRED_NOTICE",
+    "OPERATOR_FD_FLAG",
+    "OperatorCapHandoff",
     "ask_approval",
+    "forget_operator_cap",
+    "frame_authority",
     "loosening_is_authorised",
+    "mint_operator_cap",
+    "open_operator_cap_handoff",
+    "operator_cap_for",
+    "operator_cap_guarantee",
+    "operator_cap_ok",
+    "read_operator_cap_from_argv",
+    "remember_operator_cap",
+    "report_operator_cap_guarantee",
+    "reset_operator_caps_for_tests",
+    "transition_authority",
 ]

@@ -49,6 +49,7 @@ from typing import Any, Literal
 # stack — daemon, web layer, attach client, peer send — keeps importing them
 # from the path it always has. See local_operator/session/runtime/types.py for
 # why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
+from local_operator.harness.approval import OPERATOR_CAP_BYTES
 from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
@@ -59,6 +60,13 @@ from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ClientKind,
     SessionRecord,
 )
+
+#: The wire form of the operator capability: ``mint_operator_cap``'s 32 bytes,
+#: hex-encoded (issue #1310). Derived from the byte count rather than spelled as
+#: 64, so the validator cannot accept a length the mint cannot produce.
+OPERATOR_CAP_HEX_CHARS = OPERATOR_CAP_BYTES * 2
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -153,6 +161,27 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
     op = frame.get("op")
     if not isinstance(op, str) or not op:
         raise ValueError("op must be a non-empty string")
+    if "operator_cap" in frame:
+        # ONE OPTIONAL FIELD (issue #1310). It is validated wherever it appears —
+        # the shape check is cheap and a field that reaches the seam untyped is
+        # a field the seam has to defend against — and READ only on the three ops
+        # that can carry an authority-increasing request (see
+        # ``harness/approval.frame_authority``). Typed here for the reason
+        # ``credential`` is: this is a CREDENTIAL's wire form, and a non-string or
+        # an ill-shaped value must be refused rather than coerced into a
+        # comparison the far side would then fail in its own way. The check is on
+        # SHAPE only — this module never learns what the right value is, and must
+        # not, since the runtime is the only holder.
+        #
+        # Length plus hexdigits, matching what ``mint_operator_cap`` produces
+        # (``token_bytes(32).hex()``, always 64 lowercase hex characters). A
+        # value that fails this is refused as malformed rather than as
+        # unauthorised, so the two cases stay distinguishable in the logs.
+        capability = frame.get("operator_cap")
+        if not isinstance(capability, str) or len(capability) != OPERATOR_CAP_HEX_CHARS:
+            raise ValueError("operator_cap must be a hex string")
+        if any(character not in _HEX_DIGITS for character in capability.lower()):
+            raise ValueError("operator_cap must be a hex string")
     if op in ("prompt", "steer"):
         text = frame.get("text")
         if not isinstance(text, str) or (
