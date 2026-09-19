@@ -3779,20 +3779,33 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
     NOT invented here — a unit/Task-XML rewrite is not the plist rewrite this
     child performs, and it needs each installer's own identity guard — so what
     ships this round is the sentence that says the refresh did not happen.
+
+    THE ANNOUNCEMENT IS MADE *AFTER* THE SCAN, not instead of it. The scan is
+    the module's own question ("which of our agents are installed") and it is
+    consulted on every platform: gating the CALL on the platform made the
+    function's own contract untestable off macOS, and four of this module's
+    tests patch the scan and assert what the child was invoked with. What is
+    platform-specific is the CONCLUSION drawn when the scan comes back empty,
+    and that is where the branch belongs.
+
+    THE SENTENCE NAMES NO DAEMON. The upgrade summary is parsed by tests that
+    pin each refresh step's own output, and the mobile step must stay
+    distinguishable from this one; an enumeration here also goes stale the
+    moment a fifth supervised daemon exists.
     """
     name = "service daemons"
-    if not _DAEMONS_ARE_LAUNCHD_AGENTS:
-        return DaemonRefresh(
-            name,
-            lines=(
-                "service daemons: not refreshed — this step rewrites launchd "
-                f"agents, which only macOS has (this host is {sys.platform}); "
-                "re-run the daemon's installer (lop browser install, "
-                "lop tunnel install, lop wakes install, lop mobile install) "
-                "to move its unit or task onto this build",
-            ),
-        )
-    if not _installed_daemon_plists():
+    installed = _installed_daemon_plists()
+    if not installed:
+        if not _DAEMONS_ARE_LAUNCHD_AGENTS:
+            return DaemonRefresh(
+                name,
+                lines=(
+                    "service daemons: not refreshed — this step rewrites launchd "
+                    f"agents, which only macOS has (this host is {sys.platform}); "
+                    "re-run each supervised daemon's own installer to move its "
+                    "unit or task onto this build",
+                ),
+            )
         return DaemonRefresh(name)
     import subprocess
 

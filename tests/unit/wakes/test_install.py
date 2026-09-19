@@ -550,11 +550,21 @@ def test_a_repeat_install_in_a_foreign_store_does_not_claim_to_be_installed(
     first = ensure_supervisor_installed(config)
     second = ensure_supervisor_installed(config)  # same store, plist now matches
 
-    if _supervisor_kind() != "launchctl":
+    if _supervisor_kind() is None:
+        # Neither macOS nor Linux-with-systemctl: the only honest answer left.
+        assert second.installed is False
         assert second.reason == UNSUPPORTED_REASON
         return
 
-    assert second.installed is False, "a store launchd cannot reach reported as installed"
+    # The gate is the supervisor's IDENTITY, not "is it launchctl". Before the
+    # Linux arm existed this branch was ``!= "launchctl"`` and asserted the
+    # unsupported reason, which was true then because nothing else was ever
+    # installed. Now a Linux host with a user manager takes the SAME shape as
+    # macOS — a unit is written, the manager refuses to be addressed from a
+    # foreign home — so the assertion that matters ("a store nothing supervises
+    # must not report as installed, and must say which manager cannot reach
+    # it") is asserted for both, instead of one arm asserting nothing.
+    assert second.installed is False, "a store the supervisor cannot reach reported as installed"
     assert "not addressable" in second.reason, second.reason
     # Both calls answer in the same vocabulary; only the tense differs.
     assert "not addressable" in first.reason, first.reason
