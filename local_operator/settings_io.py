@@ -2118,21 +2118,6 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         gated_by="classification.auto",
     ),
-    Setting(
-        key="classification.notice",
-        path=("classification", "notice"),
-        section="classification",
-        label="↳ notice",
-        kind=Kind.BOOL,
-        default=True,
-        # ON by default, unlike the master switch: the notice is the only place
-        # the spend and the vendor are visible, and a user who turned the layer on
-        # asked for that. It appears once per message and only when the model
-        # actually recommended something.
-        help="Needs recommendations on. Names vendor, resources, cost.",
-        choices=_bool_choices("show the one-line notice", "stay silent"),
-        gated_by="classification.auto",
-    ),
     # -- fork ---------------------------------------------------------------
     #
     # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.

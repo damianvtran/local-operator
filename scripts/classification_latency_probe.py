@@ -32,7 +32,7 @@ made an earlier version of these numbers look like the prewarm saved nothing.
 WHY A SCRIPT AND NOT A TEST: the vendor leg is a real network call and the numbers
 move with machine load, so this is evidence a human reads, not an assertion CI can
 carry. The hermetic guarantees (byte-identical block when off, the bounded wait, the
-single notice) live in ``tests/unit/test_session_factory_classification.py``.
+single delivery) live in ``tests/unit/test_session_factory_classification.py``.
 """
 
 from __future__ import annotations

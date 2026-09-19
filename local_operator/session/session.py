@@ -2031,10 +2031,6 @@ class Session:
         #: appended in place because a late hook is registered EARLY — often
         #: before the hooks it has to outlive even exist.
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
-        #: Notices that belong AFTER the running turn's answer (see
-        #: :meth:`queue_notice`). A list, not a single slot: a turn can raise more
-        #: than one, and their order is the order they were raised in.
-        self._queued_notices: list[tuple[str, Literal["info", "warning", "error"]]] = []
         # Set by the composition root when MCP servers are wired in, and read
         # only for diagnostics — the session never drives the manager itself,
         # it just governs its lifetime through a dispose hook.
@@ -7471,71 +7467,6 @@ class Session:
 
         return unsubscribe
 
-    async def queue_notice(
-        self,
-        text: str,
-        kind: Literal["info", "warning", "error"] = "info",
-    ) -> None:
-        """Emit a notice AFTER the running turn's answer, or at once if none is running.
-
-        WHY THIS EXISTS, and why it is not just ``_stream_notice``. A notice raised
-        while a turn's prompt is being built lands between the user's question and
-        the reply — the notice occupies the answer slot, and a reader takes the
-        dimmest ink on screen for the first thing the model said (design round 1,
-        D1). The classification layer's resource line is exactly that case: it is
-        raised during prompt build, because that is where the resources are chosen.
-
-        Deferral is conditioned on a turn actually running, not on a flag the
-        caller passes: outside a turn there is no answer to wait for, and holding
-        the line would delay it with nothing to gain. ``_turn_lock`` is the same
-        condition ``_run_turn`` documents (its caller holds it), so a host that
-        emits from a viewer or a preflight still gets its line immediately.
-        """
-        if not self._turn_lock.locked() or self._disposed:
-            await self._stream_notice(text, kind)
-            return
-        self._queued_notices.append((text, kind))
-
-    def _discard_queued_notices(self) -> None:
-        """Drop whatever a finished turn left queued. The counterpart to the flush.
-
-        Every line in the queue is attributed to the message whose ANSWER was being
-        built, so a line may only be released by the turn that raised it — and only the
-        flush, which runs once that answer is persisted, releases it as a line. What
-        reaches here is therefore either nothing (the flush emptied the queue, which is
-        what a normal turn and an aborted-but-persisted one both do) or a line whose
-        answer will never arrive: see ``_run_turn``'s ``finally`` for the three cases.
-
-        Logged rather than silent, so a turn that dies before its reply still leaves a
-        trace of what the user did not see."""
-        if not self._queued_notices:
-            return
-        dropped, self._queued_notices = self._queued_notices, []
-        logger.debug(
-            "session: dropped %d queued notice(s) from a turn with no answer", len(dropped)
-        )
-
-    async def _flush_queued_notices(self) -> None:
-        """Release the notices whose turn has finished. Never raises.
-
-        Called from ``_run_turn`` once the answer has landed and been persisted, so
-        the line reads as a note about the turn that just finished rather than as
-        part of the reply. The ORDER is the contract, not an accident of where the
-        call sits: the answer's own events are emitted by the persist above it, so a
-        subscriber sees the assistant's message BEFORE this notice (pinned by
-        ``test_a_queued_notice_lands_after_the_answer``), and the queue is swapped out
-        atomically, so a second flush cannot re-emit it. One that fails to paint is
-        logged and dropped: a notice is never worth failing the teardown it rides on.
-        """
-        if not self._queued_notices:
-            return
-        queued, self._queued_notices = self._queued_notices, []
-        for text, kind in queued:
-            try:
-                await self._stream_notice(text, kind)
-            except Exception:  # noqa: BLE001 — a notice never fails a turn
-                logger.warning("session queued notice failed to emit", exc_info=True)
-
     async def _stream_notice(
         self,
         text: str,
@@ -8349,14 +8280,6 @@ class Session:
             # site: the clone copies what is on disk.
             await self._drain_pending_fork()
 
-            # Anything that was waiting for this turn's answer goes out HERE, after
-            # the reply is on disk and therefore after it has painted: notices raised
-            # during prompt build would otherwise sit between the question and the
-            # answer (see ``queue_notice``). Before the bookkeeping below, so the line
-            # lands as promptly as the answer it follows rather than trailing the
-            # todo/spend writes.
-            await self._flush_queued_notices()
-
             # Snapshot the todo list when it moved this turn. Guarded by the
             # same full-list fingerprint the continuation guardrail uses, so an
             # unchanged list costs one tuple comparison and no transcript write,
@@ -8403,27 +8326,6 @@ class Session:
             # write that fails must not replace the original exception (which
             # is what the caller and the incident journal need to see).
             await self._persist_progress(self._context.messages)
-            # …and the notices that turn queued are DISCARDED rather than flushed. What
-            # that means depends on how the turn ended, and there are three cases:
-            #
-            # * a turn that reached the flush above — the ordinary one, and also an
-            #   ABORTED stream, which returns normally, persists the partial answer and
-            #   flushes — finds the queue already empty, so this is a no-op;
-            # * a turn CANCELLED before the flush (Ctrl+C, dispose, a steering teardown)
-            #   never produced an answer, and its line would attribute a suggestion to a
-            #   message that delivered nothing;
-            # * a turn that RAISES after the answer landed (out of
-            #   ``_persist_new_messages``, ``_drain_pending_fork``, the todo checkpoint)
-            #   did answer, but its line is dropped with the failing turn rather than
-            #   delivered onto the next message, where it would name the wrong question.
-            #   A line queued after the flush point goes the same way, by construction:
-            #   this and the flush are the only two places the queue is emptied.
-            #
-            # Flushing here instead was round 3's bug in the other direction — the
-            # stale line survived its turn and arrived ahead of the NEXT turn's own,
-            # misattributed to a message that delivered nothing (round 4, MINOR-2, for
-            # the claim that all three cases are one).
-            self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
 
@@ -14196,13 +14098,6 @@ class Session:
             from local_operator.session.retention import release_session
 
             release_session(self._transcript.directory)
-            # A queued notice whose turn never finished (aborted, or a raise out of
-            # the run) would otherwise sit here forever. Emitting it now is the
-            # honest choice of the two: it belongs to no later answer, and the
-            # substitute — delivering it onto the next turn — is exactly the wrong
-            # attribution the queue exists to avoid. Before the hooks, so the event
-            # stream is still live when it goes out.
-            await self._flush_queued_notices()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:
