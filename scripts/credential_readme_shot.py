@@ -1,9 +1,18 @@
 """Re-shoot the two README figures for the inline ``/credential`` gesture.
 
-Run from the worktree root:
+Run from the worktree root — the three profile variables are not optional:
 
-    env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+    env -u NO_COLOR TERM=xterm-256color \
+        LOP_CAPTURE_CELL_WIDTH=16 LOP_CAPTURE_CELL_HEIGHT=34 LOP_CAPTURE_FONT_SIZE=26 \
+        .venv/bin/python \
         scripts/credential_readme_shot.py OUTDIR [COLSxROWS] [THEME]
+
+Without the profile this dies after the ~60 s boot with ``90 cells at 8 px is
+720 px, not 2x the README's 720 px pin``: ``BAND_CELLS`` below is 2x the
+README's 720 px pin only at the 16 px cell of the 2x profile, and the
+environment's defaults are the 8x17 / 13 px gallery preset. The check runs
+after the boot rather than before it, so the omission is an expensive one to
+discover.
 
 Then rasterize and install (this script never writes into ``static/``):
 
@@ -23,9 +32,14 @@ one command.
 WHAT IT IS: the two states the README's prose describes, driven through the
 composer's own keys — the description typed first, ``/credential`` and a space
 to arm, then either a bracketed paste (which mints the chip) or ten typed
-characters (which stay masked). The chip frame selects the chip with the same
-gesture a reader's click uses, so the frame shows the chip in its SELECTED
-ink, matching what is merged.
+characters (which stay masked). The chip frame is captured with the chip at
+REST — the state a reader's own paste leaves behind — and never clicked: the
+alt text calls it "a **collapsed** [Credential #1, 15 chars] chip" and no page
+prose mentions clicking one, while a press inside the marker repaints it under
+the ``-selected`` rule (``$lo-fg`` on ``$lo-tint-attach-hi``), a state the page
+never introduces. The frame is therefore the paste's own result rather than a
+state this script paints, and the mint check in ``shoot`` fails the run if no
+chip reached the composer at all.
 
 WHAT IT IS NOT: a general credential coverage script. The armed / held /
 disarmed states, the destructive key sequences and the store assertions live
@@ -33,10 +47,17 @@ in ``scripts/credential_armed_shot.py``; this file exists only for the two
 frames the README embeds, and it deliberately does not grow a second dialect
 for driving the feature.
 
-THEME: ``tron`` by default, because that is the palette the merged figures
-were captured under (their ground is the tron ``surface``); a re-shoot in
-another palette would change the figures' colour as well as their sharpness,
-which is not what was asked for. Pass THEME to compare palettes deliberately.
+THEME: ``tron`` by default, which is also the palette of the merged pair this
+replaces — measured, not assumed. Those two files carry Apple's "Display" ICC
+profile, and read through their own profile their ground ``(14, 20, 31)`` is
+sRGB ``(12, 20, 32)`` = tron's ``surface``, and their chip ground
+``(23, 35, 55)`` is ``(19, 35, 57)`` = tron's ``tint-attach``. Reading those
+same bytes as untagged sRGB is what makes them look like a different palette:
+no registered palette carries ``#0e141f`` as ``surface``, because ``#0e141f``
+is not an sRGB value at all — it is ``#0c1420`` in that profile's encoding.
+This capture is untagged sRGB, so its bytes are tron's tokens directly and a
+colour-managed page paints both at the same colour. Pass THEME to compare
+palettes deliberately.
 
 ISOLATION AND THE SECRET: every inherited ``CMUX_*`` variable is dropped and
 ``probe_isolation`` re-homes HOME and the config root before any application
@@ -97,7 +118,7 @@ THEME = "tron"
 #: is exactly 1440 px, which is exactly 2x the 720 px the README pins — so the
 #: page paints one image pixel per device pixel on a 2x display instead of
 #: upscaling, which is the whole point of re-shooting these two figures. The
-#: The band's own content (the panel's padding cell, the chevron pair, the
+#: band's own content (the panel's padding cell, the chevron pair, the
 #: gutter, the draft and the caret cell) measures 88 cells here, so the pin
 #: decides the width and the content has to fit — asserted rather than assumed.
 BAND_CELLS = 90
@@ -182,46 +203,6 @@ def painted(app) -> str:
     return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
 
 
-def _mouse(app, kind: type, x: int, y: int):
-    """One SGR mouse report, as ``Screen._forward_event`` receives it.
-
-    The tests' own shape (``tests/unit/tui/test_transcript_selection.py``): the
-    real routing from the screen down to the composer, so the coordinates are
-    the ones a terminal would send rather than this script's idea of the widget.
-    """
-    return kind(
-        app.screen,
-        x=x,
-        y=y,
-        delta_x=0,
-        delta_y=0,
-        button=1,
-        shift=False,
-        meta=False,
-        ctrl=False,
-        screen_x=x,
-        screen_y=y,
-    )
-
-
-async def click_chip(app, pilot, editor, cells: tuple[int, int]) -> None:
-    """Select the chip the way a click does: press inside it, release inside it.
-
-    Driving the real mouse path rather than assigning ``editor.selection``
-    directly keeps the frame honest — the selected ink, the caret's cell and
-    the exclusion of the caret from the chip's own run are all the widget's
-    decisions, and a hand-set selection would be this script's instead.
-    """
-    start, _end = cells
-    x = editor.region.x + editor.gutter.left + start + 1
-    y = editor.region.y + editor.gutter.top
-    app.screen._forward_event(_mouse(app, events.MouseDown, x, y))
-    await pilot.pause()
-    app.screen._forward_event(_mouse(app, events.MouseUp, x, y))
-    for _ in range(3):
-        await pilot.pause()
-
-
 async def shoot(outdir: Path, size: tuple[int, int], theme: str) -> dict[str, dict[str, object]]:
     """Boot once per state, drive it, and write the full frame and its crop."""
     results: dict[str, dict[str, object]] = {}
@@ -250,13 +231,17 @@ async def shoot(outdir: Path, size: tuple[int, int], theme: str) -> dict[str, di
                 app.post_message(events.Paste(SECRET))
                 for _ in range(4):
                     await pilot.pause()
-                cells = next(
-                    (span for span in editor._marker_cells(0) if span[2] is False),
-                    None,
-                )
-                if cells is None:
+                # The chip is NOT clicked. This figure is the paste's own
+                # result — the state a reader reaches, and the state the alt
+                # text ("a **collapsed** … chip") and the caption describe. A
+                # press inside the marker repaints it under the -selected rule
+                # ($lo-fg on $lo-tint-attach-hi), which no page prose
+                # introduces; the merged figure measured the resting tokens, so
+                # selecting here was the capture drifting, not the subject
+                # changing. The check below is what keeps "there is a chip in
+                # this frame" a measurement rather than a claim.
+                if not any(span[2] is False for span in editor._marker_cells(0)):
                     raise RuntimeError("the pasted secret did not mint a chip")
-                await click_chip(app, pilot, editor, (cells[0], cells[1]))
             else:
                 await type_text(pilot, DESCRIPTION_PASSWORD)
                 await type_text(pilot, "/credential ")
@@ -269,6 +254,12 @@ async def shoot(outdir: Path, size: tuple[int, int], theme: str) -> dict[str, di
                 raise RuntimeError("the synthetic secret reached the screen as plaintext")
             if name == "credential-masked-typing" and TYPED_SECRET in frame:
                 raise RuntimeError("the typed secret reached the screen unmasked")
+            # README.md:928's alt text asserts this notice is on the frame, so a
+            # frame without it would publish a figure whose caption is false.
+            if name == "credential-masked-typing" and "masked as you type" not in frame:
+                raise RuntimeError(
+                    "the masked frame lost the 'masked as you type' notice README.md:928 asserts"
+                )
 
             full = outdir / f"{name}.full.svg"
             save_capture(app, full)
