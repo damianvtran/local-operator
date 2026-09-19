@@ -55,6 +55,7 @@ from local_operator.evaluation.evidence.models import (
     UserSimulatorExchangePayload,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
+from local_operator.paths import O_BINARY
 from local_operator.evaluation.receipts import RedactionSet
 
 _LOCK = ".lock"
@@ -131,7 +132,11 @@ if hasattr(os, "register_at_fork"):
 # above: ``O_CLOEXEC``/``O_NOFOLLOW``/``O_NONBLOCK`` are POSIX-only, and a bare
 # attribute reference is evaluated at IMPORT time whether or not the platform
 # would ever reach the call that uses it.
-_WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+# `| O_BINARY`: this fd carries length- or newline-framed BYTES the reader
+# counts, and on Windows `os.open` is the CRT's TEXT mode unless the flag
+# is given — a `0x0A` in the payload lands as `0x0D 0x0A` and every later
+# record is misparsed. See `paths.O_BINARY` for the measured case.
+_WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | O_BINARY
 _READ_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
