@@ -1445,8 +1445,11 @@ class _KnowledgeHooks:
     #: the server id for a candidate and never its tools.
     mcp_server_names: tuple[str, ...] = ()
     #: The classification seam (docs/design/classification-layer.md §7): an
-    #: object exposing ``async recommend_resources(request) -> Recommendation``
-    #: and ``notice(recommendation) -> str | None``. ``None`` means the layer is
+    #: object exposing ``async recommend_resources(request) -> Recommendation``.
+    #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
+    #: that render path is deleted (the layer draws nothing into the transcript), so a
+    #: host's own classifier that still publishes one is simply never asked for it.
+    #: ``None`` means the layer is
     #: off, unavailable, or its package failed to import — and that the prompt is
     #: exactly what it was before this seam existed.
     #:
@@ -1508,13 +1511,14 @@ class _KnowledgeHooks:
     #: answer belongs to the message being rendered decides where it is delivered:
     #: into THIS turn's next step, or onto the next user message.
     classification_outstanding: list[_OutstandingClassification] = field(default_factory=list)
-    #: Recommendations that have not reached a prompt yet, oldest first, each paired
-    #: with whether it MISSED the message it was computed for. ``False`` means the
-    #: answer arrived while that message's turn was still running, so it is delivered
-    #: into this turn's next model step — which is what keeps a suggestion attached to
-    #: the question that produced it instead of arriving one message late. Consumed
-    #: exactly once.
-    classification_pending: list[tuple[Any, bool]] = field(default_factory=list)
+    #: Recommendations that have not reached a prompt yet, oldest first. Consumed
+    #: exactly once, by the render that carries them.
+    #: NO ``late`` FLAG: it used to say whether an answer MISSED the message it was
+    #: computed for, and its only reader was the deleted notice sentence's attribution.
+    #: Where an answer goes is decided before it reaches this list
+    #: (``classification_answered_task_id``, and the pending slot itself), so the flag
+    #: was data no code read — the second shape this removal exists to delete.
+    classification_pending: list[Any] = field(default_factory=list)
 
 
 #: The capability line a configured MCP server contributes when no release-owned
@@ -1856,8 +1860,8 @@ def _attach_classification(
         # this buys is in ``ClassificationService.warm_up``.
         #
         # ``getattr`` and a try of its own: warming is an OPTIMISATION, so a seam that
-        # does not publish it (the seam contract is ``recommend_resources`` +
-        # ``notice``, and the tests inject exactly that) keeps working, and a warm-up
+        # does not publish it (the seam contract is ``recommend_resources`` alone, and
+        # the tests inject exactly that) keeps working, and a warm-up
         # that fails must not cost the layer — the shared handler below would turn
         # both into ``classifier = None``, i.e. a session with no classification
         # because a prewarm went wrong.
@@ -2273,7 +2277,7 @@ def _harvest_classification(hooks: _KnowledgeHooks, *, task_id: str | None = Non
         # is None for callers that never had a task (legacy paths), which keeps their
         # behaviour: everything harvested is treated as late.
         in_turn = task_id is not None and call.task_id is not None and call.task_id == task_id
-        hooks.classification_pending.append((recommendation, not in_turn))
+        hooks.classification_pending.append(recommendation)
         if in_turn:
             hooks.classification_answered_task_id = task_id
         arrived_in_turn = arrived_in_turn or in_turn
@@ -2433,9 +2437,9 @@ def _classification_block(
     the reason is outside this module: ``tests/unit/classification/test_block_parity.py``
     compares this function's return value against the package's ``render_block`` line
     for line, and that comparison is worth more than a tidier signature. The caller
-    owes the NOTICE an honest account of what was appended — the line it builds from
-    the recommendation names every resource the recommendation carried, which the
-    dedupe or the cap may have dropped — and this is how it learns the difference.
+    needs the difference between what the recommendation CARRIED and what survived the
+    dedupe or the cap — that is what feeds ``carried`` for the next answer in the same
+    prompt — and this is how it learns it.
     """
     from local_operator.skills.protocol import resource_url
 
@@ -2676,11 +2680,11 @@ async def _select_knowledge_block(
     # step under the reply the user was reading. Delivery below is unchanged — the
     # block still reaches the prompt, and the cost line still reaches the log.
     pending, hooks.classification_pending = hooks.classification_pending, []
-    answers: list[tuple[Any, bool]] = [(answer, late) for answer, late in pending]
+    answers: list[Any] = list(pending)
     if recommendation is not None:
-        answers.append((recommendation, False))
+        answers.append(recommendation)
     carried: set[str] = set()
-    for answer, late in answers:
+    for answer in answers:
         urls: list[str] = []
         block = _classification_block(
             hooks,

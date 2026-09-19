@@ -27,8 +27,11 @@ import pytest
 from local_operator.harness.types import StreamEndEvent, StreamTextDelta
 from tests.unit.session.test_config_live import make_session
 
-LINE = "Suggestion added for this message: skill://alpha"
-STALE = "Suggestion added for your previous message: skill://beta"
+# NEUTRAL text on purpose. These two used to spell the classification layer's deleted
+# sentence, which made the fixture read as though that line still exists; the contract
+# under test is the queue's ordering, not the wording of any one producer.
+LINE = "queued line alpha"
+STALE = "queued line beta"
 
 
 class _StubStream:

@@ -792,11 +792,10 @@ async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
 
 
 # ---------------------------------------------------------------------------
-# The notice's memory is what the user SAW (review round 3, NIT 1)
+# Skill-tree fixtures for the roster tests
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 def _write_skill(root: Path, name: str, description: str) -> Path:
     """A real skill tree entry, so the fingerprint and the scanner both see it."""
     directory = root / name

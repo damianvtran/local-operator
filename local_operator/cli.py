@@ -1739,6 +1739,16 @@ def config_list_command() -> int:
         "Number of recent messages to leave unsummarized in conversation history",
         "max_learnings_history": "[DEPRECATED — superseded by compaction] "
         "Maximum number of learning entries to retain",
+        # The ONE entry here whose key the schema DOES carry (a READONLY row in the
+        # retired section), and it is here for this table's own grammar: the three
+        # keys above spell their retirement as a bracketed tag, and without one
+        # `classification.notice: True` was the only row in the family a scanning
+        # reader could not see was retired (design round 1, D3). Restating the
+        # sentence the registry carries is deliberate — the alternative, teaching
+        # this loop to synthesise a tag from `section`, would double-tag the three
+        # rows above, which already carry theirs in their own text.
+        "classification.notice": "[DEPRECATED] Smart hints is silent in the chat; "
+        "the call and its cost are in the session log",
         "auto_save_conversation": "Whether to automatically save conversations",
         "compaction": "Compaction engine settings (enabled, strategy, thresholds); "
         "replaces conversation_length/detail_length",
