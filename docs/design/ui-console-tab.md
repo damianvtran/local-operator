@@ -115,6 +115,18 @@ the review's one-paragraph and one-line corrections (§10.6 gains
 it per actor; §12.3 and §11.4 define `exit_epoch` and qualify what the
 secure-input span drops), and the dangling cross-references.
 
+**Revision 4 — this commit — answers the agent-review round 2, and no decision
+moved: four `file:line` corrections, the fifth citation the same sweep caught,
+and one field-ownership fix.** The four (§14.6's `_reconcile_web_tools`, §6.6's
+CSP line, §9.1's grounds line, §9.3's contrast sentence) now resolve to the line
+that carries the thing they name, and Appendix A's `session.py` census follows
+the first of them from `:14001` to `:14012`; §2.10's `TOOL_ICONS` citation sat
+one line below the `const` it names and now reads `:54-72`. `exit_epoch` has one
+owner — §7.3's sidecar record, beside `exit_code` — and §10.2's `console_status`
+row returns it while §12.3 keys its dedupe on it; no section attributes the
+counter to a place that does not carry it. §0.5 and §17.1 are unchanged between
+revision 3 and this one.
+
 | area | revision 1 | revision 2 |
 |---|---|---|
 | D1 emulator | xterm.js, ghostty assessed from licences and packaging | **unchanged decision, now evidence-backed** — and the ghostty path is recorded as *measured-viable*, with its sha256, its minisign verification and a named switch trigger (§5.5) |
@@ -549,7 +561,7 @@ already absorbed a third.
   explicit `display.nerd_icons` bool, then `_nerd_capable_terminal()` — because a
   renderer cannot be asked, only inferred, and "Every Nerd Font codepoint"
   detection cannot detect a *missing* glyph (`:168`).
-- UI: `src/renderer/src/features/chat/components/trace/tool-glyphs.ts:55-72 TOOL_ICONS`
+- UI: `src/renderer/src/features/chat/components/trace/tool-glyphs.ts:54-72 TOOL_ICONS`
   maps the same names to lucide icons "of the same meaning" (`bash: Terminal`,
   `browser: Globe`, `web_search: Globe`, `peer: Inbox`), with two distinct
   fallbacks — unknown → `Wrench`, `mcp__*` → `Plug` — and case-insensitive
@@ -1146,7 +1158,7 @@ An agent told "I ran it in the console" must be able to (a) find the surface and
   Three consequences, and they are the whole of R5's font story:
   1. **Inside the app this is already solved, and it is the app's job.** The pane
      renders `--font-mono` = the bundled `GeistMonoNerdFontMono` faces (§2.7), and
-     CSP is `font-src 'self' data:` (`styles/index.css:100-110`) so no remote face
+     CSP is `font-src 'self' data:` (`styles/index.css:117`) so no remote face
      can rescue a missing glyph — the bundled file is the only mechanism. The
      spike's tofu is what happens *outside* the app and in any harness that does
      not load the app's CSS.
@@ -1233,9 +1245,15 @@ always a tap, because main is the pty's only reader.
 
 - Location: `<config-dir>/run/ui-console/history/<session_id>/<surface_id>.log`,
   plus a `<surface_id>.json` sidecar holding the create parameters (argv, cwd,
-  grid, `created_at`, `last_seen_at`, `exit_code`, `truncated`). The directory
-  follows the discovery namespace's discipline (0700/0600, §2.2, §2.4) and the
-  project's config-root conventions rather than inventing a second root.
+  grid, `created_at`, `last_seen_at`, `exit_code`, `truncated`) and
+  **`exit_epoch`** — the surface's exit *generation*, incremented once per
+  `process_exited` (§10.6). The retention layer owns that counter rather than the
+  live registry, because its job is to outlive the process: a retained surface is
+  replayed under its own id (§6.7) and may be run again, and only a generation
+  that survived can tell that second exit from the first. `console_status`
+  returns it (§10.2) and the notifier keys on it (§12.3). The directory follows
+  the discovery namespace's discipline (0700/0600, §2.2, §2.4) and the project's
+  config-root conventions rather than inventing a second root.
 - **A read never creates anything** — the rule the state modules state explicitly
   (`ui_browser/state.py:87-89`) — so a listing on a machine with no history does
   not leave a directory behind.
@@ -1356,7 +1374,7 @@ work from React.
 
 | xterm key | role | why |
 |---|---|---|
-| `background` | `sunken` | the same ground the CodeMirror editor takes ("wells, tracks, code grounds", `palette-contract.ts:67`) |
+| `background` | `sunken` | the same ground the CodeMirror editor takes ("wells, tracks, code grounds", `palette-contract.ts:192`) |
 | `foreground` | `ink` | primary text, 7:1 floor on all four grounds |
 | `cursor` | `accent` | the accent's one non-text job in this pane is the caret, and the editor already does exactly this (`code-mirror-theme.ts`: `caretColor: var(--color-accent)`) |
 | `selectionBackground` | `accentWash` | the "faintest accent tint: hover fills, active rows, focus washes" |
@@ -1394,7 +1412,7 @@ position, stated so it can be argued rather than discovered:
   `nonText` 3:1 floor as a foreground on `sunken`; `cursor`/`accent` is
   distinguishable from the ground by ≥3:1; `selectionBackground`/`accentWash` is
   a *ground* under `ink` and is checked as one ("a colour used as a background is
-  treated as a ground", `contrast-contract.mjs:36-38`). The block states its own
+  treated as a ground", `contrast-contract.mjs:34-35`). The block states its own
   bound the way that file's header does: it measures flat hexes, so it cannot see
   a program's own `\x1b[48;2;…m` truecolor, and it says so.
 - **Looked at, by a human, in frames (the design round, §16.3):** the twelve
@@ -1476,7 +1494,7 @@ vocabulary; ids are opaque strings.
 |---|---|---|
 | `console_list` | `{session_id?: str}` | `[{surface, session_id, origin, command, argv_tail, cwd, cols, rows, running, exit_code, last_activity, live, agent_owned}]` |
 | `console_create` | `{session_id, cwd?, command?, args?, input?, env?, cols?, rows?, reveal?, retain?}` | `{surface, cols, rows, pid, live, revealed}` |
-| `console_status` | `{surface}` | `{running, exit_code, cols, rows, live, truncated, modes, cursor, last_activity, retain, secure}` |
+| `console_status` | `{surface}` | `{running, exit_code, exit_epoch, cols, rows, live, truncated, modes, cursor, last_activity, retain, secure}` |
 | `console_read` | `{surface, mode: "viewport"\|"scrollback", start?, count?}` | `{text, cols, rows, cursor, truncated, live, mode}` |
 | `console_screenshot` | `{surface, format?: "png"}` | `{image_base64, cols, rows, rendered: "displayed"\|"offscreen", theme, live}` |
 | `console_input` | `{surface, text?, bytes?, secret_ref?, paste?}` | `{accepted: true, bytes: <count>}` |
@@ -1828,12 +1846,14 @@ First match wins, and each rung says what it cannot see:
   the "ended" state (§7.3) — an honest landing, not a no-op.
 - **One banner per completion**, claimed before delivery, in the notifier's own
   dedupe map (`:1101 claim(key)`), keyed on `(surface, exit_epoch)`. `exit_epoch`
-  is the exit *generation* of the surface — the counter §7.2's record already
-  keeps and §10.2's `console_status` already returns, incremented once per
-  `process_exited` — so a surface that is restarted with the same id gets a new
-  epoch and can therefore banner again, while a re-notification for one exit
-  cannot. It is the same "claim-then-deliver" discipline the backend's
-  `/notified` uses, so the blip and the banner can never both be counted twice.
+  is the exit *generation* of the surface: the retention layer's counter, kept
+  with the surface's record and persisted beside `exit_code` (§7.3), incremented
+  once per `process_exited`, and returned to a caller by `console_status`
+  (§10.2). This notifier is a *reader* of it, never its owner — so a retained
+  surface that is replayed and run again under the same id gets a new epoch and
+  can therefore banner again, while a re-notification for one exit cannot. It is
+  the same "claim-then-deliver" discipline the backend's `/notified` uses, so the
+  blip and the banner can never both be counted twice.
 
 ### 12.4 The e2e exemption path (no new switch)
 
@@ -2093,7 +2113,7 @@ looks like a lever does not:
    as a defect it had to design around. **Recommendation: `console` joins that
    exclusion set**, so an architect/reviewer/scout/manager gets no `console_*` at
    all unless a future need appears. This is enforcement rather than advice.
-2. **The turn-boundary inventory** (`session.py:14001 _reconcile_web_tools` and
+2. **The turn-boundary inventory** (`session.py:14012 _reconcile_web_tools` and
    `refresh_tools`, `:6120`) is where a *capability* appears and disappears, not
    where a preference is expressed — the tool is gated on presence of the app, and
    it must not be used to implement "discourage" (a tool that vanishes
@@ -2568,7 +2588,7 @@ repo is named:
   `browser_bridge/protocol.py:16`/`:20-45`/`:45`/`:200`/`:288`/`:349`/`:422`/`:434`;
   `browser_bridge/backend.py:159`/`:679`/`:718`/`:829`;
   `prompts_api.py:184`/`:304`/`:333`/`:365`/`:379`/`:401`/`:411`/`:489-513`;
-  `prompts_md/system.md:264`/`:287`; `session/session.py:6120`/`:14001`;
+  `prompts_md/system.md:264`/`:287`; `session/session.py:6120`/`:14012`;
   `tui/glyphs.py:82`/`:116`/`:118`/`:123`/`:191-224`/`:228-241`; `tui/notify.py:115`/`:404`;
   `terminals.py`'s marker predicates (`is_kitty`/`is_ghostty`/`is_wezterm` at
   `:103`/`:115`/`:131` and their callers);
